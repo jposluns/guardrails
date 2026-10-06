@@ -1480,7 +1480,9 @@ def _rdp_scope_cases(base, plain):
                 "git blame -I -O -- --ext-diff", "git for-each-ref --sort=refname", "git for-each-ref --sort refname",
                 "git branch --sort=-committerdate", "git tag -l --sort=v:refname", "git shortlog --group=author HEAD",
                 "git shortlog --group author --group=trailer:x HEAD", "git shortlog --group=%an HEAD",
-                "git shortlog --grep %GG HEAD", "git log --grep signature", "git tag -m signature v1")
+                "git shortlog --grep %GG HEAD", "git log --grep signature", "git tag -m signature v1",
+                "git for-each-ref --sort=refname signature", "git shortlog --group=author %GG",
+                "git for-each-ref --sort refname signature", "git shortlog --group author %GG")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",

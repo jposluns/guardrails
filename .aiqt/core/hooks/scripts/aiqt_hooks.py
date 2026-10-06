@@ -11615,10 +11615,11 @@ _RDP_GIT_INFO_OPTIONS = frozenset(("--version", "--exec-path", "--html-path", "-
 # --patch, add and commit --interactive); and commit and tag --trailer, which run trailer commands. The
 # other allowlisted subcommands have no such option of their own (status, log, diff, show, rev-parse,
 # ls-files, ls-tree, blame, grep, describe, shortlog, merge-base, rev-list, for-each-ref, show-ref, branch,
-# remote, config, rm, mv, fetch, switch, worktree), though a value of one can run gpg.program: a signature
-# placeholder or atom in a format (--format, --pretty, shortlog --group) or a sort key (for-each-ref, branch
-# and tag --sort), judged by _rdp_git_signature_value. git runs the editor by default (git commit without
-# -m, git revert), so an option asking for it is not counted, as configuration is not.
+# remote, config, rm, mv, fetch, switch, worktree). Whether or not a subcommand has one, an option's value
+# can also run gpg.program: a signature placeholder or atom in a format (--format, --pretty, shortlog
+# --group) or a sort key (the --sort of for-each-ref, branch and tag), judged by _rdp_git_signature_value.
+# git runs the editor by default (git commit without -m, git revert), so an option asking for it is not
+# counted, as configuration is not.
 _RDP_GIT_PROGRAM_OPTIONS = ("--ext-diff", "--textconv", "--show-signature", "--open-files-in-pager", "--exec",
                             "--extcmd", "--upload-pack", "--receive-pack", "--exec-path", "--sendmail-cmd",
                             "--to-cmd", "--cc-cmd", "--header-cmd", "--smtp-server")
@@ -11902,10 +11903,10 @@ _RDP_GIT_SIGNATURE_SORT = re.compile(r"signature")
 # value git reads as a pretty format when it holds a % (also written format:FORMAT). Read from git SUB -h
 # (git 2.53) for every allowlisted subcommand (log, show, diff and rev-list list none there; their format
 # options are the revision options --format and --pretty) and run on git 2.53 with a gpg.program leaving a
-# marker: the other format options take formats with no signature
-# placeholder or atom (ls-files and ls-tree --format, cat-file --batch, --batch-check and --batch-command,
-# each refusing %(signature) on git 2.53 and printing %G as written; log --date=format: is a strftime
-# format), and clone --ref-format names a ref storage format.
+# marker: the other format options take formats with no signature placeholder or atom. ls-files and
+# ls-tree --format refuse a %G placeholder (exit 128, "element 'GG' does not start with '('") and
+# %(signature); cat-file --batch, --batch-check and --batch-command refuse %(signature), and only they print
+# %G as written. log --date=format: is a strftime format, and clone --ref-format names a ref storage format.
 _RDP_GIT_SIGNATURE_VALUES = {
     "for-each-ref": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "branch": (("--sort",), _RDP_GIT_SIGNATURE_SORT),
     "tag": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "shortlog": (("--group",), _RDP_GIT_SIGNATURE_FORMAT)}
@@ -11915,7 +11916,8 @@ def _rdp_git_signature_value(sub, name):
     """The pattern a value of the option name (the part of a word before any =, abbreviated or not) given to
     the git subcommand sub matches when it makes git run gpg.program: _RDP_GIT_SIGNATURE_FORMAT for --format,
     --pretty and shortlog --group, _RDP_GIT_SIGNATURE_SORT for a --sort of _RDP_GIT_SIGNATURE_VALUES; None
-    when git reads its value as no format or sort key."""
+    when the option takes no value covered here that can run gpg.program (git may still read its value as a
+    format: cat-file --batch-check takes one, with no signature placeholder or atom)."""
     if _rdp_long_option(name, ("--format", "--pretty")):
         return _RDP_GIT_SIGNATURE_FORMAT
     options, pattern = _RDP_GIT_SIGNATURE_VALUES.get(sub, ((), None))
@@ -12012,23 +12014,22 @@ def _rdp_git_off_allowlist(words):
 
 
 def _rdp_git_runs_program(words):
-    """The first word of a plain git command that makes it run a program, named in it or configured; None
-    when the command is no git command or runs none that way: a global -p or --paginate (the pager), an
-    option of _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or
-    not), a signature placeholder or atom in a --format, --pretty or shortlog --group value
+    """The first word of a plain git command that makes it run a program, named in it or configured; None when
+    the command is no git command or runs none that way: a global -p or --paginate (the pager), an option of
+    _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or not), a
+    signature placeholder or atom in a --format, --pretty or shortlog --group value
     (_RDP_GIT_SIGNATURE_FORMAT) or a signature sort key in a for-each-ref, branch or tag --sort value
     (_RDP_GIT_SIGNATURE_SORT), each running gpg.program, a short option of _RDP_GIT_PROGRAM_LETTERS (grep -O,
     rebase and difftool -x, clone -u and -c, commit -S and -p, tag -s, -u and -v), a --help after the
-    subcommand (git help's viewer), a
-    TRANSPORT::ADDRESS URL for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of
-    _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are read with their operands first: a word taken as the value of
-    an option before it (attached, or the
-    next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
-    --ext-diff searches for --ext-diff. Every other word is judged up to a -- ending the options of a
-    subcommand of _RDP_GIT_DASHDASH_ENDS, one the scan reaches surely free (the word before it may not
-    take it as a value, or is surely a value itself: git grep -e -e -- -O), after which a word is a path
-    (git diff --cached -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a
-    global option this hook does not know, every word that may be the subcommand is tried."""
+    subcommand (git help's viewer), a TRANSPORT::ADDRESS URL for a subcommand of _RDP_GIT_TRANSPORTS, or a
+    subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are read with their operands first: a word taken as
+    the value of an option before it (attached, or the next word after one of _RDP_GIT_PROGRAM_LETTERS or
+    _RDP_GIT_NEXT_LONG) is no option, so git log --grep --ext-diff searches for --ext-diff. Every other word
+    is judged up to a -- ending the options of a subcommand of _RDP_GIT_DASHDASH_ENDS, one the scan reaches
+    surely free (the word before it may not take it as a value, or is surely a value itself:
+    git grep -e -e -- -O), after which a word is a path (git diff --cached -- --ext-diff); for any other
+    subcommand, a word after -- is judged too. Behind a global option this hook does not know, every word that
+    may be the subcommand is tried."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
     at, _configured = _rdp_git_subcommand(words)
