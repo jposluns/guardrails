@@ -1180,7 +1180,9 @@ def lease_holder_of(raw, cause=None):
     load-bearing: the ownership decision is the full-payload byte compare in unlink_owned_lease). With no
     bytes (raw None) it names no holder and says why, from `cause` (a read_lease_payload cause: absent,
     non-regular, oversized, or unreadable with its error), or that the lease was not read when the caller
-    gives no cause; it never reports one cause as another."""
+    gives no cause; it never reports one cause as another. No shipped caller passes raw None today (the
+    one caller, unlink_owned_lease, names a holder only from bytes it read), so that branch is defensive
+    and T81 exercises it by calling this function directly."""
     if raw is None:
         if cause is None:
             return "no holder named (the lease was not read)"

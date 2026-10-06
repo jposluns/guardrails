@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T82)
+  check_opf_record.py --self-test                    the fixture suite (T1-T83)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -398,9 +398,15 @@ Each case runs on its own copy of that template; the root is removed in a finall
       "absent or a non-regular entry" for every unread lease)
   T82 the discriminator binds each flip to an assertion: a flipped run that goes red only through a
       cannot-evaluate backstop (a crash the CLI turned into exit 2) or a harness exception never counts
-      as discriminating, while an assertion red, or a backstop the flip declares as its intended
-      outcome, does (flip: the round-2 discriminator, which refused only a signature TypeError at the
+      as discriminating, while an assertion red, or a backstop caused by a recorded injection the flip
+      declares, does (flip: the round-2 discriminator, which refused only a signature TypeError at the
       backstop and let a harness exception escape)
+  T83 a declared backstop is bound to the recorded injection that must cause it: an unrelated crash
+      under a declared flip, another exception type carrying the declared text, a twin of the injected
+      exception raised in its place, a crash the CLI turns into an unexpected-error refusal, and a
+      SystemExit from the flipped run each fail the discrimination (flip: the round-3 discriminator,
+      which matched each declared text as a substring of any backstop line and let a BaseException
+      escape)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -542,16 +548,51 @@ def assert_no_auto_maintenance(env, base):
 # Any crash inside a CLI run (a flip's replacement raising NameError, or a TypeError once it no longer
 # matches its caller) meets that CLI's class-width backstop, which prints a cannot-evaluate line and exits
 # 2, an ordinary refusal exit that a test's assertion then reads as red. Every such line, from any verb
-# (record, render, doctor, upgrade, adopt) or the cli self-test, matches _BACKSTOP. While _discriminate
-# runs a flip it pushes a list here, and cli, child and the T75 children add each backstop line they print
-# to the innermost list, so the flipped run's red is judged with every backstop it met in view.
-_BACKSTOP = re.compile(r"(?:cannot evaluate|harness error): unexpected error[^\n]*")
+# (record, render, doctor, upgrade, adopt) or the cli self-test, matches _BACKSTOP, as does the refusal a
+# store-resolution wrapper makes of a crash ("refused: unexpected error resolving the store ... (repr)").
+# While _discriminate runs a flip it pushes a list here, and cli, child and the T75 children add each
+# backstop line they print to the innermost list, so the flipped run's red is judged with every backstop
+# it met in view. A crash that production code swallows, or wraps in a refusal of any other wording,
+# prints no such line and is not seen here.
+_BACKSTOP = re.compile(r"(?:cannot evaluate|harness error|refused): unexpected error[^\n]*")
 _flip_watch = []
+
+# The exact line the record CLI's backstop prints for an exception object; a declared backstop is accepted
+# only as this line for a recorded injection (_bound_injection).
+_BACKSTOP_LINE = "cannot evaluate: unexpected error ({!r}); failing closed to exit 2"
+
+# While _discriminate runs a flip it also pushes a list here, and each injection site a declared backstop
+# may come from records (label, exception object) in the innermost list as it raises (_injected), or as a
+# reverted guard's crash passes its one expected point (_crash_point).
+_flip_injections = []
 
 
 def _note_backstops(text):
     if _flip_watch and text:
         _flip_watch[-1].extend(_BACKSTOP.findall(text))
+
+
+def _injected(label, exc):
+    """exc, recorded as injection `label` of the innermost discriminated run; the caller raises it."""
+    if _flip_injections:
+        _flip_injections[-1].append((label, exc))
+    return exc
+
+
+def _crash_point(label, owner, name, expected):
+    """owner.name, recording as injection `label` an exception it raises of exactly `expected`'s type
+    and args (the crash a reverted guard lets the code reach, bound to the point it must come from); any
+    other exception passes unrecorded."""
+    real = getattr(owner, name)
+
+    def observing(*args, **kwargs):
+        try:
+            return real(*args, **kwargs)
+        except BaseException as exc:
+            if type(exc) is type(expected) and exc.args == expected.args:
+                _injected(label, exc)
+            raise
+    return patch.object(owner, name, observing)
 
 
 def cli(env, argv):
@@ -1578,14 +1619,18 @@ def t18_requires_options(fx):
         refused_unplanned(fx.env, root, ["transition", "PD-1", "decided"] + MAINTAINER, "requires --decision")
 
 
+@contextlib.contextmanager
 def flip_t18_requires():
-    """Drop the requires half of the option guard: a decide without the options is planned."""
+    """Drop the requires half of the option guard: a decide without the options is planned, and its
+    bundle's read of the missing --decision crashes (the injection its declared backstop is bound to)."""
     original = record._require_decision_options
 
     def apply_only(req, rid, rtype, cur_state, target, cur_qual):
         if "--decision" in req.values:
             original(req, rid, rtype, cur_state, target, cur_qual)
-    return patch.object(record, "_require_decision_options", apply_only)
+    with patch.object(record, "_require_decision_options", apply_only), \
+            _crash_point("t18-requires", record, "_resolution_bundle", KeyError("--decision")):
+        yield
 
 
 def t18_given_together(fx):
@@ -1597,9 +1642,13 @@ def t18_given_together(fx):
                              + MAINTAINER, "given together")
 
 
+@contextlib.contextmanager
 def flip_t18_together():
-    """Drop the parser's given-together check: one option alone reaches the store."""
-    return patch.object(record, "_require_decision_pair", lambda seen: None)
+    """Drop the parser's given-together check: one option alone reaches the store, and the bundle's read
+    of the missing --decided-by crashes (the injection its declared backstop is bound to)."""
+    with patch.object(record, "_require_decision_pair", lambda seen: None), \
+            _crash_point("t18-together", record, "_resolution_bundle", KeyError("--decided-by")):
+        yield
 
 
 def t18_apply_only_withdrawn(fx):
@@ -4606,7 +4655,7 @@ def t62_output_failure_not_release(fx):
     pre = read(root, BI_INDEX)
 
     def failing_emit(report):
-        raise BrokenPipeError(32, "synthetic output failure after the lease release")
+        raise _injected("t62-emit", BrokenPipeError(32, "synthetic output failure after the lease release"))
     with patch.object(record, "_emit_success", failing_emit):
         result = record_cli(env, root, CREATE)
     refused(result, T62_EMIT_FAILED)
@@ -4693,7 +4742,7 @@ def _t64_failing_print(marker):
     def failing(*args, **kwargs):
         if not fired and any(isinstance(a, str) and marker in a for a in args):
             fired.append(True)
-            raise OSError(5, T64_STDERR)
+            raise _injected("t64-stderr", OSError(5, T64_STDERR))
         return builtins.print(*args, **kwargs)
     return failing
 
@@ -4725,7 +4774,7 @@ def t64_diagnostic_failure_never_governs(fx):
     root = fx.case("t64-emit-then-stderr")
 
     def failing_emit(report):
-        raise BrokenPipeError(32, "synthetic emission failure")
+        raise _injected("t64-emit", BrokenPipeError(32, "synthetic emission failure"))
     with patch.object(record, "_emit_success", failing_emit), \
             patch.object(record, "print", _t64_failing_print("emitting the success report failed"),
                          create=True):
@@ -5058,7 +5107,8 @@ def t68_release_mark_before_acquisition(fx):
 
         def __iter__(self):
             if acquired:
-                raise MemoryError("synthetic allocation failure after the acquisition")
+                raise _injected("t68-mark-copy", MemoryError("synthetic allocation failure after the "
+                                                             "acquisition"))
             return iter((False,))
     with patch.object(record, "_RELEASE_PENDING", MarkCopyTrap()), \
             patch.object(guard, "acquire_lease", arming_acquire):
@@ -5138,7 +5188,7 @@ def t69_release_failure_closes_fd(fx):
     root = fx.case("t69-release-in-handler")
 
     def raising_release(_journal_root):
-        raise RuntimeError("fd release witness")
+        raise _injected("t69-release", RuntimeError("fd release witness"))
     with journal_fd_ledger() as ledger, patch.object(journal, "release_lock", raising_release):
         try:
             raise ValueError("the embedding caller's handled exception")
@@ -5172,7 +5222,7 @@ def t69_token_failure_closes_fd(fx):
     def urandom_trap(n):
         if sys._getframe(1).f_code is record._publish.__code__:
             fired.append(n)
-            raise MemoryError("synthetic token allocation failure")
+            raise _injected("t69-token", MemoryError("synthetic token allocation failure"))
         return real_urandom(n)
     with journal_fd_ledger() as ledger, patch.object(os, "urandom", urandom_trap):
         result = record_cli(env, root, CREATE)
@@ -5818,8 +5868,9 @@ def t77_report_every_failure(fx):
     type: an EMFILE on the retried O_EXCL claim and a JournalError reopening the lease directory each
     refuse with the report appended (the lease left released, the journal left for the next run), and an
     interrupt propagates as itself with the report attached as a note."""
-    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(
-                                root, lambda: OSError(errno.EMFILE, os.strerror(errno.EMFILE)))),
+    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(root, lambda: _injected(
+                                "t77-emfile", OSError(errno.EMFILE, "T77 injected: EMFILE on the retried "
+                                                                    "claim")))),
                            ("t77-journal-error", _t77_reopen_failing)):
         root = _t74_interrupted(fx, name)
         with injected(root):
@@ -5887,7 +5938,8 @@ def t77_fsync_window(fx):
     for nth, needle in ((1, T77_FSYNC_DURABLE), (2, "Before that claim,"), (3, "Before that claim,")):
         name = "t77-fsync-eio-{}".format(nth)
         root = _t74_interrupted(fx, name)
-        with _t77_fsync_failing(root, lambda: OSError(errno.EIO, os.strerror(errno.EIO)), nth):
+        with _t77_fsync_failing(root, lambda nth=nth: _injected("t77-fsync-eio", OSError(
+                errno.EIO, "T77 injected: EIO at fsync {} of the window".format(nth))), nth):
             result = record_cli(fx.env, root, CREATE)
         refused(result, needle)
         assert T77_REPORT in result[2], ("T77 the fsync failure carries the released-lease report", name,
@@ -6267,32 +6319,56 @@ def flip_t81_holder():
 # --- T82: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
 
 
+def _caught_at_backstop(exc):
+    """True when exc itself last propagated into a record CLI backstop's frame (its traceback's outermost
+    entry), so the line that backstop printed was made from this object."""
+    tb = exc.__traceback__
+    return tb is not None and tb.tb_frame.f_code in (record.cli.__code__, opf._cmd_record.__code__)
+
+
+def _bound_injection(line, injections, allowed):
+    """Consume and return the recorded injection that caused backstop `line`: one whose label the flip
+    declares, whose exact backstop line (type and message) is `line`, and which itself reached the
+    backstop. None when no recorded injection is the cause; each injection accounts for one line only."""
+    for index, (label, exc) in enumerate(injections):
+        if label in allowed and line == _BACKSTOP_LINE.format(exc) and _caught_at_backstop(exc):
+            del injections[index]
+            return exc
+    return None
+
+
 def _discriminate(name, test, flip):
     """The flip must turn the test red through an assertion, and the unflipped test must stay green
-    around it. The flipped run is bound to that outcome: a cannot-evaluate backstop printed by any CLI run
-    inside it (a crash the CLI turned into an ordinary exit 2, which an assertion then reads as red),
-    unless the flip declares that backstop as its intended outcome (_INTENDED_BACKSTOPS), and any harness
-    exception other than an assertion (the flip's own construction included) each fail the
-    discrimination by name, never count as a caught defect."""
+    around it. The flipped run is bound to that outcome: a backstop line (_BACKSTOP) printed by any CLI
+    run inside it (a crash the CLI turned into an ordinary exit 2, which an assertion then reads as red)
+    fails the discrimination unless a recorded injection the flip declares (_INTENDED_BACKSTOPS) is its
+    cause (_bound_injection), and any exception other than an assertion (the flip's own construction
+    included, a SystemExit too; an interrupt propagates) fails it by name; neither counts as a caught
+    defect. A crash production code swallows prints no backstop line and is outside this check."""
     test()
-    faults = []
+    faults, injections = [], []
     _flip_watch.append(faults)
+    _flip_injections.append(injections)
     try:
         with flip():
             test()
     except AssertionError:
         allowed = _INTENDED_BACKSTOPS.get(flip, ())
-        stray = [line for line in faults if not any(needle in line for needle in allowed)]
+        stray = [line for line in faults if _bound_injection(line, injections, allowed) is None]
         if stray:
             raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
                                  "evaluate), not an assertion: {}".format(name, stray[0])) from None
-    except Exception as exc:  # noqa: BLE001  a harness exception in the flipped run never discriminates
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  a harness exception in the flipped run never discriminates
         raise AssertionError("{} went red through a harness exception ({!r}), not an "
                              "assertion".format(name, exc)) from None
     else:
         raise AssertionError(name + " survived its flip")
     finally:
         _flip_watch.pop()
+        _flip_injections.pop()
+        del injections[:]   # the recorded exceptions' tracebacks hold the flipped run's frames
     test()
 
 
@@ -6330,9 +6406,13 @@ def _t82_backstop_flip():
     return patch.object(guard, "acquire_lease", _t82_crash)
 
 
+def _t82_declared_crash(*_args):
+    raise _injected("t82-declared", NameError("t82 broken flip fixture"))
+
+
 def _t82_declared_flip():
-    """The same crash, declared in _INTENDED_BACKSTOPS as this flip's intended outcome."""
-    return patch.object(guard, "acquire_lease", _t82_crash)
+    """The same crash, recorded as an injection this flip declares in _INTENDED_BACKSTOPS."""
+    return patch.object(guard, "acquire_lease", _t82_declared_crash)
 
 
 def _t82_harness_flip():
@@ -6352,8 +6432,8 @@ def _t82_assertion_flip():
 def t82_discrimination_bound(fx):
     """The discriminator counts a flipped run as discriminating only when it goes red through an
     assertion: a red met only through the CLI's cannot-evaluate backstop, or through a harness exception,
-    fails the discrimination naming which, while an assertion red, and a backstop the flip declares as
-    its intended outcome, discriminate."""
+    fails the discrimination naming which, while an assertion red, and a backstop caused by a recorded
+    injection the flip declares, discriminate."""
     def test():
         recorded(record_cli(fx.env, fx.case("t82-create"), CREATE))
     for label, flip, needle in (("backstop", _t82_backstop_flip, "unexpected-error backstop"),
@@ -6377,13 +6457,12 @@ def flip_t82():
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round2)
 
 
-# The flips whose intended red is reached through a CLI backstop, each with the backstop text it intends;
-# any other backstop in their flipped run (a crash of the flip's own replacement included) still fails the
-# discrimination. Most name the synthetic failure their test injects, which the reverted handling lets
-# reach the backstop; the T18 flips drop an option guard, and the planner then crashes on the missing
-# option; T64's emission leg reaches the backstop in every run, so its recovery flip meets it too.
+# --- T83: a declared backstop is bound to the recorded injection that must cause it ---------------------
+
+
+# The round-3 declarations: backstop texts each matched as a substring of any backstop line.
 _EIO = "OSError({}, ".format(errno.EIO)
-_INTENDED_BACKSTOPS = {
+_ROUND3_BACKSTOPS = {
     flip_t18_requires: ("KeyError('--decision')",),
     flip_t18_together: ("KeyError('--decided-by')",),
     flip_t62: ("BrokenPipeError(32, 'synthetic output failure after the lease release')",),
@@ -6394,6 +6473,138 @@ _INTENDED_BACKSTOPS = {
     flip_t77: ("OSError({}, ".format(errno.EMFILE), _EIO),
     flip_t77_fsync: (_EIO,),
     _t82_declared_flip: ("NameError('t82 broken flip fixture')",),
+}
+_BACKSTOP_ROUND3 = re.compile(r"(?:cannot evaluate|harness error): unexpected error")
+
+
+def _discriminate_round3(name, test, flip):
+    """The round-3 discriminator (the T83 flip): a declared text accepts any backstop line containing it,
+    a store-resolution refusal is not a backstop, and a BaseException escapes as itself."""
+    test()
+    faults = []
+    _flip_watch.append(faults)
+    try:
+        with flip():
+            test()
+    except AssertionError:
+        allowed = _ROUND3_BACKSTOPS.get(flip, ())
+        stray = [line for line in faults if _BACKSTOP_ROUND3.match(line)
+                 and not any(needle in line for needle in allowed)]
+        if stray:
+            raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
+                                 "evaluate), not an assertion: {}".format(name, stray[0])) from None
+    except Exception as exc:  # noqa: BLE001  the round-3 width
+        raise AssertionError("{} went red through a harness exception ({!r}), not an "
+                             "assertion".format(name, exc)) from None
+    else:
+        raise AssertionError(name + " survived its flip")
+    finally:
+        _flip_watch.pop()
+    test()
+
+
+def _t83_unrelated_eio(*_args):
+    raise OSError(errno.EIO, "UNRELATED crash in a broken flip; intended injection never reached")
+
+
+def _t83_unrelated_flip():
+    """A broken flip whose replacement crashes before its test's injection is reached."""
+    return patch.object(guard, "_claim_after_release", _t83_unrelated_eio)
+
+
+def _t83_mimic_crash(*_args):
+    raise RuntimeError("NameError('t82 broken flip fixture')")
+
+
+def _t83_twin_crash(*_args):
+    _injected("t82-declared", NameError("t82 broken flip fixture"))
+    raise NameError("t82 broken flip fixture")
+
+
+def _t83_resolver_crash(*_args):
+    raise NameError("t83 crash in the store resolver")
+
+
+def _t83_resolver_flip():
+    """A crash the record CLI turns into an unexpected-error refusal, never its cannot-evaluate line."""
+    return patch.object(record._opf_store, "resolve_store", _t83_resolver_crash)
+
+
+def _t83_exit(*_args):
+    raise SystemExit(0)
+
+
+def _t83_exit_flip():
+    """A flip whose replacement raises SystemExit(0) in the test itself."""
+    return patch.object(sys.modules[__name__], "recorded", _t83_exit)
+
+
+@contextlib.contextmanager
+def _t83_declared_as(probe, model):
+    """probe carries model's declarations, in this table and in the round-3 one."""
+    with patch.dict(_INTENDED_BACKSTOPS, {probe: _INTENDED_BACKSTOPS[model]}), \
+            patch.dict(_ROUND3_BACKSTOPS, {probe: _ROUND3_BACKSTOPS[model]}):
+        yield
+
+
+def t83_backstop_bound_to_injection(fx):
+    """A declared backstop is accepted only when the recorded injection the flip declares caused it: an
+    unrelated EIO under flip_t77's declarations, a RuntimeError carrying the declared NameError's text,
+    and a twin of the recorded NameError raised in its place each fail the discrimination as a backstop;
+    so does a crash the record CLI reports as an unexpected-error refusal, and a SystemExit(0) from the
+    flipped run fails it as a harness exception, never escaping."""
+    me = sys.modules[__name__]
+
+    def create():
+        recorded(record_cli(fx.env, fx.case("t83-create"), CREATE))
+    backstop, harness = "unexpected-error backstop", "harness exception"
+    legs = (("unrelated-eio", lambda: t77_report_every_failure(fx), _t83_unrelated_flip,
+             lambda: _t83_declared_as(_t83_unrelated_flip, flip_t77), backstop),
+            ("mimic-type", create, _t82_declared_flip,
+             lambda: patch.object(me, "_t82_declared_crash", _t83_mimic_crash), backstop),
+            ("twin-object", create, _t82_declared_flip,
+             lambda: patch.object(me, "_t82_declared_crash", _t83_twin_crash), backstop),
+            ("resolver-refusal", create, _t83_resolver_flip, contextlib.nullcontext, backstop),
+            ("system-exit", create, _t83_exit_flip, contextlib.nullcontext, harness))
+    for label, test, flip, setup, needle in legs:
+        outcome = None
+        try:
+            with setup():
+                me._discriminate("t83-" + label, test, flip)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
+            outcome = exc
+        assert isinstance(outcome, AssertionError) and needle in str(outcome), (
+            "T83 a backstop or exception no declared injection caused never discriminates", label,
+            repr(outcome))
+
+
+def flip_t83():
+    """The round-3 discriminator."""
+    return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round3)
+
+
+# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections
+# that may cause it. A backstop line is accepted only when a recorded injection of a declared label is its
+# cause: the line is exactly that exception object's backstop line, and that object itself reached the
+# backstop (_bound_injection); any other backstop or exception in the flipped run fails the
+# discrimination. Each label is recorded by one test's injection site alone, so a declaration binds the
+# test, the flip and the injection together. Most label the synthetic failure their test injects, which
+# the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash
+# the planner then meets reading the missing option; T64's emission leg reaches the backstop in every run,
+# so its recovery flip meets it too.
+_INTENDED_BACKSTOPS = {
+    flip_t18_requires: ("t18-requires",),
+    flip_t18_together: ("t18-together",),
+    flip_t62: ("t62-emit",),
+    flip_t64_conclude: ("t64-stderr",),
+    flip_t64_recovery: ("t64-emit",),
+    flip_t68: ("t68-mark-copy",),
+    flip_t69: ("t69-release", "t69-token"),
+    flip_t77: ("t77-emfile", "t77-fsync-eio"),
+    flip_t77_fsync: ("t77-fsync-eio",),
+    _t82_declared_flip: ("t82-declared",),
 }
 
 
@@ -6523,6 +6734,7 @@ TESTS = (
     ("T80-spec-8-8-item-1-wording", t80_spec_item_1_wording, (flip_t80, flip_t80_round1)),
     ("T81-lease-denial-scoped", t81_lease_denial_scoped, (flip_t81_denial, flip_t81_split, flip_t81_holder)),
     ("T82-discrimination-bound-to-assertion", t82_discrimination_bound, flip_t82),
+    ("T83-backstop-bound-to-injection", t83_backstop_bound_to_injection, flip_t83),
 )
 
 
