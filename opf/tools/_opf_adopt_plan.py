@@ -205,167 +205,6 @@ def _require_entry(row, exclusions):
         raise PlanError(problem)
 
 
-def _obs_roots(obs):
-    for key, label in (("sources", "source"), ("targets", "target")):
-        try:
-            roots = _roots(obs[key])
-        except (PlanError, TypeError, ValueError) as exc:
-            return "the {} roots are not roots the planner records ({})".format(label, exc)
-        if roots != obs[key]:
-            return "the {} roots are not recorded sorted, as the planner records them".format(label)
-    return None
-
-
-def _obs_exclusions(obs):
-    rows = obs["exclusions"]
-    for row in rows:
-        if not (isinstance(row, dict) and sorted(map(str, row)) == ["path", "reason"]
-                and isinstance(row["path"], str) and isinstance(row["reason"], str)):
-            return "exclusion {!r} is not a path and reason row".format(row)
-        try:
-            _path(row["path"])
-        except (PlanError, TypeError, ValueError) as exc:
-            return "exclusion path {!r} is not a path the planner records ({})".format(row["path"], exc)
-    keys = [(row["path"], row["reason"]) for row in rows]
-    if keys != sorted(keys):
-        return "the exclusions are not recorded sorted by path and reason, as the planner records them"
-    for path in obs["sources"] + obs["targets"]:
-        if any(_under(path, row["path"]) for row in rows):
-            return "source is in an excluded subtree: {!r}".format(path)
-    return None
-
-
-def _obs_scope(obs):
-    scope = obs["scope"]
-    if type(scope) is not list:
-        return "the scope is not a list of paths"
-    for path in scope:
-        try:
-            _path(path)
-        except (PlanError, TypeError, ValueError) as exc:
-            return "scope path {!r} is not a path the planner records ({})".format(path, exc)
-    if scope != sorted(set(scope)):
-        return "the scope is not recorded sorted and duplicate-free, as the planner records it"
-    omitted = sorted((set(obs["sources"]) | set(obs["targets"]) | set(DETECTION_ROOTS)) - set(scope))
-    if omitted:
-        return "the scope omits {}, which the planner always walks (every source, target and detection " \
-               "root)".format(omitted)
-    return None
-
-
-def _obs_unique(obs):
-    seen = set()
-    for row in obs["entries"]:
-        if row["path"] in seen:
-            return "entry {!r} is duplicated: the accounting is ambiguous".format(row["path"])
-        seen.add(row["path"])
-    return None
-
-
-def _obs_sorted(obs):
-    paths = [row["path"] for row in obs["entries"]]
-    if paths != sorted(paths):
-        return "the entries are not recorded sorted by path, as the planner records them"
-    return None
-
-
-def _obs_recorded(obs):
-    paths = set(row["path"] for row in obs["entries"])
-    for path in obs["scope"]:
-        if path not in paths and not any(_under(path, row["path"]) for row in obs["exclusions"]):
-            return ("scope path {!r} lies under no exclusion yet has no entry; the planner records every "
-                    "scope path it walks".format(path))
-    return None
-
-
-def _obs_available(obs):
-    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
-    for path in obs["sources"]:
-        if kinds.get(path) in (None, "absent", "excluded"):
-            return "declared source is unavailable: {!r}".format(path)
-    return None
-
-
-def _obs_walked(obs):
-    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
-    scope = set(obs["scope"])
-    for row in obs["entries"]:
-        if row["path"] in scope and row["kind"] != "excluded":
-            continue
-        parent = row["path"].rpartition("/")[0]
-        if kinds.get(parent) != "directory":
-            return ("entry {!r} ({}) is no scope path the planner walks from, and its parent {!r} is "
-                    "recorded {}, not as a directory it enumerated".format(
-                        row["path"], row["kind"], parent, kinds.get(parent, "nowhere")))
-    return None
-
-
-def _obs_ancestors(obs):
-    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
-    scope = set(obs["scope"])
-    for row in obs["entries"]:
-        parts = row["path"].split("/")
-        for depth in range(1, len(parts)):
-            ancestor = "/".join(parts[:depth])
-            kind = kinds.get(ancestor)
-            if kind in ("file", "excluded") or (
-                    kind == "absent" and not (row["kind"] == "absent" and row["path"] in scope)):
-                return ("entry {!r} ({}) lies under {!r}, recorded {}; beneath an absent entry the planner "
-                        "records only an absent scope path, and nothing beneath a file or an exclusion".format(
-                            row["path"], row["kind"], ancestor, kind))
-    return None
-
-
-def _obs_bounds(obs):
-    scope = set(obs["scope"])
-    entries = obs["entries"]
-    if len(entries) > MAX_ENTRIES + len(scope):
-        return "the entries exceed the planner's entry bound ({} > {} + {} scope paths)".format(
-            len(entries), MAX_ENTRIES, len(scope))
-    walked = sum(len(row["path"].encode("utf-8")) for row in entries if row["path"] not in scope)
-    if walked > MAX_PATH_BYTES:
-        return "the entries' walked path bytes exceed the planner's bound ({} > {})".format(walked, MAX_PATH_BYTES)
-    for row in entries:
-        parts = row["path"].split("/")
-        walked_from = [depth for depth in range(1, len(parts) + 1) if "/".join(parts[:depth]) in scope]
-        if not walked_from:
-            return "entry {!r} lies under no scope path the planner walks".format(row["path"])
-        if len(parts) - max(walked_from) > MAX_DEPTH:
-            return "entry {!r} lies deeper than the planner's depth bound ({}) below every scope path".format(
-                row["path"], MAX_DEPTH)
-    return None
-
-
-# Every cross-entry invariant _inventory guarantees of the observation it builds, in check order (the
-# completion evaluator's self-test names each one and drops it by name to show its vector load-bearing).
-OBSERVATION_INVARIANTS = (
-    ("roots", _obs_roots),            # sources, targets: as _roots records them (sorted, non-overlapping)
-    ("exclusions", _obs_exclusions),  # path and reason rows, sorted; no source or target beneath one
-    ("scope", _obs_scope),            # sorted, duplicate-free, holding every source, target, detection root
-    ("unique", _obs_unique),          # one row per path
-    ("sorted", _obs_sorted),          # rows in path order
-    ("recorded", _obs_recorded),      # every scope path outside the exclusions has a row
-    ("available", _obs_available),    # every source is recorded a file or a directory
-    ("walked", _obs_walked),          # a non-scope or excluded row is a child of a directory row
-    ("ancestors", _obs_ancestors),    # nothing beneath a file/excluded row; only absent scope beneath absent
-    ("bounds", _obs_bounds),          # entry count, walked path bytes and depth within the walk's bounds
-)
-
-
-def observation_problem(obs):
-    """Why `obs` (its sources, targets, scope, exclusions and entries) is not an observation _inventory
-    builds, or None when it is one. _inventory calls it on the observation it built (its first problem is
-    the PlanError it refuses with, so a declared source it finds unavailable refuses as before) and the
-    completion evaluator on the sealed planning inventory, so both hold one rule over the WHOLE observation,
-    where entry_row_problem holds each row alone: each of OBSERVATION_INVARIANTS, in order. Each row must
-    already pass entry_row_problem."""
-    for _name, invariant in OBSERVATION_INVARIANTS:
-        problem = invariant(obs)
-        if problem is not None:
-            return problem
-    return None
-
-
 def candidate_files(rows, roots):
     """The observation's candidates, derived from its entry rows (_inventory and the completion evaluator
     both call this): every file row under a candidate root (`roots`; None for every root) outside the store
@@ -387,6 +226,203 @@ def empty_directories(rows, roots):
                   and (roots is None or any(_under(row["path"], prefix) for prefix in roots))
                   and not schema._in_control_area(row["path"])
                   and not any(p.startswith(row["path"] + "/") for p in paths))
+
+
+def _exclusion_rows(rows):
+    """The exclusion rows as _inventory records them: path and reason rows, each path one _path accepts,
+    sorted by path and reason."""
+    if type(rows) not in (list, tuple):
+        raise PlanError("the exclusions are not a list of path and reason rows")
+    for row in rows:
+        if not (isinstance(row, dict) and sorted(map(str, row)) == ["path", "reason"]
+                and isinstance(row["path"], str) and isinstance(row["reason"], str)):
+            raise PlanError("exclusion {!r} is not a path and reason row".format(row))
+        _path(row["path"])
+    return sorted((dict(row) for row in rows), key=lambda row: (row["path"], row["reason"]))
+
+
+def manifest_budget(size, manifest_path):
+    """The byte budget the resolved manifest read opens the walk with (0 when nothing resolved): its bytes,
+    held to the per-file and total byte bounds."""
+    if size > MAX_FILE_BYTES:
+        raise PlanError("file exceeds byte bound: {!r}".format(manifest_path))
+    if size > MAX_TOTAL_BYTES:
+        raise PlanError("inventory exceeds byte bounds")
+    return size
+
+
+def build_observation(listing, *, sources, targets, exclusions, walk):
+    """The observation _inventory records, built from `listing` (the one rule set, which the completion
+    evaluator also calls over a listing rebuilt from a sealed inventory's rows), or PlanError naming the
+    first rule it breaks. `walk` holds what the rows alone do not: the deliverable destinations (from the
+    resolved or default manifest), whether a store manifest resolved, and its path and byte count.
+
+    Every rule is applied here, in the walk's own order: the roots (_roots), the exclusion rows, no root
+    beneath an exclusion, the manifest's byte budget, then each requested root walked shortest first (an
+    excluded root skipped; one whose parent is missing recorded absent and unreached), each path visited
+    once with its path bytes, the entry count and the depth below the root that walk began from bounded
+    BEFORE it is looked up; a path under an exclusion recorded excluded and never read; a directory's
+    names bounded and its children walked in name order; a file under no resolved store at a store manifest
+    name refused, its size and the running total byte bound checked; a symlink or special entry refused;
+    each recorded row held to entry_row_problem; every declared source available; and the candidate and
+    empty-directory lists derived.
+
+    `listing` is consulted lazily, in exactly this order, through four calls: at_root(path, visit) calls
+    visit(handle) with the root's parent, or visit(None) when a component above it is missing;
+    stat(handle, name) returns None when nothing is there, else a node whose [0] is "directory", "file" or
+    another kind; children(handle, name, node, visit) calls visit(subhandle, names) with the directory's
+    names (it may stop listing after MAX_ENTRIES + 1 names); read(handle, name, node, budget) returns a
+    file's (size, digest), `budget` the bytes read so far. A listing raises on its own only when the tree
+    changes under it, on an entry it cannot represent (a hard-linked file, a non-directory component above
+    a root), or when the bytes it reads cross a bound this function applies to the size it returns, with
+    this function's text."""
+    sources, targets = _roots(sources), _roots(targets)
+    exclusions = _exclusion_rows(exclusions)
+    for source in sources + targets:
+        if any(_under(source, row["path"]) for row in exclusions):
+            raise PlanError("source is in an excluded subtree: {!r}".format(source))
+    deliverables, resolved = walk["deliverables"], walk["resolved"]
+    budget = [manifest_budget(walk["manifest_bytes"], walk["manifest_path"])]
+    entries = {}
+    unreached = []
+    path_bytes = [0]
+
+    def visit(handle, name, path, depth):
+        if path in entries:
+            return
+        _path(path)
+        path_bytes[0] += len(path.encode("utf-8"))
+        if (len(entries) >= MAX_ENTRIES or path_bytes[0] > MAX_PATH_BYTES
+                or depth > MAX_DEPTH):
+            raise PlanError("inventory entry/path/depth bound exceeded")
+        node = listing.stat(handle, name)
+        if node is None:
+            entries[path] = {"path": path, "kind": "absent"}
+            return
+        row = {"path": path, "kind": "excluded"}
+        entries[path] = row
+        if any(_under(path, item["path"]) for item in exclusions):
+            _require_entry(row, exclusions)
+            return
+        if node[0] == "directory":
+            row["kind"] = "directory"
+
+            def walk_children(subhandle, names):
+                if len(names) > MAX_ENTRIES:
+                    raise PlanError("directory exceeds entry bound")
+                for child_name in sorted(names):
+                    visit(subhandle, child_name, path + "/" + child_name, depth + 1)
+
+            listing.children(handle, name, node, walk_children)
+            _require_entry(row, exclusions)
+        elif node[0] == "file":
+            # A malformed/ambiguous store must not be scanned as ordinary foreign
+            # content: a manifest may contain unmanaged exclusions we cannot trust.
+            if (not resolved and path.startswith(".working/")
+                    and path.count("/") == 2 and path.endswith("/" + store.MANIFEST_NAME)):
+                raise PlanError("unresolved store manifest requires repair before investigation")
+            size, digest = listing.read(handle, name, node, budget[0])
+            if size > MAX_FILE_BYTES:
+                raise PlanError("file exceeds byte bound: {!r}".format(name))
+            budget[0] += size
+            if budget[0] > MAX_TOTAL_BYTES:
+                raise PlanError("inventory exceeds byte bounds")
+            row.update(kind="file", size=size, digest=digest)
+            _require_entry(row, exclusions)
+        else:
+            raise PlanError("symlink or special entry refused: {!r}".format(path))
+
+    requested = sorted(set(sources) | set(targets) | set(DETECTION_ROOTS) | set(deliverables))
+    # Walk shortest roots first, avoiding a duplicate read when a source root
+    # encloses one of the fixed detection paths.
+    for path in sorted(requested, key=lambda p: (p.count("/"), p)):
+        if any(_under(path, item["path"]) for item in exclusions):
+            continue
+
+        def walk_root(handle, path=path):
+            if handle is None:
+                entries[path] = {"path": path, "kind": "absent"}
+                unreached.append(path)
+            else:
+                visit(handle, path.rpartition("/")[2], path, 0)
+
+        listing.at_root(path, walk_root)
+    for path in sources:
+        if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
+            raise PlanError("declared source is unavailable: {!r}".format(path))
+    rows = sorted(entries.values(), key=lambda row: row["path"])
+    # Candidate roots are the explicit sources, .working and the deliverable destinations outside it
+    # (spec 14: each pre-existing file there takes a disposition before init-store), outside
+    # exclusions. The store control area is never adopter content, in any homes generation (spec
+    # 14.2): its entries stay in the inventory with their digests, as OPF control area, and are
+    # never candidates. Empty directories are surfaced separately. They are not file operands.
+    candidate_roots = sources + [".working"] + list(deliverables)
+    return {
+        "scope": requested,
+        "sources": sources,
+        "targets": targets,
+        "exclusions": exclusions,
+        "entries": rows,
+        "candidates": candidate_files(rows, candidate_roots),
+        "empty_directories": empty_directories(rows, candidate_roots),
+        "walk": {
+            "deliverables": list(deliverables),
+            "resolved": resolved,
+            "manifest_path": walk["manifest_path"],
+            "manifest_bytes": walk["manifest_bytes"],
+            "unreached": sorted(unreached),
+        },
+    }
+
+
+# The observation fields build_observation returns, which the completion evaluator compares field for field.
+BUILT_FIELDS = ("scope", "sources", "targets", "exclusions", "entries", "candidates", "empty_directories",
+                "walk")
+
+
+class RowListing:
+    """A listing rebuilt from an observation's entry rows (path to row, each passing entry_row_problem) and
+    its recorded walk, for build_observation: a directory's names are the rows directly beneath it, a file
+    row gives its recorded size and digest, an excluded row stands for an entry present and never read, a
+    missing row reads as absent. A root's parent is missing when the nearest recorded ancestor is absent
+    or an enumerated directory not holding the next component, and present when it holds it; a top-level
+    root's parent (the product root) is always present; for any other root with no recorded ancestor, missing
+    exactly when the walk records the root unreached."""
+
+    def __init__(self, rows, unreached):
+        self.rows = rows
+        self.unreached = set(unreached)
+
+    def at_root(self, path, visit):
+        parts = path.split("/")
+        for depth in range(len(parts) - 1, 0, -1):
+            ancestor = "/".join(parts[:depth])
+            row = self.rows.get(ancestor)
+            if row is None:
+                continue
+            if row["kind"] == "absent" or (row["kind"] == "directory" and depth < len(parts) - 1
+                                           and "/".join(parts[:depth + 1]) not in self.rows):
+                return visit(None)
+            if row["kind"] != "directory":
+                raise PlanError("cannot open contained directory component {!r} of {!r} (recorded {})".format(
+                    ancestor, path, row["kind"]))
+            return visit(path.rpartition("/")[0])
+        # The product root itself is always there; above any other root no row says, so the walk's record does.
+        return visit(None if "/" in path and path in self.unreached else path.rpartition("/")[0])
+
+    def stat(self, handle, name):
+        path = handle + "/" + name if handle else name
+        row = self.rows.get(path)
+        if row is None or row["kind"] == "absent":
+            return None
+        return (row["kind"], row)
+
+    def children(self, handle, name, node, visit):
+        path = node[1]["path"]
+        visit(path, [p.rpartition("/")[2] for p in self.rows if p.rpartition("/")[0] == path])
+
+    def read(self, handle, name, node, budget):
+        return node[1]["size"], node[1]["digest"]
 
 
 def _stamp(st):
@@ -424,6 +460,62 @@ def _read(fd, name, before, budget):
         store._journal._close_fd_propagating(child)
 
 
+class _TreeListing:
+    """The filesystem walker: the listing build_observation consults while it walks, read beneath the held
+    product root descriptor, no-follow and tied to each opened inode, so a tree changed under it refuses.
+    It refuses on its own only as build_observation's docstring allows: a change under it, a hard-linked
+    file or a non-directory component above a root (which no listing records), or bytes read past a bound
+    build_observation applies to the size returned, with that function's text (_read's)."""
+
+    def __init__(self, root_fd):
+        self.root_fd = root_fd
+
+    def at_root(self, path, visit):
+        try:
+            parent, _name = store._journal._open_parent(self.root_fd, path)
+        except FileNotFoundError:
+            parent = None
+        if parent is None:
+            return visit(None)
+        try:
+            return visit(parent)
+        finally:
+            store._journal._close_fd_propagating(parent)
+
+    def stat(self, parent, name):
+        try:
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISDIR(before.st_mode):
+            return ("directory", before)
+        return ("file" if stat.S_ISREG(before.st_mode) else "other", before)
+
+    def children(self, parent, name, node, visit):
+        before = node[1]
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            if _stamp(os.fstat(child)) != _stamp(before):
+                raise PlanError("directory changed before enumeration")
+            names = []
+            with os.scandir(child) as listing:
+                for entry in listing:
+                    names.append(entry.name)
+                    if len(names) > MAX_ENTRIES:
+                        break  # build_observation refuses a directory listing this long
+            visit(child, names)
+            if _stamp(os.fstat(child)) != _stamp(before):
+                raise PlanError("directory changed during enumeration")
+            if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
+                raise PlanError("directory name changed during enumeration")
+        finally:
+            store._journal._close_fd_propagating(child)
+
+    def read(self, parent, name, node, budget):
+        data = _read(parent, name, node[1], [budget])
+        return len(data), _digest(data)
+
+
 def _roots(sources):
     if type(sources) not in (list, tuple):
         raise PlanError("sources must be an explicit list of contained paths")
@@ -441,7 +533,6 @@ def _roots(sources):
 def _inventory(root, sources, targets):
     store._journal.require_containment()
     root_fd = store._open_dir_nofollow(root)
-    budget = [0]
     try:
         root_stat = os.fstat(root_fd)
         # Bind discovery to this product only. Inspect BOTH pointers, even when
@@ -492,11 +583,7 @@ def _inventory(root, sources, targets):
             # brought under the planner's own byte bounds; a fresh by-path read here could read a
             # tree swapped in after the listing (round-5 defect 1).
             raw = manifest_raw
-            if len(raw) > MAX_FILE_BYTES:
-                raise PlanError("file exceeds byte bound: {!r}".format(manifest_path))
-            budget[0] += len(raw)
-            if budget[0] > MAX_TOTAL_BYTES:
-                raise PlanError("inventory exceeds byte bounds")
+            manifest_budget(len(raw), manifest_path)
             manifest = tomllib.loads(raw.decode("utf-8"))
             checked = store.validate_manifest(manifest)
             if checked.status != store.VALID:
@@ -530,101 +617,18 @@ def _inventory(root, sources, targets):
             view_targets = None
             import _opf_init
             deliverables = _deliverable_destinations(tomllib.loads(_opf_init.build_manifest()))
-        exclusions = sorted(excluded, key=lambda row: (row["path"], row["reason"]))
-        for source in sources + targets:
-            if any(_under(source, row["path"]) for row in exclusions):
-                raise PlanError("source is in an excluded subtree: {!r}".format(source))
-
-        entries = {}
-        path_bytes = [0]
-
-        def visit(parent, name, path, depth):
-            if path in entries:
-                return
-            _path(path)
-            path_bytes[0] += len(path.encode("utf-8"))
-            if (len(entries) >= MAX_ENTRIES or path_bytes[0] > MAX_PATH_BYTES
-                    or depth > MAX_DEPTH):
-                raise PlanError("inventory entry/path/depth bound exceeded")
-            try:
-                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                entries[path] = {"path": path, "kind": "absent"}
-                return
-            row = {"path": path, "kind": "excluded"}
-            entries[path] = row
-            if any(_under(path, item["path"]) for item in exclusions):
-                _require_entry(row, exclusions)
-                return
-            if stat.S_ISDIR(before.st_mode):
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                dir_fd=parent)
-                try:
-                    if _stamp(os.fstat(child)) != _stamp(before):
-                        raise PlanError("directory changed before enumeration")
-                    row["kind"] = "directory"
-                    names = []
-                    with os.scandir(child) as listing:
-                        for entry in listing:
-                            names.append(entry.name)
-                            if len(names) > MAX_ENTRIES:
-                                raise PlanError("directory exceeds entry bound")
-                    for child_name in sorted(names):
-                        visit(child, child_name, path + "/" + child_name, depth + 1)
-                    if _stamp(os.fstat(child)) != _stamp(before):
-                        raise PlanError("directory changed during enumeration")
-                    if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
-                        raise PlanError("directory name changed during enumeration")
-                    _require_entry(row, exclusions)
-                finally:
-                    store._journal._close_fd_propagating(child)
-            elif stat.S_ISREG(before.st_mode):
-                # A malformed/ambiguous store must not be scanned as ordinary foreign
-                # content: a manifest may contain unmanaged exclusions we cannot trust.
-                if (resolution.status != store.RESOLVED
-                        and path.startswith(".working/")
-                        and path.count("/") == 2 and path.endswith("/" + store.MANIFEST_NAME)):
-                    raise PlanError("unresolved store manifest requires repair before investigation")
-                data = _read(parent, name, before, budget)
-                row.update(kind="file", size=len(data), digest=_digest(data))
-                _require_entry(row, exclusions)
-            else:
-                raise PlanError("symlink or special entry refused: {!r}".format(path))
-
-        requested = sorted(set(sources) | set(targets) | set(DETECTION_ROOTS) | set(deliverables))
-        # Walk shortest roots first, avoiding a duplicate read when a source root
-        # encloses one of the fixed detection paths.
-        for path in sorted(requested, key=lambda p: (p.count("/"), p)):
-            if any(_under(path, item["path"]) for item in exclusions):
-                continue
-            try:
-                parent, name = store._journal._open_parent(root_fd, path)
-            except FileNotFoundError:
-                entries[path] = {"path": path, "kind": "absent"}
-                continue
-            try:
-                visit(parent, name, path, 0)
-            finally:
-                store._journal._close_fd_propagating(parent)
-        observed = dict(sources=sources, targets=targets, scope=requested, exclusions=exclusions,
-                        entries=sorted(entries.values(), key=lambda row: row["path"]))
-        problem = observation_problem(observed)
-        if problem is not None:
-            raise PlanError(problem)
+        walk = {"deliverables": deliverables, "resolved": resolution.status == store.RESOLVED,
+                "manifest_path": manifest_path, "manifest_bytes": len(manifest_raw) if manifest_path else 0}
+        # The walk and every rule over what it finds are build_observation's alone; the walker only lists.
+        observed = build_observation(_TreeListing(root_fd), sources=sources, targets=targets,
+                                     exclusions=excluded, walk=walk)
+        exclusions, requested = observed["exclusions"], observed["scope"]
+        entries = dict((row["path"], row) for row in observed["entries"])
         if resolution.status != store.RESOLVED:
             # With no resolved store, content at a reserved name (for example counters and
             # records, or import runs, left without a manifest) is still prior ancestry.
             traces += [path for path in ANCESTRY_RESERVED
                        if entries.get(path, {}).get("kind") in ("file", "directory")]
-        # Candidate roots are the explicit sources, .working and the deliverable destinations outside it
-        # (spec 14: each pre-existing file there takes a disposition before init-store), outside
-        # exclusions. The store control area is never adopter content, in any homes generation (spec
-        # 14.2): its entries stay in the inventory with their digests, as OPF control area, and are
-        # never candidates.
-        candidate_roots = sources + [".working"] + deliverables
-        candidates = candidate_files(entries.values(), candidate_roots)
-        # Empty directories are surfaced separately. They are not file operands.
-        empty = empty_directories(entries.values(), candidate_roots)
         check_fd = store._open_dir_nofollow(root)
         try:
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
@@ -642,8 +646,9 @@ def _inventory(root, sources, targets):
             "targets": targets,
             "exclusions": exclusions,
             "entries": observed["entries"],
-            "candidates": sorted(candidates),
-            "empty_directories": sorted(empty),
+            "candidates": observed["candidates"],
+            "empty_directories": observed["empty_directories"],
+            "walk": observed["walk"],
             "resolution": {
                 "status": resolution.status,
                 "detail": resolution.detail,

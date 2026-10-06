@@ -45,22 +45,15 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     compared by content in the receipt leg, because outcome events append to its file.
   2 discovery-accounting: the planning inventory re-seals to the plan's inventory_digest; every candidate,
     empty directory and inventoried file entry, wherever it lies, has a plan disposition or lies under a
-    recorded exclusion (the store control area counts as one, spec 14.2); every entry row must be one the
-    planner records, by the planner's own row rule (_opf_adopt_plan.entry_row_problem, which _inventory
-    calls on every row it walks: a canonical path by _opf_adopt_plan._path, a kind in its vocabulary,
-    exactly that kind's fields, a file row's size a byte count and its digest well formed, kind="excluded"
-    exactly under a recorded exclusion by _opf_adopt_plan._under), and the WHOLE observation must be one
-    the planner builds, by the planner's own observation rule (_opf_adopt_plan.observation_problem, which
-    _inventory calls on the observation it built: source and target roots as _roots records them, sorted
-    exclusions with no root beneath one, a scope holding every root it walks, one sorted row per path, a row
-    for every scope path, every declared source available, every other row a child of a directory row,
-    nothing beneath a file, excluded or absent row but an absent scope path, and the walk's bounds); either
-    is CANNOT-EVALUATE naming the problem, never a pass; every exclusion, candidate and empty-directory
-    path must pass _opf_adopt_plan._path too; and the redundant candidates and empty_directories lists are RE-DERIVED
-    from the entries by the planner's own derivations (_opf_adopt_plan.candidate_files and
-    empty_directories): each recorded path must be one the derivation yields over every root, and under the
-    candidate roots the inventory itself fixes (the source roots and .working) the recorded list must EQUAL
-    the derivation, so an omitted candidate or empty directory is CANNOT-EVALUATE, never green; every plan
+    recorded exclusion (the store control area counts as one, spec 14.2); the whole observation must be the
+    one the planner builds, by the planner's OWN build (rebuilt_observation_problem): the entry rows, one per path,
+    are read back as the listing they record (_opf_adopt_plan.RowListing) and the planner's one rule set,
+    _opf_adopt_plan.build_observation (the same function _inventory runs over the live tree: roots, exclusions,
+    the walk in its own order with every bound, the total byte budget and the depth below the root the walk
+    began from included, absent and excluded rows, the row rule, availability and the candidate and
+    empty-directory derivations), is run over it with the recorded roots, exclusions and walk table; a
+    refusal, or any recorded field (_opf_adopt_plan.BUILT_FIELDS) other than the one it returns, is
+    CANNOT-EVALUATE naming it, never a pass, and nothing here re-models the planner; every plan
     source is an observed file whose digest equals its plan digest.
   3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
     homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
@@ -101,10 +94,11 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
 DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for retire and move rows, which
 TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
 check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest, and
-re-derives the candidates and empty directories exactly only under the source roots and .working: the
-deliverable destinations, the other candidate roots, come from the store manifest, which the inventory does
-not record, so outside those roots a recorded path must be derivable from the entries but an omission is
-not seen there (every file entry and every recorded empty directory is accounted wherever it lies);
+takes as recorded what only the store manifest fixes (the exclusions, and the walk table's deliverables,
+resolved flag, manifest path and manifest byte count, the last counted against the total byte bound), since
+the inventory does not carry the manifest bytes; the resolved flag must agree with a recorded resolution,
+and for a root none of whose ancestors the walk recorded, whether its parent existed is the walk table's
+unreached record (the rows cannot show it: it moves only that root's path bytes and one entry-bound test);
 check 4 is CANNOT-EVALUATE until U25 ships the CI store-identity assertion (U25_CI_IDENTITY_ASSERTED), so
 the roster cannot be green in this release on check 4 alone either; the reference digests authenticate
 the CI floor files against this module's own embedded constants, so they are only as trustworthy as this
@@ -316,28 +310,80 @@ def _receipt_binding(ev, rep, receipt, approval):
 
 # --- check 2: discovery accounting --------------------------------------------------------------------
 
-def _inventory_path(value, label):
-    """`value` held to the planning inventory producer's own path validator (_opf_adopt_plan._path: a
-    contained, canonical file or directory path with no `.` or `..` component and no .git component), or
-    Unevaluable naming it: a path the planner never records is malformed accounting input, never a pass."""
+# The fields of the observation's walk table (_opf_adopt_plan.build_observation records it).
+_WALK_FIELDS = ("deliverables", "manifest_bytes", "manifest_path", "resolved", "unreached")
+
+
+def _differences(built, recorded):
+    """The paths whose rows differ between two entry lists (each sorted, one row per path)."""
+    ours, theirs = dict((r["path"], r) for r in built), dict((r["path"], r) for r in recorded)
+    only = sorted(set(theirs) - set(ours))
+    missing = sorted(set(ours) - set(theirs))
+    changed = sorted(p for p in set(ours) & set(theirs) if ours[p] != theirs[p])
+    return "recorded only {}, built only {}, recorded otherwise {}".format(only, missing, changed)
+
+
+def rebuilt_observation_problem(obs):
+    """Why the observation `obs` is not the one the planner's own build_observation returns over the
+    listing its rows record, or None when it is. The rows are first held only to what a listing needs (a
+    path, a kind in the planner's vocabulary, a file's integer size and string digest; else the planner's
+    row rule, entry_row_problem, names the defect) and to one row per path, so they ARE a listing
+    (_opf_adopt_plan.RowListing); the planner's one rule set (build_observation, which _inventory runs over
+    the live tree) is then run over it with the observation's recorded roots, exclusions and walk, and must
+    neither refuse nor return anything but the recorded fields (BUILT_FIELDS), field for field. There is no
+    second model of the planner here."""
+    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources", "targets", "scope")
+    if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
+        return "the observation lacks {}".format(", ".join(lists))
+    walk = obs.get("walk")
+    if not (isinstance(walk, dict) and sorted(map(str, walk)) == sorted(_WALK_FIELDS)
+            and isinstance(walk["deliverables"], list) and all(isinstance(p, str) for p in walk["deliverables"])
+            and isinstance(walk["unreached"], list) and all(isinstance(p, str) for p in walk["unreached"])
+            and type(walk["resolved"]) is bool and isinstance(walk["manifest_path"], str)
+            and type(walk["manifest_bytes"]) is int and walk["manifest_bytes"] >= 0):
+        return "the observation records no walk table of {}".format(", ".join(_WALK_FIELDS))
+    resolution = obs.get("resolution")
+    if isinstance(resolution, dict) and ((resolution.get("status") == store.RESOLVED) != walk["resolved"]
+                                         or resolution.get("manifest_path") != walk["manifest_path"]):
+        return "the walk's resolved flag or manifest path disagrees with the recorded resolution"
+    exclusions = [r for r in obs["exclusions"] if isinstance(r, dict) and isinstance(r.get("path"), str)]
+    rows = {}
+    for i, row in enumerate(obs["entries"]):
+        # Only what a listing needs of a row; every other rule is build_observation's, in its walk order.
+        if not (isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"]
+                and row.get("kind") in planner.ENTRY_KINDS
+                and (row["kind"] != "file" or (type(row.get("size")) is int
+                                               and isinstance(row.get("digest"), str)))):
+            problem = planner.entry_row_problem(row, exclusions) or "entry {!r} is no listing row".format(row)
+            return "entry [{}]: {}; the planner never records such a row".format(i, problem)
+        if row["path"] in rows:
+            return "entry {!r} is duplicated: the accounting is ambiguous".format(row["path"])
+        rows[row["path"]] = row
     try:
-        return planner._path(value)
-    except (planner.PlanError, TypeError, ValueError) as exc:
-        raise Unevaluable("planning inventory {} path {!r} is not a path the planner records ({})".format(
-            label, value, exc))
+        built = planner.build_observation(
+            planner.RowListing(rows, walk["unreached"]), sources=obs["sources"], targets=obs["targets"],
+            exclusions=obs["exclusions"], walk=walk)
+    except (planner.PlanError, TypeError, ValueError, KeyError, RecursionError) as exc:
+        return "the planner refuses it: {}".format(exc)
+    for field in planner.BUILT_FIELDS:
+        if built[field] != obs.get(field):
+            detail = "built {!r}".format(built[field])
+            if field == "entries":
+                detail = _differences(built[field], obs[field])
+                ruled = [planner.entry_row_problem(row, exclusions)
+                         for row in obs[field] if row not in built[field]]
+                detail += "".join("; " + problem for problem in [p for p in ruled if p][:1])
+            return "its {} are not the ones the planner builds from its entries ({})".format(field, detail)
+    return None
 
 
 def _check_discovery(ev, rep):
     """Spec 14.1 check 2: 'Discovery accounting: every inventory entry has a disposition or recorded
     exclusion.' Every inventoried file, wherever it lies, and every candidate and empty directory needs a
-    plan disposition or a recorded exclusion; an ambiguous (duplicate-path) or malformed entry row is
-    CANNOT-EVALUATE, never a pass. Every path is first held to the planner's own validator
-    (_inventory_path), so the containment test below only ever sees canonical contained paths, and an
-    entry recorded excluded must lie under a recorded exclusion by the planner's own matching rule
-    (_opf_adopt_plan._under: the producer records kind="excluded" exactly for such a path), so a
-    contradictory excluded entry is CANNOT-EVALUATE, never skipped. The whole row rule is the planner's
-    (_opf_adopt_plan.entry_row_problem), and the redundant candidates and empty_directories lists are
-    re-derived from the entries by the planner's own derivations and must agree (module docstring, check 2)."""
+    plan disposition or a recorded exclusion. First the whole observation must be the one the planner's own
+    build_observation returns over the listing its rows record (rebuilt_observation_problem; module
+    docstring, check 2), so an ambiguous, malformed, contradictory or unproducible record is CANNOT-EVALUATE,
+    never a pass, and the containment test below only ever sees paths the planner's own walk recorded."""
     if ev.planning_inventory is None:
         raise Unevaluable("the planning inventory was not supplied; discovery accounting needs its entries")
     doc = _canonical(ev.planning_inventory, "the planning inventory")
@@ -356,53 +402,13 @@ def _check_discovery(ev, rep):
         rep.finding("the planning inventory {!r} is not the one the approved plan binds ({!r})".format(
             claimed, ev.plan["inventory_digest"]))
     obs = doc.get("observation")
-    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources", "targets", "scope")
-    if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
-        raise Unevaluable("the planning inventory's observation lacks {}".format(", ".join(lists)))
-    try:
-        excluded = [_inventory_path(row["path"], "exclusion") for row in obs["exclusions"]]
-    except (TypeError, KeyError) as exc:
-        raise Unevaluable("the planning inventory's exclusions are malformed ({!r})".format(exc))
-    entries = {}
-    for i, row in enumerate(obs["entries"]):
-        # Ambiguous, malformed or contradictory accounting input never grades: it is CANNOT-EVALUATE, never
-        # a pass. The row rule is the planner's own, the one _inventory holds every row it records to.
-        problem = planner.entry_row_problem(row, obs["exclusions"])
-        if problem is not None:
-            raise Unevaluable("planning inventory entry [{}]: {}; the planner never records such a row "
-                              "(a malformed or contradictory record, never skipped)".format(i, problem))
-        entries[row["path"]] = row
-    # The rows' relationships, the source roots' availability included, are the planner's own observation
-    # rule, the one _inventory holds the observation it builds to (a duplicate path is ambiguous there).
-    problem = planner.observation_problem(obs)
+    problem = rebuilt_observation_problem(obs)
     if problem is not None:
         raise Unevaluable("the planning inventory's observation is not one the planner builds: {}; a "
-                          "contradictory or ambiguous record is never graded".format(problem))
-    rows = list(entries.values())
-    roots = list(obs["sources"])
-    # The planner's candidate roots are the source roots, .working and the deliverable destinations; the
-    # last come from the store manifest, which the inventory does not record, so the re-derivation is exact
-    # under the first two only (a disclosed residual).
-    roots = roots + [".working"]
-    recorded = {}
-    for label, derive in (("candidates", planner.candidate_files),
-                          ("empty_directories", planner.empty_directories)):
-        listed = [_inventory_path(p, label.replace("_", " ")) for p in obs[label]]
-        if listed != sorted(set(listed)):
-            raise Unevaluable("the planning inventory's {} are not sorted and duplicate-free, as the "
-                              "planner records them".format(label))
-        stray = sorted(set(listed) - set(derive(rows, None)))
-        if stray:
-            raise Unevaluable("the planning inventory's {} name {}, which the planner's derivation from "
-                              "its entries never yields: a contradictory record".format(label, stray))
-        derived = derive(rows, roots)
-        within = [p for p in listed if any(planner._under(p, root) for root in roots)]
-        if within != derived:
-            raise Unevaluable("the planning inventory's {} omit {}, which the planner derives from its "
-                              "entries under the candidate roots {}: a redundant list that disagrees with "
-                              "the entries it is derived from is never trusted".format(
-                                  label, sorted(set(derived) - set(within)), roots))
-        recorded[label] = listed
+                          "contradictory, ambiguous or unproducible record is never graded".format(problem))
+    excluded = [row["path"] for row in obs["exclusions"]]
+    entries = dict((row["path"], row) for row in obs["entries"])
+    recorded = dict((label, obs[label]) for label in ("candidates", "empty_directories"))
     needing = set(recorded["candidates"]) | set(recorded["empty_directories"])
     needing |= {p for p, row in entries.items() if row["kind"] == "file"}
     disposed = {row["path"] for row in _sources(ev)}
@@ -858,6 +864,7 @@ def _fixture(root):
     shipped template and recipe unless a vector patches _CI_BYTES or _CI_RECIPE_BYTES), and the run's
     bundle (plan, approval, receipt, inventory). Returns the planning inventory bytes."""
     import _opf_init
+    import tomllib
     manifest = _opf_init.build_manifest().encode("utf-8")
     sources = []
     for path, disposition, occupying in (("legacy/RULES.md", "retire", False), ("notes/old.md", "migrate", False),
@@ -910,9 +917,17 @@ def _fixture(root):
             if row["path"] == path:
                 row.update(changes)
     entries.sort(key=lambda row: row["path"])
+    # The walk table: the default manifest's deliverables (already detection roots), the resolved store's
+    # manifest read, and every scope path whose recorded ancestor is absent, which the walk never reaches.
+    kinds = dict((row["path"], row["kind"]) for row in entries)
+    unreached = [p for p in scope if any(kinds.get("/".join(p.split("/")[:i])) == "absent"
+                                         for i in range(1, p.count("/") + 1))]
+    walk = dict(deliverables=planner._deliverable_destinations(tomllib.loads(manifest.decode("utf-8"))),
+                resolved=True, manifest_path=".working/toml/manifest.toml", manifest_bytes=len(manifest),
+                unreached=sorted(unreached))
     observation = dict(exclusions=exclusions, entries=entries, candidates=sorted(_LIVE),
                        empty_directories=sorted(_EXTRA_EMPTY), sources=list(_SOURCE_ROOTS),
-                       targets=list(_TARGET_ROOTS), scope=scope)
+                       targets=list(_TARGET_ROOTS), scope=scope, walk=walk)
     if _OBSERVATION_EDIT is not None:
         _OBSERVATION_EDIT(observation)
     inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=observation),
@@ -991,6 +1006,156 @@ def _reference_case(template=None, recipe=None, symlinked=()):
                 mock.patch.object(here, "_CI_BYTES", floor[_SHIPPED_TEMPLATE]), \
                 mock.patch.object(here, "_CI_RECIPE_BYTES", floor[_SHIPPED_RECIPE]):
             return _case()
+
+
+def _parity_trees():
+    """The producer-parity trees: (label, files, directories, sources, targets, unmanaged, bound sweeps), each
+    sweep a function of the observation the producer builds with every bound lifted, returning the bounds to
+    grade under. `unmanaged` None leaves the tree storeless; a list resolves a default store registering those
+    unmanaged paths (a recorded exclusion each)."""
+    deep = "/".join(["n"] * 4)
+    chain32 = ".working/imports" + "/d" * 31
+
+    def sizes(obs):
+        return sum(row["size"] for row in obs["entries"] if row["kind"] == "file") + obs["walk"]["manifest_bytes"]
+
+    def total(obs):
+        return [dict(MAX_TOTAL_BYTES=sizes(obs) + d) for d in (0, -1)]
+
+    def entries(obs):
+        return [dict(MAX_ENTRIES=len(obs["entries"]) + d) for d in (0, -1, -3)]
+
+    def path_bytes(obs):
+        walked = sum(len(row["path"].encode("utf-8")) for row in obs["entries"])
+        return [dict(MAX_PATH_BYTES=walked + d) for d in (0, -3, -40)]
+
+    def depth(obs):
+        return [dict(MAX_DEPTH=d) for d in (2, 3, 4)]
+
+    def plain(obs):
+        return [dict(MAX_ENTRIES=planner.MAX_ENTRIES)]  # the shipped bounds
+
+    big = 8 * 1024 * 1024
+    return (
+        ("empty-product", {}, [], [], [], None, (plain,)),
+        ("one-source-file", {"legacy/a.md": b"a\n"}, [], ["legacy"], [], None, (plain, total, entries)),
+        ("nested-roots", {"a/b/c/f": b"f", "a/g": b"g"}, [], ["a"], ["a/b/c"], None, (plain, depth, path_bytes)),
+        ("nested-target-parent-missing", {"a/f": b"f"}, [], ["a"], ["a/x/y"], None, (plain, entries, path_bytes)),
+        ("target-without-walked-ancestor", {"q.md": b"q"}, [], [], ["zz/y"], None, (plain, entries, path_bytes)),
+        ("target-under-walked-parent", {"p/f": b"f"}, ["p/x"], ["p"], ["p/x"], None, (plain, entries)),
+        ("empty-directories", {"src/f": b"f"}, ["src/e1", "src/e2/e3", ".working/empty"], ["src"], [], None,
+         (plain, entries)),
+        ("depth-at-bound", {"s/" + deep + "/f": b"f"}, [], ["s"], [], None, (depth,)),
+        ("nested-root-depth", {"s/" + deep + "/f": b"f"}, [], ["s"], ["s/n/n"], None, (depth,)),
+        ("detection-dirs", {".claude/x.json": b"{}", "CLAUDE.md": b"c", ".github/workflows/w.yml": b"w"}, [],
+         [], [], None, (plain, entries, path_bytes)),
+        ("file-bytes", {"s/f": b"x" * 64}, [], ["s"], [], None,
+         (lambda obs: [dict(MAX_FILE_BYTES=64), dict(MAX_FILE_BYTES=63)],)),
+        ("total-bytes", {"s/a": b"a" * 40, "s/b": b"b" * 40, "t/c": b"c" * 20}, [], ["s", "t"], [], None, (total,)),
+        ("directory-names", dict(("s/f{:02d}".format(i), b"x") for i in range(30)), [], ["s"], [], None,
+         (lambda obs: [dict(MAX_ENTRIES=len(obs["entries"])), dict(MAX_ENTRIES=29)],)),
+        ("unresolved-working-content", {".working/notes/n.md": b"n"}, [], [], [], None, (plain, total)),
+        ("resolved-store", {"legacy/r.md": b"r"}, [], ["legacy"], [], [], (plain, total, entries)),
+        ("resolved-unmanaged-exclusion", {".working/private/p": b"p", "legacy/r.md": b"r"}, [], ["legacy"], [],
+         [".working/private"], (plain, total, path_bytes)),
+        ("resolved-nested-depth", {".working/imports/a/b/c/f": b"f"}, [], [], [".working/imports/a"], [],
+         (depth,)),
+        ("many-roots", {"r1/f": b"1", "r2/f": b"2", "r3/g/h": b"3"}, [], ["r1", "r2", "r3"], ["t1", "t2/u"], None,
+         (plain, entries, path_bytes)),
+        ("deliverables", {"VERSION": b"1.0\n", "CHANGELOG.md": b"c"}, [], [], [], None, (plain, total)),
+        ("review-total-bytes", dict((".working/imports/f{}".format(i), bytes(big)) for i in range(9)), [], [],
+         [], [], (plain, lambda obs: [dict(MAX_TOTAL_BYTES=sizes(obs) - big)])),
+        ("review-nested-depth", {chain32 + "/d/f": b"x"}, [], [], [chain32 + "/d"], [], (plain,)),
+        ("review-nested-depth-control", {chain32 + "/f": b"x"}, [], [], [chain32], [], (plain,)),
+    )
+
+
+def _parity_sweep():
+    """investigate() on each parity tree under each swept bound, beside rebuilt_observation_problem over the
+    observation the producer seals with every bound lifted: they agree when both accept (the producer's
+    observation then equal to the lifted one) or both refuse, the rebuild naming the producer's own text.
+    Returns (all agreed, accepted count, refused count, tree count)."""
+    import _opf_init
+    import tomllib
+    from unittest import mock
+    lifted = dict(MAX_ENTRIES=10 ** 6, MAX_DEPTH=10 ** 3, MAX_PATH_BYTES=10 ** 9, MAX_FILE_BYTES=10 ** 9,
+                  MAX_TOTAL_BYTES=10 ** 10)
+    agreed, accepted, refused = True, 0, 0
+    trees = _parity_trees()
+    for label, files, dirs, sources, targets, unmanaged, sweeps in trees:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-parity-") as root:
+            for rel, data in files.items():
+                _put(root, rel, data)
+            for rel in dirs:
+                os.makedirs(os.path.join(root, *rel.split("/")), exist_ok=True)
+            if unmanaged is not None:
+                manifest = tomllib.loads(_opf_init.build_manifest())
+                manifest["unmanaged"]["paths"] = list(unmanaged)
+                _put(root, ".working/toml/manifest.toml", _emit(manifest))
+            with mock.patch.multiple(planner, **lifted):
+                free = planner.investigate(root, sources=sources, targets=targets)
+            if free.status != VALID:
+                return False, accepted, refused, label
+            sealed = tomllib.loads(free.observation.decode("utf-8"))
+            for sweep in sweeps:
+                for bounds in sweep(sealed):
+                    with mock.patch.multiple(planner, **bounds):
+                        got = planner.investigate(root, sources=sources, targets=targets)
+                        problem = rebuilt_observation_problem(sealed)
+                    if got.status == VALID:
+                        accepted += 1
+                        agreed = agreed and problem is None and got.observation == free.observation
+                    else:
+                        refused += 1
+                        agreed = agreed and problem is not None and got.findings[0] in problem
+                    if not agreed:
+                        return False, accepted, refused, "{} {} {} {}".format(label, bounds, got.findings, problem)
+    return agreed, accepted, refused, len(trees)
+
+
+def _walker_stops():
+    """How many of the walker's early stops (a directory listed past MAX_ENTRIES names, a file past
+    MAX_FILE_BYTES, the reads past MAX_TOTAL_BYTES) happen inside the filesystem walker, short of the whole
+    directory or file, with the text rebuilt_observation_problem names over the unbounded observation."""
+    import tomllib
+    from unittest import mock
+    seen = []
+
+    class Watched(planner._TreeListing):
+        def children(self, parent, name, node, visit):
+            def counted(sub, names):
+                seen.append(("names", len(names)))
+                return visit(sub, names)
+            return super().children(parent, name, node, counted)
+
+        def read(self, parent, name, node, budget):
+            try:
+                return super().read(parent, name, node, budget)
+            except planner.PlanError as exc:
+                seen.append(("read", str(exc)))
+                raise
+
+    lifted = dict(MAX_ENTRIES=10 ** 6, MAX_FILE_BYTES=10 ** 9, MAX_TOTAL_BYTES=10 ** 10)
+    stops = 0
+    for files, bounds, text, stopped in (
+            (dict(("s/f{:02d}".format(i), b"x") for i in range(60)), dict(MAX_ENTRIES=40),
+             "directory exceeds entry bound", ("names", 41)),
+            ({"s/f": b"x" * 100}, dict(MAX_FILE_BYTES=64), "file exceeds byte bound: 'f'",
+             ("read", "file exceeds byte bound: 'f'")),
+            ({"s/a": b"a" * 40, "s/b": b"b" * 40}, dict(MAX_TOTAL_BYTES=60), "inventory exceeds byte bounds",
+             ("read", "inventory exceeds byte bounds"))):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-parity-") as root:
+            for rel, data in files.items():
+                _put(root, rel, data)
+            with mock.patch.multiple(planner, **lifted):
+                free = planner.investigate(root, sources=["s"])
+            sealed = tomllib.loads(free.observation.decode("utf-8")) if free.observation else {}
+            del seen[:]
+            with mock.patch.object(planner, "_TreeListing", Watched), mock.patch.multiple(planner, **bounds):
+                got = planner.investigate(root, sources=["s"])
+                problem = rebuilt_observation_problem(sealed) or ""
+        stops += got.findings == (text,) and text in problem and stopped in seen
+    return stops
 
 
 def _only(results, expected):
@@ -1342,7 +1507,8 @@ def self_test():
         hollow = dict(path=".working/unaccounted-empty", kind="directory")
         omitted = _with_entries(hollow)
         check("check-2-r13-omitted-empty-directory-cannot", _only(omitted, _red(DISCOVERY, CANNOT_EVALUATE))
-              and _says(omitted, DISCOVERY, "empty_directories omit ['.working/unaccounted-empty']"))
+              and _says(omitted, DISCOVERY, "its empty_directories are not the ones the planner builds "
+                                            "from its entries (built ['.working/unaccounted-empty'])"))
         with mock.patch.object(here, "_EXTRA_EMPTY", (hollow["path"],)):
             recorded = _with_entries(hollow)
         check("check-2-r13-recorded-empty-directory-control-red", _only(recorded, _red(DISCOVERY))
@@ -1359,7 +1525,7 @@ def self_test():
                 ("size-negative", "legacy/RULES.md", dict(size=-1), "size -1"),
                 ("size-bool", "legacy/RULES.md", dict(size=True), "size True"),
                 ("size-over-bound", "legacy/RULES.md", dict(size=planner.MAX_FILE_BYTES + 1),
-                 "is not the byte count"),
+                 "file exceeds byte bound: 'RULES.md'"),
                 ("size-string", "legacy/RULES.md", dict(size="10"), "is not the byte count"),
                 ("extra-field", "legacy/RULES.md", dict(note="x"), "records fields"),
                 ("excluded-with-digest", ".working/toml", dict(digest=_digest(b"x")), "records fields")):
@@ -1371,10 +1537,10 @@ def self_test():
               and _says(under, DISCOVERY, "lies under a recorded exclusion"))
         with mock.patch.object(planner, "entry_row_problem", lambda row, exclusions: None):
             check("check-2-r13-row-rule-load-bearing", _only(_edited("legacy/RULES.md", size=-1), {}))
-        # Round 14: the whole observation is held to the planner's own observation rule (observation_problem,
-        # which _inventory calls on what it builds). Each vector is sealed and bound by the fixture, so only
-        # check 2 grades it: CANNOT-EVALUATE naming the problem; its flip drops the named invariants from
-        # OBSERVATION_INVARIANTS and the same inventory grades VALID, so each invariant is load-bearing.
+        # Round 14 and 15: the whole observation must be the one the planner's own build_observation returns
+        # over the listing its rows record (rebuilt_observation_problem). Each vector is sealed and bound by
+        # the fixture, so only check 2 grades it: CANNOT-EVALUATE naming the problem; with the rebuild flipped
+        # off the same inventory grades VALID, so the rebuild is what refuses it.
         def _observed(sources=None, targets=(), extra=(), edit=None, bounds=()):
             patches = [mock.patch.object(here, "_SOURCE_ROOTS", sources or _SOURCE_ROOTS),
                        mock.patch.object(here, "_TARGET_ROOTS", list(targets)),
@@ -1388,11 +1554,6 @@ def self_test():
             finally:
                 for patch in reversed(patches):
                     patch.stop()
-
-        def _without(names, **vector):
-            kept = tuple(item for item in planner.OBSERVATION_INVARIANTS if item[0] not in names)
-            with mock.patch.object(planner, "OBSERVATION_INVARIANTS", kept):
-                return _observed(**vector)
 
         def _drop_path(path):
             def edit(obs):
@@ -1411,70 +1572,91 @@ def self_test():
                                            key=lambda row: row["path"])
             return edit
 
+        def _walk_edit(**changes):
+            def edit(obs):
+                obs["walk"].update(changes)
+            return edit
+
         baseline_entries = _entries(_case_inventory())
-        scope_size = len(sorted(set(_SOURCE_ROOTS) | set(planner.DETECTION_ROOTS)))
         imports_file = dict(path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))
-        for label, vector, text, drop in (
-                ("repro-missing-source-root", dict(sources=sorted(_SOURCE_ROOTS + ["missing"])),
-                 "declared source is unavailable: 'missing'", ("available",)),
-                ("repro-absent-root-with-child", dict(extra=[dict(path="legacy", kind="absent")]),
-                 "declared source is unavailable: 'legacy'", ("available", "walked", "ancestors")),
-                ("roots-targets-unsorted", dict(targets=[".gemini", ".claude"]),
-                 "the target roots are not recorded sorted", ("roots",)),
-                ("exclusions-unsorted", dict(edit=lambda obs: obs["exclusions"].reverse()),
-                 "exclusions are not recorded sorted", ("exclusions",)),
-                ("exclusions-root-beneath", dict(targets=["consumer/x"]),
-                 "source is in an excluded subtree: 'consumer/x'", ("exclusions",)),
-                ("scope-omits-detection-root", dict(edit=_scope_without("CLAUDE.md")),
-                 "the scope omits ['CLAUDE.md']", ("scope",)),
-                ("scope-unsorted", dict(edit=lambda obs: obs["scope"].reverse()),
-                 "the scope is not recorded sorted", ("scope",)),
-                ("entries-duplicated", dict(edit=_duplicate("CLAUDE.md")),
-                 "entry 'CLAUDE.md' is duplicated", ("unique",)),
-                ("entries-unsorted", dict(edit=lambda obs: obs["entries"].reverse()),
-                 "the entries are not recorded sorted", ("sorted",)),
-                ("scope-path-unrecorded", dict(edit=_drop_path("CLAUDE.md")),
-                 "scope path 'CLAUDE.md' lies under no exclusion yet has no entry", ("recorded",)),
-                ("parent-unrecorded", dict(extra=[imports_file]),
-                 "its parent '.working/imports' is recorded nowhere", ("walked",)),
-                ("top-level-unwalked", dict(extra=[dict(path="foreign.md", kind="absent")]),
-                 "entry 'foreign.md' (absent) is no scope path", ("walked", "bounds")),
-                ("excluded-beneath-exclusion", dict(extra=[dict(path=".working/toml/x.toml", kind="excluded")]),
-                 "its parent '.working/toml' is recorded excluded", ("walked", "ancestors")),
-                ("beneath-absent", dict(targets=[".github"], extra=[dict(path=".github", kind="absent"), dict(
-                    path=".github/workflows", kind="directory")]),
-                 "lies under '.github', recorded absent", ("ancestors",)),
-                ("beneath-file", dict(targets=[".working/imports/x"], extra=[dict(
-                    imports_file, path=".working/imports"), dict(path=".working/imports/x", kind="absent")]),
-                 "lies under '.working/imports', recorded file", ("ancestors",)),
-                ("bounds-entries", dict(bounds=[("MAX_ENTRIES", len(baseline_entries) - scope_size - 1)]),
-                 "exceed the planner's entry bound", ("bounds",)),
-                ("bounds-path-bytes", dict(bounds=[("MAX_PATH_BYTES", 0)]),
-                 "walked path bytes exceed", ("bounds",)),
-                ("bounds-depth", dict(bounds=[("MAX_DEPTH", 0)]),
-                 "deeper than the planner's depth bound", ("bounds",))):
+        # The round-15 reproductions: nine 8 MiB files past the total byte bound (seven are the control), and a
+        # file 33 levels below .working reached through a nested target root (32 levels is the control).
+        mib8 = dict(kind="file", size=8 * 1024 * 1024, digest=_digest(bytes(8 * 1024 * 1024)))
+
+        def _imports(count):
+            return [dict(path=".working/imports", kind="directory")] + [
+                dict(mib8, path=".working/imports/f{}".format(i)) for i in range(count)]
+
+        def _chain(length):
+            chain = [".working/imports" + "/d" * i for i in range(length)]
+            return (dict(targets=[chain[-1]], extra=[dict(path=x, kind="directory") for x in chain]
+                         + [dict(path=chain[-1] + "/f", kind="file", size=1, digest=_digest(b"x"))]))
+
+        vectors = (
+            ("r15-repro-total-bytes", dict(extra=_imports(9)), "inventory exceeds byte bounds"),
+            ("r15-repro-nested-root-depth", _chain(32), "inventory entry/path/depth bound exceeded"),
+            ("r15-walk-unreached-invented", dict(edit=_walk_edit(unreached=["CLAUDE.md"])),
+             "its walk are not the ones the planner builds"),
+            ("r15-walk-missing", dict(edit=lambda obs: obs.pop("walk")), "records no walk table"),
+            ("repro-missing-source-root", dict(sources=sorted(_SOURCE_ROOTS + ["missing"])),
+             "declared source is unavailable: 'missing'"),
+            ("repro-absent-root-with-child", dict(extra=[dict(path="legacy", kind="absent")]),
+             "declared source is unavailable: 'legacy'"),
+            ("roots-targets-unsorted", dict(targets=[".gemini", ".claude"]),
+             "its targets are not the ones the planner builds"),
+            ("exclusions-unsorted", dict(edit=lambda obs: obs["exclusions"].reverse()),
+             "its exclusions are not the ones the planner builds"),
+            ("exclusions-root-beneath", dict(targets=["consumer/x"]),
+             "source is in an excluded subtree: 'consumer/x'"),
+            ("scope-omits-detection-root", dict(edit=_scope_without("CLAUDE.md")),
+             "its scope are not the ones the planner builds"),
+            ("scope-unsorted", dict(edit=lambda obs: obs["scope"].reverse()),
+             "its scope are not the ones the planner builds"),
+            ("entries-duplicated", dict(edit=_duplicate("CLAUDE.md")), "entry 'CLAUDE.md' is duplicated"),
+            ("entries-unsorted", dict(edit=lambda obs: obs["entries"].reverse()),
+             "its entries are not the ones the planner builds"),
+            ("scope-path-unrecorded", dict(edit=_drop_path("CLAUDE.md")), "built only ['CLAUDE.md']"),
+            ("parent-unrecorded", dict(extra=[imports_file]), "recorded only ['.working/imports/x.md']"),
+            ("top-level-unwalked", dict(extra=[dict(path="foreign.md", kind="absent")]),
+             "recorded only ['foreign.md']"),
+            ("excluded-beneath-exclusion", dict(extra=[dict(path=".working/toml/x.toml", kind="excluded")]),
+             "recorded only ['.working/toml/x.toml']"),
+            ("beneath-absent", dict(targets=[".github"], extra=[dict(path=".github", kind="absent"), dict(
+                path=".github/workflows", kind="directory")]), "recorded otherwise ['.github/workflows']"),
+            ("beneath-file", dict(targets=[".working/imports/x"], extra=[dict(
+                imports_file, path=".working/imports"), dict(path=".working/imports/x", kind="absent")]),
+             "component '.working/imports' of '.working/imports/x' (recorded file)"),
+            ("bounds-entries", dict(bounds=[("MAX_ENTRIES", len(baseline_entries) - 1)]),
+             "inventory entry/path/depth bound exceeded"),
+            ("bounds-path-bytes", dict(bounds=[("MAX_PATH_BYTES", 0)]), "inventory entry/path/depth bound exceeded"),
+            ("bounds-depth", dict(bounds=[("MAX_DEPTH", 0)]), "inventory entry/path/depth bound exceeded"),
+            ("bounds-file-bytes", dict(bounds=[("MAX_FILE_BYTES", 8)]),
+             "file exceeds byte bound: '.working/toml/manifest.toml'"),
+        )
+        for label, vector, text in vectors:
             got = _observed(**vector)
-            check("check-2-r14-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
+            check("check-2-rebuild-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
                   and _says(got, DISCOVERY, text))
-            check("check-2-r14-" + label + "-load-bearing", _only(_without(drop, **vector), {}))
-        # Under the excluded row the walk rule speaks first; the ancestor rule alone still refuses it.
-        check("check-2-r14-excluded-beneath-exclusion-ancestor-rule", _says(_without(("walked",), extra=[dict(
-            path=".working/toml/x.toml", kind="excluded")]), DISCOVERY, "lies under '.working/toml', recorded excluded"))
-        # Beside the walk rule, the bounds rule alone refuses a row under no scope path.
-        check("check-2-r14-top-level-unwalked-bounds-rule", _says(_without(("walked",), extra=[dict(
-            path="foreign.md", kind="absent")]), DISCOVERY, "'foreign.md' lies under no scope path"))
-        # The controls: legacy recorded a directory with its child, and an absent scope path beneath an
-        # absent one (as the planner records a nested root whose parent is missing), both grade VALID.
-        check("check-2-r14-directory-control-valid", _only(_observed(extra=[dict(path="legacy", kind="directory")]), {})
-              and dict(path="legacy", kind="directory") in baseline_entries)
-        check("check-2-r14-absent-beneath-absent-control-valid", _only(_observed(
-            targets=[".github"], extra=[dict(path=".github", kind="absent")]), {}))
-        # Without the shared rule at all, both review reproductions grade VALID (the round-13 hole).
-        with mock.patch.object(planner, "observation_problem", lambda obs: None):
-            check("check-2-r14-repros-load-bearing", _only(_observed(sources=sorted(_SOURCE_ROOTS + ["missing"])), {})
-                  and _only(_observed(extra=[dict(path="legacy", kind="absent")]), {}))
+            with mock.patch.object(here, "rebuilt_observation_problem", lambda obs: None):
+                check("check-2-rebuild-" + label + "-load-bearing", _only(_observed(**vector), {}))
+        # The controls: seven 8 MiB files and a file 32 levels below .working through the nested target root
+        # (the producer accepts both), legacy recorded a directory with its child, and an absent scope path
+        # beneath an absent one (recorded unreached, as the planner records a nested root whose parent is
+        # missing), all grade VALID.
+        for label, vector in (("r15-total-bytes-control", dict(extra=_imports(7))),
+                              ("r15-nested-root-depth-control", _chain(31)),
+                              ("directory-control", dict(extra=[dict(path="legacy", kind="directory")])),
+                              ("absent-beneath-absent-control", dict(
+                                  targets=[".github"], extra=[dict(path=".github", kind="absent")]))):
+            check("check-2-rebuild-" + label + "-valid", _only(_observed(**vector), {}))
+        # The field-for-field comparison is load-bearing on its own: with it emptied, a row the walk never
+        # reaches (one the build simply does not return) grades VALID.
+        with mock.patch.object(planner, "BUILT_FIELDS", ()):
+            check("check-2-rebuild-comparison-load-bearing",
+                  _only(_observed(extra=[dict(path="foreign.md", kind="absent")]), {}))
+        check("check-2-rebuild-directory-in-baseline", dict(path="legacy", kind="directory") in baseline_entries)
         # The producer refuses the missing root with the same words, and the observation it builds for a
-        # tree with legacy/RULES.md passes the shared rule, recording legacy a directory beside its child.
+        # tree with legacy/RULES.md passes the rebuild, recording legacy a directory beside its child.
         import tomllib
         with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
             refused = planner.investigate(root, sources=["missing"])
@@ -1484,8 +1666,15 @@ def self_test():
         check("check-2-r14-producer-refuses-missing-root", refused.status == CANNOT_EVALUATE
               and refused.findings == ("declared source is unavailable: 'missing'",))
         check("check-2-r14-producer-observation-passes", built.status == VALID
-              and planner.observation_problem(built_obs) is None
+              and rebuilt_observation_problem(built_obs) is None
               and dict(path="legacy", kind="directory") in built_obs.get("entries", []))
+        # Producer parity: investigate() on a real tree and the rebuild over its sealed observation agree.
+        agreed, accepted, refused_count, trees = _parity_sweep()
+        check("check-2-rebuild-producer-parity", agreed and accepted >= 10 and refused_count >= 10 and trees >= 20)
+        # The walker stops early only where build_observation refuses (its docstring): on each tree the
+        # producer's refusal is raised while the walker lists or reads, before it has listed or read it all,
+        # and the rebuild over the observation sealed with the bounds lifted refuses with the same text.
+        check("check-2-rebuild-walker-stops-only-where-build-refuses", _walker_stops() == 3)
         # Check 4: the formerly occupied destination, the doctor contract, store identity, CI and views.
         occ = _case(_occupied)
         check("check-4-old-occupant-red", _only(occ, _red(OPERATIONAL)))
@@ -1838,21 +2027,22 @@ def self_test():
                 hollow_dir = dict(path="legacy/hollow", kind="directory")
                 for label, changes, text in (
                         ("candidate-without-entry", dict(candidates=sorted(sorted(_LIVE) + ["legacy/ghost.md"])),
-                         "candidates name ['legacy/ghost.md']"),
+                         "its candidates are not the ones the planner builds"),
                         ("candidate-omitted-under-root", dict(entries=_entries(inv) + [ghost]),
-                         "candidates omit ['legacy/ghost.md']"),
-                        ("candidates-unsorted", dict(candidates=sorted(_LIVE, reverse=True)), "not sorted"),
+                         "'legacy/RULES.md', 'legacy/ghost.md', 'notes/old.md'])"),
+                        ("candidates-unsorted", dict(candidates=sorted(_LIVE, reverse=True)), "its candidates are not"),
                         ("candidates-duplicated", dict(candidates=sorted(sorted(_LIVE) + ["legacy/RULES.md"])),
-                         "duplicate-free"),
+                         "its candidates are not"),
                         ("empty-directory-without-entry", dict(empty_directories=["legacy/hollow"]),
-                         "empty_directories name ['legacy/hollow']"),
+                         "its empty_directories are not the ones the planner builds from its entries (built [])"),
                         ("empty-directory-with-descendant", dict(empty_directories=["legacy"]),
-                         "empty_directories name ['legacy']"),
+                         "its empty_directories are not the ones the planner builds from its entries (built [])"),
                         ("empty-directory-omitted-under-root", dict(entries=_entries(inv) + [hollow_dir]),
-                         "empty_directories omit ['legacy/hollow']"),
+                         "(built ['legacy/hollow'])"),
                         ("sources-overlapping", dict(sources=["legacy", "legacy/sub"]), "overlapping"),
-                        ("sources-unsorted", dict(sources=["notes", "legacy", "adopter"]), "recorded sorted"),
-                        ("sources-noncanonical", dict(sources=["legacy/../notes"]), "source roots"),
+                        ("sources-unsorted", dict(sources=["notes", "legacy", "adopter"]), "its sources are not"),
+                        ("sources-noncanonical", dict(sources=["legacy/../notes"]),
+                         "invalid contained file/directory path"),
                         ("sources-not-list", dict(sources="legacy"), "lacks")):
                     check("check-2-r13-" + label + "-cannot", text in _refused(**changes))
                 # The controls: the same rows recorded as the planner records them grade, never refuse.
