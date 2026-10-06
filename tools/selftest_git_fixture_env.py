@@ -1426,6 +1426,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_adopt_complete.py": "Completion-check vectors over temporary post-apply filesystem fixtures.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
