@@ -1197,7 +1197,13 @@ def _claude_hook_self_test():
     relative operands against every directory the command names, judges the inherited git
     environment, and makes the coarse pass deny on the .working token anywhere; each round-8
     reproduction FAILS on the predecessor pin, and one discriminating vector per coarse, git and
-    forbidden-character behaviour fails under a mutant removing that behaviour alone.
+    forbidden-character behaviour fails under a mutant removing that behaviour alone. The round-10
+    change keeps every directory-plus-basename join in the container check (no dedupe against the
+    candidates), recognizes the container verbs and git container forms at any word, and reads git
+    only through a small allowlisted option grammar (an unlisted global or container-subcommand
+    option and a pathspec magic word are not plain); each round-10 reproduction FAILS on the
+    predecessor pin, and one vector per container verb and per git container subcommand, plus a
+    pack-tree container vector, pins the round-9 rule against the mutants that survived it.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -2315,6 +2321,90 @@ def _claude_hook_self_test():
                  env=dict(GIT_TRACE=os.path.join(root, "TODO.md")))
             allow("bash-r9-ambient-git-trace-flag-allowed",
                   payload("Bash", dict(command="git status"), elsewhere), env=dict(GIT_TRACE="1"))
+            # ROUND 10 (QA round 10, ruling D-RESCOPES-A): the container rule kept losing to
+            # spelling, so it no longer parses toward completeness. (1) A directory-plus-basename
+            # join is container-checked even when another word already resolves to it (one extra
+            # word spelling the joined directory, a cp backup suffix or a second operand, hid it).
+            # (2) git's subcommand is recognized only through a small allowlisted option grammar:
+            # an unlisted global option (--attr-source, --shallow-file), an unlisted option of a
+            # container subcommand and a pathspec magic word (:(top), :/docs) are NOT plain, so they
+            # take the coarse rule and deny from a product cwd. (3) A container verb or git
+            # container form behind a wrapper word (setarch) still takes the container rule. Each
+            # reproduction below ALLOWED on the predecessor pin dd48a8d5 and denies now.
+            os.makedirs(os.path.join(stage, ".claude"))
+            with open(os.path.join(stage, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            src_dir = os.path.join(root, "src")
+            os.makedirs(src_dir)
+            stage_docs = os.path.join(stage, "docs")
+            for label, cmd in (
+                    ("cp-suffix-long-over-views", "cp -r --suffix=docs " + stage_docs + " ."),
+                    ("cp-suffix-short-over-views", "cp -r -S docs " + stage_docs + " ."),
+                    ("cp-second-operand-over-views", "cp -r " + stage_docs + " docs ."),
+                    ("cp-suffix-over-registration", "cp -r -S .claude "
+                     + os.path.join(stage, ".claude") + " ."),
+                    ("wrapper-rm-r-views", "setarch x86_64 rm -r docs"),
+                    ("wrapper-git-clean-cwd", "setarch x86_64 git clean -fdx")):
+                deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "holds the protected path")
+            for label, cmd, cwd in (
+                    ("git-attr-source-checkout", "git --attr-source HEAD checkout HEAD^ -- .", root),
+                    ("git-attr-source-clean", "git --attr-source HEAD clean -fdx", root),
+                    ("git-attr-source-rm", "git --attr-source HEAD rm -rq docs", root),
+                    ("git-shallow-file-clean", "git --shallow-file x clean -fdx", root),
+                    ("git-attr-source-config-override",
+                     "git --attr-source HEAD -c diff.external=rm diff", root),
+                    ("wrapper-git-attr-source-clean",
+                     "setarch x86_64 git --attr-source HEAD clean -fdx", root),
+                    ("git-restore-top-magic", "git restore -s HEAD^ " + chr(39) + ":" + chr(40)
+                     + "top" + chr(41) + chr(39), src_dir),
+                    ("git-clean-top-magic", "git clean -fdx " + chr(39) + ":" + chr(40) + "top"
+                     + chr(41) + chr(39), src_dir),
+                    ("git-rm-slash-magic", "git rm -rq " + chr(39) + ":/docs" + chr(39), src_dir),
+                    ("git-rm-pathspec-from-file", "git rm --pathspec-from-file=list", src_dir)):
+                deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "product root")
+            # The grammar's own allowances (each denies under a mutant that drops the matching
+            # entry): a listed global flag, a valued short and a valued long option of a container
+            # subcommand, a single-file git rm from a directory holding nothing protected, and an
+            # unlisted global option in a session bound to no product root (never over-denied).
+            for label, cmd, cwd in (
+                    ("git-no-pager-log", "git --no-pager log", root),
+                    ("git-checkout-new-branch-free-dir", "git checkout -b feature", src_dir),
+                    ("git-restore-source-free-dir", "git restore --source HEAD a.py", src_dir),
+                    ("git-rm-file-free-dir", "git rm a.py", src_dir),
+                    ("git-attr-source-unbound", "git --attr-source HEAD clean -fdx", elsewhere)):
+                allow("bash-r10-" + label + "-allowed", payload("Bash", dict(command=cmd), cwd))
+            # ROUND 10 mutant pins (QA round 10, claude medium 3): each vector below denies only
+            # through the behaviour it names. A git container form judges the session cwd (git
+            # rm, mv, clean, checkout and restore act below it with no directory operand), one
+            # vector per subcommand; every container verb is pinned by its own vector (a literal
+            # list here, never the hook's constant, so a mutant shrinking the constant cannot
+            # shrink the test with it); and a directory holding the pack own tree is a container.
+            for cmd in ("git rm notes.txt", "git mv notes.txt n2.txt", "git clean -fdx",
+                        "git checkout main", "git restore notes.txt"):
+                deny("bash-r10-git-cwd-container-" + cmd.split(" ")[1] + "-denied",
+                     payload("Bash", dict(command=cmd), root), "holds the protected path")
+            for verb in ("rm", "rmdir", "unlink", "mv", "shred", "srm", "wipe", "trash",
+                         "trash-put", "chmod", "chown", "chgrp", "setfacl", "chattr"):
+                deny("bash-r10-container-verb-" + verb + "-denied",
+                     payload("Bash", dict(command=verb + " docs"), root),
+                     "holds the protected path")
+            deny("bash-r10-container-pack-tree-outside-denied",
+                 payload("Bash", dict(command="chmod -R u+w " + os.path.join(repo_root, "opf")),
+                         elsewhere), "holds the protected path")
+            # Another user's unsearchable directory is absence, never cannot-evaluate (round 9),
+            # pinned where the host offers one (the superuser's home, typically mode 0700): a
+            # session that is not the superuser and cannot search it is never over-denied.
+            other = os.path.join(os.sep, "root")
+            try:
+                other_st = os.stat(other)
+            except OSError:
+                other_st = None
+            if (other_st is not None and hasattr(os, "geteuid") and os.geteuid() != 0
+                    and other_st.st_uid != os.geteuid() and not os.access(other, os.X_OK)):
+                allow("bash-r10-other-user-unsearchable-absence-allowed",
+                      payload("Bash", dict(command="ls " + os.path.join(other, "x")), elsewhere))
             # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
             # may run shell lines the platform does not route back through PreToolUse), so each
             # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
@@ -2433,7 +2523,17 @@ def _claude_hook_self_test():
           "install or move into a directory holding a view denies at <directory>/<basename>, a "
           "recursive copy, remove or git rm over a directory holding a view, and a remove of the "
           "registration directory, deny, while a free copy into the directory and ls of it allow, "
-          "and an absolute GIT_TRACE value denies while GIT_TRACE=1 allows)")
+          "and an absolute GIT_TRACE value denies while GIT_TRACE=1 allows. ROUND 10: a "
+          "directory-plus-basename join stays container-checked when another word already names it "
+          "(cp -r -S docs, --suffix=docs, a second docs operand, and the registration directory "
+          "deny), a wrapper word keeps the container rule (setarch x86_64 rm -r docs and git clean "
+          "deny), git is read through a small allowlisted option grammar (--attr-source and "
+          "--shallow-file globals, a git -c override behind one, a pathspec magic word and an "
+          "unlisted container-subcommand option each deny from a product cwd, while --no-pager, "
+          "checkout -b, restore --source, a single-file rm in a free directory and an unlisted "
+          "global in an unbound session allow), and one vector per container verb, per git "
+          "container subcommand (the session cwd judged) and for the pack tree pins each, and "
+          "another user's unsearchable directory stays absence where the host offers one)")
     return EXIT_OK
 
 

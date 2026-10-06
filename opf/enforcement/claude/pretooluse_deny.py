@@ -89,7 +89,20 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      does any command whose directory-plus-basename target is such a directory (cp -r src/docs
      .); a tilde-headed spelling is judged in BOTH readings, literal under the cwd (bash keeps a
      quoted tilde literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
-     spelling. Past the derived-spelling, base or resolved-target budget the command
+     spelling. Round 10 (D-RESCOPES-A) stops parsing toward completeness: every
+     directory-plus-basename join is container-checked even when another word already resolves
+     to it (no dedupe across the two checks, so a cp backup suffix or a second operand spelling
+     the joined directory no longer hides it); the container verbs and git container forms are
+     recognized at ANY word of the command, so a wrapper word in front (setarch x86_64 rm -r docs)
+     keeps the rule; and git is read only through a small allowlisted option grammar
+     (_git_grammar: the global options GIT_FLAG_GLOBALS and GIT_VALUE_GLOBALS, and for rm, mv,
+     clean, checkout and restore the options listed in GIT_CONTAINER_OPTIONS), so an unlisted
+     global option (--attr-source, --shallow-file), an unlisted option of a container subcommand
+     (--pathspec-from-file, -p, -e, an abbreviated long option) and a pathspec magic word (any
+     word after the subcommand opening with a colon: :(top), :/docs) make the command NOT plain,
+     and it takes the coarse rule below (it denies when the session cwd or a literal word lies in
+     a product root, and is allowed in a session bound to none). Past the derived-spelling, base
+     or resolved-target budget the command
      DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
      allowance. A git command under an inherited code-valued git variable (GIT_CODE_ENV, other than
@@ -194,13 +207,15 @@ per-platform residual coverage carry the same list):
   - A plain command whose operand CONTAINS a protected path rather than lying on it, outside the
     round-9 container rule: the exact check judges words that resolve INTO a protected path, the
     directory-plus-basename joins and, for CONTAINER_VERBS and git rm, mv, clean, checkout and
-    restore, a directory operand holding a protected path of a BOUND root. So a program outside
-    those words acting on a directory's whole contents under a name no operand carries (an
-    archive extraction or a sync into a parent directory, cp -r src/. docs), a git work-tree
-    rewrite named by no path (git reset --hard, git stash, git switch, git merge or pull), and a
-    recursive remove of an ancestor of a product root that the session neither sits in nor
-    binds (no product root above the cwd or any operand) reach a protected file with no
-    protected token.
+    restore (at any word of the command, round 10), a directory operand holding a protected path
+    of a BOUND root. So a program outside those words acting on a directory's whole contents
+    under a name no operand carries (an archive extraction or a sync into a parent directory,
+    cp -r src/. docs, cp -rT src/docs docs), a git work-tree rewrite named by no path (git reset
+    --hard, git stash, git switch, git merge or pull, and git checkout of a branch run from a
+    directory holding no protected path), a git alias from configuration standing for a
+    container subcommand (git co, same-user preparation), and a recursive remove of an ancestor
+    of a product root that the session neither sits in nor binds (no product root above the cwd
+    or any operand) reach a protected file with no protected token.
   - A relative protected spelling past the word budget: a provably plain command binds the rosters
     above every RESOLVED target (round 8), so a relative spelling that climbs into a product from
     outside it denies; past MAX_RESOLVED_WORDS words only absolute spellings resolve (the budget
@@ -292,7 +307,24 @@ per-platform residual coverage carry the same list):
     view, chmod -R u+w . from a product root), git restore --staged or git rm --cached over such a
     directory, a directory operand beside a word whose basename names a protected file inside it,
     a quoted tilde spelling whose literal OR expanded reading is protected, and every path below a
-    directory the session's own user made unsearchable, all deny. R6 denies every write under a
+    directory the session's own user made unsearchable, all deny. Round 10 widens them again, by
+    name, from a product root or any directory holding a protected path (the git container forms
+    judge the session cwd): everyday git checkout main, git checkout -b feature, git rm notes.txt,
+    git mv notes.txt n2.txt, git restore notes.txt, git restore --staged notes.txt and git clean -n
+    all deny; and from ANY directory inside a product root, git with a global option outside the
+    allowlisted grammar (git -p log, git --bare status, git --exec-path, git --attr-source HEAD
+    log, git --namespace x log), git rm, mv, clean, checkout or restore with an option outside
+    their listed sets (git checkout -p, git restore -p, the abbreviated git restore --sour HEAD
+    x, git clean -e pattern, git clean -i, git rm --pathspec-from-file=list, git checkout
+    --orphan x), and any git command carrying a pathspec magic or colon-headed word (git
+    add :/docs, git show :docs/x for an index blob, git log -- ':(exclude)x') all deny; so does a
+    plain command naming a directory that holds a protected path beside a directory word that
+    the first name could be joined to (ls docs ., where docs holds a view), and a plain command
+    whose argument word names a removing, moving or re-permissioning program or git container
+    form (grep -rn mv docs, or a wrapped git) over such a directory, the names matched like the
+    deny list, version or variant suffix included (rm-old.txt counts as rm), and from inside a
+    product root a plain command whose argument word names git (git-notes.md included) followed
+    by an option outside the grammar (ls git -la). R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -483,8 +515,24 @@ INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", 
 # core.sshCommand, core.hooksPath), --exec-path, a subcommand that writes code-running configuration
 # or runs a command string, and the options that name a command to run (rebase -x and clone -u are
 # matched on their own subcommands).
-GIT_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                               "--super-prefix", "--config-env"))
+GIT_VALUE_GLOBALS = frozenset(("-C", "--git-dir", "--work-tree"))
+# The SMALL allowlisted git option grammar (round 10, D-RESCOPES-A): the subcommand is recognized only
+# past these global options (a value global as a separate word, or --git-dir=/--work-tree= glued);
+# any other global option (git 2.53 accepts --attr-source <tree-ish> and --shallow-file <file> as
+# separate words, and a value word would otherwise be read as the subcommand) makes the command NOT
+# plain. A container subcommand (GIT_CONTAINER_OPTIONS) accepts only its listed short letters, valued
+# short letters and exact long options before a lone --; and any word after the subcommand that opens
+# with a colon (pathspec magic, :(top) or :/docs, which reaches the repository top) is not plain.
+GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
+                              "--no-replace-objects", "--version"))
+GIT_CONTAINER_OPTIONS = dict(
+    rm=("rfnq", "", ("--force", "--dry-run", "--quiet", "--cached", "--ignore-unmatch"), ()),
+    mv=("fnkv", "", ("--force", "--dry-run", "--verbose"), ()),
+    clean=("dfnqxX", "", ("--force", "--dry-run", "--quiet"), ()),
+    checkout=("fqtm", "bB", ("--force", "--quiet", "--detach", "--track", "--no-track", "--merge",
+                             "--ours", "--theirs"), ()),
+    restore=("SWqm", "s", ("--staged", "--worktree", "--quiet", "--merge", "--ours", "--theirs"),
+             ("--source",)))
 GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodule", "difftool",
                                   "mergetool", "daemon", "instaweb", "send-email", "credential",
                                   "svn", "p4", "cvsimport", "archimport", "help", "web--browse"))
@@ -518,7 +566,7 @@ ABSENT_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG, errn
 # the pack own tree (_container_rule). Matched like the deny list, on the lowercased basename.
 CONTAINER_VERBS = frozenset(("rm", "rmdir", "unlink", "mv", "shred", "srm", "wipe", "trash",
                              "trash-put", "chmod", "chown", "chgrp", "setfacl", "chattr"))
-GIT_CONTAINER_SUBCOMMANDS = frozenset(("rm", "mv", "clean", "checkout", "restore"))
+GIT_CONTAINER_SUBCOMMANDS = frozenset(GIT_CONTAINER_OPTIONS)
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -1057,7 +1105,8 @@ def _plain_runs_code(words):
     eatmydata python3 -c ..., runs it), and a word carrying a command string headed by such a name
     or by a leading exclamation mark (git alias.x=!cmd, --to-command=python3 -c ...), are inline
     code; so are git's configuration overrides, its code-running subcommands and its
-    command-naming options."""
+    command-naming options, and (round 10) a git word anywhere on the line (git itself or git run
+    by a wrapper) whose options fall outside the allowlisted git option grammar (_git_grammar)."""
     for word in words[1:]:
         if _names_runner(word):
             return "an argument word names a shell or interpreter another program may run"
@@ -1068,8 +1117,17 @@ def _plain_runs_code(words):
             head = piece.split(" ")
             if len(head) > 1 and _names_runner(head[0]):
                 return "an argument word carries a shell or interpreter command string"
-    if "git" not in _command_names(words[0]):
-        return None
+    for j, word in enumerate(words):
+        if "git" in _command_names(word):
+            reason = _git_runs_code(words[j:])
+            if reason is not None:
+                return reason
+    return None
+
+
+def _git_runs_code(words):
+    """The git part of the plain semantic check over a git invocation `words` (words[0] names git,
+    as the command word or behind a wrapper): a phrase, or None."""
     for name in GIT_CODE_ENV:
         value = os.environ.get(name)
         if value is not None and value.strip(" ") not in GIT_ENV_NOOPS:
@@ -1083,7 +1141,10 @@ def _plain_runs_code(words):
                 or opt.startswith("--config-env") or opt.startswith("--exec-path")):
             return "a git configuration override or exec-path option can run a command"
         i += 2 if opt in GIT_VALUE_GLOBALS else 1
-    if i >= len(words):
+    i, reason = _git_grammar(words)
+    if reason is not None:
+        return reason
+    if i is None:
         return None
     sub, rest = words[i], words[i + 1:]
     if sub in GIT_CODE_SUBCOMMANDS:
@@ -1368,13 +1429,15 @@ def _joined_targets(cands, spellings):
     cp -t docs X, install X docs, ln X docs and mv X /abs/docs each write docs/<basename of X>, so
     every resolved candidate that is a directory receives the basename of every argument spelling as
     one more resolved target (lexical and realpath): (targets, None), or (None, reason) past
-    MAX_JUDGED_TARGETS."""
+    MAX_JUDGED_TARGETS. A join is kept even when it equals a resolved candidate (round 10: a
+    dedupe against the candidates let one extra word spelling the joined directory, cp -r -S docs
+    src/docs ., drop that directory from the container check)."""
     names = []
     for spelling in spellings:
         name = os.path.basename(os.path.normpath(spelling)) if spelling else ""
         if name and name not in (".", "..") and name not in names:
             names.append(name)
-    out, seen = [], set(cands)
+    out, seen = [], set()
     for directory in cands:
         if not names or not os.path.isdir(directory):
             continue
@@ -1391,24 +1454,88 @@ def _joined_targets(cands, spellings):
     return out, None
 
 
-def _git_subcommand_index(words):
-    """The index of a git command's subcommand word past its global options, or None."""
+def _git_grammar(words):
+    """The allowlisted git option grammar (round 10) over a git invocation `words` (words[0] names
+    git): (index of the subcommand word, None), (None, None) when no subcommand follows the global
+    options, or (None, reason) when a word falls outside the grammar (an unlisted global option, an
+    unlisted option of a container subcommand, a value option with no value, or a pathspec magic
+    word), which makes the command NOT plain. The grammar is deliberately small: it never tries to
+    model every git option, so an unrecognized spelling is refused, never guessed."""
     i = 1
     while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] in GIT_VALUE_GLOBALS else 1
-    return i if i < len(words) else None
+        opt = words[i]
+        if opt in GIT_FLAG_GLOBALS:
+            i += 1
+        elif opt in GIT_VALUE_GLOBALS:
+            if i + 1 >= len(words):
+                return None, "the git global option %r carries no value" % (opt,)
+            i += 2
+        elif opt.startswith("--") and opt.split("=", 1)[0] in GIT_VALUE_GLOBALS:
+            i += 1
+        else:
+            return None, ("the git global option %r is outside the recognized git option grammar"
+                          % (opt,))
+    if i >= len(words):
+        return None, None
+    sub = words[i]
+    for word in words[i + 1:]:
+        if word.startswith(":"):
+            return None, ("the git word %r is a pathspec magic form (it can reach the repository "
+                          "top)" % (word,))
+    grammar = GIT_CONTAINER_OPTIONS.get(sub)
+    if grammar is None:
+        return i, None
+    flags, valued, longs, valued_longs = grammar
+    j = i + 1
+    while j < len(words):
+        word = words[j]
+        j += 1
+        if word == "--":
+            break
+        if not word.startswith("-") or word == "-":
+            continue
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if word in longs:
+                continue
+            if name in valued_longs:
+                if name == word:
+                    j += 1
+                continue
+            return None, ("the git %s option %r is outside the recognized git option grammar"
+                          % (sub, word))
+        for k, letter in enumerate(word[1:]):
+            if letter in valued:
+                if k + 2 == len(word):
+                    j += 1
+                break
+            if letter not in flags:
+                return None, ("the git %s option %r is outside the recognized git option grammar"
+                              % (sub, word))
+    if j > len(words):
+        return None, "a git %s option carries no value" % (sub,)
+    return i, None
 
 
 def _container_verb(words):
-    """True when a plain command acts on a directory operand's whole contents (round 9): a
-    CONTAINER_VERBS command word, or git with a GIT_CONTAINER_SUBCOMMANDS subcommand."""
-    names = _command_names(words[0])
-    if names & CONTAINER_VERBS:
-        return True
-    if "git" not in names:
-        return False
-    i = _git_subcommand_index(words)
-    return i is not None and words[i] in GIT_CONTAINER_SUBCOMMANDS
+    """True when a plain command acts on a directory operand's whole contents (round 9): ANY word
+    of it (round 10: the command word or one a wrapper runs, setarch x86_64 rm -r docs) naming a
+    CONTAINER_VERBS program, or a git container form (_git_container)."""
+    for word in words:
+        if _command_names(word) & CONTAINER_VERBS:
+            return True
+    return _git_container(words)
+
+
+def _git_container(words):
+    """True when any word of a plain command names git and, by the allowlisted grammar, its
+    subcommand is a GIT_CONTAINER_SUBCOMMANDS form (git itself or git behind a wrapper)."""
+    for j, word in enumerate(words):
+        if "git" in _command_names(word):
+            i, reason = _git_grammar(words[j:])
+            if reason is None and i is not None and words[j + i] in GIT_CONTAINER_SUBCOMMANDS:
+                return True
+    return False
 
 
 def _container_rule(cand, protected):
@@ -1629,7 +1756,7 @@ def _plain_bash_rule(command, words, cwd):
     if reason is not None:
         return reason
     container = _container_verb(words)
-    if container and "git" in _command_names(words[0]):
+    if _git_container(words):
         # git clean (and the other git container forms) act below the cwd with no path operand.
         for cand in _candidates(cwd, None, "literal") or ():
             if cand not in cands:

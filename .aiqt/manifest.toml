@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1cf7d4555d6627b79d206febe5285d15de9995873d7d8252978c7a310b79dba2"
+tree-sha256 = "c28735a2d1f0d18d582f4abac6c100900082e54f7688b4e8f04f57b5526e00b8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2431,8 +2431,8 @@ sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
-bytes = 108545
-sha256 = "09fa305a6fa1921afa152d27ee652bf82a3b0c35ad8ca0bb7d41d4c1853b434a"
+bytes = 116457
+sha256 = "30bc7cc8233d39980da6406758e9da0a26e79f0c56b3d92ef7fca7b3ed2d193b"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
@@ -2876,8 +2876,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 176604
-sha256 = "4dc32641d45491bb8d6b3627e0890a3314575151c676368282e8c55d62a79c42"
+bytes = 184756
+sha256 = "ee37be473773f5bc406fcdd5d131570b354585ae693eb0854f8787d6b0ba05c3"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
