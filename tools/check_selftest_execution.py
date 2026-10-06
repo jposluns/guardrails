@@ -19,7 +19,12 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
   check_selftest_execution.py --suite <id>   run the registered suite and reconcile its execution set
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
 
-The child is launched [sys.executable, -I, -B, <runner>, --execution-report, <private abs path>] with
+The child is launched [sys.executable, -I, -B, -c, <shim>, <runner's directory>, <runner>, <private
+abs path>]: the shim imports tools/_selftest_exit_report.py from beside the runner and hands it
+control, so that module's observation hooks (its audit hook, threading.excepthook wrapper, and
+threading._shutdown wrapper) are installed BEFORE any runner statement, import-time included, and the
+runner then executes as __main__ with [<runner>, --execution-report, <private abs path>] as its argv.
+The child runs with
 cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
 pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
 empty for EVERY descendant git call, including one made after a descendant scrubs the GIT_*
@@ -53,17 +58,29 @@ child's exit, and a WHOLE error stream byte-identical to the suite's declared by
 a suite with no entry must leave it empty, and no registered suite declares any). The child arms
 tools/_selftest_exit_report.py as its first atexit registration, so the report is written only after
 every non-daemon thread is joined, every later atexit callback has run, and a bounded garbage
-collection, and the process then ends with os._exit; the report carries format_version 2, finalized
+collection; a refusing child ends with os._exit(2), while the reporting path returns, so the process
+ends with the interpreter's own exit status; the report carries format_version 2, finalized
 true, and the exit_code that must equal the child's real exit status. A fault the child survived (an
 atexit callback, a destructor, a thread) therefore reaches the error stream and refuses the verdict; a
 thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
-_thread directly (whose SystemExit _thread ignores silently), a thread started or an atexit callback
+_thread directly at any moment from process start (whose SystemExit _thread ignores silently), an
+import of an interpreter-creating module (_interpreters, _xxsubinterpreters, _testcapi,
+_testinternalcapi: every in-process hook is per-interpreter, so code in another interpreter is
+unobservable and the machinery's import is itself the fault), a thread started or an atexit callback
 registered after the exit-time thread join (neither is ever joined or run), and a status recorded
 through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
-process left by another path, an earlier exit_with outlived it, or a C callable read its code), each
-make the child write no report and exit 2; and an in-band (format 1) report is refused. The
-child-side teardown residual (a destructor of an object still reachable at exit never runs, a daemon
-thread is killed, a thread started before arm is unobserved) is disclosed in that module. A report that is missing, truncated, malformed,
+process left by another path, or an earlier exit_with outlived it), each
+make the child write no report and exit 2; a run that arms the finalizer without the bootstrap's
+hooks (a launch that bypassed this gate) exits 2 the same way; and an in-band (format 1) report is
+refused. The finalizer's reporting path defers to the interpreter's own exit status rather than
+overriding it, so the exit_code reconcile above is against the status the child REALLY exited with:
+a confirmation forged by a C callable reading the caught exception's code with no Python frame on
+the stack (for example a weakref callback) cannot make a failure exit pass, because either the real
+exit status contradicts the report (refused here) or the process really exited with the recorded
+status (nothing was hidden). The
+child-side teardown residual (a daemon thread is killed, post-report teardown destructor effects, an
+execution context created below the audited Python surface by a C extension) is disclosed in that
+module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -526,7 +543,15 @@ def run_suite(root, suite_id):
         except OSError as exc:
             _cannot("cannot create the neutral child home directory: {}".format(exc))
             return 2
-        command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
+        # The bootstrap shim: the helper module beside the runner installs the observation hooks
+        # BEFORE any runner statement (import-time included), then runs the runner as __main__ with
+        # the [<runner>, --execution-report, <path>] argv it expects (_bootstrap_main documents the
+        # shim's own argv contract). A raw launch of the runner would leave its import-time and
+        # pre-arm code outside the hooks, the round-2 pre-arm thread gap.
+        bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                     "import _selftest_exit_report; _selftest_exit_report._bootstrap_main()")
+        command = [sys.executable, "-I", "-B", "-c", bootstrap,
+                   str(runner.parent), str(runner), report_path]
         # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
         # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
@@ -1208,6 +1233,69 @@ def self_test():
             "    threading.Thread(target=time.sleep, args=(0.1,)).start()\n"
             "threading.Thread(target=_parent).start()\n_selftest_exit_report.exit_with(0)\n")))
         expect("st/finalizer-thread-during-join-twin-passes", (code, err), (0, ""))
+        # 25c (round 3): the observation hooks the gate's bootstrap installs BEFORE any suite code
+        # close the remaining thread-class routes through the one mechanism: a raw thread started
+        # before arm is recorded at its start, whenever that is; a failing threading.Thread joined
+        # before arm is recorded by the already-installed excepthook wrapper; an import of
+        # subinterpreter machinery is itself the fault (code in another interpreter is invisible to
+        # every per-interpreter hook); and a caught exit_with whose code a C weakref callback
+        # re-reads with no frame on the stack no longer decides anything, because the finalizer
+        # defers to the interpreter's real exit status, which must equal the report's exit_code
+        # (on an interpreter where the callback fires differently the child refuses with 2 itself,
+        # so the vector asserts the refusal, not the route). A clean pre-arm threading.Thread still
+        # passes, and arming in a child launched WITHOUT the bootstrap (a raw direct launch) is
+        # refused with no report.
+        pre_arm_raw = ("import _thread, threading, time\n"
+                       "_go = threading.Event()\n_done = threading.Event()\n"
+                       "def _worker():\n    _go.wait()\n"
+                       "    try:\n        sys.exit(1)\n    finally:\n        _done.set()\n"
+                       "_thread.start_new_thread(_worker, ())\n"
+                       + arm_line
+                       + "_go.set()\nassert _done.wait(5)\n" + raw_wait
+                       + "_selftest_exit_report.exit_with(0)\n")
+        pre_arm_thread_exit = ("import threading\n"
+                               "_t = threading.Thread(target=sys.exit, args=(1,))\n"
+                               "_t.start()\n_t.join()\n"
+                               + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        subinterp_import = ("try:\n    import _interpreters\nexcept ImportError:\n"
+                            "    import _xxsubinterpreters\n"
+                            + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        weakref_confirm = (arm_line
+                           + "import functools, weakref\n"
+                           "try:\n    _selftest_exit_report.exit_with(0)\n"
+                           "except SystemExit as _e:\n    _saved = _e\n"
+                           "class _Holder:\n    pass\n"
+                           "def _fail():\n    global _ref\n    _holder = _Holder()\n"
+                           "    _ref = weakref.ref(_holder, functools.partial(getattr, _saved, 'code'))\n"
+                           "    sys.exit(1)\n"
+                           "_fail()\n")
+        for label, body, named in (
+                ("pre-arm-raw-thread-exit-1", pre_arm_raw, unobserved),
+                ("pre-arm-thread-exit-1", pre_arm_thread_exit, "ended with SystemExit(1)"),
+                ("subinterp-import", subinterp_import, "cannot be observed from this one")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        code, _out, err = run(build(_manifest_text(), weakref_confirm))
+        expect("st/finalizer-weakref-forged-confirm-2", code, 2)
+        expect("st/finalizer-weakref-forged-confirm-named",
+               ("is not the child's exit status" in err) or ("child exited 2" in err), True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "import threading\n_t = threading.Thread(target=int)\n"
+                                    "_t.start()\n_t.join()\n"
+                                    + arm_line + "_selftest_exit_report.exit_with(0)\n"))
+        expect("st/pre-arm-clean-thread-twin-passes", (code, err), (0, ""))
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0))
+        direct_report = root / "tools" / "direct-report.json"
+        direct = subprocess.run(
+            [sys.executable, "-I", "-B", str(root / "tools" / "fake_runner.py"),
+             "--execution-report", str(direct_report)],
+            cwd=str(root), capture_output=True)
+        expect("st/arm-without-bootstrap-2", direct.returncode, 2)
+        expect("st/arm-without-bootstrap-named",
+               "observation hooks were not installed"
+               in direct.stderr.decode("utf-8", errors="replace"), True)
+        expect("st/arm-without-bootstrap-no-report", direct_report.exists(), False)
 
         # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
         # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
@@ -1275,9 +1363,12 @@ def self_test():
           "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
           "differing by any byte from the declared bytes) while each fault-free twin passes, refuses a "
           "silent failure SystemExit in a non-daemon thread, a thread started through _thread "
-          "directly, and a thread or atexit callback added after the exit-time join, refuses an armed "
-          "child whose status or report bypassed the exit finalizer or whose recorded status the "
-          "interpreter's own exit did not confirm, never masks a failing child behind a "
+          "directly at any moment from process start, a thread or atexit callback added after the "
+          "exit-time join, an import of subinterpreter machinery, and an armed child whose "
+          "observation hooks were not installed at process start, refuses an armed "
+          "child whose status or report bypassed the exit finalizer, whose recorded status the "
+          "interpreter's own exit did not confirm, or whose report's exit_code differs from the "
+          "real exit status the finalizer defers to, never masks a failing child behind a "
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
