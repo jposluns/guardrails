@@ -27,24 +27,63 @@ import aiqt_hooks  # noqa: E402
 YIELD_MATCHER_TOOLS = {"ScheduleWakeup", "CronCreate"}  # keep equal to the manifest matcher
 
 
+# The truncation guard's registry-required deny reasons for each scope it denies, as the doctor reports
+# them (aiqt_hooks._orch_truncation_scope decides the scope exactly as the guard does).
+_STRICT_SCOPE_FINDINGS = dict((
+    ("none", "no orchestration registry on this repository root's ancestor chain or at its git "
+             "toplevel"),
+    ("cannot-evaluate", "the nearest .aiqt entry on this repository root's ancestor chain (or, with "
+                        "none there, at its git toplevel) cannot be confirmed as a registry: .aiqt is not "
+                        "a directory openable without following a symlink, or its first present registry "
+                        "name (orchestration.local.json, then orchestration.json) is not a regular file "
+                        "(a symlinked registry file included) or cannot be examined"),
+    ("toplevel-unopenable", "no registry on this repository root's ancestor chain, and its git toplevel "
+                            "cannot be opened as a directory"),
+))
+
+
+def _guard_scope_lines(root):
+    """What the truncation guard decides for a Bash call whose cwd is the repository root: a list of
+    report lines, and whether registry-required mode would deny that call at the scope check."""
+    scope, found = aiqt_hooks._orch_truncation_scope(root)
+    env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+    if scope == "fail":
+        return (["truncation guard: a Bash call from the repository root is denied in every mode: its "
+                 "cwd %s" % found[0]], True)
+    if aiqt_hooks._orch_registry_required() and scope in _STRICT_SCOPE_FINDINGS:
+        return (["truncation guard (%s is set, registry-required mode): a Bash call from the repository "
+                 "root is DENIED: %s" % (env, _STRICT_SCOPE_FINDINGS[scope])], True)
+    if scope == "none":
+        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+                 "ancestor chain or at its git toplevel; set %s to make it deny instead)" % env], False)
+    return (["truncation guard: ACTIVE for a Bash call from the repository root (a registry entry was "
+             "found on its ancestor chain, which can lie above this repository, or at its git "
+             "toplevel)"], False)
+
+
 def main():
     root = str(repo_root())
     status, reg = aiqt_hooks._orch_registry(root)
+    guard_lines, guard_denies = _guard_scope_lines(root)
     if status == "absent":
-        if aiqt_hooks._orch_registry_required():
-            # Registry-required mode: the truncation guard is NOT inert here, so the message must not say so.
-            print("no orchestration registry at the repository root, and {} is set (registry-required "
-                  "mode): the truncation guard denies every Bash call that passes its pre-scope checks "
-                  "unless it finds a registry on the cwd's ancestor chain or at the git toplevel; every "
-                  "other suite component is inert here".format(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV))
-        else:
-            print("no orchestration registry: the suite is inert here (by design; set {} to make the "
-                  "truncation guard deny instead)".format(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV))
+        # Scoped like the components themselves: every component except the truncation guard is inert
+        # with no registry at the repository root, but the guard's ancestor walk can find a registry ABOVE
+        # it (and the guard is then active), and in registry-required mode it denies instead of going inert.
+        print("no orchestration registry at the repository root: every suite component except the "
+              "truncation guard is inert here (by design); the truncation guard scopes by the cwd's "
+              "ancestor chain and the git toplevel, judged per call from its cwd")
+        for line in guard_lines:
+            print(line)
         return 2
     findings = []
     if status == "bad":
         findings.append("registry unreadable/invalid: {}".format(reg))
         reg = {}
+    if guard_denies:
+        # The loader accepted (or reported) the registry, but the truncation guard's own discovery denies a
+        # Bash call from here: report it, never "usable" (a symlinked registry file is the common case in
+        # registry-required mode: the loader follows it, the guard's no-follow probe does not confirm it).
+        findings.extend(guard_lines)
     if "--resume-audit" in sys.argv[1:]:
         probe = aiqt_hooks._orch_resume_probes(reg, root)
         sd = aiqt_hooks._orch_state_dir_for_root(root)

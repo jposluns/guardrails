@@ -22,7 +22,17 @@ Where a registry is looked up (two scopes):
 - The truncation guard looks at the UNION of two places: every directory on the cwd's physical
   ancestor chain (a no-follow, descriptor-anchored walk that needs no git) and, where git resolves
   a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
-  Before either lookup it denies a malformed payload or a cwd it cannot walk, in every session.
+  Before either lookup, in every session, it denies a `tool_name` that is missing, not a non-empty
+  string, or carries a control character, and for a Bash call a `cwd` that is missing, not a
+  non-empty string, or a directory it cannot walk. A malformed `tool_input` is checked only after
+  the lookup, so with no registry in scope (default mode) such a call is allowed.
+- On the walk the NEAREST directory whose `.aiqt` entry is not cleanly absent decides, and the walk
+  stops there: a stray `.aiqt` file (or any other entry it cannot evaluate) in a subdirectory
+  shadows a confirmed registry above it, so registry-required mode denies a Bash call from below
+  that subdirectory. The git toplevel is consulted only when nothing on the chain is present.
+  Inside `.aiqt` the first present registry name decides (`orchestration.local.json`, then
+  `orchestration.json`): an `orchestration.local.json` that is a symlink or a directory is not
+  confirmed even beside a regular `orchestration.json`.
 
 What an absent registry means (two modes, truncation guard only):
 
@@ -35,9 +45,13 @@ What an absent registry means (two modes, truncation guard only):
 - REGISTRY-REQUIRED (`AIQT_ORCH_REQUIRE_REGISTRY` set to any other value, including a padded or
   garbled one): with no registry in its scope the truncation guard DENIES every Bash call that
   passes the pre-scope checks, and an entry it cannot evaluate also DENIES (a discovery fault is
-  not a registry). A registry reachable only through the git toplevel reads as absent when git
-  fails. No other component reads the variable, so every other component stays inert on an
-  absent registry in both modes.
+  not a registry), as does a git toplevel that cannot be opened as a directory (with its own
+  reason). A registry reachable only through the git toplevel reads as absent when git fails. A
+  registry file that is a symlink DENIES in this mode, although the registry loader the other
+  components use follows it and accepts it. Discovery checks presence and file type only: a
+  regular registry file that is unreadable, invalid JSON, or empty satisfies this mode (the other
+  components then read it as bad). No other component reads the variable, so every other component
+  stays inert on an absent registry in both modes.
 
 The write-scope guard is not part of this suite but locates its declaration through this registry,
 and it is not inert on an absent registry: it then reads the declaration from the default state

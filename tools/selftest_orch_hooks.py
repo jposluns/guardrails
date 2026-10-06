@@ -1337,6 +1337,18 @@ def _main_isolated(report_path=None):
         (craft / "nonreg-link" / "real.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
         os.symlink(str(craft / "nonreg-link" / "real.json"),
                    str(craft / "nonreg-link" / ".aiqt" / "orchestration.json"))
+        # ROUND 6: the FIRST present registry name decides (whole-file precedence). A symlinked or directory
+        # orchestration.local.json beside a REGULAR orchestration.json is not confirmed: red under the
+        # mutant "any regular registry name confirms", which reads the regular orchestration.json as True.
+        for _pname in ("local-link-beside-regular", "local-dir-beside-regular"):
+            (craft / _pname / ".aiqt").mkdir(parents=True)
+            (craft / _pname / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                        encoding="utf-8")
+        (craft / "local-link-beside-regular" / "real.json").write_text(json.dumps(dict(version=1)),
+                                                                     encoding="utf-8")
+        os.symlink(str(craft / "local-link-beside-regular" / "real.json"),
+                   str(craft / "local-link-beside-regular" / ".aiqt" / "orchestration.local.json"))
+        (craft / "local-dir-beside-regular" / ".aiqt" / "orchestration.local.json").mkdir()
         _r5 = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
         _r5_old = os.environ.get(_r5)
         _r5_stat = aiqt_hooks.os.stat
@@ -1359,7 +1371,9 @@ def _main_isolated(report_path=None):
                        ("aiqt-dangling-symlink", craft / "dangling"),
                        ("aiqt-unreadable-dir", craft / "unreadable-dir"),
                        ("aiqt-registry-name-directory", craft / "nonreg-dir"),
-                       ("aiqt-registry-name-symlink", craft / "nonreg-link"))
+                       ("aiqt-registry-name-symlink", craft / "nonreg-link"),
+                       ("aiqt-local-symlink-beside-regular", craft / "local-link-beside-regular"),
+                       ("aiqt-local-directory-beside-regular", craft / "local-dir-beside-regular"))
         _r5_rows = {}
         try:
             os.chmod(_r5_unread, 0)
@@ -1392,7 +1406,11 @@ def _main_isolated(report_path=None):
                             ("trunc/registry-required-aiqt-registry-name-directory-plain-denies",
                              "aiqt-registry-name-directory"),
                             ("trunc/registry-required-aiqt-registry-name-symlink-plain-denies",
-                             "aiqt-registry-name-symlink")):
+                             "aiqt-registry-name-symlink"),
+                            ("trunc/registry-required-aiqt-local-symlink-beside-regular-plain-denies",
+                             "aiqt-local-symlink-beside-regular"),
+                            ("trunc/registry-required-aiqt-local-directory-beside-regular-plain-denies",
+                             "aiqt-local-directory-beside-regular")):
             check(_cid, _r5_rows[_name],
                   (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
         # The CONFIRMED side of the same probe: a regular registry file reads True (not the third value),
@@ -1434,6 +1452,45 @@ def _main_isolated(report_path=None):
         check("trunc/registry-required-git-toplevel-cannot-evaluate-plain-denies",
               (aiqt_hooks._orch_git_toplevel_has_registry(str(gwc / "A")), _gw_unset, _gw_strict),
               (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
+        # ROUND 6, THE RECHECK'S THIRD VALUE: when the path-anchored recheck's probe returns
+        # _ORCH_REG_CANNOT_EVALUATE the recheck returns ('cannot-evaluate', None), never ('found', None). The
+        # direct call pins the return; the guard legs make the descriptor walk's own probes miss (the seam
+        # is live only until the recheck starts), so the scope can come only from the recheck: unset, the
+        # guard stays active (plain allow, detach deny); strict, it denies with the cannot-evaluate
+        # reason. Red under the mutant recheck that returns ('found', None) for that probe.
+        _rc_dir = str(craft / "regular-file")
+        _rc_direct = aiqt_hooks._orch_walk_recheck(_rc_dir, [])
+        _rc_probe = aiqt_hooks._orch_dirfd_has_registry
+        _rc_recheck = aiqt_hooks._orch_walk_recheck
+        _rc_live = []
+
+        def _rc_walk_probe(dirfd):
+            return _rc_probe(dirfd) if _rc_live else False
+
+        def _rc_recheck_wrap(cwd, chain):
+            _rc_live.append(True)
+            return _rc_recheck(cwd, chain)
+        _rc_rows = []
+        try:
+            aiqt_hooks._orch_dirfd_has_registry = _rc_walk_probe
+            aiqt_hooks._orch_walk_recheck = _rc_recheck_wrap
+            for _rc_env, _rc_cmd in ((None, "printf ok"), (None, "long_job &"), ("1", "printf ok")):
+                del _rc_live[:]
+                if _rc_env is None:
+                    os.environ.pop(_r5, None)
+                else:
+                    os.environ[_r5] = _rc_env
+                _rc_rows.append(_r5_case(_rc_dir, _rc_cmd))
+        finally:
+            aiqt_hooks._orch_dirfd_has_registry = _rc_probe
+            aiqt_hooks._orch_walk_recheck = _rc_recheck
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/walk-recheck-cannot-evaluate-strict-denies",
+              (_rc_direct, (_rc_rows[0][0], _rc_rows[1][0]), _rc_rows[2]),
+              (("cannot-evaluate", None), ("allow", "deny"), ("deny", True)))
         # A SEARCH-ONLY ancestor must not fail the walk: O_PATH steps need only the search permission path
         # resolution itself needs, so the registry above is still found. The real chmod 0o311 exercises
         # the kernel on a non-root run; the os.open seam refuses a READ-open of that ancestor so the row
@@ -1556,13 +1613,79 @@ def _main_isolated(report_path=None):
         (fcb / "top-file").write_text("not a directory", encoding="utf-8")
         fcb_cwd = str(fcb / "cwd" / "sub")
         saved_top = aiqt_hooks._recovery_toplevel
+        _ut_env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _ut_old = os.environ.get(_ut_env)
         try:
             aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "top-file")
             cv, cw = _cwd_case(fcb_cwd)
+            # ROUND 6, THREE-PART (probe value, unset pair, strict deny with reason): the union leg returns
+            # its OWN value for a toplevel it cannot open, and strict mode denies it with a reason naming
+            # the toplevel, not a .aiqt entry. Red when that except branch returns True (a confirmed
+            # registry: strict allows) and red against round 5 (the .aiqt-fault reason).
+            _ut_probe = aiqt_hooks._orch_git_toplevel_has_registry(fcb_cwd)
+            os.environ.pop(_ut_env, None)
+            _ut_plain = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok"))))
+            os.environ[_ut_env] = "1"
+            _ut_res = aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok")))
+            _ut_why = (_ut_res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         finally:
             aiqt_hooks._recovery_toplevel = saved_top
+            if _ut_old is None:
+                os.environ.pop(_ut_env, None)
+            else:
+                os.environ[_ut_env] = _ut_old
         check("trunc/union-unopenable-toplevel-detach-denies", (cv, "detaches a child" in cw),
               ("deny", True))
+        check("trunc/registry-required-union-unopenable-toplevel-plain-denies",
+              (_ut_probe, (_ut_plain, cv), _verdict(_ut_res),
+               "toplevel git resolves for this cwd could not be opened as a directory" in _ut_why,
+               _ut_env in _ut_why, "could not be confirmed" in _ut_why),
+              (aiqt_hooks._ORCH_REG_TOPLEVEL_UNOPENABLE, ("allow", "deny"), "deny", True, True, False))
+        # ROUND 6, THE DOCTOR REPORTS WHAT THE GUARD DECIDES (tools/orch_doctor.py over
+        # aiqt_hooks._orch_truncation_scope, rooted at a fixture by patching its repo_root). Default mode, no
+        # registry at the root but one ABOVE it: the doctor must not call the suite inert, and names the
+        # truncation guard ACTIVE. Strict mode, a symlinked registry file the loader accepts: the doctor
+        # reports the guard's deny, never "all usable". Red against the round-5 doctor on both rows.
+        import importlib
+        import contextlib
+        import io
+        _doc = importlib.import_module("orch_doctor")
+        _doc_root = _doc.repo_root
+        _doc_env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _doc_old = os.environ.get(_doc_env)
+        (tmp / "doc-above" / ".aiqt").mkdir(parents=True)
+        (tmp / "doc-above" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                        encoding="utf-8")
+        (tmp / "doc-above" / "nested").mkdir()
+
+        def _doc_run(root, env):
+            if env is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = env
+            _doc.repo_root = lambda: Path(root)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = _doc.main()
+            return code, out.getvalue()
+        try:
+            _da_code, _da_out = _doc_run(tmp / "doc-above" / "nested", None)
+            _ds_code, _ds_out = _doc_run(craft / "nonreg-link", "1")
+        finally:
+            _doc.repo_root = _doc_root
+            if _doc_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _doc_old
+        check("doctor/default-registry-above-root-not-inert",
+              (_da_code, "the suite is inert here" in _da_out, "truncation guard: ACTIVE" in _da_out),
+              (2, False, True))
+        check("doctor/registry-required-symlinked-registry-reports-deny",
+              (_ds_code, "is DENIED" in _ds_out and "symlinked registry file" in _ds_out,
+               "all usable" in _ds_out),
+              (1, True, False))
         saved_recheck_fc = aiqt_hooks._orch_walk_recheck
         saved_realpath = aiqt_hooks.os.path.realpath
         saved_open_fc = aiqt_hooks.os.open

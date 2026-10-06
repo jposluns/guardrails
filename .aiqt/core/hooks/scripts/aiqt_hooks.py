@@ -8024,8 +8024,9 @@ def gensrc_guard(data):
 # (_orch_root, the scope every component except orch_truncation_guard uses) it is inert (the gensrc.json
 # precedent), with two disclosed exceptions, both in orch_truncation_guard. First, that guard's scope is
 # not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
-# toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope malformed-payload and
-# unwalkable-cwd denies apply before that scope in every session, registry or not. Second, in the opt-in
+# toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
+# tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
+# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
 # registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
 # _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
 # checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
@@ -8137,6 +8138,11 @@ _ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 # direction there. Only orch_truncation_guard's registry-required mode tells it apart from a confirmed
 # registry, and DENIES it: a discovery fault never satisfies that mode.
 _ORCH_REG_CANNOT_EVALUATE = "cannot-evaluate"
+# The union leg's own fault value (round 6): git names a toplevel for the cwd but this process cannot open
+# it as a directory, so its registry entry is never reached. Truthy like _ORCH_REG_CANNOT_EVALUATE (IN
+# SCOPE by default, deny-safe) and denied in registry-required mode, with a reason naming the toplevel
+# rather than a .aiqt entry.
+_ORCH_REG_TOPLEVEL_UNOPENABLE = "toplevel-unopenable"
 
 
 def _orch_dirfd_has_registry(dirfd):
@@ -8368,7 +8374,8 @@ def _orch_git_toplevel_has_registry(cwd):
     SCOPE) when git resolves a toplevel and the same no-follow registry probe the walk uses
     (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
     there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
-    registry-required mode) when that probe neither rules a registry out nor confirms one, and equally when
+    registry-required mode) when that probe neither rules a registry out nor confirms one, and
+    _ORCH_REG_TOPLEVEL_UNOPENABLE (truthy and denied in that mode the same way, with its own reason) when
     the resolved toplevel exists but cannot be opened as a directory (a toplevel git can name but this
     probe cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable
     read). Returns False when git cannot resolve a toplevel at
@@ -8385,12 +8392,35 @@ def _orch_git_toplevel_has_registry(cwd):
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
-        return _ORCH_REG_CANNOT_EVALUATE
+        return _ORCH_REG_TOPLEVEL_UNOPENABLE
     try:
         probe = _orch_dirfd_has_registry(fd)
         return _ORCH_REG_CANNOT_EVALUATE if probe == _ORCH_REG_CANNOT_EVALUATE else bool(probe)
     finally:
         os.close(fd)
+
+
+def _orch_truncation_scope(cwd):
+    """The truncation guard's registry scope for a non-empty string cwd (round 6: shared with
+    tools/orch_doctor.py so the doctor reports exactly what the guard decides): the ancestor walk
+    (_orch_registry_walk) and, only when the walk finds nothing on the chain, the git-toplevel union leg
+    (_orch_git_toplevel_has_registry). Returns the walk's ('fail', (detail, fix)), ('found', None) or
+    ('cannot-evaluate', None) as is; on a walk 'none' returns ('none', None) when the union leg is False,
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE, ('toplevel-unopenable', None)
+    when it returns _ORCH_REG_TOPLEVEL_UNOPENABLE, and ('found', None) when it confirms a registry. The
+    NEAREST non-absent entry decides: a walk 'found' or 'cannot-evaluate' never consults the chain above it
+    or the git toplevel."""
+    scope, found = _orch_registry_walk(cwd)
+    if scope != "none":
+        return scope, found
+    top_probe = _orch_git_toplevel_has_registry(cwd)
+    if not top_probe:
+        return ("none", None)
+    if top_probe == _ORCH_REG_CANNOT_EVALUATE:
+        return ("cannot-evaluate", None)
+    if top_probe == _ORCH_REG_TOPLEVEL_UNOPENABLE:
+        return ("toplevel-unopenable", None)
+    return ("found", None)
 
 
 def _orch_registry(root):
@@ -9980,8 +10010,10 @@ def orch_truncation_guard(data):
     evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
     toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
     file, a symlink, or an unreadable directory; a first present registry name that is not a regular file
-    or whose no-follow stat faults; a toplevel that cannot be opened) DENIES in that mode, never read as a
-    registry, while by default it keeps the guard ACTIVE exactly as a present registry does. PRE-SCOPE DENIES, checked BEFORE the
+    or whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
+    toplevel that cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6, with its own
+    reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a present
+    registry does. PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -10025,7 +10057,7 @@ def orch_truncation_guard(data):
             "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
             "the call with a string cwd.".format(kind),
             "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
-    scope, found = _orch_registry_walk(cwd)
+    scope, found = _orch_truncation_scope(cwd)
     if scope == "fail":
         detail, fix = found
         return _deny(
@@ -10036,30 +10068,26 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
             "registry (rule trkasy, fail-closed).")
     if scope == "none":
-        # No registry on the cwd's ancestor chain. UNION (round 4): where git resolves a toplevel for this
-        # cwd, that toplevel's registry is consulted too, because core.worktree can point the work tree
-        # (and its registry) off the ancestor chain. BY DEFAULT git success can only add a deny here and a
-        # git failure alone never denies (the union leg reads False and the allow stands); in
+        # No registry on the cwd's ancestor chain and none at a git-resolved toplevel (the UNION, round 4:
+        # core.worktree can point the work tree and its registry off the ancestor chain, so
+        # _orch_truncation_scope consults that toplevel too). BY DEFAULT git success can only add a deny
+        # and a git failure alone never denies (the union leg reads False and the allow stands); in
         # registry-required mode that False is an ABSENT registry, so a git failure hiding a registry
         # reachable only through the git toplevel is denied below, and git success removes that deny.
-        top_probe = _orch_git_toplevel_has_registry(cwd)
-        if not top_probe:
-            if _orch_registry_required():
-                # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
-                # absent registry fails closed instead of leaving the guard inert. Default unchanged.
-                return _deny(
-                    "AIQT rule trkasy (track-launched-work) (registry-required mode): "
-                    "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
-                    "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
-                    ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
-                    "toplevel. Commit the orchestration registry at the repository root, run from a "
-                    "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
-                    "restore the default scoping (inert allow with no registry).",
-                    "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
-                    "registry found (rule trkasy, fail-closed).")
-            return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
-        if top_probe == _ORCH_REG_CANNOT_EVALUATE:
-            scope = "cannot-evaluate"
+        if _orch_registry_required():
+            # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
+            # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+                "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
+                "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
+                "toplevel. Commit the orchestration registry at the repository root, run from a "
+                "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+                "restore the default scoping (inert allow with no registry).",
+                "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
+                "registry found (rule trkasy, fail-closed).")
+        return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
     if scope == "cannot-evaluate" and _orch_registry_required():
         # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
         # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
@@ -10077,6 +10105,22 @@ def orch_truncation_guard(data):
             "restore the default scoping (where such an entry keeps this guard active).",
             "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
             "could not be evaluated (rule trkasy, fail-closed).")
+    if scope == "toplevel-unopenable" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 6: git names a toplevel for this cwd but this process cannot open it
+        # as a directory, so its registry entry is never reached. That is a fault in the toplevel itself,
+        # not in a .aiqt entry, so it carries its own reason and repair. Default unchanged (in scope).
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry; none "
+            "is on this cwd's ancestor chain, and the toplevel git resolves for this cwd could not be "
+            "opened as a directory, so its registry could not be looked up. A registry this guard cannot "
+            "reach is not a registry, so the call is denied rather than read as registry-present "
+            "(check-fails-closed-on-unreadable). Make the git toplevel (core.worktree) an existing "
+            "directory this process can open, run from a directory under the orchestrated tree, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such a toplevel keeps this "
+            "guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
+            "opened for the orchestration registry (rule trkasy, fail-closed).")
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
@@ -10374,8 +10418,12 @@ def orch_untracked_wait_loop(data):
     orch_truncation_guard: it roots via _orch_root (the session cwd's git-resolved toplevel ONLY, no
     ancestor walk and no union) and loads the registry there (_orch_registry), so it is inert where git
     resolves no toplevel or that toplevel has no registry, even where the truncation guard's ancestor walk
-    finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so it stays inert on an absent
-    registry in registry-required mode too, where the truncation guard denies instead. NOT lease-gated: a
+    finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so registry-required mode does
+    not change it: it stays inert wherever _orch_registry reports no registry at the git toplevel, in either
+    mode. The truncation guard in that mode denies only where its own scope (the ancestor walk unioned with
+    the git toplevel, _orch_truncation_scope) finds no registry or cannot confirm one; where that walk finds
+    a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
+    allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
     or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
@@ -10390,7 +10438,7 @@ def orch_untracked_wait_loop(data):
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
-        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is by default
+        return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
