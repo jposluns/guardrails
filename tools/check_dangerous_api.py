@@ -371,6 +371,11 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_watchdog_completion_case.resolve_exception_classes", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in the"
      " repository's own _opf_emit source and asserts it is an exception class; never called"),
+    ("opf/tools/_opf_adopt_apply.py", "_close_class_sweep_checks.close_site_classes", "code", 1,
+     "static analysis: getattr(builtins, name), the same reviewed form as"
+     " _watchdog_completion_case.resolve_exception_classes, resolves an exception name read from"
+     " the repository's own module source and keeps it only when it is an exception class; never"
+     " called"),
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
      "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
      " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"

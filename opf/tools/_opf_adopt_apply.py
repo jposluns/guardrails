@@ -12041,7 +12041,10 @@ _CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
                        "resolve-at-close-store-error-raised-as-itself",
                        "resolve-at-read-close-fault-then-store-error-both-named",
                        "close-class-sweep-close-pairs-both-named",
-                       "class-run-reclaims-only-at-disclosed-windows")
+                       "class-run-reclaims-only-at-disclosed-windows",
+                       "class-run-census-number-reuse-after-foreign-close-judged",
+                       "class-run-census-baseline-close-reopen-judged",
+                       "class-run-reclaims-caller-leak-at-window-refused")
 _CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
 
 
@@ -12103,6 +12106,7 @@ def _close_class_sweep_checks():
     descriptors its runs leave open die with that process: rows [check, passed, observed or None] in
     _CLASS_SWEEP_CHECKS order."""
     import errno
+    import fcntl
     import tempfile
     from unittest import mock
     rows = []
@@ -12125,14 +12129,24 @@ def _close_class_sweep_checks():
         finally:
             _journal._close_fd_quietly(jr_fd)
 
-    def _fds_open():
+    def _fd_identity(fd):
+        """The identity of what `fd` names now, read with no side effect (fstat and F_GETFL): (st_dev,
+        st_ino, file type, st_rdev, access mode and status flags), or None when `fd` is not open."""
+        try:
+            st = _real_fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
+
+    def _fd_census():
+        """Every descriptor open now, as (number, identity) pairs: a number closed and reopened on another
+        file, or with other flags, is a new pair, never the one open before."""
         out = set()
         for fd_name in os.listdir("/proc/self/fd"):
-            try:
-                _real_fstat(int(fd_name))
-            except OSError:
-                continue
-            out.add(int(fd_name))
+            identity = _fd_identity(int(fd_name))
+            if identity is not None:
+                out.add((int(fd_name), identity))
         return out
 
     def compose_refused_here(ops):
@@ -12186,33 +12200,46 @@ def _close_class_sweep_checks():
     # the code that opened each descriptor left open, None when unattributed). Judged once the sweeps below
     # have run. Nothing is closed for it: this child process ends, and every descriptor with it.
     class_reclaims = []
-    # The descriptors the foreign-thread vector's other thread opens (below), never counted as a run's.
-    foreign = []
+    # Every descriptor the foreign-thread vector's other thread opens (below), as (number, identity); and
+    # those it still holds, the only ones exempt from a run's census. The exemption is by identity and
+    # expires when the fixture closes its descriptor (foreign_close), so a later descriptor that reuses
+    # the number, even on the same file, is judged as the run's.
+    foreign, foreign_live = [], set()
     # The disclosed windows (module docstring): _open_dir_contained's duplicate, and the store's
     # _open_working_dir_fd `.working` descriptor, each left open when a parent close raises anything
-    # but OSError.
+    # but OSError. Each window's code with the local holding that descriptor across its parent close.
     class_reclaim_windows = frozenset(("_journal.py:_open_dir_contained", "_opf_store.py:_open_working_dir_fd"))
+    window_held_locals = dict(((_journal._open_dir_contained.__code__, "result"),
+                               (store._open_working_dir_fd.__code__, "wfd")))
 
-    def class_run(scenario, plan, sites=None):
+    def foreign_close(fd):
+        foreign_live.difference_update(set(pair for pair in foreign_live if pair[0] == fd))
+        os.close(fd)
+
+    def class_run(scenario, plan, sites=None, into=None):
         """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
         close event n (counted from 1, or only beneath a frame running `plan["under"]` when given; with
         plan["fast"], fsync a no-op): (events counted, [(exception, disclosed-unnamed)], what the run
         raised). `sites`, a set, collects the module of every frame on the stack at each close event, from
-        the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
+        the close up to run_adopt_transaction (the close-site path, never the harness above it). `into`, a
+        list, takes the run's left-open row in place of class_reclaims."""
         name, compose_c, patches = scenario
         under = plan.get("under")
         # Attribution only, never ownership: the code that opened each descriptor os.open, os.dup or
-        # os.pipe returns while the run's patches stand, with its identity (st_dev, st_ino) then, dropped
+        # os.pipe returns while the run's patches stand, with its identity (_fd_identity) then, dropped
         # when os.close is called on it. What the run leaves open is read from the census (below), so a
         # descriptor opened around these patches is still counted, as unattributed.
         opened = {}
+        # (number, identity) of the descriptor a disclosed window's own frame held (window_held_locals)
+        # when an injected exception fired at a close beneath that frame: the one descriptor that
+        # window's parent close abandons, so the one a window leak may be.
+        held = set()
         real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
 
         def note(*fds):
             opener = sys._getframe(2).f_code
             for fd in fds:
-                st = _real_fstat(fd)
-                opened[fd] = (st.st_dev, st.st_ino, opener)
+                opened[fd] = (_fd_identity(fd), opener)
             return fds
 
         def noted_open(*args, **kwargs):
@@ -12223,7 +12250,7 @@ def _close_class_sweep_checks():
 
         def noted_pipe():
             return note(*real_pipe_c())
-        census_before = _fds_open()
+        census_before = _fd_census()
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root, files = fixture(temp)
             real_close_c, seen, fired = os.close, [0], []
@@ -12246,6 +12273,13 @@ def _close_class_sweep_checks():
                 if seen[0] in plan:
                     exc = plan[seen[0]]()
                     fired.append((exc, sys._getframe(1).f_code is quiet_code or sys.exc_info()[1] is not None))
+                    frame = sys._getframe(1)
+                    while frame is not None:
+                        value = frame.f_locals.get(window_held_locals[frame.f_code]) \
+                            if frame.f_code in window_held_locals else None
+                        if type(value) is int and value in opened and opened[value][1] is frame.f_code:
+                            held.add((value, opened[value][0]))
+                        frame = frame.f_back
                     raise exc
             raised = None
             with contextlib.ExitStack() as stack:
@@ -12263,21 +12297,22 @@ def _close_class_sweep_checks():
                 except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
                     raised = exc
         # An injection at a disclosed close window (the store's _open_working_dir_fd parent close among
-        # them; leak-freedom under interrupt is not claimed) leaves a descriptor open. Each descriptor open
-        # now that was not open before the run (the foreign-thread vector's excepted) is recorded with its
-        # opener (class_reclaims), or as unattributed when its number no longer names the file that opener
-        # opened, so a leak is judged, never hidden: the check after the sweeps admits only the disclosed
-        # windows. None is closed here; the child's exit releases them all.
+        # them; leak-freedom under interrupt is not claimed) leaves a descriptor open. Each (number,
+        # identity) pair open now that was not open before the run (a descriptor the foreign-thread fixture
+        # still holds excepted) is recorded (class_reclaims) as (number, opener, held by a window's frame
+        # at an injected fault), the opener None (unattributed) when the number no longer names what that
+        # opener opened, so a leak is judged, never hidden: a number closed and reused (a baseline's, or
+        # one the fixture has closed) is a new pair. The check after the sweeps admits only the disclosed
+        # windows. Census limit (disclosed): a baseline descriptor closed and its number reopened on the
+        # same file with the same flags is the same pair, so not seen. None is closed here; the child's
+        # exit releases them all.
         left = []
-        for fd in sorted(_fds_open() - census_before - {fd for fd, _identity in foreign}):
-            dev, ino, opener = opened.get(fd, (None, None, None))
-            try:
-                st = _real_fstat(fd)
-            except OSError:
-                continue
-            left.append(opener if (st.st_dev, st.st_ino) == (dev, ino) else None)
+        for fd, identity in sorted(_fd_census() - census_before - foreign_live):
+            was, opener = opened.get(fd, (None, None))
+            left.append((fd, opener if identity == was else None, (fd, identity) in held))
         if left:
-            class_reclaims.append((name, tuple(type(exc) for exc, _quiet in fired), tuple(left)))
+            (class_reclaims if into is None else into).append(
+                (name, tuple(type(exc) for exc, _quiet in fired), tuple(left)))
         return seen[0], fired, raised
 
     def class_named(exc, raised):
@@ -12312,7 +12347,7 @@ def _close_class_sweep_checks():
                         chain.append(expr.attr)
                         expr = expr.value
                     if isinstance(expr, ast.Name):
-                        obj = vars(module).get(expr.id, builtins.__dict__.get(expr.id))
+                        obj = vars(module).get(expr.id, getattr(builtins, expr.id, None))
                         for attr in reversed(chain):
                             obj = getattr(obj, attr, None)
                         if isinstance(obj, type) and issubclass(obj, BaseException):
@@ -12345,8 +12380,9 @@ def _close_class_sweep_checks():
     # opened during the run.
     def foreign_open():
         fd = os.open(os.devnull, os.O_RDONLY)
-        st = _real_fstat(fd)
-        foreign.append((fd, (st.st_dev, st.st_ino)))
+        identity = _fd_identity(fd)
+        foreign.append((fd, identity))
+        foreign_live.add((fd, identity))
 
     def acquire_then_foreign_open(journal_root, session_id):
         got = real_acquire_c(journal_root, session_id)
@@ -12359,12 +12395,12 @@ def _close_class_sweep_checks():
     foreign_kept = []
     for fd, identity in foreign:
         try:
-            st = _real_fstat(fd)
+            _real_fstat(fd)
         except OSError as exc:
             foreign_kept.append((fd, exc.errno))
             continue
-        foreign_kept.append((fd, (st.st_dev, st.st_ino) == identity))
-        os.close(fd)
+        foreign_kept.append((fd, _fd_identity(fd) == identity))
+        foreign_close(fd)
     check("class-run-leaves-a-foreign-thread-descriptor-open",
           foreign_raised is None and len(foreign) == 1 and foreign_kept == [(foreign[0][0], True)],
           observed=(foreign_raised, foreign_kept))
@@ -12494,22 +12530,93 @@ def _close_class_sweep_checks():
     # What class_run runs left open across every run above, judged (train review round 1): a run with no
     # injection leaves nothing open, and every descriptor left open was opened at a disclosed close window
     # (class_reclaim_windows) in a run whose injected exceptions are none of them an OSError, the only
-    # classes those windows disclose; an unattributed one is never admitted. Red against a production
-    # leak (a descriptor a close helper opens on its propagate path, for one). The per-scenario tally is
-    # named.
-    reclaim_tally, reclaim_bad = {}, {}
-    for sc, injected, openers in class_reclaims:
-        classes = ",".join(sorted({cls.__qualname__ for cls in injected})) or "none"
-        for opener in openers:
-            where = "unattributed" if opener is None else "{}:{}".format(os.path.basename(opener.co_filename),
-                                                                         opener.co_qualname)
-            reclaim_tally[(sc, where)] = reclaim_tally.get((sc, where), 0) + 1
-            if not injected or where not in class_reclaim_windows \
-                    or any(issubclass(cls, OSError) for cls in injected):
-                reclaim_bad[(sc, classes, where)] = reclaim_bad.get((sc, classes, where), 0) + 1
+    # classes those windows disclose, and was the descriptor that window's own frame held when the
+    # injected exception fired at a close beneath it (round 5: a descriptor the window returned whole
+    # and its caller dropped is not the window's, whatever the run injected elsewhere); an unattributed
+    # one is never admitted. Red against a production leak (a descriptor a close helper opens on its
+    # propagate path, for one). The per-scenario tally is named.
+    def reclaim_judge(entries):
+        """(left open per (scenario, opener), undisclosed per (scenario, injected, opener)) of `entries`."""
+        tally, bad = {}, {}
+        for sc, injected, left in entries:
+            classes = ",".join(sorted({cls.__qualname__ for cls in injected})) or "none"
+            for _fd, opener, at_window in left:
+                where = "unattributed" if opener is None else "{}:{}".format(
+                    os.path.basename(opener.co_filename), opener.co_qualname)
+                tally[(sc, where)] = tally.get((sc, where), 0) + 1
+                if not injected or where not in class_reclaim_windows or not at_window \
+                        or any(issubclass(cls, OSError) for cls in injected):
+                    bad[(sc, classes, where)] = bad.get((sc, classes, where), 0) + 1
+        return tally, bad
+    reclaim_tally, reclaim_bad = reclaim_judge(class_reclaims)
     check("class-run-reclaims-only-at-disclosed-windows", reclaim_tally and not reclaim_bad,
           observed="undisclosed (scenario, injected, opener): count={!r}; left open (scenario, opener): "
           "count={!r}".format(sorted(reclaim_bad.items()), sorted(reclaim_tally.items())))
+    # Round 5, the census compares (number, identity) pairs, never numbers: a descriptor opened (on the
+    # same file, /dev/null) at the number of a foreign-thread descriptor the fixture has closed in the
+    # run is judged as the run's (the exemption expired at that close), and so is one opened on another
+    # file at the number of a baseline descriptor closed in the run. Red against a census by number,
+    # or a fixture exemption kept past its close (each left row then empty).
+    reuse_rows, reuse_seen = [], []
+
+    def acquire_then_reuse(journal_root, session_id):
+        got = real_acquire_c(journal_root, session_id)
+        opener = threading.Thread(target=foreign_open)
+        opener.start()
+        opener.join()
+        gone = foreign[-1][0]
+        foreign_close(gone)
+        reuse_seen.append((gone, os.open(os.devnull, os.O_RDONLY)))
+        return got
+    _n, _fired, reuse_raised = class_run(("foreign-close-reuse", None, (("acquire_lock", acquire_then_reuse),)),
+                                         dict(), into=reuse_rows)
+    reuse_left = [fd for _sc, _inj, left in reuse_rows for fd, _opener, _held in left]
+    check("class-run-census-number-reuse-after-foreign-close-judged",
+          reuse_raised is None and len(reuse_seen) == 1 and reuse_seen[0][0] == reuse_seen[0][1]
+          and reuse_left == [reuse_seen[0][1]] and not foreign_live,
+          observed=(reuse_raised, reuse_seen, reuse_rows, sorted(foreign_live)))
+    reopen_rows, reopen_seen = [], []
+    base_fd = os.open(os.devnull, os.O_RDONLY)
+
+    def acquire_then_reopen(journal_root, session_id):
+        got = real_acquire_c(journal_root, session_id)
+        os.close(base_fd)
+        reopen_seen.append(os.open("/", os.O_RDONLY | os.O_DIRECTORY))
+        return got
+    _n, _fired, reopen_raised = class_run(("baseline-close-reopen", None,
+                                           (("acquire_lock", acquire_then_reopen),)), dict(), into=reopen_rows)
+    reopen_left = [fd for _sc, _inj, left in reopen_rows for fd, _opener, _held in left]
+    check("class-run-census-baseline-close-reopen-judged",
+          reopen_raised is None and reopen_seen == [base_fd] and reopen_left == [base_fd],
+          observed=(reopen_raised, base_fd, reopen_seen, reopen_rows))
+    # Round 5, the window admission is the window's own parent-close path: a descriptor
+    # _open_dir_contained returned whole to its caller, which drops it, then an injected fault at a
+    # later _open_dir_contained parent close (the last close beneath one in the run). Required to FAIL
+    # the judge for that dropped descriptor (opener and injected class alone admitted it), while the
+    # faulted window's own descriptor is admitted.
+    real_open_dir_c, leak_seen = _journal._open_dir_contained, []
+
+    def open_dir_then_caller_leak(root_fd, relpath):
+        if not leak_seen:
+            leak_seen.append(real_open_dir_c(root_fd, relpath))     # returned whole, dropped here
+        return real_open_dir_c(root_fd, relpath)
+    leak_scenario = ("caller-leak", None, (("_open_dir_contained", open_dir_then_caller_leak),))
+    leak_under = real_open_dir_c.__code__
+    leak_total = class_run(leak_scenario, dict(under=leak_under), into=[])[0]
+    leak_seen.clear()
+    leak_rows = []
+    _n, leak_fired, _raised = class_run(leak_scenario, dict(((leak_total, lambda: _InjectedCloseFault("CALLER-LEAK")),
+                                                             ("under", leak_under))), into=leak_rows)
+    _tally, leak_bad = reclaim_judge(leak_rows)
+    leak_left = sorted((fd, opener is leak_under, at_window)
+                       for _sc, _inj, left in leak_rows for fd, opener, at_window in left)
+    check("class-run-reclaims-caller-leak-at-window-refused",
+          leak_total > 1 and len(leak_seen) == 1 and len(leak_fired) == 1
+          and (leak_seen[0], True, False) in leak_left and (True, True) in [row[1:] for row in leak_left]
+          and list(leak_bad.values()) == [1]
+          and [where for _sc, _cls, where in leak_bad] == ["_journal.py:_open_dir_contained"],
+          observed=(leak_total, leak_seen, [repr(exc) for exc, _quiet in leak_fired], leak_left,
+                    sorted(leak_bad.items())))
     return rows
 
 
