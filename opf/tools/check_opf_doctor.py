@@ -2437,6 +2437,17 @@ def _claude_hook_self_test():
                 deny("bash-r11-git-" + sub + "-free-dir-denied",
                      payload("Bash", dict(command="git " + sub + " x"), src_dir),
                      "rewrites the working tree")
+            # ROUND 13: the plain work-tree and index writers found since (a literal list here,
+            # never the hook's constant); on the predecessor pin 25993a15 each ALLOWED.
+            for sub in ("sparse-checkout", "update-index", "merge-recursive", "merge-resolve",
+                        "merge-octopus", "merge-subtree", "merge-index", "merge-one-file", "rerere",
+                        "quiltimport"):
+                deny("bash-r13-git-" + sub + "-free-dir-denied",
+                     payload("Bash", dict(command="git " + sub + " x"), src_dir),
+                     "rewrites the working tree")
+            deny("bash-r13-git-sparse-checkout-set-free-dir-denied",
+                 payload("Bash", dict(command="git sparse-checkout set --no-cone src/"), src_dir),
+                 "rewrites the working tree")
             sq = chr(39)
             for label, cmd, cwd in (
                     ("git-rm-glob", "git rm -r -q " + sq + "../" + chr(42) + sq, src_dir),
@@ -2492,6 +2503,25 @@ def _claude_hook_self_test():
                      "holds the protected path")
                 allow("bash-r11-git-status-pack-repo-allowed",
                       payload("Bash", dict(command="git status"), pack_sub))
+                # ROUND 13: a git work-tree subcommand that runs code (bisect, submodule,
+                # filter-branch) is not plain, and the coarse rule applies the same repository-top
+                # check; the submodule read forms stay allowed. On the predecessor pin 25993a15
+                # each -denied vector here ALLOWED.
+                for label, cmd in (("bisect-start", "git bisect start"),
+                                   ("bisect-reset", "git bisect reset"),
+                                   ("submodule-update", "git submodule update --init"),
+                                   ("submodule-deinit", "git submodule deinit -f x"),
+                                   ("submodule-foreach", "git submodule foreach true"),
+                                   ("submodule-absorbgitdirs", "git submodule absorbgitdirs"),
+                                   ("submodule-quiet-update", "git submodule -q update"),
+                                   ("submodule-bare", "git submodule"),
+                                   ("filter-branch", "git filter-branch -f HEAD")):
+                    deny("bash-r13-git-" + label + "-pack-repo-top-denied",
+                         payload("Bash", dict(command=cmd), pack_sub), "holds the protected path")
+                for label, cmd in (("submodule-status", "git submodule status"),
+                                   ("submodule-quiet-summary", "git submodule --quiet summary")):
+                    allow("bash-r13-git-" + label + "-pack-repo-allowed",
+                          payload("Bash", dict(command=cmd), pack_sub))
             notes = os.path.join(root, "notes.txt")
             deny("multiedit-r11-nested-path-field-denied",
                  payload("MultiEdit", dict(file_path=notes, edits=[dict(

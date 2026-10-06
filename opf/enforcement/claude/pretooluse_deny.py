@@ -105,14 +105,19 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      and is allowed in a session bound to none). Round 11 (the git work-tree rule): a plain git
      command whose subcommand rewrites the working tree or the index (GIT_WORKTREE_SUBCOMMANDS:
      checkout, restore, reset, clean, stash, switch, merge, pull, rebase, cherry-pick, revert, am,
-     apply, rm, mv, read-tree, checkout-index and worktree) DENIES whenever it acts in a bound
+     apply, rm, mv, read-tree, checkout-index and worktree; round 13 adds sparse-checkout, bisect,
+     submodule other than its status and summary forms, update-index, merge-recursive,
+     merge-resolve, merge-octopus, merge-subtree, merge-index, merge-one-file, filter-branch,
+     rerere and quiltimport) DENIES whenever it acts in a bound
      product (a product root at or above the session cwd, an absolute spelling or a resolved
      operand, git -C and --work-tree values included), whatever its pathspec spelling, because git
      expands a glob ('../*') or pathspec magic (:(top), :/docs) itself; a dry run of git rm, mv
      or clean read through a strict grammar (GIT_DRY_RUN_GRAMMAR: only listed option letters and
      exact long options, -n or --dry-run among them) writes nothing and is exempt; outside every
      bound product such a command denies when the session cwd, a directory it names or the
-     repository top above either holds the pack own tree (R8). Every other git subcommand
+     repository top above either holds the pack own tree (R8); a member that runs code (bisect,
+     submodule, filter-branch) is not plain and takes the coarse rule below, which applies the
+     same repository-top check when the command passes rules 1 to 3. Every other git subcommand
      (commit, add, push, status, log, diff, show, fetch and the rest) is judged by the exact path
      check alone, so it is allowed unless it references or resolves to a protected path. The
      dashed builtin forms (git-checkout, /usr/lib/git-core/git-rm) are off the allowlist and take
@@ -232,10 +237,15 @@ per-platform residual coverage carry the same list):
     directory-plus-basename joins of cp, mv and ln and, for rm, rmdir, mv and chmod, a directory
     operand holding a protected path of a BOUND root. So a copy of a directory's whole contents
     under a name no operand carries (cp -r src/. docs, cp -rT src/docs docs), a git subcommand
-    outside GIT_WORKTREE_SUBCOMMANDS that still writes the work tree or the index (git
-    sparse-checkout set or reapply, which removes every file outside the sparse cone, and the
-    index writers git add, git stage, git commit -a and git update-index; each is judged by the
-    exact path check alone, as the git work-tree rule's subcommand list directs), and a
+    outside GIT_WORKTREE_SUBCOMMANDS that still writes the work tree or the index (the index
+    writers git add, git stage and git commit -a, which record the work tree's own content; git
+    merge-file, which writes only the file its first operand names; and git mergetool, difftool
+    --dir-diff, svn, p4, cvsimport, archimport and cvsexportcommit, documented to write a work
+    tree but not confirmed by a probe here; each is judged by the exact path check alone, or by
+    the coarse rule where it runs code, as the git work-tree rule's subcommand list directs), a
+    git work-tree subcommand that runs code inside a command failing rules 1 to 3 (git bisect
+    start; true from a repository top holding the pack own tree: the coarse rule reads no
+    subcommand there), and a
     work-tree rewrite or a recursive remove reaching a product root that the session neither sits
     in nor binds (no product root above the cwd or any operand: git reset --hard, git stash or git
     rm -r '*' run from a repository top or a sibling directory above or beside the product root,
@@ -337,7 +347,9 @@ per-platform residual coverage carry the same list):
     every git subcommand in GIT_WORKTREE_SUBCOMMANDS denies, even where it writes only an
     unprotected file or only .git, or writes nothing (git checkout main, git checkout -b feature,
     git switch main, git restore notes.txt, git restore --staged notes.txt, git rm notes.txt, git
-    mv notes.txt n2.txt, git stash list, git worktree list, git reset --soft HEAD), and so does a
+    mv notes.txt n2.txt, git stash list, git worktree list, git reset --soft HEAD; round 13: git
+    sparse-checkout list, git bisect log, git rerere status, git update-index --refresh and a
+    bare git submodule, which git reads as status), and so does a
     git rm, mv or clean dry run outside the strict dry-run grammar (git clean -e x -n, git rm
     --dry -r x); outside every bound product such a subcommand run in a repository whose tree
     holds the pack own files (R8) denies from any directory of that repository; and a git global
@@ -546,9 +558,24 @@ GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--lite
 # magic, no operand at all), since git expands the pathspec itself; outside every bound product it
 # denies when the cwd, a directory it names or the repository top above either holds the pack own
 # tree (R8). Every other git subcommand is judged by the exact path check alone.
+# Round 13 adds sparse-checkout (set or reapply removes every file outside the sparse cone),
+# bisect (start, good, bad, skip and reset check out a commit), submodule (update, deinit, foreach,
+# absorbgitdirs, add and set-url write the work tree; only status and summary read, see
+# GIT_SUBMODULE_READ), update-index (writes any index entry), the merge strategy backends
+# merge-recursive, merge-resolve, merge-octopus and merge-subtree, merge-index and merge-one-file,
+# filter-branch (checks the rewritten HEAD out), rerere (writes a recorded resolution into a
+# conflicted file) and quiltimport (applies patches to the work tree). bisect, submodule and
+# filter-branch run code and so are never plain: the coarse rule applies the same unbound
+# repository-top check to them (_exotic_bash_rule).
 GIT_WORKTREE_SUBCOMMANDS = frozenset((
     "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull", "rebase",
-    "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree", "checkout-index", "worktree"))
+    "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree", "checkout-index", "worktree",
+    "sparse-checkout", "bisect", "submodule", "update-index", "merge-recursive", "merge-resolve",
+    "merge-octopus", "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
+    "quiltimport"))
+# The read forms of git submodule (round 13): the first word after any -q or --quiet is exactly one
+# of these. Every other form (the bare command and --cached included) is a work-tree rewrite.
+GIT_SUBMODULE_READ = frozenset(("status", "summary"))
 # The dry-run grammar (round 11): git rm, mv or clean whose every option word is one of these short
 # letters or exact long options, at least one of them the dry run (-n, --dry-run), writes nothing
 # and is judged like any other git subcommand. Any other option (a valued one, an abbreviation, a
@@ -1571,10 +1598,32 @@ def _git_worktree_sub(words):
     i, reason = _git_grammar(words)
     if reason is not None or i is None:
         return None
-    sub = words[i]
-    if sub not in GIT_WORKTREE_SUBCOMMANDS or _git_dry_run(sub, words[i + 1:]):
+    sub, rest = words[i], words[i + 1:]
+    if sub not in GIT_WORKTREE_SUBCOMMANDS or _git_dry_run(sub, rest):
         return None
+    if sub == "submodule":
+        while rest and rest[0] in ("-q", "--quiet"):
+            rest = rest[1:]
+        if rest and rest[0] in GIT_SUBMODULE_READ:
+            return None
     return sub
+
+
+def _git_unbound_rule(cwd, cands, protected):
+    """The unbound half of the git work-tree rule (round 11; round 13 shares it with the coarse
+    rule): a deny reason when the session cwd, a directory among the resolved `cands`, or the
+    repository top above either is a container of a `protected` path (the pack own tree, R8),
+    or None."""
+    bases = []
+    for base in (_candidates(cwd, None, "literal") or []) + [c for c in cands if os.path.isdir(c)]:
+        for spot in (base, _git_top(base)):
+            if spot is not None and spot not in bases:
+                bases.append(spot)
+    for base in bases:
+        reason = _container_rule(base, protected)
+        if reason is not None:
+            return reason
+    return None
 
 
 def _git_top(path):
@@ -1780,6 +1829,11 @@ def _exotic_bash_rule(command, cwd, tokens):
             reason = _guard_rule(cand)
             if reason is not None:
                 return reason
+    # Round 13: a git work-tree subcommand that runs code (bisect, submodule, filter-branch) or
+    # carries another not-plain trait, read through the plain word split, takes the unbound
+    # repository-top check of the git work-tree rule (R8).
+    if tokens and _git_worktree_sub(tokens) is not None:
+        return _git_unbound_rule(cwd, cands, set(_guarded_prefixes()))
     return None
 
 
@@ -1841,16 +1895,9 @@ def _plain_bash_rule(command, words, cwd):
     if git_sub is not None:
         # Unbound: the pack own tree (R8) under the cwd, a directory the command names, or the
         # repository top above either is still a container git rewrites.
-        bases = []
-        for base in (_candidates(cwd, None, "literal") or []) + [c for c in cands
-                                                                   if os.path.isdir(c)]:
-            for spot in (base, _git_top(base)):
-                if spot is not None and spot not in bases:
-                    bases.append(spot)
-        for base in bases:
-            reason = _container_rule(base, protected)
-            if reason is not None:
-                return reason
+        reason = _git_unbound_rule(cwd, cands, protected)
+        if reason is not None:
+            return reason
     for cand in (cands if container else []) + joined:
         reason = _container_rule(cand, protected)
         if reason is not None:
