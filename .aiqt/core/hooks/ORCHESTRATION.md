@@ -169,7 +169,8 @@ malformed.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
 - `labels` names the five brief labels. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
-  with the brief's absolute path appended, and it must print exactly one full commit id: the
+  with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
+  for the hook's own git reads, and it must print exactly one full commit id: the
   authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
   check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
   when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`. The check runs in a worker
@@ -193,16 +194,17 @@ brief option is never accepted in its `-b=PATH` form, which a getopt parser read
 `=PATH`. A parser the hook does not know may also take a brief from an alias or a grouped short
 option, so a brief given last is the one a last-wins parser keeps. A second brief, including an
 abbreviation such as `--brie PATH`, is refused. A relative brief path resolves against the session
-cwd; a path under `/proc` or `/dev` is withheld as `UNVERIFIABLE:`, since it names a different file
-in the hook's process. The brief is opened once, without blocking and without following a symlink,
+cwd; a path under `/proc` or `/dev` is withheld as `UNVERIFIABLE:`, since it can name a different file
+in the hook's process (a sandbox may give each process its own `/dev/shm`). The brief is opened once, without blocking and without following a symlink,
 and must be a regular file; one leading byte-order mark is dropped.
 
-Any other command that names a declared command is withheld as `UNVERIFIABLE:` with a message
-that says how to write the dispatch plainly, and so is any command that is not plain and holds ANSI-C
-or locale quoting (`$'...'`, `$"..."`), whose decoded text the hook does not read. For a command that is
-not plain, a name is looked for, without regard to case, in the raw text and in the text with quotes,
-backslashes, `$`, braces and commas deleted; nothing is decoded. A command that names no declared
-command is allowed.
+In a session that a binding scopes, every Bash call must be one plain command. A command that is not
+plain is withheld as `UNVERIFIABLE:`, whatever it names, with a message that says how to split the work
+into plain calls and write the dispatch plainly: a dispatcher name assembled at run time (a variable
+joined to text, a glob, command output) is not in the raw text, so no name check can clear a command
+that is not plain. A plain command that names a declared command other than as its command word (a
+`git -c` alias that runs it, say), compared without regard to case, is withheld too. A plain command
+that names no declared command is allowed.
 
 The hook reads labels only from the brief, only at column 0, and only as the exact label followed by
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
@@ -246,16 +248,25 @@ duplicate label, an unreadable brief, a failed or timed-out git probe, an exhaus
 an authority that fails or prints anything other than one commit id. A linked worktree is scoped
 by its main worktree's registry, found through git or, when git cannot run (a broken shared
 configuration), through the raw `.git` and `commondir` files. A linked worktree whose main worktree
-cannot be located (a git directory separated from the main worktree) withholds every background
-Bash call; a foreground call there proceeds with a note. When git cannot resolve the session
+cannot be located (a git directory separated from the main worktree) withholds every Bash call. When
+git cannot say where the main worktree is (a failed or timed-out probe), the raw `.git` and
+`commondir` files are read instead. A registry without a binding never ends the search: the session
+repository's registry, its main worktree's, and every registry on the cwd's ancestors are read,
+nearest first, and the first binding decides, so a registry of `{"version": 1}` checked out, written
+or nested below an orchestrated tree cannot hide its binding. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
 no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
 moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one
 that is not the registry's own (a nested repository, a moved top level), and a binding is found,
 every dispatch is withheld as `UNVERIFIABLE:`. The authority runs from the top level of the worktree
-whose registry binds the dispatch, so a relative `authority.argv` is always the registry's own. A malformed binding, a registry that cannot be read (including a FIFO,
-a device or a symlink in its place), or an ancestor search that cannot be made withholds every
-background Bash call. A foreground call is then allowed with a note.
+whose registry binds the dispatch, so a relative `authority.argv` is always the registry's own. A
+dispatch is withheld as `UNVERIFIABLE:` when the environment sets a variable that moves the
+repository, index, object store or history git reads (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_QUARANTINE_PATH`,
+`GIT_NAMESPACE`, `GIT_REPLACE_REF_BASE`, `GIT_GRAFT_FILE`, `GIT_SHALLOW_FILE`): the hook's reads ignore
+it, but the dispatch inherits it. A malformed binding, a registry that cannot be read (including a
+FIFO, a device or a symlink in its place), or an ancestor search that cannot be made withholds every
+Bash call, foreground or background, until an operator repairs it.
 
 Limits:
 
@@ -267,13 +278,18 @@ Limits:
 - A misdeclared target bypasses the check.
 - The authority's own correctness is the adopter's concern.
 - Delivery acceptance is not checked.
-- A dispatcher name built at run time from parts the hook cannot see joined (a variable assembled
-  from pieces, command output, a brace or glob pattern that splits the name) is not found.
-- Some commands are refused although they dispatch nothing: any command that mentions a declared
-  command name outside one plain dispatch, such as `grep orch-dispatch` or a commit message that
-  names it, and any command that is not plain and uses ANSI-C or locale quoting. A dispatch joined to
-  another command or redirected (`> log`, `</dev/null`, `&&`, `;`, `&`) is refused as well; run the
-  dispatch as a call of its own, and redirect its output another way.
+- A plain command whose program runs an argument or its own configuration as shell text (a `git -c`
+  alias, a pager or editor setting, a package script, a makefile) can assemble a dispatcher name the
+  hook does not see; only a name written in full in the command is found.
+- The dispatcher's own options other than the brief option (a `--family` or a working directory, say)
+  are its own; the hook checks the brief and the repository, not what those options select.
+- Variables that configure git without moving the repository (`GIT_CONFIG_*`, `GIT_CONFIG_PARAMETERS`)
+  are not refused: the hook's own reads drop them, but the verifier inherits them.
+- Many commands are refused although they dispatch nothing: in a session a binding scopes, every
+  command that is not plain (a pipeline, `&&`, a redirection, a variable, a glob, a wrapper), and any
+  plain command that mentions a declared command name outside one plain dispatch, such as
+  `grep orch-dispatch` or a commit message that names it. Run each command as a call of its own, and
+  redirect output another way.
 - Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
   endings or a filter) differs by content from the pin and is refused.
 

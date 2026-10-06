@@ -10365,6 +10365,13 @@ _RDP_DEADLINE = [None]   # the monotonic deadline of the decision in progress, s
 _RDP_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
 _RDP_MAX_LISTED = 20
 _RDP_OID_LEN = {"sha1": 40, "sha256": 64}
+# The ambient variables that move the repository, index, object store or history git reads. The hook's own
+# git probes and the authority scrub every GIT_* variable; a dispatch inherits the session's environment,
+# so with any of these set the verifier may read another revision than the one reconciled.
+_RDP_AMBIENT_GIT = frozenset((
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"))
 
 
 def _rdp_overdue():
@@ -10697,8 +10704,10 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
         return ("unverifiable", "the check ran out of its {} second budget before the authority "
                 "command".format(_RDP_BUDGET))
     try:
-        auth = subprocess.run(cfg["argv"] + [brief], capture_output=True, text=True,
-                              timeout=auth_timeout, cwd=auth_dir or root)
+        # The _isolate_git_env scrub, as for every git probe: an ambient GIT_DIR or GIT_WORK_TREE cannot
+        # point the authority at another repository.
+        auth = subprocess.run(cfg["argv"] + [brief], capture_output=True, text=True, timeout=auth_timeout,
+                              cwd=auth_dir or root, env=_isolate_git_env(dict(os.environ)))
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return ("unverifiable", "the authority command failed to run ({})".format(exc))
     if auth.returncode != 0:
@@ -10926,18 +10935,12 @@ def _rdp_mentions(command, commands):
     return sorted(name for name in commands if any(name.casefold() in t for t in texts))
 
 
-def _rdp_opaque_quoting(command):
-    """Whether command holds ANSI-C or locale quoting ($'...' or $"..."): bash decodes such a body (escapes,
-    a NUL that ends the word, a translation) into text this hook does not read, so no name check over the
-    raw text can see what it runs."""
-    return "$'" in command or '$"' in command
-
-
 def _rdp_registry_dir(cwd):
-    """Where git cannot resolve the session's top level, find the registry that would scope this hook by
-    walking cwd's ancestors (the resolved path, then the path as written, so a cwd that no longer exists
-    still finds a registry above it) with the truncation guard's no-follow registry probe. ("found", dir),
-    ("none", None) when no ancestor carries one, or ("fail", detail) when the walk cannot be made."""
+    """Every directory carrying a registry on cwd's ancestors, nearest first (the resolved path, then the
+    path as written, so a cwd that no longer exists still finds a registry above it), found with the
+    truncation guard's no-follow registry probe: ("found", [dir, ...]), the list empty when no ancestor
+    carries one, or ("fail", detail) when the walk cannot be made. Every registry is listed, not only the
+    nearest, so a registry without a binding cannot hide one above it."""
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
         return ("fail", "the session cwd {!r} is not an absolute path".format(cwd))
     chains = []
@@ -10947,8 +10950,11 @@ def _rdp_registry_dir(cwd):
             chain.append(os.path.dirname(chain[-1]))
         if chain not in chains:
             chains.append(chain)
+    found = []
     for chain in chains:
         for path in chain:
+            if path in found:
+                continue
             try:
                 fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
             except (FileNotFoundError, NotADirectoryError):
@@ -10957,20 +10963,18 @@ def _rdp_registry_dir(cwd):
                 return ("fail", "the ancestor {} cannot be opened ({})".format(path, exc))
             try:
                 if _orch_dirfd_has_registry(fd):
-                    return ("found", path)
+                    found.append(path)
             finally:
                 os.close(fd)
-    return ("none", None)
+    return ("found", found)
 
 
 def _rdp_withhold(tool_input, detail):
-    """The policy for a registry state that cannot say which commands dispatch: a background call is
-    withheld as UNVERIFIABLE; a foreground call proceeds with a note, so a broken registry does not block
-    every shell command."""
-    if not isinstance(tool_input, dict) or tool_input.get("run_in_background", False) is not False:
-        return ("unverifiable", "{}; a background dispatch is withheld until it is repaired".format(detail))
-    return ("note", "AIQT rule vfxcmt: {}; background Bash calls are refused until it is repaired".format(
-        detail))
+    """The policy for a registry state that cannot say which commands dispatch (a malformed registry or
+    binding, a registry or main worktree that cannot be read or located): every Bash call, foreground or
+    background, is withheld as UNVERIFIABLE, since any of them may be a dispatch. The registry is frozen
+    against the assistant's own file tools too, so an operator repairs it."""
+    return ("unverifiable", "{}; every Bash call is withheld until an operator repairs it".format(detail))
 
 
 def _rdp_decide(data):
@@ -11087,9 +11091,12 @@ def _rdp_decide_within(data):
     the git-resolved top level, the main worktree of a linked worktree (through git, or through the raw
     .git and commondir files where git cannot run), and the cwd's ancestors. Git success can only ADD a
     binding, never remove one, so a repository configuration (core.worktree, a separate git directory) or a
-    broken shared configuration cannot turn the check off. A binding found anywhere but the session
-    repository's own registry (or its main worktree's) is FOREIGN: a dispatch under it is a cannot-evaluate,
-    since the nested or redirected repository it would be checked in is not the one the registry binds."""
+    broken shared configuration cannot turn the check off, and a registry WITHOUT a binding never ends the
+    search: every registry of the session repository and its main worktree is read, then every registry on
+    the cwd's ancestors, nearest first, and the first binding (or malformed registry) decides. A binding
+    found anywhere but the session repository's own registry (or its main worktree's) is FOREIGN: a
+    dispatch under it is a cannot-evaluate, since the nested or redirected repository it would be checked
+    in is not the one the registry binds."""
     cwd = data.get("cwd")
     tool_input = data.get("tool_input")
     root = _orch_root(data)
@@ -11100,7 +11107,10 @@ def _rdp_decide_within(data):
         try:
             main_top, why = _rdp_main_worktree(root)
         except OSError as exc:
-            main_top, why = None, str(exc)
+            # A failed or timed-out probe: the raw .git and commondir files still name the main worktree
+            # of a linked worktree; only where they do not is the scope unknown.
+            main_top = _rdp_gitfile_main(root)
+            why = None if main_top is not None else str(exc)
         if main_top is not None:
             own.append(main_top)
         withheld = why
@@ -11109,31 +11119,38 @@ def _rdp_decide_within(data):
         if main_top is not None:
             own.append(main_top)
     for reg_dir in own:
-        status, reg = _orch_registry(reg_dir, nofollow=True)
-        if status == "absent":
-            continue
-        binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
-        if binding is None:
-            break
-        return _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=False)
+        binding, cfg = _rdp_scope(reg_dir)
+        if binding is not None:
+            return _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=False)
     # git cannot resolve the session's top level (no repository, a broken configuration, a refused ownership
     # check, a deleted cwd), or resolves one without a binding (a worktree or repository nested inside an
     # orchestrated tree, or a top level moved off the cwd's ancestors by core.worktree). Neither is proof the
-    # session is out of scope: the registry is looked for on cwd's ancestors, and a binding found there
-    # scopes the session.
-    where, found_dir = _rdp_registry_dir(cwd)
+    # session is out of scope: the registries on cwd's ancestors are read, nearest first, and the first
+    # binding found there scopes the session.
+    where, found = _rdp_registry_dir(cwd)
     if where == "fail":
-        return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found_dir)
-    if where == "found" and not any(os.path.realpath(found_dir) == os.path.realpath(d) for d in own):
-        status, reg = _orch_registry(found_dir, nofollow=True)
-        if status != "absent":
-            binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
-            if binding is not None:
-                foreign = root is not None and os.path.realpath(found_dir) != os.path.realpath(root)
-                return _rdp_bound(data, tool_input, binding, cfg, root, found_dir, foreign=foreign)
+        return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found)
+    seen = {os.path.realpath(d) for d in own}
+    for found_dir in found:
+        if os.path.realpath(found_dir) in seen:
+            continue
+        binding, cfg = _rdp_scope(found_dir)
+        if binding is not None:
+            foreign = root is not None and os.path.realpath(found_dir) != os.path.realpath(root)
+            return _rdp_bound(data, tool_input, binding, cfg, root, found_dir, foreign=foreign)
     if withheld:
         return _rdp_withhold(tool_input, withheld)
     return ("allow", "")
+
+
+def _rdp_scope(reg_dir):
+    """The binding of the registry at reg_dir as _rdp_binding gives it: (None, None) when there is no
+    registry or it declares no binding, so the search goes on; ("bad", detail) for a registry that cannot
+    be read or parsed; ("ok", cfg) for a well-formed binding."""
+    status, reg = _orch_registry(reg_dir, nofollow=True)
+    if status == "absent":
+        return (None, None)
+    return _rdp_binding(reg) if status == "ok" else ("bad", reg)
 
 
 def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
@@ -11152,32 +11169,34 @@ def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
 
 
 def _rdp_not_plain(cfg, names, why):
-    """The UNVERIFIABLE message for a command that may run a declared dispatch command but is not a provably
-    plain dispatch."""
+    """The UNVERIFIABLE message for a command that is not a provably plain command, or a plain command that
+    names a declared dispatch command other than as its command word."""
     name = names[0] if names else sorted(cfg["commands"])[0]
-    return ("unverifiable", "the command {} but is not a plain dispatch ({}), so the hook cannot tell what "
-            "it runs, which brief it reads or where; write the dispatch plainly, as the only command of "
-            "the call: {} [OPTIONS] {} PATH, literal printable ASCII words only (a single-quoted segment, or "
-            "a double-quoted one holding no shell character, may appear inside a word), the brief option "
-            "last, no wrapper, variable, operator, redirection or second command".format(
-                "names the declared dispatch command " + name if names else "uses ANSI-C or locale quoting",
-                why, name, cfg["brief_option"]))
+    return ("unverifiable", "the command {} ({}), so the hook cannot tell whether it runs a review dispatch, "
+            "which brief it reads or where; in a session whose registry binds review dispatch, every Bash "
+            "call must be one plain command: literal printable ASCII words only (a single-quoted segment, or "
+            "a double-quoted one holding no shell character, may appear inside a word), no wrapper, "
+            "variable, glob, operator, redirection or second command; split the work into plain calls, and "
+            "write a dispatch as {} [OPTIONS] {} PATH with the brief option last".format(
+                "names the declared dispatch command " + name + " other than as a plain dispatch" if names
+                else "is not plain", why, name, cfg["brief_option"]))
 
 
 def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
-    """The decision for a Bash payload in a session with a well-formed binding. Only a provably plain
-    command (_rdp_plain_words) whose command word is a declared command gets the pin check; a command that
-    is not plain is UNVERIFIABLE when it names a declared command (_rdp_mentions) or holds ANSI-C or locale
-    quoting, and a plain command that names none is allowed. Names are compared without regard to case,
-    since a case-insensitive filesystem runs ORCH-DISPATCH as orch-dispatch."""
+    """The decision for a Bash payload in a session with a well-formed binding. Every command that is not
+    provably plain (_rdp_plain_words) is UNVERIFIABLE, whatever it names: a name assembled at run time
+    (a variable joined to text, a glob, command output) cannot be seen in the raw text. A provably plain
+    command whose command word is a declared command gets the pin check; a plain command that names a
+    declared command elsewhere (_rdp_mentions) is UNVERIFIABLE, and one that names none is allowed. Names
+    are compared without regard to case, since a case-insensitive filesystem runs ORCH-DISPATCH as
+    orch-dispatch."""
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return ("unverifiable", "the Bash tool_input carries no command string")
     commands = cfg["commands"]
     words, why = _rdp_plain_words(command)
     if words is None:
-        names = _rdp_mentions(command, commands)
-        return _rdp_not_plain(cfg, names, why) if names or _rdp_opaque_quoting(command) else ("allow", "")
+        return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
     word = _rdp_basename(words[0])
     if word.casefold() not in {name.casefold() for name in commands}:
         # The one dispatch's own arguments may mention a declared name (in a brief path, say); a plain
@@ -11239,6 +11258,12 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
                           "{}: {}".format(brief, target))
         return ("note", "AIQT rule vfxcmt: the brief {} declares target {}, so no revision was "
                 "reconciled; a review of committed work must pin it".format(brief, target))
+    ambient = sorted(k for k in os.environ if k in _RDP_AMBIENT_GIT)
+    if ambient:
+        return ("unverifiable", "the environment sets {}, which moves the repository, index, object store "
+                "or history git reads; the {} dispatch runs with it, so the revision it reviews is not the "
+                "one this hook reconciles in {}; unset it and dispatch again".format(
+                    ", ".join(ambient), word, root))
     return _rdp_reconcile(cfg, found, root, brief, root, reg_dir)
 
 
@@ -11246,10 +11271,12 @@ def review_dispatch_pin(data):
     """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
     immutable, authoritative revision whose changed set is the declared review set and whose declared
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
-    dispatch runs. Inert without a review_dispatch binding.
+    dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
+    is not one provably plain command is withheld, and a malformed registry or binding withholds every
+    Bash call.
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
-    declared non-revision target, a malformed binding on a foreground call, or a branch label that does
-    not resolve to the pin is allowed with a note. A crash reaches main's PreToolUse fail-closed exit 2.
+    declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a
+    note. A crash reaches main's PreToolUse fail-closed exit 2.
     Hookless dispatchers run it as a preflight: `aiqt_hooks.py review_dispatch_pin` with the payload on
     stdin."""
     tool_name = data.get("tool_name")
