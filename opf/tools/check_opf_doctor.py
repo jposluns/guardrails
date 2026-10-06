@@ -2857,6 +2857,44 @@ def _claude_hook_self_test():
                                ("push", "git push origin main"), ("fetch", "git fetch origin")):
                 allow("bash-r21-no-write-" + label + "-read-form-allowed",
                       payload("Bash", dict(command=cmd), src_dir))
+            # ROUND 22 (QA round 19): an output option is a write in EVERY git subcommand. git
+            # blame, annotate and pickaxe inherit --output from the diff options (-h lists none),
+            # and git resolves its value from the repository top, so from a product subdirectory
+            # git blame --output=docs/./STATUS.md free truncated the declared view and from the
+            # synthetic pack repository's docs directory the same form truncated the hook. Every
+            # GIT_NO_WORKTREE_WRITE member gets a bound output-bearing deny vector (the ./ spelling
+            # from the src subdirectory), --output gets every abbreviation, and the hook-file case
+            # runs plain and not plain. On the pin 4136bd3a every -denied vector here ALLOWED.
+            for name in sorted(no_write):
+                deny("bash-r22-no-write-" + name + "-output-bound-denied",
+                     payload("Bash", dict(command="git " + name + " --output=docs/./STATUS.md x"),
+                             src_dir), "product root")
+            for opt in ("--o", "--ou", "--out", "--outp", "--outpu", "--output"):
+                deny("bash-r22-blame-abbrev" + opt + "-bound-denied",
+                     payload("Bash", dict(command="git blame " + opt + "=docs/./STATUS.md free"),
+                             src_dir), "product root")
+                deny("bash-r22-blame-abbrev" + opt + "-separate-bound-denied",
+                     payload("Bash", dict(command="git blame " + opt + " docs//STATUS.md free"),
+                             src_dir), "product root")
+            hook_rel = "opf/enforcement/claude/./pretooluse_deny.py"
+            for name in ("blame", "annotate", "pickaxe"):
+                deny("bash-r22-" + name + "-output-pack-hook-denied",
+                     payload("Bash", dict(command="git " + name + " --output=" + hook_rel
+                                          + " free"), pack_docs), "pack own tree", via=pack_hook)
+                deny("bash-r22-" + name + "-outp-pack-hook-nonplain-denied",
+                     payload("Bash", dict(command="git " + name + " --outp=" + hook_rel
+                                          + " free; true"), pack_docs), "pack own tree",
+                     via=pack_hook)
+            for label, cmd, cwd in (
+                    ("blame-output-elsewhere", "git blame --output=" + os.path.join(
+                        elsewhere, "blame.txt") + " free", pack_docs),
+                    ("blame-plain", "git blame free", pack_docs),
+                    ("grep-index", "git grep --index x", None),
+                    ("fetch-filter", "git fetch --filter=blob:none origin", None),
+                    ("reflog-expire", "git reflog expire --expire=now --all", None)):
+                allow("bash-r22-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), cwd or src_dir),
+                      via=pack_hook if cwd else None)
             # The two reviewer reproductions (QA round 18), bound and from the synthetic pack
             # repository's docs directory: each ALLOWED on ee28f930 and rewrote the view or the
             # pack file when run.
