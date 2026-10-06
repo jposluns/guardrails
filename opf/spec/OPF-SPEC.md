@@ -8,7 +8,7 @@ the relocator `opf migrate`, the
 synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
 record author `opf record`,
 ship in later releases).
-Date: 2026-10-03 (UTC).
+Date: 2026-10-05 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
@@ -174,8 +174,8 @@ The imported files are registered managed leaves beside the clean-series files, 
 enabled-type roster; `worklog` uses `worklog.imported.toml` instead of an imported index.
 Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0 `opf init`
 and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and
-empty; enabling a further type or module later MUST create its imported leaf in the same act as its
-clean index. They are machine
+empty; in a store that declares `spec_version` 1.3.0 or later, enabling a further type or module
+later MUST create its imported leaf in the same act as its clean index. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
 imported-series release MUST keep these files inline in either store layout and MUST NOT provide
 views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
@@ -890,7 +890,10 @@ Other historical type fields MUST NOT be absent without an explicit missingness 
 fields MUST retain their declared value types and vocabularies; unknown keys still fail. Missing
 historical timestamps and type fields MUST be accounted for in `unrecorded = [{field, reason}]`,
 with one row per absent field, no duplicate fields and no row claiming a supplied field absent.
-`field` MUST name a field in that type's schema. The closed reasons are `not_recorded_in_source`,
+`field` MUST name a field in that type's schema. A missingness row whose `field` names an omitted
+exempt envelope field, one of the optional envelope fields `proposed_from`, `summary`, `links`,
+`refs` and registered `x-<vendor>` tables where the type's own schema does not require it, MUST be
+refused. The closed reasons are `not_recorded_in_source`,
 `unparsed`, `ambiguous`, `conflicting`, and `not_applicable`. The first means "never recorded
 historically in the supplied source", not a claim about all history. The required imported
 envelope and provenance fields MUST NOT be waived through missingness. Strict current resolution
@@ -1512,6 +1515,8 @@ store takes the 1.0.0 delta above directly to 1.2.0.
 For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and
 create-only initialization of missing imported managed leaves for enabled types, and addition
 of missing imported counter rows at zero only where no imported ancestry exists.
+Where imported ancestry exists in a namespace, the imported counter row added for it MUST hold the
+highest imported ID number in that namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
 a populated collision, missing ancestral counter or unprovable prestate refuses.
 The upgrade MUST refuse before any write a store whose `[unmanaged]` entry equals or contains a
