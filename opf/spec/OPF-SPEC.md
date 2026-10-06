@@ -2102,9 +2102,10 @@ An implementation MUST declare, in the documentation of each release and in ever
 it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
 worklog storage generation. An implementation that declares no class MUST be treated as
 upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or contradictory
-declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. An absent
-declaration is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
-MUST NOT authorize any store operation.
+declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A declaration
+that is absent, or that omits its release identity, its `spec_version`, its homes generation, or its
+worklog storage generation, is malformed rather than one that declares no class: it MUST yield
+cannot-evaluate and MUST NOT authorize any store operation.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease

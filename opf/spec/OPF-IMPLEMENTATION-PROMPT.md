@@ -1053,9 +1053,11 @@ Build the primitives every later step relies on.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed, as a later revision of section 16.1 states: "An absent declaration is malformed
-    rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any
-    store operation"; section 16.1 at the pinned commit does not yet name the absent case.
+    malformed, as a later revision of section 16.1 states: "A declaration that is absent, or that
+    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+    generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate
+    and MUST NOT authorize any store operation"; section 16.1 at the pinned commit does not yet name
+    the absent case.
     Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
