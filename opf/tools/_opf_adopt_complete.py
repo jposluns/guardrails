@@ -61,7 +61,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     (`opf doctor --require-store`, optionally with the recipe's `--root .`, or `sh` running a planned recipe
     member of the same row that is the pack's shipped recipe) with no `if:`, every step key within its
     value rule (continue-on-error only the plain literal false, timeout-minutes a positive integer literal)
-    and a bash shell (_ci_asserts_store). A step that mentions the assertion in any other
+    and a bash shell, in a job that carries runs-on and whose permissions, like the workflow's, take one
+    of GitHub's forms (_ci_asserts_store). A step that mentions the assertion in any other
     form is CANNOT-EVALUATE, named, never VALID or INVALID, since this check proves nothing about other
     shell; with no step mentioning it the check is INVALID; undecodable or unparseable CI (a control
     character, an unparsed flow collection) is CANNOT-EVALUATE; every planned view
@@ -79,10 +80,11 @@ check 2 trusts the planning inventory the caller supplies once it re-seals to th
 check 4's doctor verdict is only as complete as the caller's observations; the CI assertion test parses the
 digest-pinned planned CI members through a block-YAML subset (an anchor, a flow step, a control character or
 a multi-line plain scalar is CANNOT-EVALUATE), accepts only the canonical step forms and reads no other
-shell, knows the opf program by its name (`opf`, or `python3 -I -B` running a relative `opf.py`) and the
-recipe only by byte equality with the pack's shipped recipe, does not model what an earlier `uses:` step, the
-runner image or a container puts on the path or into the environment, nor which triggers run the workflow,
-and is not a run of CI.
+shell, knows the opf program by its name (`opf`, or `python3 -I -B` running the shipped `opf/tools/opf.py`)
+and the recipe only by byte equality with the pack's shipped recipe, does not model what an earlier `uses:`
+step, the runner image or a container puts on the path or into the environment, nor which triggers run the
+workflow, validates of the workflow schema only the job and workflow keys it names (not `on:`, `run-name:`
+or `concurrency:` at the workflow level), and is not a run of CI.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -139,12 +141,14 @@ _YAML_NULL_BOOL = frozenset("null Null NULL y Y yes Yes YES true True TRUE On ON
 # The plain scalars YAML 1.1 or the 1.2 core schema resolves to something other than a string: every null,
 # bool, int (binary, octal, decimal, hexadecimal, sexagesimal, `_`-grouped, signed), float (decimal,
 # exponent, sexagesimal, infinity, not-a-number) and timestamp form, read as a superset (a bare `.` is
-# included), and YAML 1.1's value `=` and merge `<<`. A plain scalar that fully matches none of them is a
-# string (_string_scalar): `1st assertion` is one, `5`, `1_0`, `.inf` and `2001-12-14` are not.
+# included), and YAML 1.1's value `=` and merge `<<`. A float carries one decimal point: the 1.2 core schema
+# and the common YAML 1.1 resolvers read a plain scalar with two or more (`1.2.3`) as a string, though the
+# YAML 1.1 type page's own float pattern admits more dots. A plain scalar that fully matches none of them
+# is a string (_string_scalar): `1st assertion` and `1.2.3` are, `5`, `1_0`, `.inf` and `2001-12-14` not.
 _YAML_NONSTRING_RE = re.compile(
     r"~|null|Null|NULL|y|Y|yes|Yes|YES|n|N|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
     r"|[-+]?0b[01_]+|[-+]?0o?[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])*"
-    r"|[-+]?(?:[0-9][0-9_]*(?::[0-5]?[0-9])*)?\.[0-9_.]*(?:[eE][-+]?[0-9]+)?"
+    r"|[-+]?(?:[0-9][0-9_]*(?::[0-5]?[0-9])*)?\.[0-9_]*(?:[eE][-+]?[0-9]+)?"
     r"|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
     r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?)?|=|<<")
@@ -808,12 +812,19 @@ def _strip_plain_comment(rest):
 
 # The canonical CI assertion (spec 14.1 check 4). Adoption writes the CI step itself, so a step counts only
 # in one exact form, and this check proves nothing about what any other shell text does: the opf program
-# (`opf`, or `python3 -I -B` running a relative `opf.py`, the recipe's own launch) with exactly the
-# arguments `doctor --require-store`, optionally followed by the recipe's `--root .`; or `sh` running a
-# planned recipe member of the same CI row (optionally `./`-prefixed) with no argument or the root `.`, the
-# invocation the recipe's usage line names, where the recipe's bytes are the pack's shipped recipe.
+# (`opf`, or `python3 -I -B` running a shipped OPF CLI path, _OPF_CLI_PATHS) with exactly the arguments
+# `doctor --require-store`, optionally followed by the recipe's `--root .`; or `sh` running a planned recipe
+# member of the same CI row (optionally `./`-prefixed) with no argument or the root `.`, the invocation the
+# recipe's usage line names, where the recipe's bytes are the pack's shipped recipe.
 _CANONICAL_ROOT = "."
-_OPF_PY_RE = re.compile(r"(?:[A-Za-z0-9_-]+/)*opf\.py")
+# The closed set of repository-relative OPF CLI paths a canonical `python3 -I -B` line may run: the pack
+# sits at opf/ (opf/enforcement/ci/github-actions.yml) and its recipe launches opf/tools/opf.py
+# (opf-ci.sh's default OPF_TOOL, ../../tools/opf.py beside it). Equality, never a pattern: an operand such as
+# `-h/opf.py` is an interpreter option (python3 prints its help and exits 0, running no OPF).
+_OPF_CLI_PATHS = ("opf/tools/opf.py",)
+# One path segment of a canonical script operand: a plain name, so no segment is empty, `.`, `..` or
+# option-shaped (a leading `-`).
+_PLAIN_SEGMENT_RE = re.compile(r"(?!\.\.?\Z)[A-Za-z0-9_.][A-Za-z0-9_.-]*")
 _SHIPPED_RECIPE = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
 # The only keys a canonical step may carry: an `if:`, an `env:`, a `working-directory:` or a `uses:` can
 # skip the step, change the program it resolves or move the root `.` it asserts. Each carries a value rule
@@ -828,22 +839,41 @@ _CANONICAL_STEP_KEYS = frozenset(("name", "id", "run", "shell", "continue-on-err
 # that rule (a job env can reach the step's shell: BASH_ENV, SHELLOPTS).
 _CANONICAL_JOB_KEYS = frozenset(("name", "runs-on", "steps", "timeout-minutes", "continue-on-error",
                                  "permissions", "env", "defaults"))
+# GitHub's permission forms (workflow syntax, `permissions` and `jobs.<job_id>.permissions`,
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions):
+# `read-all`, `write-all`, an empty flow mapping, or a mapping of scope names to an access level. Each
+# scope maps to the levels it accepts (id-token only write or none, models only read or none); a scope
+# missing here or a level outside its set refuses, which leaves a valid workflow unproven, never an
+# invalid one VALID.
+_PERMISSION_WHOLE = frozenset(("read-all", "write-all"))
+_RWN = frozenset(("read", "write", "none"))
+_PERMISSION_SCOPES = {
+    "actions": _RWN, "attestations": _RWN, "checks": _RWN, "contents": _RWN, "deployments": _RWN,
+    "discussions": _RWN, "id-token": frozenset(("write", "none")), "issues": _RWN,
+    "models": frozenset(("read", "none")), "packages": _RWN, "pages": _RWN, "pull-requests": _RWN,
+    "repository-projects": _RWN, "security-events": _RWN, "statuses": _RWN}
 # A step id: a letter or `_`, then letters, digits, `_` and `-`.
 _STEP_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
+def _plain_path(path):
+    """Whether `path` is a repository-relative path of plain-name segments (_PLAIN_SEGMENT_RE)."""
+    return all(_PLAIN_SEGMENT_RE.fullmatch(segment) for segment in path.split("/"))
+
+
 def _canonical_assertion(run, planned):
-    """The canonical form `run` is exactly: ("doctor", None), ("recipe", path) for a path in `planned`,
-    else None. `run` is one line (one trailing newline allowed) of single-space-separated words."""
+    """The canonical form `run` is exactly: ("doctor", None), ("recipe", path) for a path in `planned`
+    whose segments are plain names (_plain_path), else None. `run` is one line (one trailing newline
+    allowed) of single-space-separated words."""
     words = (run[:-1] if run.endswith("\n") else run).split(" ")
     flag = CI_STORE_ASSERTION.decode("ascii")
     if words[:1] == ["opf"]:
         args = words[1:]
-    elif words[:3] == ["python3", "-I", "-B"] and len(words) > 3 and _OPF_PY_RE.fullmatch(words[3]):
+    elif words[:3] == ["python3", "-I", "-B"] and len(words) > 3 and words[3] in _OPF_CLI_PATHS:
         args = words[4:]
     elif words[:1] == ["sh"] and len(words) in (2, 3) and words[2:] in ([], [_CANONICAL_ROOT]):
         path = words[1][2:] if words[1].startswith("./") else words[1]
-        return ("recipe", path) if path in planned else None
+        return ("recipe", path) if path in planned and _plain_path(path) else None
     else:
         return None
     return ("doctor", None) if args in (["doctor", flag], ["doctor", flag, "--root", _CANONICAL_ROOT]) else None
@@ -880,9 +910,16 @@ def _canonical_value(key, value):
 
 def _flow_values(value, opener):
     """The entry values of `value`, a reader flow collection opening with `opener` (`[`, a sequence, or `{`,
-    a mapping), when every entry is a scalar (a mapping entry's key set aside), each a plain str or a _Quoted
-    (its text undecoded: only its kind is read); None for any other value, kind or a nested collection. The
-    reader has already parsed the collection in full (_Workflow._flow_node)."""
+    a mapping), when every entry is a scalar (a mapping entry's key set aside, _flow_pairs), each a plain
+    str or a _Quoted (its text undecoded: only its kind is read); None for any other value, kind or a nested
+    collection. The reader has already parsed the collection in full (_Workflow._flow_node)."""
+    pairs = _flow_pairs(value, opener)
+    return None if pairs is None else [item for _, item in pairs]
+
+
+def _flow_pairs(value, opener):
+    """The (key, value) entries of `value` as _flow_values reads them, each key None in a sequence and,
+    in a mapping, a plain str or a _Quoted (undecoded) like a value."""
     text = value.text if isinstance(value, _Flow) else ""
     if text[:1] != opener:
         return None
@@ -893,18 +930,32 @@ def _flow_values(value, opener):
         entry = _FLOW_ENTRY_RE.match(body, j)
         if entry is None or (entry.group(1) is None) != (opener == "["):
             return None
-        item = entry.group(2)
-        out.append(_Quoted(item[1:-1]) if item[0] in "'\"" else item)
+        key, item = entry.group(1), entry.group(2)
+        if key is not None:
+            key = _Quoted(key[1:-1]) if key[0] in "'\"" else key
+        out.append((key, _Quoted(item[1:-1]) if item[0] in "'\"" else item))
         j = entry.end()
     return out
+
+
+def _permissions_value(value):
+    """Whether `value` is one of GitHub's permission forms (_PERMISSION_WHOLE, _PERMISSION_SCOPES): the
+    string scalar read-all or write-all, an empty flow mapping, or a block or flow mapping whose every key
+    is a known scope and whose every value is a string scalar naming a level that scope accepts."""
+    if _string_scalar(value):
+        return value in _PERMISSION_WHOLE
+    pairs = list(value.items()) if type(value) is dict else _flow_pairs(value, "{")
+    return pairs is not None and all(
+        key in _PERMISSION_SCOPES and _string_scalar(level) and level in _PERMISSION_SCOPES[key]
+        for key, level in pairs)
 
 
 def _canonical_job_value(key, value):
     """Whether `value` meets the value rule of canonical job key `key` (_CANONICAL_JOB_KEYS): name a string
     scalar (_string_scalar); runs-on a string scalar or a non-empty flow or block sequence of string
     scalars; steps a block sequence; timeout-minutes and continue-on-error the canonical step's rules (a
-    positive integer literal; only the plain literal false); permissions a string scalar or a block or flow
-    mapping of string scalars; defaults a block mapping holding only a run mapping of shell and
+    positive integer literal; only the plain literal false); permissions one of GitHub's permission forms
+    (_permissions_value); defaults a block mapping holding only a run mapping of shell and
     working-directory (_shell_of and the working-directory rule judge those). env and any other key are
     outside it."""
     if key == "name":
@@ -917,8 +968,7 @@ def _canonical_job_value(key, value):
     if key in ("timeout-minutes", "continue-on-error"):
         return _canonical_value(key, value)
     if key == "permissions":
-        scopes = list(value.values()) if type(value) is dict else _flow_values(value, "{")
-        return _string_scalar(value) or scopes is not None and all(_string_scalar(scope) for scope in scopes)
+        return _permissions_value(value)
     if key == "defaults":
         return (type(value) is dict and set(value) == {"run"} and type(value["run"]) is dict
                 and set(value["run"]) <= {"shell", "working-directory"})
@@ -971,14 +1021,15 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
     integer literal, shell bash); its job is canonical too, carrying only _CANONICAL_JOB_KEYS, each value
     within its rule (_canonical_job_value), so a job with `needs:`, `if:`, `strategy:`, `services:`,
     `container:`, `uses:`, `concurrency:`, `environment:`, `outputs:` or any other key is refused, a valid
-    workflow included (the assertion belongs in a job of its own); neither the job nor the workflow sets
-    `env:` or a default working directory; its shell (the step's,
-    else the job's and then the workflow's default) is bash; and no earlier step of its job runs
-    shell (it could export variables or PATH entries into the step). `refused` names every other step whose
-    run value mentions the assertion (_mentions_assertion): the caller reports those CANNOT-EVALUATE, never
-    VALID and never INVALID, because this check proves nothing about what other shell text does. A step
-    running a planned recipe that is absent or drifted asserts nothing and is not refused (the member
-    finding names it). Undecodable or unparseable CI raises Unevaluable: CANNOT-EVALUATE, never a pass."""
+    workflow included (the assertion belongs in a job of its own); the job carries runs-on (GitHub requires
+    it of a job that runs steps) and a workflow permissions value is one of GitHub's forms
+    (_permissions_value); neither the job nor the workflow sets `env:` or a default working directory;
+    its shell (the step's, else the job's and then the workflow's default) is bash; and no earlier step of
+    its job runs shell (it could export variables or PATH entries into the step). `refused` names every
+    other step whose run value mentions the assertion (_mentions_assertion): the caller reports those
+    CANNOT-EVALUATE, never VALID and never INVALID, because this check proves nothing about what other
+    shell text does. A step running a planned recipe that is absent or drifted asserts nothing and is not
+    refused (the member finding names it). Undecodable or unparseable CI raises Unevaluable: CANNOT-EVALUATE, never a pass."""
     recipes = recipes or {}
     planned = list(recipes) if planned is None else list(planned)
     try:
@@ -1025,6 +1076,10 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
             elif not all(_canonical_job_value(key, value) for key, value in job.items()):
                 why = "the job's {} value is outside the canonical job's value rule".format(
                     ", ".join(sorted(key for key, value in job.items() if not _canonical_job_value(key, value))))
+            elif "runs-on" not in job:
+                why = "its job has no runs-on (GitHub requires one of a job that runs steps)"
+            elif "permissions" in doc and not _permissions_value(doc["permissions"]):
+                why = "the workflow's permissions value is outside GitHub's permission forms"
             elif any("working-directory" in table for table in defaults):
                 why = "a default working directory moves the root it asserts"
             elif _shell_of(step, *defaults) != "bash":
@@ -1221,7 +1276,7 @@ _CI_PATH = ".github/workflows/opf.yml"
 # A recipe-delegating workflow shaped like the shipped pack (opf/enforcement/ci): the step runs the planned
 # recipe in the invocation its usage line names, and the planned recipe is the pack's shipped recipe.
 _CI_RECIPE_PATH = "opf/enforcement/ci/opf-ci.sh"
-_CI_DELEGATING = (b"jobs:\n  opf:\n    steps:\n      - name: OPF CI floor (doctor --require-store)\n"
+_CI_DELEGATING = (b"jobs:\n  opf:\n    runs-on: x\n    steps:\n      - name: OPF CI floor (doctor --require-store)\n"
                   b"        run: sh opf/enforcement/ci/opf-ci.sh .\n")
 _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
@@ -1665,7 +1720,7 @@ def self_test():
               and _says(misroot, OPERATIONAL, "not the planned identity"))
         with mock.patch.object(here, "CI_STORE_ASSERTION", b"--not-in-the-ci-member"):
             check("check-4-ci-assertion-required", _only(_case(), _red(OPERATIONAL)))
-        commented = (b"# opf doctor --require-store\njobs:\n  t:\n    steps:\n"
+        commented = (b"# opf doctor --require-store\njobs:\n  t:\n    runs-on: x\n    steps:\n"
                      b"      - name: opf doctor --require-store\n        run: sh ci.sh .\n")
         with mock.patch.object(here, "_CI_BYTES", commented):
             lipsvc = _case()
@@ -1688,11 +1743,12 @@ def self_test():
         for label, ci_bytes, want in (
                 ("name-block-scalar", b"name: |\n  --require-store\non: push\njobs:\n  test:\n"
                                       b"    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n", INVALID),
-                ("suffixed-flag", b"jobs:\n  t:\n    steps:\n      - run: opf doctor --require-store-fake\n",
+                ("suffixed-flag", b"jobs:\n  t:\n    runs-on: x\n    steps:\n"
+                                  b"      - run: opf doctor --require-store-fake\n",
                  INVALID),
-                ("echo", b"jobs:\n  t:\n    steps:\n      - run: echo --require-store\n", CANNOT_EVALUATE),
+                ("echo", b"jobs:\n  t:\n    runs-on: x\n    steps:\n      - run: echo --require-store\n", CANNOT_EVALUATE),
                 ("undecodable", b"\xff\xfe--require-store\n", CANNOT_EVALUATE),
-                ("unparseable", b"jobs:\n  t:\n    steps:\n      - run: opf doctor --require-store 'x\n",
+                ("unparseable", b"jobs:\n  t:\n    runs-on: x\n    steps:\n      - run: opf doctor --require-store 'x\n",
                  CANNOT_EVALUATE),
                 ("quoted-hash-block", _run_step(b"printf ' # '; opf doctor --require-store"), CANNOT_EVALUATE),
                 ("literal-block-canonical", _run_step(b"opf doctor --require-store"), VALID),
@@ -1751,6 +1807,24 @@ def self_test():
                 ("digit-led-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1st assertion\n"),
                  VALID),
                 ("numeric-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1_000\n"),
+                 CANNOT_EVALUATE),
+                # Round 8: the script operand must equal a shipped OPF CLI path (`-h/opf.py` is python3's help
+                # option: it exits 0 running no OPF); the assertion job needs runs-on; a permissions value
+                # outside GitHub's forms, at the job or the workflow, refuses; a two-dot name is a string.
+                ("help-option-script", _CI_BYTES.replace(b"opf/tools/opf.py", b"-h/opf.py"), CANNOT_EVALUATE),
+                ("other-opf-py", _CI_BYTES.replace(b"opf/tools/opf.py", b"tools/opf.py"), CANNOT_EVALUATE),
+                ("job-without-runs-on", _CI_BYTES.replace(b"    runs-on: ubuntu-latest\n", b""), CANNOT_EVALUATE),
+                ("job-permissions-banana", _CI_BYTES.replace(b"    runs-on: ubuntu-latest\n", b"    runs-on: "
+                                                             b"ubuntu-latest\n    permissions: {contents: banana}\n"),
+                 CANNOT_EVALUATE),
+                ("job-permissions-read", _CI_BYTES.replace(b"    runs-on: ubuntu-latest\n", b"    runs-on: "
+                                                           b"ubuntu-latest\n    permissions: {contents: read}\n"),
+                 VALID),
+                ("workflow-permissions-banana", b"permissions:\n  contents: banana\n" + _CI_BYTES, CANNOT_EVALUATE),
+                ("workflow-permissions-read", b"permissions:\n  contents: read\n" + _CI_BYTES, VALID),
+                ("multi-dot-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1.2.3\n"),
+                 VALID),
+                ("float-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1.5\n"),
                  CANNOT_EVALUATE)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
@@ -1803,9 +1877,9 @@ def self_test():
                                            b"        timeout-minutes: 5\n        shell: bash\n"
                                            b"        continue-on-error: false\n"
                                            b"        run: opf doctor --require-store\n", None, VALID),
-                ("job-continue-on-error-false", b"jobs:\n  t:\n    continue-on-error: false\n    steps:\n"
+                ("job-continue-on-error-false", b"jobs:\n  t:\n    runs-on: x\n    continue-on-error: false\n    steps:\n"
                                                 b"      - run: opf doctor --require-store\n", None, VALID),
-                ("job-default-shell-bash", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: bash\n"
+                ("job-default-shell-bash", b"jobs:\n  t:\n    runs-on: x\n    defaults:\n      run:\n        shell: bash\n"
                                            b"    steps:\n      - run: opf doctor --require-store\n", None, VALID),
                 ("after-uses-step", steps + b"      - uses: actions/checkout@v4\n"
                                             b"      - run: opf doctor --require-store\n", None, VALID),
@@ -1867,6 +1941,34 @@ def self_test():
                  None, CANNOT_EVALUATE),
                 ("python-parent-path", steps + b"      - run: python3 -I -B ../opf.py doctor --require-store\n",
                  None, CANNOT_EVALUATE),
+                ("python-help-option", steps + b"      - run: python3 -I -B -h/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-command-option", steps + b"      - run: python3 -I -B -c/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-bare-opf-py", steps + b"      - run: python3 -I -B opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-dot-slash", steps + b"      - run: python3 -I -B ./opf/tools/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-dot-segment", steps + b"      - run: python3 -I -B opf/./tools/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-empty-segment", steps + b"      - run: python3 -I -B opf//tools/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-absolute", steps + b"      - run: python3 -I -B /opf/tools/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("recipe-option-shaped", steps + b"      - run: sh -n/opf-ci.sh .\n", {"-n/opf-ci.sh": recipe},
+                 CANNOT_EVALUATE),
+                ("recipe-parent-segment", steps + b"      - run: sh x/../opf-ci.sh .\n", {"x/../opf-ci.sh": recipe},
+                 CANNOT_EVALUATE),
+                ("recipe-hidden-segment", steps + b"      - run: sh .ci/opf-ci.sh .\n", {".ci/opf-ci.sh": recipe},
+                 VALID),
+                ("job-without-runs-on", b"jobs:\n  t:\n    steps:\n      - run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("workflow-permissions-banana", b"permissions: {contents: banana}\n" + steps
+                 + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("workflow-permissions-unknown-scope", b"permissions:\n  banana: read\n" + steps
+                 + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("workflow-permissions-read-all", b"permissions: read-all\n" + steps
+                 + b"      - run: opf doctor --require-store\n", None, VALID),
                 ("step-if", steps + b"      - if: false\n        run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
                 ("continue-on-error", steps + b"      - continue-on-error: true\n        run: opf doctor "
@@ -1879,32 +1981,35 @@ def self_test():
                  CANNOT_EVALUATE),
                 ("sh-shell", steps + b"      - shell: sh\n        run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
-                ("job-default-shell-sh", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: sh\n"
+                ("job-default-shell-sh", b"jobs:\n  t:\n    runs-on: x\n    defaults:\n      run:\n        shell: sh\n"
                                          b"    steps:\n      - run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
-                ("job-continue-on-error-quoted-false", b"jobs:\n  t:\n    continue-on-error: 'false'\n    steps:\n"
+                ("job-continue-on-error-quoted-false", b"jobs:\n  t:\n    runs-on: x\n"
+                                                       b"    continue-on-error: 'false'\n    steps:\n"
                                                        b"      - run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
                 ("custom-shell", steps + b"      - shell: bash {0}\n        run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
                 ("earlier-run-step", steps + b"      - run: echo PATH=x >> \"$GITHUB_ENV\"\n"
                                              b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
-                ("job-if", b"jobs:\n  t:\n    if: false\n    steps:\n      - run: opf doctor --require-store\n", None,
+                ("job-if", b"jobs:\n  t:\n    runs-on: x\n    if: false\n    steps:\n"
+                           b"      - run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
-                ("job-continue-on-error", b"jobs:\n  t:\n    continue-on-error: true\n    steps:\n"
+                ("job-continue-on-error", b"jobs:\n  t:\n    runs-on: x\n    continue-on-error: true\n    steps:\n"
                                           b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
-                ("job-env", b"jobs:\n  t:\n    env:\n      SHELLOPTS: noexec\n    steps:\n"
+                ("job-env", b"jobs:\n  t:\n    runs-on: x\n    env:\n      SHELLOPTS: noexec\n    steps:\n"
                             b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
                 ("workflow-env", b"env:\n  OPF_PYTHON: 'true'\n" + steps
                  + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
-                ("job-default-working-directory", b"jobs:\n  t:\n    defaults:\n      run:\n"
+                ("job-default-working-directory", b"jobs:\n  t:\n    runs-on: x\n    defaults:\n      run:\n"
                                                   b"        working-directory: other\n    steps:\n"
                                                   b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
                 ("workflow-default-working-directory", b"defaults:\n  run:\n    working-directory: other\n"
                  + steps + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
                 ("workflow-default-shell", b"defaults:\n  run:\n    shell: pwsh\n" + steps
                  + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
-                ("job-default-shell", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: pwsh\n    steps:\n"
+                ("job-default-shell", b"jobs:\n  t:\n    runs-on: x\n    defaults:\n      run:\n"
+                                      b"        shell: pwsh\n    steps:\n"
                                       b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
                 ("recipe-not-planned", steps + delegating, {}, CANNOT_EVALUATE),
                 ("recipe-sh-n", steps + delegating.replace(b"sh opf/", b"sh -n opf/"), planned, CANNOT_EVALUATE),
@@ -1932,11 +2037,12 @@ def self_test():
 
         for key, within, outside in (
                 (b"name", (b"OPF store", b"'5'", b'"true"', b"x # c", b"1st assertion", b".github check", b"-x",
-                           b"+x", b"0x", b"1e", b"x#c", b"2001-12-14 build"),
+                           b"+x", b"0x", b"1e", b"x#c", b"2001-12-14 build", b"1.2.3", b"1.2.3.4", b"1..2",
+                           b"0.1.0-rc1", b"..", b"1.5.e3"),
                  (b"[a]", b"{a: b}", b"|\n          x", b">\n          x", b"true", b"null", b"~", b"5", b"",
                   b"1_000", b"0x10", b"0o17", b"0b101", b"1:20", b"1.5", b"1e5", b".5", b"+1", b"-1", b".inf",
                   b"-.inf", b".nan", b"2001-12-14", b"2001-12-14t21:59:43.10-05:00", b"2001-12-14 21:59:43.10 -5",
-                  b"on", b"Off", b"Yes", b"n", b"=", b"<<")),
+                  b"on", b"Off", b"Yes", b"n", b"=", b"<<", b"1.", b"1_0.5", b"1:20.5", b"-1.5e3", b".")),
                 (b"id", (b"opf_store", b"'opf-1'", b"_a"),
                  (b"a.b", b"'a b'", b"1a", b"true", b"[a]", b"|\n          a", b"'${{ x }}'", b"")),
                 (b"shell", (b"bash", b"'bash'", b'"bash"'),
@@ -1958,7 +2064,9 @@ def self_test():
         # CANNOT-EVALUATE, on the same carrier.
         def job(key, value):
             separated = b":" + value if value[:1] == b"\n" else b": " + value if value else b":"
-            return b"jobs:\n  t:\n    " + key + separated + b"\n    steps:\n      - run: opf doctor --require-store\n"
+            runner = b"" if key == b"runs-on" else b"    runs-on: x\n"
+            return (b"jobs:\n  t:\n" + runner + b"    " + key + separated
+                    + b"\n    steps:\n      - run: opf doctor --require-store\n")
 
         for key, value in ((b"needs", b"prerequisite"), (b"if", b"true"),
                            (b"strategy", b"\n      matrix:\n        os: [a]"), (b"matrix", b"[a]"),
@@ -1968,6 +2076,17 @@ def self_test():
             asserted, refused = _ci_asserts_store(_CI_PATH, job(key, value))
             check("ci-job-key-refused-" + key.decode(), not asserted and len(refused) == 1
                   and "(" + key.decode() + ")" in refused[0] and "its own job" in refused[0])
+        asserted, refused = _ci_asserts_store(_CI_PATH, b"jobs:\n  t:\n    steps:\n"
+                                                         b"      - run: opf doctor --require-store\n")
+        check("ci-job-runs-on-required", not asserted and len(refused) == 1 and "no runs-on" in refused[0])
+        # The closed CLI path set is the shipped layout (the template runs the recipe from opf/, which
+        # launches ../../tools/opf.py beside it), every member a plain-segment path; the segment rule refuses
+        # an empty, `.`, `..` and option-shaped segment.
+        template = (_SHIPPED_RECIPE.parent / "github-actions.yml").read_bytes()
+        check("ci-opf-cli-paths", all(_plain_path(path) for path in _OPF_CLI_PATHS)
+              and b"$here/../../tools/opf.py" in recipe and b"run: sh opf/enforcement/ci/opf-ci.sh ." in template
+              and not any(_plain_path(path) for path in ("-h/opf.py", "", "a//b", "./a", "a/..", "/a", "a/-b"))
+              and _plain_path(".ci/opf-ci.sh") and _plain_path("opf/tools/opf.py"))
         for key, within, outside in (
                 (b"name", (b"OPF", b"'5'", b"1st job"), (b"[a]", b"5", b"true", b"~", b"")),
                 (b"runs-on", (b"ubuntu-latest", b"[self-hosted, linux]", b"['a', \"b c\"]",
@@ -1977,9 +2096,15 @@ def self_test():
                 (b"timeout-minutes", (b"5", b"360"), (b"[bad]", b"0", b"'5'", b"${{ 5 }}", b"1.5", b"")),
                 (b"continue-on-error", (b"false",), (b"true", b"'false'", b"${{ false }}", b"[false]")),
                 (b"permissions", (b"read-all", b"{}", b"{contents: read}", b"{contents: read, 'id-token': \"write\"}",
-                                  b"\n      contents: read"),
+                                  b"\n      contents: read", b"write-all", b"'read-all'", b"{'contents': 'none'}",
+                                  b"\n      id-token: write\n      pull-requests: 'write'\n      models: read",
+                                  b"{actions: read, attestations: write, checks: none, deployments: read, discussions: "
+                                  b"write, issues: none, packages: read, pages: write, repository-projects: none, "
+                                  b"security-events: read, statuses: write}"),
                  (b"[read]", b"5", b"{contents: [read]}", b"\n      contents:\n        x: y", b"\n      contents: true",
-                  b"")),
+                  b"", b"{contents: banana}", b"\n      contents: banana", b"{banana: read}", b"\n      banana: read",
+                  b"read", b"none", b"READ-ALL", b"read-all-x", b"{id-token: read}", b"{models: write}",
+                  b"{contents: Read}", b"{contents: ~}", b"\n      contents:", b"{contents: read, x: none}")),
                 (b"defaults", (b"\n      run:\n        shell: bash",),
                  (b"\n      run:\n        shell: bash\n      other: x", b"\n      run:\n        foo: x",
                   b"\n      other: x")),
@@ -1990,7 +2115,6 @@ def self_test():
                 check("ci-job-value-outside-{}-{}".format(key.decode(), n), ci(job(key, value)) == CANNOT_EVALUATE)
         # The pack's own workflow template (opf/enforcement/ci) is canonical with its recipe planned, and a
         # refused mention without it.
-        template = (_SHIPPED_RECIPE.parent / "github-actions.yml").read_bytes()
         check("ci-shipped-template", ci(template, planned) == VALID and ci(template) == CANNOT_EVALUATE)
         # A planned recipe that is absent or drifted asserts nothing (INVALID, the member finding names it);
         # a non-canonical run of it is still refused.
