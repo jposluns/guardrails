@@ -549,13 +549,15 @@ def _close_fd_exc_safe(fd):
     inside an `except` handler of the SAME function would read that handled exception as in flight (as in
     #378), and no call site is nested that way; a platform that keeps the descriptor on a failed close
     (HP-UX, and POSIX.1-2024 as close(2) reports it) leaks it until exit, which Linux does not, and macOS
-    is assumed not to."""
+    is assumed not to. A close error raised leaves marked (_journal._mark_fd_release_raised), so a handler
+    reading OSError as a signal raises it (_journal._fd_release_fault)."""
     tb = sys.exc_info()[2]
     in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
     try:
         os.close(fd)
-    except OSError:
+    except OSError as exc:
         if not in_flight:
+            _journal._mark_fd_release_raised(exc)
             raise
 
 
@@ -565,11 +567,12 @@ def _close_fd_on_exit(fd, exc_type, exc, tb):
     exception it is unwinding (the body's, or an earlier callback's close error), so the close is quiet
     while one is and propagates fail-closed when none is. One os.close either way (P1, as
     _close_fd_exc_safe): a raising close has released the number, which is never probed or closed again.
-    Returns None, so it never suppresses."""
+    Returns None, so it never suppresses. A close error raised leaves marked, as _close_fd_exc_safe's."""
     try:
         os.close(fd)
-    except OSError:
+    except OSError as cexc:
         if exc is None:
+            _journal._mark_fd_release_raised(cexc)
             raise
 
 
@@ -614,7 +617,11 @@ def _open_dir_nofollow(abspath):
         held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[1:]:
             held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            _journal._close_fd_propagating(held.pop(-2))
+            try:
+                _journal._close_fd_propagating(held.pop(-2))
+            except BaseException as cexc:  # noqa: BLE001  marked: a caller never reads it as an open error
+                _journal._mark_fd_release_raised(cexc)
+                raise
         return held.pop()
     except BaseException as exc:
         closing = []    # what a close raised that is not an OSError: resolved against `exc` below
@@ -663,6 +670,7 @@ def _read_store_bytes_contained(root_fd, relpath):
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
         # control-character, or refused/unreadable intermediate component) or OSError; neither is a
         # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
@@ -694,6 +702,7 @@ def _read_store_bytes_contained(root_fd, relpath):
         # paths, so the single-link requirement covers both without touching generic product reads.
         data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
         # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
@@ -759,9 +768,11 @@ def _open_working_dir_fd(store_root_fd, working_rel):
     _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is never read as absent
         return None
     except (OSError, _journal.JournalError) as exc:
+        _journal._fd_release_fault(exc)    # nor as a cannot-evaluate
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
     wfd = None
     try:
@@ -1120,6 +1131,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
         # root or ancestor is refused, MAJOR 2); the default location is the trusted product-root anchor.
         store_root_fd = _open_store_root_fd(store_root, pointer)
     except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, "cannot open store root {} ({})".format(store_root, exc),
                           target=target, pointer_source=source)
     try:

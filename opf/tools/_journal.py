@@ -223,6 +223,22 @@ def _fd_release_raised(exc):
     return getattr(exc, "fd_release_raised", False) is True
 
 
+def _fd_release_fault(exc, record=None):
+    """The ONE record-and-report rule for a close exception, applied FIRST by every handler that reads an
+    exception's class as a signal (absent, unreadable, cannot-evaluate, cannot-inspect, does-not-verify,
+    not reached): an exception that left a close helper (_fd_release_raised) is never that signal. With
+    `record` None it is raised as itself, every fault recorded on it kept, for the outcome to name (the
+    run's report renders it with its notes, _exc_said); with `record` a list (a lock-state read whose
+    outcome is a returned clause) it is appended there and returned, and that list is named beside the
+    run's outcome. None for any other exception: the handler's own signal stands."""
+    if not _fd_release_raised(exc):
+        return None
+    if record is None:
+        raise exc
+    record.append(exc)
+    return exc
+
+
 def _first_interrupt(excs):
     """The FIRST interrupt (a BaseException that is not an Exception) among `excs`, taken in the order
     they were raised, else None: the one first-interrupt selection every close of the adoption
@@ -387,7 +403,8 @@ def _lstat_contained(root_fd, relpath):
     the target is absent, which is exactly the prestate a create/mkdir op expects."""
     try:
         pfd, name = _open_parent(root_fd, relpath)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        _fd_release_fault(exc)                                 # a close's exception is never read as absent
         return None
     try:
         return _lstat_at(pfd, name)
@@ -1117,8 +1134,7 @@ def release_lock(journal_root):
     try:
         owner = read_lock_owner(journal_root)
     except JournalError as exc:
-        if _fd_release_raised(exc):
-            raise                                         # a close's exception: never dropped as unreadable
+        _fd_release_fault(exc)                                 # a close's exception: never dropped as unreadable
         return                                            # unreadable/malformed: never blind-unlink
     if owner is None:
         return                                            # already absent
@@ -1462,10 +1478,10 @@ def _verify_prestate_at(pfd, name, relpath, prestate):
 def _poststate_verifies(root_fd, op):
     """Domain-separated post-state check per op kind (file: exists, regular, mode, content digest; dir:
     exists, directory, mode, NO digest; removed: absent). Used ONLY by the roll-forward election, which
-    fires solely when EVERY op already verifies. A lookup error reads as does-not-verify; a JournalError or
-    KeyError a CLOSE raised (_fd_release_raised) propagates as itself, never dropped as that answer (inside
-    run_transaction it still rolls back first). A close OSError still reads as does-not-verify, the fail-
-    closed answer, unnamed (disclosed, module docstring of _opf_adopt_apply)."""
+    fires solely when EVERY op already verifies. A lookup error reads as does-not-verify; an exception a
+    CLOSE raised (_fd_release_raised: a JournalError, KeyError or OSError among them) propagates as itself
+    through _fd_release_fault, never dropped as that answer, and inside run_transaction it rolls back first
+    (run_transaction rolls back on a JournalError and on any Exception a close raised)."""
     try:
         post = op["poststate"]
         st = _lstat_contained(root_fd, op["path"])
@@ -1482,8 +1498,7 @@ def _poststate_verifies(root_fd, op):
             data, _ = _read_contained(root_fd, op["path"])
             return hashlib.sha256(data).hexdigest() == post["content-sha256"]
     except (JournalError, OSError, KeyError) as exc:
-        if _fd_release_raised(exc) and not isinstance(exc, OSError):
-            raise
+        _fd_release_fault(exc)                                 # a close's exception: never read as does-not-verify
         return False
     return False
 
@@ -2147,9 +2162,13 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
         # before publishing COMPLETE; if any fails, do NOT publish COMPLETE, roll back, and fail closed.
         if not all(_poststate_verifies(root_fd, op) for op in ops):
             raise JournalError("post-apply poststate verification failed; refusing to publish COMPLETE")
-    except JournalError:
+    except Exception as exc:
         # A prestate mismatch, a staged-digest mismatch, or a failed poststate (a hostile or racing tree):
-        # roll back from the durable preimages and fail.
+        # roll back from the durable preimages and fail. An Exception a CLOSE raised (_fd_release_raised,
+        # a KeyError from _poststate_verifies' close among them) rolls back the same way; an interrupt
+        # never does.
+        if not isinstance(exc, JournalError) and not _fd_release_raised(exc):
+            raise
         publish(jr_fd, txn_dir, F_RIP, {"txn": txn_id})
         total = len(ops)
         for j, op in enumerate(reversed(ops)):

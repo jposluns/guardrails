@@ -156,7 +156,7 @@ transaction ids, checks, probes) is the stage driver's to assemble, held here on
 validator and the plan bindings adoption_record names; and the trust gate proves member bytes against the
 agreed release inventory, never the publisher's authenticity beyond it.
 
-Exceptions on the closing paths, guaranteed: the run's FIRST interrupt always propagates as itself (a
+Exceptions on the closing paths: the run's FIRST interrupt always propagates as itself (a
 close-out or a _journal helper close that meets an earlier error and then an interrupt raises the
 interrupt, never notes it on the error), and every close exception is named where a reader sees it: in
 the propagating exception, or in the run's report, which renders each exception with the notes recorded
@@ -171,19 +171,36 @@ interrupt in flight there kept as itself with the close exception noted on it), 
 close-outs, sweep and listings (recorded, then selected in the order RAISED: the lock read's close
 before the release, the release's own exceptions, the closes after it, the closing sweep and listing,
 then the final close-out), so a later interrupt never propagates in place of an earlier one. An
-exception a close raised leaves the close helpers marked (_journal._mark_fd_release_raised), so a handler that
-reads its class as a clean signal (release_lock's unreadable lock, _poststate_verifies' does-not-verify)
-raises it rather than dropping it with what is recorded on it; a lock clause names each exception with
-its notes (_journal._msg_said), and a transaction whose state cannot be classified names why. Not named
-(disclosed): a close OSError that yields to an exception already in flight (#378), as before; a close
-OSError on a quiet teardown close (_journal._close_fd_quietly: the lock identity's and the first
-listing's held descriptors, _journal's cleanup loops), whose descriptor close(2) released anyway; and a
-close OSError inside _poststate_verifies, which reads as does-not-verify (the fail-closed answer).
+exception a close raised leaves the close helpers marked (_journal._mark_fd_release_raised: _journal's
+_close_fd_yielding and _yield_close_exceptions, the store's _close_fd_exc_safe and _close_fd_on_exit and
+its no-follow walk's hand-off close), and EVERY handler in the transaction's reach that reads an
+exception's class as a signal applies ONE record-and-report rule first, _journal._fd_release_fault: a marked
+exception is raised as itself (or, in the two lock-state reads, recorded and named beside the outcome),
+never read as absent, unreadable, cannot-evaluate, cannot-inspect, does-not-verify or not reached. Those
+handlers: _journal's _lstat_contained, release_lock and _poststate_verifies; the store's
+_read_store_bytes_contained (both reads), _open_working_dir_fd and _resolve_at (so the resolver, its
+discovery and the probe, _default_store_present_without_manifest, never fold one into a posture or a
+False); and here _open_product_root, _read_live, ApplyOps._mkdirs, journal_state,
+_committed_base_or_refuse, _absent_journal_dirs, the sweep (_remove_journal_dirs, both _open_parent
+handlers), _interrupted_lock_state, _failed_lock_state and run_adopt_transaction's journal reads, lock
+acquire and transaction handler. run_transaction rolls back on any Exception a close raised (a KeyError
+from _poststate_verifies' close among them), never only on a JournalError. A lock clause names each
+exception with its notes (_journal._msg_said), and a transaction whose state cannot be classified names
+why. A self-test vector injects a raise after a real close at EVERY close event of seven runs (commit,
+refusal, body interrupt, body fault, failed acquire, lock stays, failed transaction with rollback), so a
+handler added later that drops one fails the suite. Not named (disclosed): a close OSError that yields
+to an exception already in flight (#378), as before; and a close OSError on a quiet teardown close
+(_journal._close_fd_quietly: the lock identity's and the first listing's held descriptors, the
+cleanup loops of _open_parent, _open_dir_contained and ensure_journal_dirs, and _committed_base_or_refuse's
+journal descriptor), whose descriptor close(2) released anyway.
 Residual (disclosed, not chased): when a SECOND ORDINARY fault (an Exception) arrives during a cleanup
 that is already failing, which of the two propagates and which is named beside it (in a note, or as the
 other's context) is not specified, for instance a _journal close exception with an error in flight
 propagates in its place, that error noted on it and kept as its context; a second interrupt never
-propagates in place of the first. An asynchronous interrupt landing outside these protected calls (the
+propagates in place of the first. Likewise an interrupt a later close raises while an earlier close's
+exception is being HANDLED by a caller (a rollback publish after _poststate_verifies' close raised, for
+instance) propagates as the first interrupt with that exception kept only as its context (__context__),
+not noted on it. An asynchronous interrupt landing outside these protected calls (the
 named residual above) is not covered.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
@@ -354,6 +371,7 @@ def _read_live(root_fd, relpath):
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot observe {!r} ({}); fail-closed".format(relpath, exc))
     if st is None:
         return None, None
@@ -363,6 +381,7 @@ def _read_live(root_fd, relpath):
     try:
         data, fst = _journal._read_contained(root_fd, relpath, require_single_link=True)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot read {!r} contained ({}); fail-closed".format(relpath, exc))
     return fst, data
 
@@ -433,6 +452,7 @@ def _open_product_root(product_root):
     try:
         return store._open_dir_nofollow(root)
     except OSError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot open product root {!r} contained ({}); "
                               "fail-closed".format(str(root), exc))
 
@@ -672,6 +692,7 @@ class ApplyOps:
             try:
                 st = _journal._lstat_contained(self.root_fd, d)
             except (_journal.JournalError, OSError) as exc:
+                _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
                 raise AdoptApplyError("cannot inspect {!r} ({}); fail-closed".format(d, exc))
             if st is None:
                 self.ops.append(dict(op="mkdir", path=d, poststate=dict(kind="dir", mode=DIR_MODE)))
@@ -849,6 +870,7 @@ def journal_state(root_fd, journal_root):
     try:
         st = _journal._lstat_contained(root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot inspect the adoption journal {} ({}); "
                               "fail-closed".format(JOURNAL_REL, exc))
     if st is None:
@@ -860,6 +882,7 @@ def journal_state(root_fd, journal_root):
         try:
             held.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
         except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise AdoptApplyError("cannot open the adoption journal {} ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
         jr_fd = held[0]
@@ -878,6 +901,7 @@ def journal_state(root_fd, journal_root):
             opened = sorted(t.name for t, tfd in txns
                             if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
         except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise AdoptApplyError("the adoption journal {} cannot be read ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
     finally:
@@ -980,7 +1004,8 @@ def _default_store_present_without_manifest(product_root):
             return False
         try:
             status, _machine, _detail = store.discover_machine_store(held[0], Path(product_root))
-        except (store.StoreError, OSError):
+        except (store.StoreError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never read as False
             return False
     finally:
         if held:
@@ -1055,6 +1080,7 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
             except BaseException as cexc:   # noqa: BLE001  the first interrupt propagates as itself
                 _journal._yield_close_exceptions(inflight, [cexc])
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
         raise AdoptApplyError("cannot inspect the run's base transaction ({}); fail-closed".format(exc))
     ops = intent.get("ops", []) if isinstance(intent, dict) else []
     published = next(((op.get("poststate") or {}).get("content-sha256") for op in ops
@@ -1091,6 +1117,7 @@ def _absent_journal_dirs(root_fd):
         try:
             present = _journal._lstat_contained(root_fd, "/".join(parts[:i + 1]))
         except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
         if present is None:
             return ["/".join(parts[:j + 1]) for j in range(i, len(parts))]
@@ -1109,7 +1136,9 @@ def _remove_journal_dirs(root_fd, created, raised=None):
     only on an empty directory); and what it removed whose parent fsync then failed, so the removal may
     not be durable. ([], []) when the tree is as found. When `raised` is a list, each parent close RECORDS
     its exception there, never raising it past an exception already in flight (an interrupt in an rmdir
-    among them), and with none in flight raises the one it recorded, which stops the sweep."""
+    among them), and with none in flight raises the one it recorded, which stops the sweep. An exception a
+    close inside _open_parent raised is never read as a missing or unreachable directory: it stops the
+    sweep as itself (_journal._fd_release_fault)."""
     left = []
     unconfirmed = []
     gone = []
@@ -1120,9 +1149,13 @@ def _remove_journal_dirs(root_fd, created, raised=None):
             try:
                 try:
                     pfd, name = _journal._open_parent(root_fd, rel)
-                except FileNotFoundError:
+                except FileNotFoundError as exc:
+                    _journal._fd_release_fault(exc)  # a close's exception stops the sweep, never read as absent
                     continue    # never created: a preparation that failed part-way
                 except (_journal.JournalError, OSError) as exc:
+                    # a close's exception stops the sweep as itself, every fault recorded on it kept: the
+                    # caller names it beside the outcome, never only as a "not reached" reason it may drop
+                    _journal._fd_release_fault(exc)
                     left.append((rel, "not reached: {}".format(exc)))
                     continue
                 parent.append(pfd)
@@ -1698,8 +1731,14 @@ def _interrupted_lock_state(jr_fd, exc, raised=None):
     itself with `exc` noted on it, never left only as its context."""
     try:
         now = _lock_identity(jr_fd, raised=raised)
-    except (_journal.JournalError, OSError) as exc:
-        return "unreadable", _unreadable_lock(exc, at_acquire=True)
+    except (_journal.JournalError, OSError) as unread:
+        if _journal._fd_release_fault(unread, raised) is not None:
+            # a close's exception is never read as an unreadable lock: recorded in `raised`, named beside
+            # the run's outcome, and what the acquire left is not known
+            return "unidentified", ("whether this run's lock acquire left a journal lock {}/lock is not known: "
+                                    "reading it raised a close exception, named beside this outcome; a lock "
+                                    "there stays, and the next run refuses on it".format(JOURNAL_REL))
+        return "unreadable", _unreadable_lock(unread, at_acquire=True)
     except BaseException as later:  # noqa: BLE001  raised after `exc`: never in place of the first interrupt
         if _journal._first_interrupt([exc, later]) is not later:
             return "unreadable", _unreadable_lock("its read raised {}".format(_journal._exc_said(later)),
@@ -1740,7 +1779,13 @@ def _failed_lock_state(jr_fd, journal_root, error, raised=None):
             mine = _lock_identity(jr_fd, keep=held, raised=raised)
             current = owner is not None and _journal._owner_is_current(owner)
         except (_journal.JournalError, OSError) as exc:
-            return "unreadable", _unreadable_lock(exc, at_acquire=True), None
+            if _journal._fd_release_fault(exc, raised if raised is not None else None) is None:
+                return "unreadable", _unreadable_lock(exc, at_acquire=True), None
+            # a close's exception is never read as an unreadable lock (this run's own, readable lock):
+            # recorded in `raised` and named beside the refusal, the lock named as staying
+            return "stays", ("this run's own journal lock WAS created, and reading it back raised a close "
+                             "exception ({}), named beside this outcome: it stays, and the next run refuses "
+                             "on it".format(_journal._exc_said(exc))), None
         except BaseException as exc:    # noqa: BLE001  returned: named beside the acquire's error
             return "stays", ("this run's own journal lock WAS created, and reading it back raised {}: it "
                              "stays, and the next run refuses on it".format(_journal._exc_said(exc))), exc
@@ -1883,6 +1928,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         try:
             prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
         except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
         if prior is not None:
             raise AdoptApplyError("run {} already has its transaction {!r}: one run takes one transaction "
@@ -1898,14 +1944,21 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             jr_st = os.fstat(jr_fd)
             jr_id = (jr_st.st_dev, jr_st.st_ino)    # the journal directory this run writes to
         except (_journal.JournalError, OSError) as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
             raise AdoptApplyError("cannot prepare the adoption journal {} ({})".format(JOURNAL_REL, exc))
         try:
             maybe_mine = True
             try:
                 _journal.acquire_lock(journal_root, SESSION_ID)
             except _journal.JournalError as exc:   # the O_EXCL create refused: the lock was never this run's
-                maybe_mine = False
-                raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
+                if not _journal._fd_release_raised(exc):
+                    maybe_mine = False
+                    raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
+                # a close's exception AFTER the create (the lock's own close): observed, never presumed
+                # untaken, and it propagates as itself (_journal._fd_release_fault), what it left named on it
+                lock_state = "unobserved"
+                lock_state, lock_note = _interrupted_lock_state(jr_fd, exc, closeout)
+                _journal._fd_release_fault(exc)
             except OSError as exc:
                 maybe_mine = getattr(exc, "lock_created", False)
                 lock_state = "unobserved"   # until the read below returns: never presumed untaken
@@ -1948,7 +2001,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             try:
                 _journal.run_transaction(root_fd, jr_fd, journal_root, txn, header, ops.ops,
                                          staged_reader, SESSION_ID)
-            except (_journal.JournalError, OSError) as exc:
+            except Exception as exc:
+                # the engine's own error, or any Exception a close raised (_fd_release_raised: the engine
+                # rolled back on it), classified and named with every note recorded on it
+                if not isinstance(exc, (_journal.JournalError, OSError)) and not _journal._fd_release_raised(exc):
+                    raise
                 # An absent transaction directory reads as nothing-opened (read_frames), so a failure
                 # before INTENT is told apart from one after it (the record-publication precedent).
                 try:
@@ -1959,16 +2016,16 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 if state == "nothing-opened":
                     entered = False
                     raise AdoptApplyError("the adoption transaction was refused before it opened "
-                                          "({})".format(exc))
+                                          "({})".format(_journal._msg_said(exc)))
                 if state == "rolled-back":
                     raise AdoptApplyError("the adoption transaction was refused and rolled back to the "
                                           "prestate ({}): the product tree is as it was, and the journal "
-                                          "keeps this transaction's terminal record".format(exc))
+                                          "keeps this transaction's terminal record".format(_journal._msg_said(exc)))
                 retain = True
                 lock_state = "retained"
                 raise AdoptApplyError("the adoption transaction {} FAILED and is {} ({}); the journal lock "
                                       "is retained so the next run refuses into reconcile() "
-                                      "(fail-closed)".format(txn, state, exc))
+                                      "(fail-closed)".format(txn, state, _journal._msg_said(exc)))
             done = True
             return txn
         except BaseException as exc:    # noqa: BLE001  re-raised: only marks the outcome in flight
@@ -5291,6 +5348,130 @@ def _self_test_checks():
               and raised_p is fired_p[0] and verdict_p is None and not leaked,
               observed="control={!r} verdict={!r} raised={!r} injected={!r} leaked={!r}".format(
                   control_p, verdict_p, raised_p, fired_p, leaked))
+        # 6a'''b3o (round 18, the close-exception CLASS): a raise after a REAL close at EVERY close event of
+        # seven runs (commit, refusal, body interrupt, body fault, failed acquire, lock stays, failed
+        # transaction with rollback), one injection per run, its class rotating by event number over a
+        # JournalError, an OSError EIO, a KeyError, an ordinary fault and an interrupt: the injected
+        # exception is named in the outcome (raised itself, or in the message, notes, cause or context chain
+        # of what was raised) on every run, except the disclosed unnamed close OSErrors (a quiet teardown
+        # close, or one yielding to an exception in flight). Red against any handler in the run's reach
+        # that reads a close exception as a clean signal (absent, unreadable, cannot-evaluate, not reached).
+        class_makers = (_journal.JournalError, lambda said: OSError(errno.EIO, said), KeyError,
+                        _InjectedCloseFault, _InjectedCloseInterrupt)
+        real_acquire_c, real_apply_c = _journal.acquire_lock, _journal.apply_ops
+
+        def class_failed_acquire(journal_root, session_id):
+            real_acquire_c(journal_root, session_id)
+            fault = OSError(errno.EIO, "CLASS-ACQUIRE-EIO")
+            fault.lock_created = True
+            raise fault
+
+        def class_apply_then_fail(root_fd, ops, reader):
+            real_apply_c(root_fd, ops, reader)
+            raise _journal.JournalError("CLASS-ROLLBACK-TRIGGER")
+
+        def class_body_interrupt(ops):
+            raise _InjectedCloseInterrupt("CLASS-BODY-INTERRUPT")
+
+        def class_body_fault(ops):
+            raise _InjectedCloseFault("CLASS-BODY-FAULT")
+        class_scenarios = (("commit", None, ()), ("refusal", compose_refused_here, ()),
+                           ("body-interrupt", class_body_interrupt, ()), ("body-fault", class_body_fault, ()),
+                           ("failed-acquire", None, (("acquire_lock", class_failed_acquire),)),
+                           ("lock-stays", None, (("release_lock", lambda journal_root: None),)),
+                           ("rollback", None, (("apply_ops", class_apply_then_fail),)))
+        quiet_code = _journal._close_fd_quietly.__code__
+
+        def class_run(scenario, plan):
+            """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
+            close event n (counted from 1, or only beneath a frame running `plan["under"]` when given):
+            (events counted, [(exception, disclosed-unnamed)], what the run raised)."""
+            name, compose_c, patches = scenario
+            under = plan.get("under")
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                root, files = fixture(temp)
+                real_close_c, seen, fired = os.close, [0], []
+
+                def close_then_raise(fd):
+                    real_close_c(fd)
+                    if under is not None:
+                        frame = sys._getframe(1)
+                        while frame is not None and frame.f_code is not under:
+                            frame = frame.f_back
+                        if frame is None:
+                            return
+                    seen[0] += 1
+                    if seen[0] in plan:
+                        exc = plan[seen[0]]()
+                        fired.append((exc, sys._getframe(1).f_code is quiet_code or sys.exc_info()[1] is not None))
+                        raise exc
+                raised = None
+                with contextlib.ExitStack() as stack:
+                    for attr, value in patches:
+                        stack.enter_context(mock.patch.object(_journal, attr, value))
+                    stack.enter_context(mock.patch.object(os, "close", close_then_raise))
+                    try:
+                        run_adopt_transaction(root, rid, compose_c or compose_full(files))
+                    except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
+                        raised = exc
+            return seen[0], fired, raised
+
+        def class_named(exc, raised):
+            return raised is exc or (raised is not None and str(exc.args[-1]) in rendering(raised))
+        class_bad, class_runs = [], 0
+        for scenario in class_scenarios:
+            total = class_run(scenario, dict())[0]
+            for at in range(1, total + 1):
+                said = "CLASS-CLOSE-%s-%d" % (scenario[0], at)
+                _n, fired, raised = class_run(scenario, dict(((at, lambda: class_makers[at % 5](said)),)))
+                class_runs += 1
+                if fired and not (isinstance(fired[0][0], OSError) and fired[0][1]) \
+                        and not class_named(fired[0][0], raised):
+                    class_bad.append((scenario[0], at, repr(fired[0][0]), repr(raised)[:300]))
+        check("close-class-every-close-event-named-or-raised", class_runs > 500 and not class_bad,
+              observed="runs={} unnamed (scenario, event, injected, raised)={!r}".format(class_runs, class_bad[:8]))
+        # the sweep (_remove_journal_dirs): an ordinary fault at one of its closes, then a JournalError at
+        # the next (the second raised with the first recorded on it), at every consecutive pair: both are
+        # named beside the refusal (red against the sweep keeping only the JournalError's message)
+        sweep_bad, sweep_runs = [], 0
+        sweep_total = class_run(class_scenarios[1], dict(under=_remove_journal_dirs.__code__))[0]
+        for at in range(1, sweep_total):
+            _n, fired, raised = class_run(class_scenarios[1], dict((
+                ("under", _remove_journal_dirs.__code__),
+                (at, lambda: _InjectedCloseFault("SWEEP-FIRST-%d" % at)),
+                (at + 1, lambda: _journal.JournalError("SWEEP-SECOND-%d" % at)))))
+            sweep_runs += 1
+            if not isinstance(raised, AdoptApplyError) or "an injected compose refusal" not in rendering(raised) \
+                    or not all(class_named(exc, raised) for exc, _quiet in fired):
+                sweep_bad.append((at, [repr(exc) for exc, _quiet in fired], repr(raised)[:300]))
+        check("close-class-sweep-close-pairs-both-named", sweep_runs > 3 and not sweep_bad,
+              observed="pairs={} unnamed={!r}".format(sweep_runs, sweep_bad[:6]))
+        # a KeyError a close inside _poststate_verifies raises rolls the transaction back (run_transaction
+        # rolls back on any Exception a close raised) and is named in the refusal; the lock is released
+        # (red against the transaction left open with its lock released)
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            real_prop_k, fired_k, raised_k = _journal._close_fd_propagating, [], None
+            post_code = _journal._poststate_verifies.__code__
+
+            def prop_k(fd):
+                real_prop_k(fd)
+                frame = sys._getframe(1)
+                while frame is not None and frame.f_code is not post_code:
+                    frame = frame.f_back
+                if frame is not None and not fired_k:
+                    fired_k.append(KeyError("POSTSTATE-CLOSE-K"))
+                    raise fired_k[0]
+            with mock.patch.object(_journal, "_close_fd_propagating", prop_k):
+                try:
+                    run_adopt_transaction(root, rid, compose_full(files))
+                except BaseException as exc:    # noqa: BLE001  inspected below
+                    raised_k = exc
+            state_k, free_k = txn_state(root, rid), lock_free(root)
+        check("poststate-close-key-error-rolls-back-and-is-named",
+              bool(fired_k) and type(raised_k) is AdoptApplyError and "POSTSTATE-CLOSE-K" in rendering(raised_k)
+              and state_k == "rolled-back" and free_k,
+              observed="raised={!r} state={!r} injected={!r}".format(raised_k, state_k, fired_k))
         # an interrupt inside the lock acquire, then another in the read of what it left: the acquire's,
         # the first, propagates as itself, the read's named beside it; an ordinary fault in the acquire,
         # then an interrupt in that read: the read's interrupt propagates, the acquire's fault noted on it
