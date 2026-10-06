@@ -55,7 +55,7 @@ fails on an item in neither; a view that declares itself a curated selection mak
 
 A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and
 evaluates every condition the apply enforces, the expected state after the change as well as the state
-before it. A pre-apply check uses its apply's own predicate, or, where that predicate is out of reach, a
-test holds the check to failing on every input the apply rejects. A pre-apply check refuses an input its
-apply would refuse, such as a version or sequence number no greater than the last one consumed, before any
-long work begins.
+before it. An expensive apply and a check of whether it will succeed decide from one shared predicate, or,
+where the apply's predicate is out of reach, a test holds the check to failing on every input the apply
+rejects. A check of whether an expensive apply will succeed refuses an input the apply would refuse, such
+as a version or sequence number no greater than the last one consumed, before any long work begins.
