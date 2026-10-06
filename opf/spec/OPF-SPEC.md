@@ -2106,47 +2106,56 @@ with the implementation, as that copy stands, and a check of the documentation o
 reports of a release reads that file's bytes as the release ships them. A runtime check MUST read
 the declaration from the installed copy alone, never from the documentation of the release or from a
 conformance report. Each release MUST also carry, in the implementation and apart from that file,
-the SHA-256 digest of that file's bytes as the release ships them, and a runtime check MUST compare
-the installed copy's bytes with that digest before it reads any field: an installed copy whose bytes
-differ is contradictory, MUST yield cannot-evaluate, and MUST NOT authorize any store operation, so
-an edit to an installed copy cannot widen what the implementation admits. A release that carries no
-such digest does not conform to this section, and a conformance claim MUST NOT be made for it: its
-runtime check cannot tell an edited installed copy from the file the release ships, and reads
-whatever copy is installed. The documentation of each release and every conformance report MUST
-restate that file's declaration, and every conformance report MUST carry the SHA-256 digest of that
-file's bytes as the release ships them, written as 64 lowercase hexadecimal digits, so that the
-report can be bound mechanically to the file the release ships. A restatement differs from that
-file's declaration where it gives a different value for any field the file carries, or states a
-field the file does not carry. A release does not conform to this section, and a conformance claim
-MUST NOT be made for it, where its documentation or any conformance report omits the declaration or
-a field the file carries or states a declaration that differs from that file's, or where any
-conformance report omits that digest or carries any other value in its place. Each such failure is a
-release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making
-the declaration malformed or contradictory, and it does not change what a runtime check of the
-installed copy yields. A check of the documentation or the conformance reports of a release MUST
-compare each restatement and each digest with that file's bytes as the release ships them, never
-with an installed copy. A conformance report of a release is one emitted by an installation of that
-release whose installed copy of that file has the bytes the release ships: a report emitted from an
-installed copy whose bytes differ is not a conformance report of that release, MUST NOT be presented
-as one, and does not make that release nonconformant. An implementation that declares no class MUST
-be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A
-declaration that is absent, or that omits its release identity, its `spec_version`, its homes
-generation, or its worklog storage generation, is malformed rather than one that declares no class:
-it MUST yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that carries
-its release identity, its `spec_version`, its homes generation, and its worklog storage generation,
-and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission,
-and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is
-malformed or contradictory on other grounds. The rules on an absent, unreadable, malformed,
-contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to
-the installed copy as it stands, a check of the documentation or the conformance reports MUST apply
-them to that file as the release ships it, and each check MUST NOT take a class or any other field
-from the documentation of the release or from a conformance report. Where that documentation or a
-conformance report states a class that the file omits, the release does not conform to this section
-because that restatement states a field the file does not carry, and the file declares no class only
-where it omits its class and no other field: a file that is absent, or that also omits its release
-identity, its `spec_version`, its homes generation, or its worklog storage generation, is malformed
-and MUST yield cannot-evaluate.
+the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest), and a
+runtime check MUST compare the installed copy's bytes with that digest before it reads any field: an
+installed copy whose bytes differ is contradictory, MUST yield cannot-evaluate, and MUST NOT
+authorize any store operation. That comparison detects an edit of the installed copy alone, which
+then yields cannot-evaluate; it does not detect an edit that changes both the installed copy and the
+shipped-file digest the implementation carries, a residual section 17 discloses. The documentation
+of each release MUST state where the implementation carries the shipped-file digest, so that a check
+of the documentation can detect a release that states no such place. A release that carries no such
+digest does not conform to this section, and a conformance claim MUST NOT be made for it. The
+documentation of each release and every conformance report the implementation emits MUST restate
+that file's declaration, and every conformance report the implementation emits MUST carry two
+SHA-256 digests, each written as 64 lowercase hexadecimal digits: the shipped-file digest the
+implementation carries, and the installed-copy digest, the digest of the installed copy's bytes that
+its runtime check read. A restatement differs from that file's declaration where it gives a
+different value for any field the file carries, or states a field the file does not carry. A
+conformance report of a release is a report that an installation of that release emits whose
+shipped-file digest and installed-copy digest are equal: a report whose two digests differ is not a
+conformance report of that release, MUST NOT be presented as one, and does not make that release
+nonconformant. A report that an installation of a release emits and that lacks either digest, or
+writes either in any other form, MUST be treated as a conformance report of that release under the
+rule that follows, so a missing digest never takes a report out of that rule's scope. A release does
+not conform to this section, and a conformance claim MUST NOT be made for it, where its
+documentation or any conformance report of that release omits the declaration or a field the file
+carries or states a declaration that differs from that file's, where any conformance report of that
+release omits either digest, writes either in any other form, or carries a shipped-file digest other
+than the digest of that file's bytes as the release ships them, or where its documentation does not
+state where the implementation carries the shipped-file digest. Each such failure is a release
+nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the
+declaration malformed or contradictory, and it does not change what a runtime check of the installed
+copy yields. A check of the documentation or the conformance reports of a release MUST compare each
+restatement and each shipped-file digest with that file's bytes as the release ships them, never
+with an installed copy. An implementation that declares no class MUST be treated as upgrade-capable,
+and every upgrade requirement binds it. An unreadable, malformed, or contradictory declaration MUST
+yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or
+that omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
+MUST NOT authorize any store operation. A declaration that carries its release identity, its
+`spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
+declares no class: it MUST NOT be treated as malformed for that omission, and the implementation
+that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
+contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
+classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
+as it stands, a check of the documentation or the conformance reports MUST apply them to that file
+as the release ships it, and each check MUST NOT take a class or any other field from the
+documentation of the release or from a conformance report. Where that documentation or a conformance
+report of that release states a class that the file omits, the release does not conform to this
+section because that restatement states a field the file does not carry, and the file declares no
+class only where it omits its class and no other field: a file that is absent, or that also omits
+its release identity, its `spec_version`, its homes generation, or its worklog storage generation,
+is malformed and MUST yield cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2534,6 +2543,22 @@ The gates in this standard are strong where they are strong and say so where the
   malformed, or contradictory. A change made after the recheck by
   anything that does not take the lease, such as a hand edit or a branch switch, is outside
   admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+- The section 16.1 runtime check compares the installed copy of a release's declaration file with
+  the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
+  which yields cannot-evaluate. It does not detect a co-edit that changes both the installed copy
+  and the digest the implementation carries: that installation passes its own check, a report it
+  emits carries two equal digests and so is a conformance report of the release, and its
+  shipped-file digest, which differs from that file's bytes as the release ships them, makes that
+  release nonconformant although the release as shipped is not at fault. An anchor outside the
+  installation, such as a signature over that file that the implementation verifies or an
+  independent anchor like the one that section 14.1 has a plan's `manifest_sha256` checked against,
+  is the stronger option; section 16.1 does not require one. An installer that rewrites that file's
+  bytes, such as by converting its line endings, makes every runtime check of that installation
+  yield cannot-evaluate (fail-closed), and no report that installation emits is a conformance report
+  of the release, because its two digests differ. A check of the documentation detects a release
+  whose documentation states no place where the implementation carries the shipped-file digest; it
+  cannot confirm that the implementation carries that digest at the stated place, which only an
+  inspection of the implementation establishes.
 
 ## Appendix A: record envelope example
 

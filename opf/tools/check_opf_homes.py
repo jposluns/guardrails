@@ -757,20 +757,23 @@ _CONTRACT = {
         'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
         "Each release MUST ship that declaration as one file, and that file is the declaration that every check of it reads: a runtime check reads the copy of that file installed with the implementation, as that copy stands, and a check of the documentation or the conformance reports of a release reads that file's bytes as the release ships them.",
         'A runtime check MUST read the declaration from the installed copy alone, never from the documentation of the release or from a conformance report.',
-        "Each release MUST also carry, in the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release ships them, and a runtime check MUST compare the installed copy's bytes with that digest before it reads any field: an installed copy whose bytes differ is contradictory, MUST yield cannot-evaluate, and MUST NOT authorize any store operation, so an edit to an installed copy cannot widen what the implementation admits.",
-        'A release that carries no such digest does not conform to this section, and a conformance claim MUST NOT be made for it: its runtime check cannot tell an edited installed copy from the file the release ships, and reads whatever copy is installed.',
-        "The documentation of each release and every conformance report MUST restate that file's declaration, and every conformance report MUST carry the SHA-256 digest of that file's bytes as the release ships them, written as 64 lowercase hexadecimal digits, so that the report can be bound mechanically to the file the release ships.",
+        "Each release MUST also carry, in the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest), and a runtime check MUST compare the installed copy's bytes with that digest before it reads any field: an installed copy whose bytes differ is contradictory, MUST yield cannot-evaluate, and MUST NOT authorize any store operation.",
+        _D('That comparison detects an edit of the installed copy alone, which then yields cannot-evaluate; it does not detect an edit that changes both the installed copy and the shipped-file digest the implementation carries, a residual section 17 discloses.'),
+        'The documentation of each release MUST state where the implementation carries the shipped-file digest, so that a check of the documentation can detect a release that states no such place.',
+        'A release that carries no such digest does not conform to this section, and a conformance claim MUST NOT be made for it.',
+        "The documentation of each release and every conformance report the implementation emits MUST restate that file's declaration, and every conformance report the implementation emits MUST carry two SHA-256 digests, each written as 64 lowercase hexadecimal digits: the shipped-file digest the implementation carries, and the installed-copy digest, the digest of the installed copy's bytes that its runtime check read.",
         _D("A restatement differs from that file's declaration where it gives a different value for any field the file carries, or states a field the file does not carry."),
-        "A release does not conform to this section, and a conformance claim MUST NOT be made for it, where its documentation or any conformance report omits the declaration or a field the file carries or states a declaration that differs from that file's, or where any conformance report omits that digest or carries any other value in its place.",
+        'A conformance report of a release is a report that an installation of that release emits whose shipped-file digest and installed-copy digest are equal: a report whose two digests differ is not a conformance report of that release, MUST NOT be presented as one, and does not make that release nonconformant.',
+        "A report that an installation of a release emits and that lacks either digest, or writes either in any other form, MUST be treated as a conformance report of that release under the rule that follows, so a missing digest never takes a report out of that rule's scope.",
+        "A release does not conform to this section, and a conformance claim MUST NOT be made for it, where its documentation or any conformance report of that release omits the declaration or a field the file carries or states a declaration that differs from that file's, where any conformance report of that release omits either digest, writes either in any other form, or carries a shipped-file digest other than the digest of that file's bytes as the release ships them, or where its documentation does not state where the implementation carries the shipped-file digest.",
         'Each such failure is a release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it does not change what a runtime check of the installed copy yields.',
-        "A check of the documentation or the conformance reports of a release MUST compare each restatement and each digest with that file's bytes as the release ships them, never with an installed copy.",
-        'A conformance report of a release is one emitted by an installation of that release whose installed copy of that file has the bytes the release ships: a report emitted from an installed copy whose bytes differ is not a conformance report of that release, MUST NOT be presented as one, and does not make that release nonconformant.',
+        "A check of the documentation or the conformance reports of a release MUST compare each restatement and each shipped-file digest with that file's bytes as the release ships them, never with an installed copy.",
         'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
         'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
         'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
         'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
         'The rules on an absent, unreadable, malformed, contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or the conformance reports MUST apply them to that file as the release ships it, and each check MUST NOT take a class or any other field from the documentation of the release or from a conformance report.',
-        'Where that documentation or a conformance report states a class that the file omits, the release does not conform to this section because that restatement states a field the file does not carry, and the file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
+        'Where that documentation or a conformance report of that release states a class that the file omits, the release does not conform to this section because that restatement states a field the file does not carry, and the file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
         "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
         'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
@@ -877,6 +880,11 @@ _CONTRACT = {
         _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses as unsupported-legacy-state where those bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
         _D('A change made after the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is outside admission.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
+        _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate."),
+        _D("It does not detect a co-edit that changes both the installed copy and the digest the implementation carries: that installation passes its own check, a report it emits carries two equal digests and so is a conformance report of the release, and its shipped-file digest, which differs from that file's bytes as the release ships them, makes that release nonconformant although the release as shipped is not at fault."),
+        _D("An anchor outside the installation, such as a signature over that file that the implementation verifies or an independent anchor like the one that section 14.1 has a plan's manifest_sha256 checked against, is the stronger option; section 16.1 does not require one."),
+        _D("An installer that rewrites that file's bytes, such as by converting its line endings, makes every runtime check of that installation yield cannot-evaluate (fail-closed), and no report that installation emits is a conformance report of the release, because its two digests differ."),
+        _D('A check of the documentation detects a release whose documentation states no place where the implementation carries the shipped-file digest; it cannot confirm that the implementation carries that digest at the stated place, which only an inspection of the implementation establishes.'),
     ),
 }
 # Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
@@ -2818,10 +2826,27 @@ def _self_test_vectors():
     check("spec-flip-9.2-idempotence", lambda: removed == 1 and
           "spec 9.2 missing contract: The upgrade MUST be idempotent." in
           contract_findings(text.replace(body, mutated, 1)))
-    # Section 16.1 declaration rules: deleting the wrapped sentence in place, or rewording its
-    # operative clause, turns the gate red with that pin's own finding.
-    body = _sections(text)["16.1"]
-    for start, rewordings in (
+    # Section 16.1 declaration rules and their section 17 residuals: deleting the wrapped
+    # sentence in place, or rewording its operative clause, turns the gate red with that pin's
+    # own finding.
+    def spec_vectors(section, cases):
+        body = _sections(text)[section]
+        for start, rewordings in cases:
+            pin = [f for f in _CONTRACT[section] if f.startswith(start)]
+            sentence = pin[0] if len(pin) == 1 else start
+            finding = "spec " + section + " missing contract: " + sentence
+            pattern = r"\s+".join("`?" + "`?".join(map(re.escape, w)) + "`?"
+                                   for w in sentence.split())
+            deleted, removed = re.subn(pattern, "", body)
+            check("spec-flip-" + section + "-" + start,
+                  lambda d=deleted, r=removed, f=finding, p=pin, b=body:
+                  len(p) == 1 and r == 1 and f in contract_findings(text.replace(b, d, 1)))
+            for old, new in rewordings:
+                reworded, changed = re.subn(r"\s+".join(map(re.escape, old.split())), new, body)
+                check("spec-reword-" + section + "-" + old,
+                      lambda w=reworded, c=changed, f=finding, b=body:
+                      c == 1 and f in contract_findings(text.replace(b, w, 1)))
+    spec_vectors("16.1", (
             ("Each release MUST ship that declaration",
              (("as one file, and that file is", "as a file, and a file is"),
               ("reads the copy of that file installed with the implementation,",
@@ -2835,26 +2860,55 @@ def _self_test_vectors():
               ("MUST compare the installed copy's bytes", "MAY compare the installed copy's bytes"),
               ("before it reads any field:", "after it reads every field:"),
               ("whose bytes differ is contradictory,", "whose bytes differ is well-formed,"),
-              ("MUST NOT authorize any store operation, so",
-               "MAY authorize a store operation, so"))),
+              ("is contradictory, MUST yield cannot-evaluate, and MUST NOT authorize",
+               "is contradictory, MUST yield cannot-evaluate, and MAY authorize"),
+              ("ships them (the shipped-file digest),", "ships them,"))),
+            ("That comparison detects an edit",
+             (("detects an edit of the installed copy alone,",
+               "detects any edit of the installation,"),
+              ("it does not detect an edit that changes both",
+               "it detects an edit that changes both"),
+              ("a residual section 17 discloses.", "which cannot happen."))),
+            ("The documentation of each release MUST state where",
+             (("MUST state where the implementation carries",
+               "MAY state where the implementation carries"),)),
             ("A release that carries no such digest",
              (("no such digest does not conform to this section,",
                "no such digest conforms to this section,"),
-              ("MUST NOT be made for it:", "MAY be made for it:"))),
+              ("conformance claim MUST NOT be made for it.",
+               "conformance claim MAY be made for it."))),
             ("The documentation of each release and every",
              (("MUST restate that file's declaration,", "MAY restate that file's declaration,"),
-              ("MUST carry the SHA-256 digest", "MAY carry the SHA-256 digest"),
-              ("bytes as the release ships them, written as", "bytes, written as"),
-              ("written as 64 lowercase hexadecimal digits,", "written in hexadecimal,"),
-              ("bound mechanically to the file the release ships.",
-               "checked mechanically against the file."))),
+              ("every conformance report the implementation emits MUST carry",
+               "some conformance reports MUST carry"),
+              ("MUST carry two SHA-256 digests,", "MAY carry two SHA-256 digests,"),
+              ("carry two SHA-256 digests,", "carry one SHA-256 digest,"),
+              ("each written as 64 lowercase hexadecimal digits:", "each written in hexadecimal:"),
+              ("and the installed-copy digest, the digest of the installed copy's bytes",
+               "and the installed-copy digest,"))),
             ("A restatement differs from that file's",
              (("for any field the file carries,", "for the class,"),
               ("or states a field the file does not carry.", "."))),
+            ("A conformance report of a release is a report",
+             (("whose shipped-file digest and installed-copy digest are equal:",
+               "whatever its digests:"),
+              ("is not a conformance report of that release,",
+               "is a conformance report of that release,"),
+              ("MUST NOT be presented as one,", "MAY be presented as one,"))),
+            ("A report that an installation of a release emits",
+             (("MUST be treated as a conformance report of that release",
+               "MUST NOT be treated as a conformance report of that release"),
+              ("lacks either digest,", "lacks both digests,"))),
             ("A release does not conform to this section,",
              (("MUST NOT be made for it,", "MAY be made for it,"),
+              ("any conformance report of that release omits the declaration",
+               "any conformance report whose digests match omits the declaration"),
               ("omits the declaration or a field the file carries", "omits the declaration"),
-              ("or carries any other value in its place.", "."))),
+              ("omits either digest,", "omits both digests,"),
+              ("or carries a shipped-file digest other than the digest of that file's bytes",
+               "or carries a malformed shipped-file digest of that file's bytes"),
+              ("or where its documentation does not state where the implementation carries",
+               "or where its documentation does not state whether the implementation carries"))),
             ("Each such failure is a release nonconformance,",
              (("never a runtime state of the declaration:", "a runtime state of the declaration:"),
               ("MUST NOT be treated as making the declaration malformed",
@@ -2863,13 +2917,9 @@ def _self_test_vectors():
                "what a check of the documentation yields."))),
             ("A check of the documentation or the conformance reports",
              (("with that file's bytes as the release ships them,", "with the file as installed,"),
-              ("never with an installed copy.", "or with an installed copy."))),
-            ("A conformance report of a release is one",
-             (("whose installed copy of that file has the bytes the release ships:",
-               "whatever its installed copy of that file:"),
-              ("is not a conformance report of that release,",
-               "is a conformance report of that release,"),
-              ("MUST NOT be presented as one,", "MAY be presented as one,"))),
+              ("never with an installed copy.", "or with an installed copy."),
+              ("each restatement and each shipped-file digest",
+               "each restatement and each installed-copy digest"))),
             ("A declaration that carries its release identity,",
              (("omits only its class, declares no class:", "omits only its class, is malformed:"),)),
             ("The rules on an absent, unreadable, malformed,",
@@ -2880,24 +2930,32 @@ def _self_test_vectors():
                "MUST apply them to an installed copy,"),
               ("MUST NOT take a class or any other field",
                "MAY take a class or any other field"))),
-            ("Where that documentation or a conformance report states a class",
-             (("the release does not conform to this section",
+            ("Where that documentation or a conformance report of that release states a class",
+             (("or a conformance report of that release states a class",
+               "or a conformance report states a class"),
+              ("the release does not conform to this section",
                "the release conforms to this section"),
               ("declares no class only where it omits its class and no other field:",
                "declares no class where it omits its class:"),
               ("is malformed and MUST yield cannot-evaluate.",
-               "declares no class.")))):
-        pin = [f for f in _CONTRACT["16.1"] if f.startswith(start)]
-        sentence = pin[0] if len(pin) == 1 else start
-        finding = "spec 16.1 missing contract: " + sentence
-        pattern = r"\s+".join("`?" + "`?".join(map(re.escape, w)) + "`?" for w in sentence.split())
-        deleted, removed = re.subn(pattern, "", body)
-        check("spec-flip-16.1-" + start, lambda d=deleted, r=removed, f=finding, p=pin:
-              len(p) == 1 and r == 1 and f in contract_findings(text.replace(body, d, 1)))
-        for old, new in rewordings:
-            reworded, changed = re.subn(r"\s+".join(map(re.escape, old.split())), new, body)
-            check("spec-reword-16.1-" + old, lambda w=reworded, c=changed, f=finding:
-                  c == 1 and f in contract_findings(text.replace(body, w, 1)))
+               "declares no class.")))))
+    spec_vectors("17", (
+            ("- The section 16.1 runtime check compares",
+             (("so it detects an edit of that copy alone,", "so it detects any edit,"),)),
+            ("It does not detect a co-edit",
+             (("It does not detect a co-edit", "It detects a co-edit"),
+              ("makes that release nonconformant although",
+               "leaves that release conformant although"))),
+            ("An anchor outside the installation,",
+             (("is the stronger option;", "is no stronger;"),
+              ("section 16.1 does not require one.", "section 16.1 requires one."))),
+            ("An installer that rewrites",
+             (("yield cannot-evaluate (fail-closed),", "pass (fail-open),"),
+              ("no report that installation emits is a conformance report",
+               "every report that installation emits is a conformance report"))),
+            ("A check of the documentation detects",
+             (("it cannot confirm that the implementation carries",
+               "it confirms that the implementation carries"),))))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
