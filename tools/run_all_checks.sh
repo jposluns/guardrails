@@ -186,6 +186,8 @@ run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execut
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+run_gate "merge-train-selftest" python3 -I -B tools/merge_train.py --self-test --red-on-revert
+run_gate "merge-train-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite merge-train-selftest
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py

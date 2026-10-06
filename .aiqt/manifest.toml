@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0d3e0706d9fac3fe06d57b00fa40f14db3eb0e1636fcdfa1677608f6492fa26f"
+tree-sha256 = "104b624f32c6b126c14dc72178f7f3b77f515badfe6cfd46475df68cc495fedf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 254972
-sha256 = "99472ee6447cdad552e9bf272966747c377e76a586175625848259b30ec7ae63"
+bytes = 259824
+sha256 = "007c4b6df59c28d7f2649f7bd8c6bcb5acd009615a8a854a45370df78c8d7def"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -101,8 +101,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 15441
-sha256 = "1d91c1c0540dd59e66533b97b7ccaad1baa99bc737d38c68e1e1bf9c8afa9d08"
+bytes = 15841
+sha256 = "4630b32d11edfca30a773abf03ddb7dcc8f0c8521a0b176c7ba61c4bee8212fd"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -796,8 +796,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 335609
-sha256 = "b9f81513d57d98b2581350ea98d0ab5dadc16c85e04b405d934dd00af568de07"
+bytes = 335653
+sha256 = "a9071b3e3cae10e592647f6cd8d29c878c8f1f2b37004a499da74f387c1f2867"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41527
-sha256 = "7d855714c2b0dc105ff579cf0cee6cfea90fad2ca7b7bd1e54fb0258830ea12d"
+bytes = 41560
+sha256 = "f1c9f8349aac28f408148a5c9e438a0c9d867943206c88a18d4715a05f15e559"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2306,8 +2306,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 190556
-sha256 = "75e7ad6fa8b521c189b738fc1e6e807eb8baf1e3316ae521b7a98d7e73086bb9"
+bytes = 190578
+sha256 = "d5b47dc563b1bd2be13c2da5694cd28464b19df99ffabd170d53053817b37c57"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3061,8 +3061,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 238428
-sha256 = "4037191af5047523ded156f6efb695363aa499826bbc44ccf3f6b5ca067e1edf"
+bytes = 238450
+sha256 = "a0987953737270b3ac891f424a08c5993536f02764ce7fdda6b7027c707d734e"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3570,6 +3570,11 @@ bytes = 442
 sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
+path = "tools/merge_train.py"
+bytes = 211587
+sha256 = "33c300cb4117a51758d685f2b6e61a5f5241093a78bfa2d1de919c85efcfd5db"
+
+[[sources]]
 path = "tools/migrate.py"
 bytes = 133707
 sha256 = "b054fc3f73ed4bacc69e3e0b92aa0334f1f32ff7cad59c2c22d76962a7b538eb"
@@ -3601,8 +3606,8 @@ sha256 = "21e3d8ae910d0c10103055d5c3fa992f72e2729d8a4e81b2634403b96c550d70"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 18654
-sha256 = "92ac757d8593279cb4c0d66bfcdea6cf6154ae58cc1431c76320c702819d574c"
+bytes = 18868
+sha256 = "b9d975346bed1e95a3aac01da2ed3c22bce0fb8adb15d75409baee7c767221f3"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3616,8 +3621,8 @@ sha256 = "b448a94715f2f63ae90dfa035cd56d869fd3d9ff6767fdf307bcc34677b69123"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 40933
-sha256 = "596b7fefb52d87a04a8cfd45a9b0534a001c36b75377838edc381b79aede3c80"
+bytes = 49770
+sha256 = "8ce1139d37cc57330e64fa4417d0634141593dd744b07154954f19b777cca228"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3626,8 +3631,8 @@ sha256 = "13c527d0d7999c696bf34fcf649c804e8856f11c6880c3cfde3bdee630d582fe"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 272662
-sha256 = "bd0d1f3b00d95a7a9a5d01c842bf9abc2725d86093ac6a6e731254e8f4d19eca"
+bytes = 273276
+sha256 = "baaa51343a4166bd852faa3a602ccb98f7778c21f54f6aceda3dd52f15e1caa2"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
