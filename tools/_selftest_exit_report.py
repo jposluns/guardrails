@@ -49,12 +49,31 @@ including a C callable: _thread ignores such a thread's SystemExit silently, so 
 cannot be observed; a start is threading's own only when its target is exactly a bound method
 whose function is threading.Thread._bootstrap and whose instance is a threading.Thread, read through
 the method type's own slots, so no attribute the target supplies is trusted), every thread started
-after the exit-time thread join (it is never joined), and every import of an interpreter-creating
-module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi; the name is compared as an
-exact str, so a str subclass's own hashing or equality cannot hide it): every hook here is
-per-interpreter, so code in another interpreter is invisible to all of them, and the import of the
-machinery that could create one is therefore itself the fault; and threading._shutdown, the
-exit-time join, is wrapped to mark when it has finished. A hook that meets a fault records it FIRST,
+after the exit-time thread join (it is never joined), and the means of creating another
+interpreter: every hook here is per-interpreter, so code in another interpreter is invisible to all
+of them, and creating one is therefore itself the fault. That is refused in two layers. (1) THE ACT:
+the audit event cpython.PyInterpreterState_New, which CPython documents for the creation of an
+interpreter, is a fault whenever this interpreter's hook receives it. MEASURED on CPython 3.14.4,
+creating an interpreter through _interpreters.create(), concurrent.interpreters.create() or
+_testcapi.run_in_subinterp delivers that event to no hook added with sys.addaudithook (nor to a
+runtime-level hook added with PySys_AddAuditHook; _xxsubinterpreters is absent there), so on that
+version this layer refuses nothing and layer (2) is the guard. (2) THE MACHINERY, identified by its
+FILE, not by the name it is imported under: at installation, each interpreter-creating extension
+module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi) present as a file is found
+through importlib.util.find_spec without being imported, and its spec origin is recorded by
+identity (st_dev and st_ino of the file os.stat resolves, so the resolved path, a symlink and a hard
+link all match) and by content (size and sha256, so a byte copy at another path matches); every
+extension load raises an import audit event that carries the file the loader is about to open (its
+spec origin), and that file is compared with the record, so a load under a qualified alias (for
+example importlib.util.spec_from_file_location("qa._interpreters", origin)) or from a copied file
+is refused exactly as the plain import is. The plain name is refused as well, compared as an exact
+str (a str subclass's own hashing or equality cannot hide it): it is the only route to such a module
+built into the interpreter, whose import carries no file. Both checks run when the load is
+attempted, so a failed load is refused the same way, and a file that cannot be examined is
+recorded as an unclassifiable event (a fault). NOT refused: an interpreter created through an
+extension file that is none of the recorded ones (a rebuilt or third-party C extension, or ctypes),
+the C-extension tier disclosed below. Finally, threading._shutdown, the exit-time join, is wrapped
+to mark when it has finished. A hook that meets a fault records it FIRST,
 with a fixed message that runs no code the suite controls, and only then attempts a richer
 description (an exception's repr, a thread's name) inside a guard whose own failure is recorded
 too, so a raising __repr__ or code property cannot erase the fault; a thread's end is classified
@@ -64,11 +83,11 @@ THE HOOKS OUTLIVE THE MODULE'S GLOBALS: interpreter teardown clears module globa
 to None) while the audit hook is still installed and late destructors still run, so a hook that
 looked a global up at call time would itself fault there, and its "Exception ignored" would refuse
 a run whose late code was clean (for example a destructor that opens a file or audits an event).
-Every hook and the finalizer (_audit, _genuine_bootstrap, _thread_hook, _clean_status,
+Every hook and the finalizer (_audit, _file_digest, _genuine_bootstrap, _thread_hook, _clean_status,
 _SuiteExit.code, the _shutdown wrapper, _harness_error, _finalize) therefore binds, when it is
 defined, every object it reads, builtins included, as a keyword-only default (the _shutdown wrapper
-reads its factory's through its closure), and looks up no global or builtin name and imports
-nothing at call time (an import at teardown fails once sys.meta_path is cleared). A faulting late
+reads its factory's through its closure), and looks up no global or builtin name and imports nothing
+at call time (an import at teardown fails once sys.meta_path is cleared). A faulting late
 destructor reaches stderr through sys.unraisablehook, and is refused, only while sys.stderr still
 exists: CPython drops sys.stderr (and sys.__stderr__) before it clears some interpreter-level state,
 so the destructor of an object whose last reference that state holds runs and raises at late teardown
@@ -129,7 +148,9 @@ replaced _invoke_excepthook) is the gate's loaded-code residual, disclosed there
 """
 import atexit
 import gc
+import hashlib
 import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
@@ -140,12 +161,19 @@ FORMAT_VERSION = 2
 GC_PASSES = 3            # the bounded collection: stop early once a pass frees nothing
 HARNESS_ERROR = 2
 _THREAD_START_EVENTS = ("_thread.start_new_thread", "_thread.start_joinable_thread")
+# The audit event CPython documents for the creation of an interpreter. Receiving it is a fault; on
+# CPython 3.14.4 interpreter creation was measured to deliver it to no sys.addaudithook hook, so there
+# the extension-file record below is what refuses (module docstring, layers (1) and (2)).
+_INTERP_NEW_EVENT = "cpython.PyInterpreterState_New"
 # The stdlib modules able to create or drive another interpreter from Python: _interpreters (3.13+)
 # and _xxsubinterpreters (its older name), and the C-API test modules whose run_in_subinterp does
-# the same. Importing one is itself a fault: every hook this module installs is per-interpreter, so
+# the same. Loading one is itself a fault: every hook this module installs is per-interpreter, so
 # code in another interpreter is unobservable from this one.
 _SUBINTERP_MODULES = frozenset(
     ("_interpreters", "_xxsubinterpreters", "_testcapi", "_testinternalcapi"))
+# The files those modules load from, filled by _install before the audit hook is added: their
+# identities (st_dev, st_ino), sizes, and (size, sha256) contents.
+_SUBINTERP_FILES = {"identities": set(), "sizes": set(), "digests": set()}
 _BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs this, bound
 # SystemExit's own code slot, read through the base descriptor so that a subclass's code property
 # (code the exception controls) never runs while a thread's end is classified
@@ -221,14 +249,23 @@ def _genuine_bootstrap(target, *, _BOOTSTRAP=_BOOTSTRAP, _MethodType=types.Metho
             and issubclass(type(target.__self__), _Thread))
 
 
+def _file_digest(path, *, open=open, _sha256=hashlib.sha256):
+    """The sha256 of a file's content (an extension file is small enough to read in one piece)."""
+    with open(path, "rb") as handle:
+        return _sha256(handle.read()).hexdigest()
+
+
 def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVENTS,
-           _SUBINTERP_MODULES=_SUBINTERP_MODULES, _genuine_bootstrap=_genuine_bootstrap,
-           _exact_str=str.__str__, BaseException=BaseException):
+           _SUBINTERP_MODULES=_SUBINTERP_MODULES, _SUBINTERP_FILES=_SUBINTERP_FILES,
+           _INTERP_NEW_EVENT=_INTERP_NEW_EVENT, _genuine_bootstrap=_genuine_bootstrap,
+           _file_digest=_file_digest, _stat=os.stat, _exact_str=str.__str__,
+           BaseException=BaseException):
     """The audit hook from installation on: record, as a fault, a thread started outside threading
-    or after the exit-time join, and an import of a module able to create another interpreter
-    (whose code no hook of this interpreter can see; the event fires for the import attempt, so a
-    probing failed import is recorded the same way). It never raises (a raising hook would abort
-    the audited operation instead)."""
+    or after the exit-time join, the creation of another interpreter (whose code no hook of this
+    interpreter can see) when its event is delivered, and the load of an interpreter-creating
+    module, identified by the extension FILE it loads from whatever name it is loaded under, or by
+    its exact plain name (the event fires for the load attempt, so a probing failed load is recorded
+    the same way). It never raises (a raising hook would abort the audited operation instead)."""
     try:
         if event == "import":
             # the exact str of the name: a str subclass's own __hash__ or __eq__ would otherwise
@@ -238,6 +275,22 @@ def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVE
                 _STATE["faults"].append(
                     "the interpreter-creating module {} was imported; code in another interpreter "
                     "cannot be observed from this one".format(name))
+            elif args[1] is not None:
+                # an extension load: args[1] is the file the loader is about to open (its spec
+                # origin), compared by identity and then by content with the recorded files, so
+                # the name the spec carries decides nothing
+                path = _exact_str(args[1])
+                stat = _stat(path)
+                if ((stat.st_dev, stat.st_ino) in _SUBINTERP_FILES["identities"]
+                        or (stat.st_size in _SUBINTERP_FILES["sizes"]
+                            and (stat.st_size, _file_digest(path)) in _SUBINTERP_FILES["digests"])):
+                    _STATE["faults"].append(
+                        "the extension file of an interpreter-creating module was loaded as {}; "
+                        "code in another interpreter cannot be observed from this one".format(name))
+            return
+        if event == _INTERP_NEW_EVENT:
+            _STATE["faults"].append("another interpreter was created; code in another interpreter "
+                                    "cannot be observed from this one")
             return
         if event not in _THREAD_START_EVENTS:
             return
@@ -264,6 +317,20 @@ def _wrap_shutdown(original, *, _STATE=_STATE, _ncallbacks=atexit._ncallbacks):
     return _shutdown
 
 
+def _record_subinterp_files():
+    """Record, into _SUBINTERP_FILES, the file each interpreter-creating extension module loads
+    from, found without importing it (a top-level find_spec runs no module code); a module built
+    into the interpreter or absent has no file, and only its plain name can import it."""
+    for name in sorted(_SUBINTERP_MODULES):
+        spec = importlib.util.find_spec(name)
+        if spec is None or not spec.has_location:
+            continue
+        stat = os.stat(spec.origin)
+        _SUBINTERP_FILES["identities"].add((stat.st_dev, stat.st_ino))
+        _SUBINTERP_FILES["sizes"].add(stat.st_size)
+        _SUBINTERP_FILES["digests"].add((stat.st_size, _file_digest(spec.origin)))
+
+
 def _install():
     """Install the observation hooks; idempotent. _bootstrap_main calls this before any suite code
     runs, so under the gate nothing a runner executes precedes them. The audit hook cannot be
@@ -271,6 +338,7 @@ def _install():
     reporting machinery, the disclosed residual."""
     if _STATE["installed"]:
         return
+    _record_subinterp_files()
     _STATE["installed"] = True
     _STATE["main_ident"] = threading.main_thread().ident
     _STATE["thread_hook"] = threading.excepthook

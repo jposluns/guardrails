@@ -65,10 +65,14 @@ true, and the exit_code that must equal the child's real exit status. A fault th
 atexit callback, a destructor, a thread) therefore refuses the verdict when it reaches the error
 stream, which a destructor fault at late interpreter teardown can fail to do (disclosed below); a
 thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
-_thread directly at any moment from process start (whose SystemExit _thread ignores silently), an
-import of an interpreter-creating module (_interpreters, _xxsubinterpreters, _testcapi,
-_testinternalcapi: every in-process hook is per-interpreter, so code in another interpreter is
-unobservable and the machinery's import is itself the fault), a thread started or an atexit callback
+_thread directly at any moment from process start (whose SystemExit _thread ignores silently), a
+delivered interpreter-creation audit event (cpython.PyInterpreterState_New; measured on CPython
+3.14.4 as never delivered to an in-process hook) and a load of an interpreter-creating extension
+module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi), identified by the
+extension FILE it loads from, by identity or content, under any module name, or by its exact plain
+name (every in-process hook is per-interpreter, so code in another interpreter is unobservable and
+loading the machinery is itself the fault; an interpreter created through any other C extension or
+ctypes is the disclosed C-extension tier), a thread started or an atexit callback
 registered after the exit-time thread join (neither is ever joined or run), and a status recorded
 through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
 process left by another path, or an earlier exit_with outlived it), each,
@@ -1353,6 +1357,48 @@ def self_test():
             code, _out, err = run(build(_manifest_text(), body))
             expect("st/finalizer-{}-2".format(label), code, 2)
             expect("st/finalizer-{}-named".format(label), named in err, True)
+        # 25c2 (round 9): the interpreter-creating machinery is identified by its extension FILE, not
+        # by the name it is loaded under: the _interpreters extension loaded as qa._interpreters
+        # (a qualified alias through spec_from_file_location) creates a subinterpreter whose fault no
+        # hook here can see, and so does a byte copy of the file loaded from another path; both are
+        # refused like the plain import above. A delivered interpreter-creation audit event is
+        # refused too (sys.audit raises it here, since CPython 3.14.4 delivers it to no in-process
+        # hook when it creates an interpreter). The twin, another extension file loaded under a
+        # qualified alias, passes.
+        alias_load = ("import importlib.util\n"
+                      "_spec = importlib.util.find_spec('_interpreters')\n"
+                      "_origin = _spec.origin\n")
+        alias_tail = ("_alias = importlib.util.spec_from_file_location('qa._interpreters', _origin)\n"
+                      "_mod = importlib.util.module_from_spec(_alias)\n"
+                      "_alias.loader.exec_module(_mod)\n"
+                      "_interp = _mod.create()\n"
+                      "try:\n"
+                      "    print('ST fault observed:', _mod.run_string(\n"
+                      "        _interp, \"raise RuntimeError('ST_SUBINTERP_FAULT')\"), flush=True)\n"
+                      "finally:\n    _mod.destroy(_interp)\n"
+                      + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        copy_load = ("import shutil\n"
+                     "_origin = shutil.copyfile(_origin, os.path.join(here, 'copied_interp.so'))\n")
+        for label, body, named in (
+                ("subinterp-qualified-alias", alias_load + alias_tail,
+                 "was loaded as qa._interpreters"),
+                ("subinterp-copied-file", alias_load + copy_load + alias_tail,
+                 "was loaded as qa._interpreters"),
+                ("subinterp-creation-event", "sys.audit('cpython.PyInterpreterState_New')\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n",
+                 "another interpreter was created")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        code, _out, err = run(build(_manifest_text(), (
+            "import importlib.util\n"
+            "_spec = importlib.util.find_spec('_queue')\n"
+            "if _spec.has_location:\n"
+            "    _alias = importlib.util.spec_from_file_location('qa._queue', _spec.origin)\n"
+            "    _alias.loader.exec_module(importlib.util.module_from_spec(_alias))\n"
+            "else:\n    import _queue\n"
+            + arm_line + "_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-unrelated-extension-alias-twin-passes", (code, err), (0, ""))
         code, _out, err = run(build(_manifest_text(), weakref_confirm))
         expect("st/finalizer-weakref-forged-confirm-2", code, 2)
         expect("st/finalizer-weakref-forged-confirm-named",
@@ -1452,7 +1498,8 @@ def self_test():
         probe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(probe)
         for label, function in (
-                ("audit", probe._audit), ("genuine-bootstrap", probe._genuine_bootstrap),
+                ("audit", probe._audit), ("file-digest", probe._file_digest),
+                ("genuine-bootstrap", probe._genuine_bootstrap),
                 ("thread-hook", probe._thread_hook), ("clean-status", probe._clean_status),
                 ("suite-exit-code", probe._SuiteExit.code.fget),
                 ("shutdown-wrapper", probe._wrap_shutdown(int)),
@@ -1569,8 +1616,10 @@ def self_test():
           "silent failure SystemExit in a non-daemon thread, a thread fault whose repr or code "
           "property raises, a thread started through _thread directly at any moment from process "
           "start (a forged or non-Thread bootstrap target included), a thread or atexit callback "
-          "added after the exit-time join, an import of subinterpreter machinery (a str-subclass "
-          "name included), a finalizer failure whose repr raises, and an armed child whose "
+          "added after the exit-time join, a load of subinterpreter machinery (a str-subclass "
+          "name, a qualified alias of its extension file, and a copy of that file included), a "
+          "delivered interpreter-creation audit event, a finalizer failure whose repr raises, "
+          "and an armed child whose "
           "observation hooks were not installed at process start, refuses an armed "
           "child whose status or report bypassed the exit finalizer, whose recorded status the "
           "interpreter's own exit did not confirm, or whose report's exit_code differs from the "
