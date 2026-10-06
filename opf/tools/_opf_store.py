@@ -549,13 +549,15 @@ def _close_fd_exc_safe(fd):
     inside an `except` handler of the SAME function would read that handled exception as in flight (as in
     #378), and no call site is nested that way; a platform that keeps the descriptor on a failed close
     (HP-UX, and POSIX.1-2024 as close(2) reports it) leaks it until exit, which Linux does not, and macOS
-    is assumed not to."""
+    is assumed not to. A close error raised leaves marked (_journal._mark_fd_release_raised), so a handler
+    reading OSError as a signal raises it (_journal._fd_release_fault)."""
     tb = sys.exc_info()[2]
     in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
     try:
         os.close(fd)
-    except OSError:
+    except OSError as exc:
         if not in_flight:
+            _journal._mark_fd_release_raised(exc)
             raise
 
 
@@ -565,11 +567,12 @@ def _close_fd_on_exit(fd, exc_type, exc, tb):
     exception it is unwinding (the body's, or an earlier callback's close error), so the close is quiet
     while one is and propagates fail-closed when none is. One os.close either way (P1, as
     _close_fd_exc_safe): a raising close has released the number, which is never probed or closed again.
-    Returns None, so it never suppresses."""
+    Returns None, so it never suppresses. A close error raised leaves marked, as _close_fd_exc_safe's."""
     try:
         os.close(fd)
-    except OSError:
+    except OSError as cexc:
         if exc is None:
+            _journal._mark_fd_release_raised(cexc)
             raise
 
 
@@ -614,15 +617,25 @@ def _open_dir_nofollow(abspath):
         held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[1:]:
             held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            _journal._close_fd_propagating(held.pop(-2))
+            try:
+                _journal._close_fd_propagating(held.pop(-2))
+            except BaseException as cexc:  # noqa: BLE001  marked: a caller never reads it as an open error
+                _journal._mark_fd_release_raised(cexc)
+                raise
         return held.pop()
     except BaseException as exc:
+        closing = []    # what a close raised that is not an OSError: resolved against `exc` below
         while held:
             try:
                 _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
+            except BaseException as cexc:   # noqa: BLE001  keep closing; resolved below, never dropped
+                closing.append(cexc)
+        # the one first-interrupt selection: an interrupt in flight keeps propagating as itself, each
+        # close exception noted on it, and none replaces it (_journal._yield_close_exceptions)
+        _journal._yield_close_exceptions(exc, closing)
         raise
 
 
@@ -657,6 +670,7 @@ def _read_store_bytes_contained(root_fd, relpath):
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
         # control-character, or refused/unreadable intermediate component) or OSError; neither is a
         # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
@@ -688,6 +702,7 @@ def _read_store_bytes_contained(root_fd, relpath):
         # paths, so the single-link requirement covers both without touching generic product reads.
         data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
     except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
         # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
@@ -736,7 +751,13 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -747,9 +768,11 @@ def _open_working_dir_fd(store_root_fd, working_rel):
     _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is never read as absent
         return None
     except (OSError, _journal.JournalError) as exc:
+        _journal._fd_release_fault(exc)    # nor as a cannot-evaluate
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
     wfd = None
     try:
@@ -769,12 +792,15 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # is _close_fd_exc_safe's single os.close (P1: a raising close has released its number, close(2),
         # and it is never touched again), and its close error propagates fail-closed unless an exception is
         # already in flight here, which then keeps propagating in its place.
+        inflight = _journal._in_flight_in(sys._getframe())
         try:
             _close_fd_exc_safe(pfd)
         except OSError:
             if wfd is not None:
                 _journal._close_fd_quietly(wfd)
             raise
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     return wfd
 
 
@@ -861,7 +887,13 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
         status, machine_dir, detail = _discovery_result(matches, legacy)
         return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _classify_working_names(names, load, accept):
@@ -1043,9 +1075,16 @@ def resolve_store(product_root, accept_tokens=None):
             # override already settled (MAJOR 1).
             committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        _close_fd_exc_safe(product_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1055,6 +1094,7 @@ def resolve_store(product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root)
         res = _resolve_at(store_root, source, target, pointer=True, accept_tokens=accept_tokens)
@@ -1093,6 +1133,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
         # root or ancestor is refused, MAJOR 2); the default location is the trusted product-root anchor.
         store_root_fd = _open_store_root_fd(store_root, pointer)
     except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, "cannot open store root {} ({})".format(store_root, exc),
                           target=target, pointer_source=source)
     try:
@@ -1100,10 +1141,20 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
             status, machine_dir, detail = discover_machine_store(
                 store_root_fd, store_root, accept_tokens=accept_tokens)
         except StoreError as exc:
+            # a close's exception (marked as it left the close helper) is raised as itself, every fault
+            # recorded on it kept, never this cannot-evaluate posture (_store_posture_or_refuse admits a
+            # cannot-evaluate default location once fresh discovery succeeds, so it would vanish there)
+            _journal._fd_release_fault(exc)
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1153,6 +1204,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
         committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
     pointer = local is not None or committed is not None
     target = local if local is not None else committed
@@ -1162,6 +1214,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root), None
         if store_root != product_root:
@@ -1174,6 +1227,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
             product_root_fd, accept_tokens=accept_tokens)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
                           pointer_source=source, product_root=product_root), None
     if status == "one":
@@ -1953,9 +2007,16 @@ def load_manifest(resolution, supported_profiles=None):
     try:
         data = _read_toml_contained(store_root_fd, manifest_rel)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])

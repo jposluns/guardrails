@@ -14,7 +14,24 @@ HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledg
 STATUS DERIVATION. A non-empty `gates` array makes a rule gate-linked; else a non-empty `hooks` array
 makes it hook-linked; else prose-only. The label names the most deterministic linkage point only; the
 two arrays carry the FULL linkage, so the precedence collapses nothing (a rule cited by both a hook and
-a gate reads gate-linked yet still lists its hook).
+a gate reads gate-linked yet still lists its hook). Each gate and hook row carries its class letter, so a
+rule linked only through class c gates reads as such from its rows.
+
+PREVIEW HOOKS. The hooks published in .preview/ are not shipped controls: they are not in the plugin and
+nothing installs them. .aiqt/core/hooks/preview.toml declares each one and the corpus ids its own module
+docstring names (an entry may name none). The ledger lists every declared preview at the top level and, per
+rule, the ids of the previews that name it; a preview never changes a status. The declaration is checked
+fail-closed against .preview/ in both directions (a published hook with no entry, or an entry with no
+published hook, exits 2). Every declared hook file is validated whether or not its entry lists rules: the
+file itself (the final path component) must be a regular file, so a symlink (even to a valid file) or a
+directory is rejected, while the directories above it are resolved as usual; it must be readable, valid
+UTF-8 with no coding cookie other than UTF-8 (a UTF-8 byte order mark is allowed), parse as Python from its
+BYTES (so the docstring checked is the one Python sees), and carry a non-blank module docstring. A docstring
+NAMES a rule when the rule's slug appears in it, its ASCII letters in either case, with no word character,
+hyphen or combining mark directly on either side. Linkage is checked both ways: each declared corpus id must
+resolve in the corpus AND be named, and every corpus rule the docstring names must be declared, so an entry
+can neither claim a link its hook does not name nor hide one its hook does. Those .preview/ reads are
+validation only and never change the ledger bytes, so .preview/ is not a GENSRC_OUTPUTS source.
 
 GRADING RUBRIC (the class letter grades a control's DECISION PROCEDURE against the rule's violation
 surface; the a-versus-c line is TOTALITY over the examined class, not determinism of the scan):
@@ -67,8 +84,14 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import ast
+import codecs
+import io
 import json
 import re
+import stat
+import tokenize
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -81,6 +104,9 @@ LEDGER_REL = ".aiqt/enforceability.json"
 GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
 HOOKS_MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
 RULES_DIR_REL = ".aiqt/core/rules"
+PREVIEW_DECL_REL = ".aiqt/core/hooks/preview.toml"
+PREVIEW_DIR_REL = ".preview"
+PREVIEW_KEYS = {"id", "rules"}
 # The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
 # VALIDATION-ONLY read that never changes the ledger bytes, so they are deliberately NOT GENSRC_OUTPUTS
 # sources (the exclusion gen_gensrc's docstring defines; gen_hooks reading the corpus to cross-check ids
@@ -110,16 +136,20 @@ BOUNDARY = (
     "half of every claim. None of the statuses means a rule is enforced: gate-linked means at least one "
     "deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it "
     "and no gate does, prose-only means no shipped control cites it and the rule binds through the "
-    "governing prose alone. Nothing in this file is a completeness or coverage measure, and deriving a "
-    "score from it misreads it.")
+    "governing prose alone. Each gate and hook row carries its class letter; a rule linked only through "
+    "class c gates is linked only for a recognizable subset of its surface. A preview is not a shipped "
+    "control: the previews list names hooks published in .preview/ for manual installation, outside the "
+    "plugin, whose own description names the rule, and a preview never changes a status. Nothing in this "
+    "file is a completeness or coverage measure, and deriving a score from it misreads it.")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. Sources are the content-bearing inputs the
-# ledger DERIVES from (the corpus and the two manifests); the roster files are excluded (see ROSTER_FILES).
+# ledger DERIVES from (the corpus, the two manifests and the preview declaration); the roster files are
+# excluded (see ROSTER_FILES).
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
-                 ".aiqt/core/gates/manifest.toml"),
+                 ".aiqt/core/gates/manifest.toml", ".aiqt/core/hooks/preview.toml"),
      "regenerate": "python3 tools/gen_enforceability.py"},
 )
 
@@ -197,6 +227,146 @@ def load_gates_manifest(path, root):
                              "control)".format(where, "/".join(sorted(CLASSES))))
         _req_str(gate, "residue", where)  # required, never empty: the gate's honest residue gap
     return gates
+
+
+def _published_previews(root):
+    """The stems of the hook files published in .preview/ (every *.py entry), or an empty set when the
+    directory is absent. A .preview path that is present but unreadable raises OSError (fail-closed)."""
+    try:
+        names = sorted(entry.name for entry in (root / PREVIEW_DIR_REL).iterdir())
+    except FileNotFoundError:
+        return set()
+    return {name[:-3] for name in names if name.endswith(".py")}
+
+
+def _refusal(exc):
+    """The reason text for an exception raised while decoding or parsing a preview hook's bytes: a
+    SyntaxError's own message, otherwise the exception's type and message."""
+    if isinstance(exc, SyntaxError):
+        return exc.msg
+    return "{}: {}".format(type(exc).__name__, exc)
+
+
+def _preview_docstring(root, rel):
+    """The module docstring of the declared preview hook file root/rel, exactly as Python sees it,
+    validated before any of its rules are read. The file itself (the final path component) must be a
+    regular file: a symlink, even to a valid file, or a directory is rejected, while the directories above
+    it are resolved as usual. It must be readable; its bytes must be valid UTF-8 (a UTF-8 byte order mark
+    is allowed) with no PEP 263 coding cookie or one naming UTF-8, so the text Python decodes is the text
+    checked here; it must parse as Python from those BYTES, so Python's own source decoding applies; and
+    its module docstring must be non-blank. The cookie is looked for where Python looks: on line 1 or 2,
+    with LF, CRLF and a lone CR each ending a line. An unreadable file raises OSError; every other failure
+    raises ValueError naming the file. Every exception that decoding, cookie detection or parsing raises
+    on the file's content is converted, whatever its class (a SyntaxError, the LookupError of a cookie
+    naming a codec that is not a text encoding, the MemoryError or RecursionError of a file too complex to
+    parse, or any other), so run() fails closed with exit 2 either way and never shows a traceback."""
+    path = root / rel
+    if not stat.S_ISREG(path.lstat().st_mode):  # lstat raises OSError on an absent or unreadable path
+        raise ValueError("{} is not a regular file".format(rel))
+    raw = path.read_bytes()  # OSError on an unreadable file
+    try:
+        raw.decode("utf-8")
+    except Exception as exc:  # noqa: BLE001  any refusal of the bytes is a refusal of the file
+        raise ValueError("{} is not valid UTF-8 ({})".format(rel, _refusal(exc))) from None
+    # detect_encoding's readline ends a line at LF only, so it reads a copy with every line ending made LF;
+    # the original bytes are what is parsed below.
+    lf = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    try:
+        encoding = tokenize.detect_encoding(io.BytesIO(lf).readline)[0]
+        codec = codecs.lookup(encoding).name
+    except Exception as exc:  # noqa: BLE001  e.g. an unknown or non-text codec, or a BOM by another cookie
+        raise ValueError("{} fails source encoding detection ({})".format(rel, _refusal(exc))) from None
+    if codec not in ("utf-8", "utf-8-sig"):
+        raise ValueError("{} declares coding {}; a preview hook must be UTF-8 with no other coding "
+                         "cookie".format(rel, encoding))
+    try:
+        tree = ast.parse(raw, filename=rel)
+    except SyntaxError as exc:
+        raise ValueError("{} does not parse as Python ({}, line {})".format(
+            rel, exc.msg, exc.lineno)) from None
+    except (MemoryError, RecursionError) as exc:
+        raise ValueError("{} is too complex to parse as Python ({}: {})".format(
+            rel, type(exc).__name__, exc)) from None
+    except Exception as exc:  # noqa: BLE001  e.g. the ValueError for null bytes on a Python before 3.12
+        raise ValueError("{} does not parse as Python ({})".format(rel, _refusal(exc))) from None
+    doc = ast.get_docstring(tree)
+    if not doc or not doc.strip():
+        raise ValueError("{} has no module docstring (a blank one counts as none)".format(rel))
+    return doc
+
+
+def _names_slug(doc, slug):
+    """True when the docstring NAMES the slug: the slug appears, each ASCII letter in either case (no other
+    case folding, so a Kelvin sign is not a k), with no word character (a letter, digit or underscore), no
+    hyphen and no combining mark directly on either side. The forward check (a declared rule must be named)
+    and the reverse check (a named rule must be declared) share this one predicate, so the two directions
+    cannot disagree about what naming is. It is lexical: it does not read Markdown or meaning."""
+    body = "".join("[{}{}]".format(c.lower(), c.upper()) if c.isascii() and c.isalpha() else re.escape(c)
+                   for c in slug)
+    for match in re.finditer(r"(?<![\w-]){}(?![\w-])".format(body), doc):
+        start, end = match.span()
+        beside = (doc[i] for i in (start - 1, end) if 0 <= i < len(doc))
+        if not any(unicodedata.category(ch).startswith("M") for ch in beside):
+            return True
+    return False
+
+
+def load_previews(root, slugs):
+    """Parse and validate the preview declaration against .preview/ and the corpus; return its entries
+    sorted by id, each as {id, file, rules}. `slugs` maps corpus id to slug. An absent declaration with no
+    published preview hook is an empty list; every other disagreement raises ValueError (exit 2)."""
+    published = _published_previews(root)
+    decl = root / PREVIEW_DECL_REL
+    if not _exists(decl):
+        if published:
+            raise ValueError("{} is absent but .preview/ publishes hook(s): {}".format(
+                PREVIEW_DECL_REL, ", ".join(sorted(published))))
+        return []
+    data = load_toml(decl)
+    top_extra = set(data) - {"preview"}
+    if top_extra:
+        raise ValueError("{}: unknown top-level key(s): {}".format(PREVIEW_DECL_REL,
+                                                                  ", ".join(sorted(top_extra))))
+    entries = data.get("preview", [])
+    if not isinstance(entries, list):
+        raise ValueError("{}: preview must be an array of tables".format(PREVIEW_DECL_REL))
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != PREVIEW_KEYS:
+            raise ValueError("{}: every [[preview]] must be a table with exactly the keys {}".format(
+                PREVIEW_DECL_REL, ", ".join(sorted(PREVIEW_KEYS))))
+        pid = _req_str(entry, "id", "{}: [[preview]]".format(PREVIEW_DECL_REL))
+        where = "{}: [[preview]] {}".format(PREVIEW_DECL_REL, pid)
+        if not ID_RE.match(pid):
+            raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$".format(where))
+        if any(p["id"] == pid for p in out):
+            raise ValueError("{}: duplicate preview id".format(where))
+        rules = entry["rules"]
+        if not isinstance(rules, list) or not all(isinstance(r, str) for r in rules):
+            raise ValueError("{}: rules must be a list of corpus-id strings (it may be empty)".format(where))
+        if rules != sorted(set(rules)):
+            raise ValueError("{}: rules must be unique and sorted".format(where))
+        rel = "{}/{}.py".format(PREVIEW_DIR_REL, pid)
+        if pid not in published:
+            raise ValueError("{}: no published preview hook {}".format(where, rel))
+        doc = _preview_docstring(root, rel)  # every declared file, whether or not it lists rules
+        for rule in rules:
+            if rule not in slugs:
+                raise ValueError("{}: cites corpus-id '{}' not in .aiqt/core/rules/".format(where, rule))
+            if not _names_slug(doc, slugs[rule]):
+                raise ValueError("{}: the module docstring of {} does not name rule '{}' (slug {})".format(
+                    where, rel, rule, slugs[rule]))
+        unlisted = sorted(cid for cid, slug in slugs.items() if cid not in rules and _names_slug(doc, slug))
+        if unlisted:
+            raise ValueError("{}: the module docstring of {} names rule(s) the entry does not list: "
+                             "{}".format(where, rel, ", ".join("{} (slug {})".format(cid, slugs[cid])
+                                                               for cid in unlisted)))
+        out.append({"id": pid, "file": rel, "rules": rules})
+    undeclared = sorted(published - {p["id"] for p in out})
+    if undeclared:
+        raise ValueError("{}: published preview hook(s) with no entry: {}".format(
+            PREVIEW_DECL_REL, ", ".join(undeclared)))
+    return sorted(out, key=lambda p: p["id"])
 
 
 def roster_scripts(root):
@@ -300,10 +470,12 @@ def build_ledger(root):
         raise ValueError("cannot build the ledger: no {} to load".format(rules_dir))
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
+    slugs = {str(fm["corpus-id"]): str(fm["slug"]) for _src, fm, _rel in corpus}
     _plugin, hooks = load_manifest(root / HOOKS_MANIFEST_REL)
     gates = load_gates_manifest(root / GATES_MANIFEST_REL, root)
     roster_union, per_file = roster_scripts(root)
     cross_checks(gates, hooks, corpus_ids, roster_union, per_file)
+    previews = load_previews(root, slugs)
 
     entries = []
     for src, fm, _rel in sorted(corpus, key=lambda t: str(t[1]["corpus-id"])):
@@ -323,8 +495,9 @@ def build_ledger(root):
             "status": status,
             "hooks": [_hook_row(h) for h in rule_hooks],
             "gates": [_gate_row(g) for g in rule_gates],
+            "previews": [p["id"] for p in previews if cid in p["rules"]],
         })
-    obj = {"version": 1, "boundary": BOUNDARY, "rules": entries}
+    obj = {"version": 1, "boundary": BOUNDARY, "rules": entries, "previews": previews}
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
 
 
@@ -385,6 +558,22 @@ def main():
 #       enumerate that script, so its manifest entry reads as a linkage claim with no roster step and
 #       fails closed (exit 2): proves the F-148 comment strip (the quoted-argument / heredoc residual
 #       stays a disclosed limit and is deliberately not asserted here).
+#   (q) a tree with published preview hooks and a matching declaration lists every preview at the top
+#       level and per rule, and a rule named only by a preview stays prose-only (a preview is never a
+#       shipped control); with no .preview/ and no declaration every rule lists no preview,
+#   (r) a published preview hook with no declaration entry, (s) an entry naming no published hook, (t) an
+#       entry citing a rule whose slug the hook's own docstring does not name, (u) an entry citing an
+#       unknown corpus-id, and (v) published preview hooks with the declaration absent each fail closed
+#       (exit 2),
+#   (w) a declared preview file that lists NO rules is still validated: one that is unreadable, not
+#       UTF-8, a directory, a symlink, unparseable, too complex to parse (MemoryError or RecursionError),
+#       coded other than UTF-8 (a lone-CR line 2 cookie included), with a cookie naming an unknown codec or
+#       one that is not a text encoding (rot13, hex), or has no module docstring each fails closed (exit 2),
+#   (x) a linked preview file that does not parse returns exit 2 from run() instead of raising,
+#   (y) a slug with a letter (either case), digit, underscore or hyphen directly beside it is not named,
+#       while the slug in another letter case between punctuation is named, and
+#   (z) an entry whose docstring names a corpus slug it does not list fails closed (exit 2), with
+#       naming defined exactly as in (y).
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -478,6 +667,32 @@ jobs:
 """
 
 
+_PREVIEW_ONE = '''"""A self-test preview hook motivated by the selftest-rule-dd rule."""
+'''
+_PREVIEW_TWO = '''"""A self-test preview hook whose docstring names no rule."""
+'''
+_PREVIEW_DECL = """[[preview]]
+id = "p-one"
+rules = ["ruledd"]
+
+[[preview]]
+id = "p-two"
+rules = []
+"""
+
+
+def _add_previews(base):
+    """Publish two preview hooks in .preview/ (one naming rule dd by slug, one naming no rule), a README
+    that is not a hook, and a declaration matching them."""
+    preview = base / ".preview"
+    preview.mkdir()
+    (preview / "README.md").write_text("# self-test preview channel\n", encoding="utf-8")
+    (preview / "p-one.py").write_text(_PREVIEW_ONE, encoding="utf-8")
+    (preview / "p-two.py").write_text(_PREVIEW_TWO, encoding="utf-8")
+    (base / PREVIEW_DECL_REL).write_text(_PREVIEW_DECL, encoding="utf-8")
+    return base
+
+
 def _build(base):
     """A conformant synthetic tree: a mini corpus (apex + 4 rules), a hooks manifest citing rule 1 and
     rule 3, a gates manifest citing rule 1 (so one rule is hook+gate) and rule 2 plus an explicit-empty
@@ -522,6 +737,14 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_caught(root, check):
+        # Like run_quiet, but an unexpected exception of any kind is also returned as a non-int
+        # sentinel, so a case expecting exit 2 records a failure rather than crashing the self-test.
+        try:
+            return run_quiet(root, check)
+        except Exception as exc:  # noqa: BLE001  the escape itself is what the case detects
+            return "raised {}".format(type(exc).__name__)
 
     def replace_in(path, old, new):
         text = path.read_text(encoding="utf-8")
@@ -579,6 +802,8 @@ def self_test_main():
                 failures.append("conformant tree: the hook+gate rule must list BOTH its hook and its gate")
             if obj.get("boundary") != BOUNDARY:
                 failures.append("conformant tree: the boundary string is absent or altered")
+            if obj.get("previews") != [] or any(e.get("previews") != [] for e in by_id.values()):
+                failures.append("conformant tree: with no .preview/ every rule must list no preview")
 
         # (b) Mutated ledger fails --check (exit 1).
         if ledger.is_file():
@@ -732,6 +957,148 @@ def self_test_main():
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
                             "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+        # (q) Published preview hooks with a matching declaration: listed at the top level and per rule,
+        #     and a rule named only by a preview keeps its prose-only status.
+        qtree = _add_previews(_build(tmp / "previews"))
+        if run_quiet(qtree, check=False) != 0:
+            failures.append("preview tree: generation expected exit 0")
+        else:
+            qobj = json.loads((qtree / LEDGER_REL).read_text(encoding="utf-8"))
+            want = [{"id": "p-one", "file": ".preview/p-one.py", "rules": ["ruledd"]},
+                    {"id": "p-two", "file": ".preview/p-two.py", "rules": []}]
+            if qobj.get("previews") != want:
+                failures.append("preview tree: top-level previews {!r}, expected {!r}".format(
+                    qobj.get("previews"), want))
+            qby = {e["corpus-id"]: e for e in qobj.get("rules", [])}
+            if qby.get("ruledd", {}).get("previews") != ["p-one"]:
+                failures.append("preview tree: rule dd must list the preview that names it")
+            if qby.get("ruledd", {}).get("status") != "prose-only":
+                failures.append("preview tree: a preview must never change a status (rule dd prose-only)")
+            if qby.get("ruleaa", {}).get("previews") != []:
+                failures.append("preview tree: a rule no preview names must list none")
+
+        # (r) A published preview hook with no declaration entry fails closed.
+        rtree = _add_previews(_build(tmp / "preview-undeclared"))
+        (rtree / ".preview" / "p-three.py").write_text(_PREVIEW_TWO, encoding="utf-8")
+        if run_quiet(rtree, check=False) != 2:
+            failures.append("a published preview hook with no declaration entry expected exit 2")
+        # (s) A declaration entry naming no published hook fails closed.
+        stree = _add_previews(_build(tmp / "preview-unpublished"))
+        (stree / ".preview" / "p-two.py").unlink()
+        if run_quiet(stree, check=False) != 2:
+            failures.append("a declaration entry with no published hook expected exit 2")
+        # (t) A declared rule the hook's own docstring does not name fails closed.
+        ttree = _add_previews(_build(tmp / "preview-unnamed-rule"))
+        replace_in(ttree / PREVIEW_DECL_REL, 'id = "p-two"\nrules = []', 'id = "p-two"\nrules = ["rulecc"]')
+        if run_quiet(ttree, check=False) != 2:
+            failures.append("a declared rule the preview's docstring does not name expected exit 2")
+        # (u) A declared unknown corpus-id fails closed.
+        utree = _add_previews(_build(tmp / "preview-unknown-cid"))
+        replace_in(utree / PREVIEW_DECL_REL, 'rules = ["ruledd"]', 'rules = ["nosuch9"]')
+        if run_quiet(utree, check=False) != 2:
+            failures.append("a declared unknown corpus-id expected exit 2")
+        # (v) Published preview hooks with the declaration absent fail closed.
+        vtree = _add_previews(_build(tmp / "preview-no-decl"))
+        (vtree / PREVIEW_DECL_REL).unlink()
+        if run_quiet(vtree, check=False) != 2:
+            failures.append("published preview hooks with no declaration expected exit 2")
+        # (w) A declared file that lists no rules is validated all the same.
+        wcases = (
+            ("not UTF-8", lambda f: f.write_bytes(b"\xff\n")),
+            ("a directory", lambda f: (f.unlink(), f.mkdir())),
+            ("a symlink", lambda f: (f.unlink(), f.with_name("target.txt").write_text(
+                '"""A valid hook body reached through a link."""\n', encoding="utf-8"),
+                f.symlink_to("target.txt"))),
+            ("unparseable", lambda f: f.write_text("def (:\n", encoding="utf-8")),
+            ("without a module docstring", lambda f: f.write_text("X = 1\n", encoding="utf-8")),
+            ("with a whitespace-only module docstring",
+             lambda f: f.write_text('""" \n """\n', encoding="utf-8")),
+            ("with an unknown coding cookie",
+             lambda f: f.write_bytes(b'# coding: not_an_encoding\n"""No named rule."""\n')),
+            ("with a latin-1 coding cookie",
+             lambda f: f.write_bytes(b'# -*- coding: latin-1 -*-\n"""A doc."""\n')),
+            ("with a byte order mark beside a latin-1 cookie",
+             lambda f: f.write_bytes(b'\xef\xbb\xbf# coding: latin-1\n"""A doc."""\n')),
+            ("too complex to parse", lambda f: f.write_text('"""A doc."""\nx = ' + "-" * 100000 + "1\n",
+                                                            encoding="utf-8")),
+            ("too deep to compile (RecursionError)", lambda f: f.write_text(
+                '"""A doc."""\nx = ' + "+".join(["1"] * 200000) + "\n", encoding="utf-8")),
+            ("with a rot13 coding cookie (a codec that is not a text encoding: LookupError)",
+             lambda f: f.write_bytes(b'# coding: rot13\n"""A doc."""\n')),
+            ("with a hex coding cookie", lambda f: f.write_bytes(b'# coding: hex\n"""A doc."""\n')),
+            ("with a latin-1 cookie on a lone-CR line 2",
+             lambda f: f.write_bytes(b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\r')),
+            ("with a latin-1 cookie on a lone-CR line 2 in an LF-ended file",
+             lambda f: f.write_bytes(b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\n')),
+        )
+        for wi, (wname, wmutate) in enumerate(wcases):
+            wtree = _add_previews(_build(tmp / "preview-empty-bad-{}".format(wi)))
+            wmutate(wtree / ".preview" / "p-two.py")
+            got = run_caught(wtree, check=False)
+            if got != 2:
+                failures.append("a rule-less declared preview file {} expected exit 2, got {!r}".format(
+                    wname, got))
+        wtree = _add_previews(_build(tmp / "preview-empty-unreadable"))
+        wfile = wtree / ".preview" / "p-two.py"
+        os.chmod(wfile, 0)
+        try:
+            if os.access(wfile, os.R_OK):
+                skipped.append("w unreadable-preview")
+            else:
+                got = run_caught(wtree, check=False)
+                if got != 2:
+                    failures.append("an unreadable rule-less preview file expected exit 2, got "
+                                    "{!r}".format(got))
+        finally:
+            os.chmod(wfile, 0o644)
+        # (x) A linked preview file that does not parse returns exit 2 rather than raising SyntaxError.
+        xtree = _add_previews(_build(tmp / "preview-linked-syntax"))
+        (xtree / ".preview" / "p-one.py").write_text("def (:\n", encoding="utf-8")
+        got = run_caught(xtree, check=True)
+        if got != 2:
+            failures.append("a linked preview file that does not parse expected exit 2, got {!r}".format(got))
+        # (y) The slug boundary: any word character or hyphen beside the slug means it is not named.
+        for yi, (ydoc, ywant) in enumerate((
+                ("Xselftest-rule-ddX", 2), ("xselftest-rule-ddx", 2), ("_selftest-rule-dd_", 2),
+                ("9selftest-rule-dd", 2), ("selftest-rule-dd-x", 2), ("-selftest-rule-dd", 2),
+                ("selftest-rule-dd\u00e9", 2), ("\u017felftest-rule-dd", 2), ("selftest-rule-dd\u0301", 2),
+                ("e\u0301selftest-rule-dd", 2), ("Motivated by (SELFTEST-RULE-DD).", 0))):
+            ytree = _add_previews(_build(tmp / "preview-boundary-{}".format(yi)))
+            (ytree / ".preview" / "p-one.py").write_text('"""{}"""\n'.format(ydoc), encoding="utf-8")
+            got = run_caught(ytree, check=False)
+            if got != ywant:
+                failures.append("a p-one docstring {!r} expected exit {}, got {!r}".format(ydoc, ywant, got))
+        # (z) The reverse direction: a docstring naming a corpus slug its entry does not list fails closed,
+        #     so an entry cannot hide a rule behind rules = [] (same naming predicate as (y)).
+        for zi, (zdoc, zwant) in enumerate((
+                ("Motivated by selftest-rule-cc.", 2), ("Motivated by Selftest-Rule-CC.", 2),
+                ("Motivated by selftest-rule-ccx.", 0), ("Motivated by selftest_rule_cc.", 0))):
+            ztree = _add_previews(_build(tmp / "preview-unlisted-{}".format(zi)))
+            (ztree / ".preview" / "p-two.py").write_text('"""{}"""\n'.format(zdoc), encoding="utf-8")
+            got = run_caught(ztree, check=False)
+            if got != zwant:
+                failures.append("a rule-less p-two docstring {!r} expected exit {}, got {!r}".format(
+                    zdoc, zwant, got))
+        # (aa) The bytes Python reads decide: the docstring checked is the one Python sees. A unicode_escape
+        #      cookie that makes Python's docstring name rule cc behind rules = [] fails closed; a UTF-8 byte
+        #      order mark is Python and is accepted, and the reverse check still reads through it; a cookie
+        #      naming UTF-8 is accepted. A lone CR ends a line for Python, so cookie-like text inside a docstring on
+        #      a CR-delimited line 2, or a cookie on line 3, is no cookie and the file is accepted.
+        for ai, (abytes, awant) in enumerate((
+                (b'# coding: unicode_escape\nr"""Motivated by \\x73elftest-rule-cc."""\n', 2),
+                (b'\xef\xbb\xbf"""A self-test preview hook whose docstring names no rule."""\n', 0),
+                (b'\xef\xbb\xbf"""Motivated by selftest-rule-cc."""\n', 2),
+                (b'# -*- coding: utf-8 -*-\n"""A doc."""\n', 0), (b'# coding: utf8\n"""A doc."""\n', 0),
+                (b'# comment\r"""# coding: latin-1"""\r', 0),
+                (b'# comment\r"""# coding: not_an_encoding"""\r', 0),
+                (b'# a\r# b\r# coding: latin-1\r"""A doc."""\r', 0),
+                (b'# a\r\n"""A doc."""\r\n', 0))):
+            atree = _add_previews(_build(tmp / "preview-bytes-{}".format(ai)))
+            (atree / ".preview" / "p-two.py").write_bytes(abytes)
+            got = run_caught(atree, check=False)
+            if got != awant:
+                failures.append("a rule-less p-two file {!r} expected exit {}, got {!r}".format(
+                    abytes, awant, got))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -753,7 +1120,14 @@ def self_test_main():
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
           "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
           "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
-          "named only inside a roster inline comment all fail closed (exit 2)" + note)
+          "named only inside a roster inline comment all fail closed (exit 2); preview hooks are listed "
+          "at the top level and per rule without changing a status, and an undeclared or unpublished "
+          "preview, a declared rule the hook's docstring does not name, a docstring naming a rule its entry "
+          "does not list (read from the bytes Python reads, a UTF-8 byte order mark included), a declared "
+          "preview file that is unreadable, not UTF-8, coded other than UTF-8 (a cookie on a lone-CR line "
+          "included) or with a cookie naming an unknown or non-text codec, not a regular file, unparseable, too complex to parse, or without a non-blank docstring "
+          "(rules listed or not), an unknown declared corpus-id, and an absent declaration beside published "
+          "previews all fail closed (exit 2)" + note)
     return 0
 
 
