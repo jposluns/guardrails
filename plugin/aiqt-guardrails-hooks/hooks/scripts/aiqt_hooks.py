@@ -8098,14 +8098,16 @@ def _orch_root(data):
 # Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
 # lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
 # dubious-ownership refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout)
-# never denies an ordinary session: with no registry on the walk and none at a git-resolved toplevel the
-# session is out of scope, while the same session inside an orchestrated tree still finds the registry on
+# never denies an ordinary session BY DEFAULT: with no registry on the walk and none at a git-resolved
+# toplevel the session is out of scope (denied instead in the opt-in registry-required mode,
+# _orch_registry_required), while the same session inside an orchestrated tree still finds the registry on
 # the walk and keeps the guard active. Leg two (restored from the rev-parse scoping after the round-4
 # finding) applies where git DOES resolve a toplevel for the cwd: core.worktree (set in a repository
 # config or a gitfile's gitdir target) can point the work tree OFF the cwd's physical ancestor chain,
 # where the walk alone would never visit its registry, so that toplevel's registry is consulted as well
-# (_orch_git_toplevel_has_registry); git success can only ADD a deny, and a git failure alone never
-# denies. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+# (_orch_git_toplevel_has_registry). BY DEFAULT git success can only ADD a deny and a git failure alone
+# never denies; in registry-required mode a git failure where the registry is reachable only through the
+# git toplevel reads as ABSENT and is denied, and git success can then remove that deny. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
 _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
 # O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
 # itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
@@ -8232,7 +8234,8 @@ def _orch_registry_walk(cwd):
                     and (pst.st_dev, pst.st_ino) == root_id):
                 os.close(parent)
                 # The filesystem root with every lookup a clean not-present: confirm with the path-anchored
-                # recheck before reading the session as out of scope. A dev/ino repeat that is NOT the root
+                # recheck before reporting no registry on the chain ('none'; the git-toplevel union and the
+                # registry-required mode then decide the outcome). A dev/ino repeat that is NOT the root
                 # (a directory bind-mounted onto its own child) falls through and is stepped through below.
                 return _orch_walk_recheck(cwd, chain)
             os.close(fd)
@@ -8324,8 +8327,10 @@ def _orch_git_toplevel_has_registry(cwd):
     registry out there, and True when the resolved toplevel exists but cannot be opened as a directory (a
     toplevel git can name but this probe cannot examine is not cleanly registry-free: deny-safe, matching
     the old scoping's present-but-unreadable read). Returns False when git cannot resolve a toplevel at
-    all (git success can only ADD a deny; a git failure alone never denies), when the resolved toplevel is
-    cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
+    all (BY DEFAULT git success can only ADD a deny and a git failure alone never denies; in
+    registry-required mode a False here with nothing on the walk is the ABSENT registry the caller denies,
+    so a git failure where the registry is reachable only through the git toplevel is denied, and git
+    success can then remove that deny), when the resolved toplevel is cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
     not-present."""
     top = _recovery_toplevel(cwd)
     if top is None:
@@ -8344,7 +8349,9 @@ def _orch_git_toplevel_has_registry(cwd):
 
 def _orch_registry(root):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
-    (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
+    (a clean lstat FileNotFoundError; each caller is inert by design, and orch_truncation_guard, whose
+    opt-in registry-required mode denies an absent registry, does not scope through this loader), ('ok',
+    dict) on a schema-valid
     registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
     bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, or a non-version-1
     object all fail closed rather than silently disarming a caller that locates confinement through it. The
@@ -9862,8 +9869,9 @@ def _orch_registry_required():
     case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
     nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
     around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
-    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert; the default
-    (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
+    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
+    includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
+    there a git failure alone denies; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
     surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
     located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
     file-based key can never speak exactly when it is needed; the hook execution environment is the one
@@ -9902,8 +9910,9 @@ def orch_truncation_guard(data):
     the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
     with its post-walk concurrent-move recheck) and, where git resolves a toplevel for the cwd, that
     toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
-    the ancestor chain; a git discovery failure alone - no git binary, a dubious-ownership refusal, a
-    broken config, a bare repository - still never denies), so with NO registry entry on that chain and
+    the ancestor chain; by default a git discovery failure alone - no git binary, a dubious-ownership
+    refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
+    that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
     none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
     passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
     unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
@@ -9918,7 +9927,7 @@ def orch_truncation_guard(data):
     cannot open or examine, or an ancestor chain that changed while the walk read it:
     _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
     non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
-    are out of scope (allow)."""
+    are out of scope (allow; in registry-required mode that cwd is denied instead)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -9967,8 +9976,10 @@ def orch_truncation_guard(data):
     if scope == "none":
         # No registry on the cwd's ancestor chain. UNION (round 4): where git resolves a toplevel for this
         # cwd, that toplevel's registry is consulted too, because core.worktree can point the work tree
-        # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
-        # failure alone still never denies (the union leg reads False then and the allow stands).
+        # (and its registry) off the ancestor chain. BY DEFAULT git success can only add a deny here and a
+        # git failure alone never denies (the union leg reads False and the allow stands); in
+        # registry-required mode that False is an ABSENT registry, so a git failure hiding a registry
+        # reachable only through the git toplevel is denied below, and git success removes that deny.
         if not _orch_git_toplevel_has_registry(cwd):
             if _orch_registry_required():
                 # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an

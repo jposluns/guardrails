@@ -1024,8 +1024,9 @@ def _main_isolated(report_path=None):
               raw(dict(tool_name="mcp__files__read", tool_input=None)), "allow")
         # A string cwd whose registry walk cannot be carried out (not a readable directory, a NUL, an
         # unreadable ancestor) denies with a named reason AND an actionable fix; a cwd whose COMPLETED walk
-        # and git-toplevel union find no registry allows (a git FAILURE alone never denies: the round-3
-        # git lockout is withdrawn). The confirmed-outside CONTROL row passes before and after the fix.
+        # and git-toplevel union find no registry allows BY DEFAULT (a git FAILURE alone never denies by
+        # default: the round-3 git lockout is withdrawn; the registry-required exception is pinned by
+        # trunc/registry-required-git-unavailable-core-worktree-denies). The confirmed-outside CONTROL row passes before and after the fix.
         def _cwd_case(cwd):
             res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
             why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -1052,13 +1053,15 @@ def _main_isolated(report_path=None):
             aiqt_hooks.os.access = saved_access
         check("trunc/cwd-unreadable-dir-denies", (cv, "cannot read and enter" in cw), ("deny", True))
         # ROUND-3 LOCKOUT WITHDRAWN: scope is the registry walk UNIONED with a git-resolved toplevel's
-        # registry (round 4), and a git FAILURE alone never denies, so a cwd git cannot resolve (a bare
+        # registry (round 4), and BY DEFAULT a git FAILURE alone never denies (registry-required mode
+        # denies one that hides a registry reachable only through the git toplevel: see the gw rows
+        # below), so a cwd git cannot resolve (a bare
         # repository, a dubious-ownership refusal, a missing git binary, a broken config, a timeout) is
         # OUT OF SCOPE when no registry sits on the cwd's ancestor chain (each such row was a blanket deny
         # at the round-3 revision and now allows: the restored-allow controls), while the SAME failing git
         # inside an orchestrated tree still applies the guard (a detach denies, a plain command allows).
         # _recovery_git is patched to raise or refuse, so these rows pin that the union leg turns every
-        # git failure into a clean out-of-scope read, never a deny.
+        # git failure into a clean out-of-scope read, never a deny (these rows run in the default mode).
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
@@ -1243,6 +1246,30 @@ def _main_isolated(report_path=None):
             check("trunc/registry-required-git-core-worktree-plain-allows",
                   _verdict(aiqt_hooks.orch_truncation_guard(dict(
                       nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+            # The strict-mode exception to "a git failure alone never denies": with git unavailable (a
+            # controlled PATH holding no git) the union leg reads False, so the registry reachable ONLY
+            # through core.worktree reads as ABSENT and strict mode DENIES ls -la; the same call with the
+            # variable unset ALLOWS (the default mode's out-of-scope read). Red when a git failure is read
+            # as PRESENT, and red when the strict deny is skipped on a git failure.
+            nogit = tmp / "gw-nogit-bin"
+            nogit.mkdir()
+            _path_old = os.environ.get("PATH")
+            try:
+                os.environ["PATH"] = str(nogit)
+                ng = aiqt_hooks.orch_truncation_guard(dict(
+                    nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))
+                ng_reason = (ng[1] or {}).get("hookSpecificOutput", {}).get(
+                    "permissionDecisionReason", "")
+                os.environ.pop(_rrg, None)
+                ng_unset = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                    nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la"))))
+            finally:
+                if _path_old is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = _path_old
+            check("trunc/registry-required-git-unavailable-core-worktree-denies",
+                  (_verdict(ng), _rrg in ng_reason, ng_unset), ("deny", True, "allow"))
         finally:
             if _rrg_old is None:
                 os.environ.pop(_rrg, None)
@@ -2391,7 +2418,9 @@ def _main_isolated(report_path=None):
           "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found, and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
-          "a git-resolved toplevel; a git failure alone never denies), a malformed tool_input, "
+          "a git-resolved toplevel; by default a git failure alone never denies, while the "
+          "registry-required mode denies one that hides a registry reachable only through the git "
+          "toplevel), a malformed tool_input, "
           "run_in_background, or command, and on any stdin the dispatcher cannot parse; the ledger "
           "records launches "
           "and completions; the resume "

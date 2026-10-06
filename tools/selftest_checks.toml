@@ -254,6 +254,7 @@ expected-check-ids = [
   "trunc/git-core-worktree-registry-detach-denies",
   "trunc/git-core-worktree-registry-plain-allows",
   "trunc/registry-required-git-core-worktree-plain-allows",
+  "trunc/registry-required-git-unavailable-core-worktree-denies",
   "trunc/git-separate-gitdir-worktree-registry-detach-denies",
   "trunc/aiqt-symlink-dir-denies",
   "trunc/aiqt-dangling-symlink-denies",
