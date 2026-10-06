@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "259bc4669f8c8ca52daa76cd1b50b9a32293b62380681d4e91ce36abd97f5c45"
+tree-sha256 = "3dbd43d70e3e0942fc6497a3348b98e1e10f981f0b4be5ed53777f3e5c0148de"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 267070
-sha256 = "72a7b5bfacec5e987482e06f73242e961098abe6be687cc8f5e3d9bee3b40a66"
+bytes = 268826
+sha256 = "979c21fa01a262ceeb90da1c947ad2ff34a97cfbcb041ecbd6adbd7a9aaca381"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -811,8 +811,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10230
-sha256 = "d54c482231108c9ea1ccef1cf8465ac748cf1153e1a6de2f283a2b2f26a004da"
+bytes = 10493
+sha256 = "3031c1bec42828f7e6a63df17d12e6d479f9235fa9262d39975f60411eb91774"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2586,8 +2586,8 @@ sha256 = "4ab83f2abcd2d7e2202ed2f2f80928cd9a81bfe331677973a0dc821c25a72c32"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
-bytes = 84347
-sha256 = "b93d804a1003c7fa1339104fd23c46d3c783bec34e072d61bc5fa5c14d81495a"
+bytes = 94742
+sha256 = "cfc4d04bd39686832ee476f7a6e480cf4818f95ef888bae31be13521bc1049c6"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
@@ -3521,8 +3521,8 @@ sha256 = "d2cd9c84712efa8eab503dfcd23a3ff79023d0e6ea895d99970c6f64971f56e4"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
-bytes = 8450
-sha256 = "08f457e64584154a85af83a21b69bc5d5978c8e8c3445fcc6422cdeab5e3ac56"
+bytes = 11142
+sha256 = "79bda54484bf29053d4bf56210f330c0951c52f111999d12dbf8284053faf37a"
 
 [[sources]]
 path = "tools/gen_site.py"

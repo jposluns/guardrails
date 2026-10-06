@@ -10,7 +10,7 @@ and stdlib-only, so it can neither fork the regexes (they would drift) nor runti
 plus labels as plain Python literals into a sentinelled GENERATED REGION in aiqt_hooks.py; the hook
 compiles them at module load. The region is drift-gated, so the source of truth stays single.
 
-  gen_secret_patterns.py           rewrite the generated region in aiqt_hooks.py from check_secrets.py
+  gen_secret_patterns.py           rewrite the generated regions (aiqt_hooks.py, _opf_adopt_complete.py)
   gen_secret_patterns.py --check   fail (exit 1) on drift; exit 2 on an unreadable source or target
 
 Order matters in the pipeline: run this BEFORE tools/gen_hooks.py, so the region is up to date in the
@@ -20,11 +20,20 @@ Fail-closed posture mirrors gen_hooks.py: an unreadable check_secrets.py (import
 unreadable/unwritable aiqt_hooks.py exits 2, never a silent no-op. Deterministic by construction: the
 PREFIXES order is check_secrets.py's own list order, and each pattern and label is rendered with repr(),
 a stable canonical Python literal, so a second run makes no change.
+
+SECOND REGION, the OPF CI floor digests: the same sentinelled-region mechanism embeds the sha256 of the
+pack's shipped CI template and recipe (opf/enforcement/ci/github-actions.yml and opf-ci.sh) as constants
+in opf/tools/_opf_adopt_complete.py. That evaluator authenticates the reference files it reads against
+these constants (spec 14.1 check 4), so an edit to either file that is not regenerated here fails this
+generator's --check, and a reference file replaced in a working tree after the fact fails the
+evaluator closed. A symlinked or unreadable CI floor file exits 2, never a silent digest.
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hashlib  # noqa: E402
+
 from _gen_common import repo_root  # noqa: E402
 
 # The source of truth and the render target, repo-root-relative.
@@ -38,12 +47,23 @@ BEGIN = ("# BEGIN generated secret patterns (source: tools/check_secrets.py; reg
          "tools/gen_secret_patterns.py)")
 END = "# END generated secret patterns"
 
+# The second region: the OPF CI floor files, their digest constants, and the evaluator they are embedded in.
+CI_FLOOR_SOURCES = (("_SHIPPED_TEMPLATE_SHA256", "opf/enforcement/ci/github-actions.yml"),
+                    ("_SHIPPED_RECIPE_SHA256", "opf/enforcement/ci/opf-ci.sh"))
+CI_FLOOR_TARGET_REL = "opf/tools/_opf_adopt_complete.py"
+CI_FLOOR_BEGIN = ("# BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with "
+                  "tools/gen_secret_patterns.py)")
+CI_FLOOR_END = "# END generated OPF CI floor digests"
+
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. The target is a generated block inside the
 # hand-authored aiqt_hooks.py (the sentinelled secret-patterns region), so it is recorded as kind block.
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/core/hooks/scripts/aiqt_hooks.py", "kind": "block",
      "sources": ("tools/check_secrets.py",), "regenerate": "python3 tools/gen_secret_patterns.py"},
+    {"target": "opf/tools/_opf_adopt_complete.py", "kind": "block",
+     "sources": ("opf/enforcement/ci/github-actions.yml", "opf/enforcement/ci/opf-ci.sh"),
+     "regenerate": "python3 tools/gen_secret_patterns.py"},
 )
 
 
@@ -94,54 +114,75 @@ def render_region(patterns):
     return "\n".join(lines)
 
 
-def _splice(text, region):
+def ci_floor_region(root):
+    """The OPF CI floor digest region, sentinels included: one bare-hex sha256 constant per CI floor file,
+    in CI_FLOOR_SOURCES order. A symlinked file raises ValueError (the digest must be of the file itself);
+    an unreadable one raises OSError; run() maps both to exit 2."""
+    lines = [CI_FLOOR_BEGIN]
+    for name, rel in CI_FLOOR_SOURCES:
+        path = root / rel
+        if path.is_symlink():
+            raise ValueError("{} is a symlink; the CI floor digest is taken of the file itself".format(rel))
+        lines.append("{} = {}".format(name, repr(hashlib.sha256(path.read_bytes()).hexdigest())))
+    lines.append(CI_FLOOR_END)
+    return "\n".join(lines)
+
+
+def _splice(text, region, begin=BEGIN, end=END, target_rel=TARGET_REL):
     """Replace the on-disk region (BEGIN..END inclusive) with the rendered region. Raises ValueError
     when a sentinel is missing, duplicated, or out of order, so a mangled, removed, or multi-region file
     fails closed rather than appending a second copy, writing nothing, or splicing only the first of
     several regions. Requiring EXACTLY ONE BEGIN and EXACTLY ONE END is what stops a second BEGIN..END
     block (which text.find would never inspect) from overriding the patterns undetected: both the regen
     path and the --check path reach the region through this function, so the count guard covers both."""
-    begin_count = text.count(BEGIN)
+    begin_count = text.count(begin)
     if begin_count != 1:
-        raise ValueError("expected exactly one BEGIN sentinel in {}, found {}".format(TARGET_REL,
+        raise ValueError("expected exactly one BEGIN sentinel in {}, found {}".format(target_rel,
                                                                                       begin_count))
-    end_count = text.count(END)
+    end_count = text.count(end)
     if end_count != 1:
-        raise ValueError("expected exactly one END sentinel in {}, found {}".format(TARGET_REL,
+        raise ValueError("expected exactly one END sentinel in {}, found {}".format(target_rel,
                                                                                     end_count))
-    i = text.find(BEGIN)
+    i = text.find(begin)
     if i == -1:
-        raise ValueError("BEGIN sentinel not found in {}".format(TARGET_REL))
-    j = text.find(END, i)
+        raise ValueError("BEGIN sentinel not found in {}".format(target_rel))
+    j = text.find(end, i)
     if j == -1:
-        raise ValueError("END sentinel not found after BEGIN in {}".format(TARGET_REL))
-    j_end = j + len(END)
+        raise ValueError("END sentinel not found after BEGIN in {}".format(target_rel))
+    j_end = j + len(end)
     return text[:i] + region + text[j_end:]
 
 
 def run(root, check):
-    """Render the region into aiqt_hooks.py, or (check mode) report drift. Fail-closed (exit 2) on any
-    unreadable source or unreadable/unwritable target, mirroring gen_hooks.py's posture."""
-    target = root / TARGET_REL
+    """Render the secret-pattern region into aiqt_hooks.py and the CI floor digest region into
+    _opf_adopt_complete.py, or (check mode) report drift in either. Fail-closed (exit 2) on any unreadable
+    source or unreadable/unwritable target, mirroring gen_hooks.py's posture; nothing is written unless
+    both regions render."""
+    plans = []
     try:
         patterns = _load_check_secrets(root)
-        current = target.read_text(encoding="utf-8")
-        region = render_region(patterns)
-        desired = _splice(current, region)
+        for rel, region, begin, end in ((TARGET_REL, render_region(patterns), BEGIN, END),
+                                        (CI_FLOOR_TARGET_REL, ci_floor_region(root), CI_FLOOR_BEGIN,
+                                         CI_FLOOR_END)):
+            current = (root / rel).read_text(encoding="utf-8")
+            plans.append((rel, current, _splice(current, region, begin, end, rel)))
     except (OSError, ValueError, ImportError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if current == desired:
+    drifted = [(rel, desired) for rel, current, desired in plans if current != desired]
+    if not drifted:
         return 0
     if check:
-        print("drift: the generated secret-pattern region in {} is out of date".format(TARGET_REL))
+        for rel, _desired in drifted:
+            print("drift: the generated region in {} is out of date".format(rel))
         print("run tools/gen_secret_patterns.py to regenerate")
         return 1
-    try:
-        target.write_text(desired, encoding="utf-8")
-    except OSError as exc:
-        print("error: cannot write {} ({}); fail-closed".format(target, exc), file=sys.stderr)
-        return 2
+    for rel, desired in drifted:
+        try:
+            (root / rel).write_text(desired, encoding="utf-8")
+        except OSError as exc:
+            print("error: cannot write {} ({}); fail-closed".format(root / rel, exc), file=sys.stderr)
+            return 2
     return 0
 
 

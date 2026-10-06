@@ -227,6 +227,15 @@
       "target": "VERSION"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "sources": [
+        "opf/enforcement/ci/github-actions.yml",
+        "opf/enforcement/ci/opf-ci.sh"
+      ],
+      "target": "opf/tools/_opf_adopt_complete.py"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
       "sources": [

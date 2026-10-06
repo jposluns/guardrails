@@ -55,27 +55,39 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     post-green relocation (spec 14.2), so before green this check verifies its frozen live bytes against
     the plan digest instead and requires no archive copy of it.
   4 operational-readiness: the store resolves to the planned identity (an absent store is a finding, so a
-    de-adopted repository cannot pass as NOT-APPLICABLE); CI asserts store presence and identity only by
-    template identity, never by reading workflow syntax (_ci_template_identity): per CI row the plan names
+    de-adopted repository cannot pass as NOT-APPLICABLE); the CI leg is proven only by template
+    identity, never by reading workflow syntax (_ci_template_identity): per CI row the plan names
     exactly one workflow member, a file directly under .github/workflows/ (default
     .github/workflows/opf.yml), whose recorded digest is the pack's shipped template
     opf/enforcement/ci/github-actions.yml and whose live bytes equal that template; every CI member is live
     at its plan digest; and the recipe the template runs, opf/enforcement/ci/opf-ci.sh, is live and equals
-    the pack's shipped recipe by digest. Any other workflow content, any other path, an absent or modified
-    copy, an absent or modified recipe, or a shipped file that cannot be read is CANNOT-EVALUATE, the
-    reason telling the adopter to install the template unmodified (OPF_TOOL, which moves the CLI the
-    recipe launches, is unsupported in this release: the plan models no variant); every planned view
+    the pack's shipped recipe by digest. The two reference files are themselves authenticated: each is
+    read contained and no-follow under the pack root and must equal the sha256 embedded in this module
+    (generated and drift-gated by tools/gen_secret_patterns.py), so a reference replaced, symlinked or
+    unreadable in the working tree is CANNOT-EVALUATE. Any other workflow content, any other path, an
+    absent or modified copy, an absent or modified recipe, or a shipped file that cannot be read is
+    CANNOT-EVALUATE, the reason telling the adopter to install the template unmodified (OPF_TOOL, which
+    moves the CLI the recipe launches, is unsupported in this release: the plan models no variant); every
+    planned view
     destination holds exactly its planned bytes, a formerly occupied destination included (spec 14.1: once
     apply commits, restoring an archived file to the live tree takes a fresh plan, so old occupant bytes
     there are drift the plan does not account for); every consumer repointing holds its planned new bytes;
     and every doctor finding fails the check, none set aside (doctor evidence whose findings or
-    cannot_evaluate is missing or not a list is CANNOT-EVALUATE, never read as empty).
+    cannot_evaluate is missing or not a list is CANNOT-EVALUATE, never read as empty). Check 4 is NEVER
+    VALID in this release: the shipped floor asserts store presence, not identity (the CI identity
+    assertion is the deferred U25), so with every other condition met the check is CANNOT-EVALUATE naming
+    U25; an earlier failure keeps its own reason. U25_CI_IDENTITY_ASSERTED is the one switch that lets
+    it grade VALID, to be set only in the release that ships U25.
   6 retirement-readiness: each retire-disposed source that occupied no managed destination is present live
     with its plan digest; each archived occupying source still equals its plan digest in the archive.
 
 DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for retire and move rows, which
 TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
 check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest;
+check 4 is CANNOT-EVALUATE until U25 ships the CI store-identity assertion (U25_CI_IDENTITY_ASSERTED), so
+the roster cannot be green in this release on check 4 alone either; the reference digests authenticate
+the CI floor files against this module's own embedded constants, so they are only as trustworthy as this
+module's bytes (an attacker who can rewrite the evaluator itself is out of scope);
 check 4's doctor verdict is only as complete as the caller's observations; check 4's CI leg proves byte
 identity with the shipped template and recipe, not what GitHub runs: it does not see another workflow in the
 repository that cancels or shadows this one (for example a concurrency group with cancel-in-progress),
@@ -443,10 +455,29 @@ def store_doctor(observations=None):
 # The pack's shipped CI floor (opf/enforcement/ci beside these tools): the GitHub Actions template an adopter
 # installs unmodified (its header: "Copy this file to .github/workflows/opf.yml") and the recipe that
 # template runs. Check 4 proves the CI leg by byte identity with these two files, never by reading workflow
-# syntax, so any other workflow content is CANNOT-EVALUATE.
-_SHIPPED_CI = Path(__file__).resolve().parent.parent / "enforcement" / "ci"
-_SHIPPED_TEMPLATE = _SHIPPED_CI / "github-actions.yml"
-_SHIPPED_RECIPE = _SHIPPED_CI / "opf-ci.sh"
+# syntax, so any other workflow content is CANNOT-EVALUATE. The reference files sit in a writable tree, so
+# each is read contained and no-follow from the pack root (_shipped) and authenticated against the digest
+# embedded below; a mismatch, a symlink or a read error is CANNOT-EVALUATE.
+_PACK_ROOT = Path(__file__).resolve().parent.parent
+_SHIPPED_TEMPLATE = "enforcement/ci/github-actions.yml"
+_SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
+# The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
+# without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
+# BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
+_SHIPPED_TEMPLATE_SHA256 = '3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262'
+_SHIPPED_RECIPE_SHA256 = '0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104'
+# END generated OPF CI floor digests
+# Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
+# presence only (doctor --require-store, then render --check); the CI identity assertion is the deferred
+# U25 (the template's own header says so). This is the one switch for it: while it is False, check 4's CI
+# leg is CANNOT-EVALUATE naming U25 once every other check-4 condition holds, so check 4 is never VALID on
+# a presence-only floor. Set it True only in the release whose shipped recipe performs the U25 identity
+# assertion (that recipe change regenerates _SHIPPED_RECIPE_SHA256 above).
+U25_CI_IDENTITY_ASSERTED = False
+_U25_DEFERRED = ("the shipped CI floor asserts store presence only (doctor --require-store, then render "
+                 "--check); spec 14.1 check 4 also requires CI to assert store identity, which is the "
+                 "deferred CI receipt-identity comparison (U25), so this check cannot be VALID until U25 "
+                 "ships")
 # The repository path the template's one run step names (`run: sh opf/enforcement/ci/opf-ci.sh .`): the
 # pack sits at opf/, and the recipe launches opf/tools/opf.py beside it unless OPF_TOOL is set.
 _CI_RECIPE_REL = "opf/enforcement/ci/opf-ci.sh"
@@ -466,12 +497,33 @@ def _is_workflow(path):
     return path.endswith((".yml", ".yaml"))
 
 
-def _shipped(path):
-    """The bytes of one shipped CI floor file; one that cannot be read is Unevaluable (fail closed)."""
+def _shipped(rel, expected):
+    """The authenticated bytes of one shipped CI floor file: read contained and no-follow under the pack
+    root (the apply shell's reader: a symlink, special or multiply-linked file refuses) and equal to the
+    `expected` bare-hex sha256 embedded in this evaluator. Absent, unreadable, symlinked or mismatched is
+    Unevaluable (fail closed), never trusted as the reference."""
+    root_fd = None
     try:
-        return path.read_bytes()
-    except OSError as exc:
-        raise Unevaluable("cannot read the pack's shipped CI file {} ({})".format(path, exc))
+        root_fd = apply._open_product_root(_PACK_ROOT)
+        _fst, data = apply._read_live(root_fd, rel)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable("cannot read the pack's shipped CI file {} ({})".format(rel, exc))
+    finally:
+        if root_fd is not None:
+            store._close_fd_exc_safe(root_fd)
+    if data is None:
+        raise Unevaluable("cannot read the pack's shipped CI file {} (absent)".format(rel))
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise Unevaluable("the pack's shipped CI file {} does not match the digest embedded in this evaluator "
+                          "(regenerate with tools/gen_secret_patterns.py when the release changes it); an "
+                          "unauthenticated reference is never trusted".format(rel))
+    return data
+
+
+def _shipped_floor():
+    """The authenticated (template, recipe) bytes of the pack's shipped CI floor."""
+    return (_shipped(_SHIPPED_TEMPLATE, _SHIPPED_TEMPLATE_SHA256),
+            _shipped(_SHIPPED_RECIPE, _SHIPPED_RECIPE_SHA256))
 
 
 def _ci_template_identity(ev, row):
@@ -481,8 +533,9 @@ def _ci_template_identity(ev, row):
     equal the template; every member of the row is live at its plan digest (a planned recipe member at the
     shipped recipe's digest); and the recipe the template runs (_CI_RECIPE_REL) is live and equals the
     shipped recipe by digest, planned or not. No workflow syntax is read. A shipped file that cannot be
-    read, or a shipped template that does not run that recipe, is Unevaluable."""
-    template, recipe = _shipped(_SHIPPED_TEMPLATE), _shipped(_SHIPPED_RECIPE)
+    read or does not match its embedded digest (_shipped), or a shipped template that does not run that
+    recipe, is Unevaluable."""
+    template, recipe = _shipped_floor()
     if _TEMPLATE_RUN_LINE not in template:
         raise Unevaluable("the pack's shipped template {} does not run {}: the pack is inconsistent".format(
             _SHIPPED_TEMPLATE, _CI_RECIPE_REL))
@@ -503,10 +556,10 @@ def _ci_template_identity(ev, row):
                            "workflows".format(path, _WORKFLOW_DIR))
             if member["digest"] != _digest(template):
                 why.append("the plan records CI workflow {!r} at a digest that is not the pack's shipped "
-                           "template {}".format(path, _SHIPPED_TEMPLATE.name))
+                           "template {}".format(path, Path(_SHIPPED_TEMPLATE).name))
             elif data is not None and data != template:
                 why.append("live CI workflow {!r} is not byte-identical to the pack's shipped template "
-                           "{}".format(path, _SHIPPED_TEMPLATE.name))
+                           "{}".format(path, Path(_SHIPPED_TEMPLATE).name))
         elif path == _CI_RECIPE_REL and member["digest"] != _digest(recipe):
             why.append("the plan records the CI recipe {!r} at a digest that is not the pack's shipped "
                        "recipe".format(path))
@@ -527,7 +580,10 @@ def _check_operational(ev, rep):
     binding its rendered member digest, nothing else: old occupant bytes there are unaccounted drift (spec
     14.1: once apply commits, restoring an archived file takes a fresh plan), and no doctor finding is ever
     set aside. CI asserts only through the pack's shipped template and recipe installed unmodified
-    (_ci_template_identity); any other CI is CANNOT-EVALUATE, never VALID."""
+    (_ci_template_identity); any other CI is CANNOT-EVALUATE, never VALID. That floor asserts store
+    presence, not identity (U25 is deferred), so while U25_CI_IDENTITY_ASSERTED is False a check with no
+    other finding or cannot-evaluate reason is CANNOT-EVALUATE naming U25; an earlier failure keeps its own
+    reason."""
     plan = ev.plan
     resolution = store.resolve_store(Path(ev.product_root))
     if resolution.status == store.NOT_ADOPTED:
@@ -552,7 +608,7 @@ def _check_operational(ev, rep):
         why = _ci_template_identity(ev, row)
         if why:
             rep.cannot.append("CI is not the pack's shipped CI floor installed unmodified, and this check proves "
-                              "CI asserts store presence and identity only by that byte identity: {}; {}".format(
+                              "the CI leg only by that byte identity: {}; {}".format(
                                   "; ".join(why), _INSTALL_UNMODIFIED))
     occupants = {s["path"]: s["digest"] for s in _sources(ev) if s["occupying"]}
     for op in plan["ops"]:
@@ -593,6 +649,8 @@ def _check_operational(ev, rep):
         # Spec 14.1 check 4: any drift the plan does not account for fails the check, and the plan accounts
         # only by binding digests, so every doctor finding is reported; none is set aside.
         rep.finding("doctor: {}".format(f))
+    if not U25_CI_IDENTITY_ASSERTED and not rep.findings and not rep.cannot:
+        rep.cannot.append(_U25_DEFERRED)
 
 
 # --- check 6: retirement readiness --------------------------------------------------------------------
@@ -688,8 +746,9 @@ _LIVE = {"legacy/RULES.md": b"old rules\n", "notes/old.md": b"old notes\n", ".wo
 
 def _ci_floor():
     """The fixture's (workflow, recipe) bytes: the shipped files unless a vector patches them."""
-    return (_shipped(_SHIPPED_TEMPLATE) if _CI_BYTES is None else _CI_BYTES,
-            _shipped(_SHIPPED_RECIPE) if _CI_RECIPE_BYTES is None else _CI_RECIPE_BYTES)
+    template, recipe = _shipped_floor() if _CI_BYTES is None or _CI_RECIPE_BYTES is None else (None, None)
+    return (template if _CI_BYTES is None else _CI_BYTES,
+            recipe if _CI_RECIPE_BYTES is None else _CI_RECIPE_BYTES)
 
 
 class _Doctor:
@@ -804,6 +863,31 @@ def _case(mutate=None):
         if mutate is not None:
             kwargs.update(mutate(root, kwargs["planning_inventory"]) or {})
         return evaluate(root, _RUN, **kwargs)
+
+
+def _reference_case(template=None, recipe=None, symlinked=()):
+    """The round-10 reproductions: the pack's reference CI floor replaced in a scratch pack root, `template`
+    or `recipe` bytes standing in for the shipped file, installed live and recorded by the plan (as an edit
+    matched by the live copy would be); each pack-relative name in `symlinked` becomes a symlink to its
+    bytes outside the pack root. With nothing replaced and nothing symlinked it is the genuine floor."""
+    from unittest import mock
+    here = sys.modules[__name__]
+    genuine = _shipped_floor()
+    floor = dict([(_SHIPPED_TEMPLATE, genuine[0] if template is None else template),
+                  (_SHIPPED_RECIPE, genuine[1] if recipe is None else recipe)])
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-pack-") as scratch:
+        pack = os.path.join(scratch, "opf")
+        for rel, data in floor.items():
+            if rel in symlinked:
+                _put(scratch, "elsewhere/" + rel, data)
+                os.makedirs(os.path.dirname(os.path.join(pack, *rel.split("/"))), exist_ok=True)
+                os.symlink(os.path.join(scratch, "elsewhere", *rel.split("/")), os.path.join(pack, *rel.split("/")))
+            else:
+                _put(pack, rel, data)
+        with mock.patch.object(here, "_PACK_ROOT", Path(pack)), \
+                mock.patch.object(here, "_CI_BYTES", floor[_SHIPPED_TEMPLATE]), \
+                mock.patch.object(here, "_CI_RECIPE_BYTES", floor[_SHIPPED_RECIPE]):
+            return _case()
 
 
 def _only(results, expected):
@@ -940,8 +1024,38 @@ def self_test():
         results.append((name, bool(ok)))
 
     try:
+        # The U25 switch as shipped (off): the genuine floor installed unmodified leaves check 4
+        # CANNOT-EVALUATE naming U25 and nothing else, every other check green; an earlier check-4 failure
+        # keeps its own reason (never U25), whether a finding (de-adopted), a modified live recipe, or a
+        # reference file that does not match its embedded digest.
+        def _u25_only(results):
+            return (_only(results, _red(OPERATIONAL, CANNOT_EVALUATE))
+                    and results[OPERATIONAL].findings == ["cannot evaluate: " + _U25_DEFERRED])
+
+        shipped_off = _case()
+        check("check-4-u25-off-shipped-floor-cannot", not U25_CI_IDENTITY_ASSERTED and _u25_only(shipped_off)
+              and _says(shipped_off, OPERATIONAL, "(U25)"))
+        gone = type("Resolution", (), dict(status=store.NOT_ADOPTED, detail="no store"))()
+        with mock.patch.object(store, "resolve_store", lambda *a, **k: gone):
+            absent_off = _case()
+        check("check-4-u25-off-finding-keeps-reason", _only(absent_off, _red(OPERATIONAL))
+              and _says(absent_off, OPERATIONAL, "never NOT-APPLICABLE")
+              and not _says(absent_off, OPERATIONAL, "U25"))
+        recipe_off = _case(lambda r, i: _append(r, _CI_RECIPE_REL, b"# x\n"))
+        check("check-4-u25-off-ci-reason-kept", _only(recipe_off, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(recipe_off, OPERATIONAL, "is not the pack's shipped recipe")
+              and not _says(recipe_off, OPERATIONAL, "U25"))
+        exit0 = b"#!/bin/sh\nexit 0\n"
+        reference_off = _reference_case(recipe=exit0)
+        check("check-4-u25-off-reference-reason-kept", _only(reference_off, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(reference_off, OPERATIONAL, "does not match the digest embedded")
+              and not _says(reference_off, OPERATIONAL, "U25"))
+        # Every vector below runs with the switch on, the state U25 ships: the check-4 machinery is graded
+        # as it will be then, and the switch-on baseline is VALID.
+        mock.patch.object(here, "U25_CI_IDENTITY_ASSERTED", True).start()
         base = _case()
         check("baseline-green-1-4-6", _only(base, {}))
+        check("check-4-u25-switch-on-valid", U25_CI_IDENTITY_ASSERTED and _only(base, {}))
         check("roster-never-green-without-check-5", not roster_green(base))
         greenable = dict(base, **dict([(WIRING, CheckResult(VALID))]))
         check("roster-green-needs-all-six", roster_green(greenable))
@@ -1128,7 +1242,7 @@ def self_test():
         # verbatim are VALID; any other workflow or recipe is CANNOT-EVALUATE, the reason naming the template
         # to install unmodified and OPF_TOOL as unsupported, never VALID and never INVALID. Each vector changes
         # only the CI floor, so only check 4 moves (_only).
-        template, recipe = _shipped(_SHIPPED_TEMPLATE), _shipped(_SHIPPED_RECIPE)
+        template, recipe = _shipped_floor()
         verbatim = _case()
         with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
             _fixture(root)
@@ -1200,6 +1314,33 @@ def self_test():
             got = _case()
         check("check-4-ci-template-inconsistent-cannot", _only(got, _red(OPERATIONAL, CANNOT_EVALUATE))
               and _says(got, OPERATIONAL, "the pack is inconsistent"))
+        # The reference files are authenticated (_shipped): the round-10 reproductions, each a reference
+        # file replaced or symlinked in the pack and matched by the live copy the plan records, were VALID
+        # before and are CANNOT-EVALUATE now; the genuine floor in the same scratch pack root stays VALID,
+        # and each embedded digest is load-bearing.
+        def _unauthenticated(results, text):
+            return _only(results, _red(OPERATIONAL, CANNOT_EVALUATE)) and _says(results, OPERATIONAL, text)
+
+        if_false = template.replace(b"    runs-on: ubuntu-latest\n", b"    if: false\n    runs-on: ubuntu-latest\n")
+        check("check-4-r10-scratch-pack-genuine-valid", _only(_reference_case(), {}))
+        for label, kwargs, text in (
+                ("reference-recipe-exit-0", dict(recipe=exit0), "does not match the digest embedded"),
+                ("reference-recipe-weakened", dict(recipe=weakened), "does not match the digest embedded"),
+                ("reference-template-if-false", dict(template=if_false), "does not match the digest embedded"),
+                ("reference-recipe-symlink-exit-0", dict(recipe=exit0, symlinked=(_SHIPPED_RECIPE,)),
+                 "a symlink or special entry is refused"),
+                ("reference-recipe-symlink-genuine", dict(symlinked=(_SHIPPED_RECIPE,)),
+                 "a symlink or special entry is refused"),
+                ("reference-template-symlink-genuine", dict(symlinked=(_SHIPPED_TEMPLATE,)),
+                 "a symlink or special entry is refused")):
+            check("check-4-r10-" + label, if_false != template and _TEMPLATE_RUN_LINE in if_false
+                  and _unauthenticated(_reference_case(**kwargs), text))
+        for attr in ("_SHIPPED_TEMPLATE_SHA256", "_SHIPPED_RECIPE_SHA256"):
+            with mock.patch.object(here, "_CI_BYTES", template), mock.patch.object(here, "_CI_RECIPE_BYTES", recipe), \
+                    mock.patch.object(here, attr, "0" * 64):
+                got = _case()
+            check("check-4-embedded-digest-load-bearing-" + attr, _unauthenticated(
+                got, "does not match the digest embedded"))
         noview = _case(lambda r, i: _remove(r, ".working/TODO.md"))
         check("check-4-view-missing-red", _only(noview, _red(OPERATIONAL))
               and _says(noview, OPERATIONAL, "is missing"))
@@ -1304,7 +1445,7 @@ def self_test():
                 check("check-4-ci-no-workflow-direct", _named(_ci_direct(
                     [dict(path=_CI_RECIPE_REL, digest=_digest(recipe))]), "0 workflow members"))
                 for attr, name in (("_SHIPPED_TEMPLATE", "github-actions.yml"), ("_SHIPPED_RECIPE", "opf-ci.sh")):
-                    with mock.patch.object(here, attr, Path(root) / "absent" / name):
+                    with mock.patch.object(here, attr, "enforcement/ci/absent/" + name):
                         unread = _ci_direct(workflow_only)
                     check("check-4-ci-shipped-unreadable-" + name,
                           _named(unread, "cannot read the pack's shipped CI file"))
@@ -1382,6 +1523,8 @@ def self_test():
         print("OPF-ADOPT-COMPLETE SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
         return 2
+    finally:
+        mock.patch.stopall()
     failed = [name for name, ok in results if not ok]
     for name in failed:
         print("FAIL: " + name, file=sys.stderr)
