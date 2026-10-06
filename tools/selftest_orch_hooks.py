@@ -1432,7 +1432,10 @@ def _rdp_scope_cases(base, plain):
                 "git diff --word-diff-regex --grep --ext-diff", "git rev-list --default --grep --ext-diff HEAD",
                 "git shortlog --since-as-filter --grep --ext-diff", "git blame --word-diff-regex -S --ext-diff f",
                 "git log --word-diff-regex -- --ext-diff", "git show --word-diff-reg --grep --ext-diff",
-                "git log --oneline --default --grep --ext-diff")
+                "git log --oneline --default --grep --ext-diff", "git log -1 --format=%-GG",
+                "git show -s --pretty=tformat:%+GK", "git log -1 --format='% GT' -- .aiqt",
+                "git log --pretty tformat:%-GS", "git log --format='%<(9)% GF'",
+                "git for-each-ref --format='%(*signature)'", "git tag -l --format '%(*signature:grade)'")
     pr_got = []
     for c in programs:
         result = go.run(c)

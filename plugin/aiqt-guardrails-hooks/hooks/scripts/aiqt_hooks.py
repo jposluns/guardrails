@@ -11883,6 +11883,13 @@ def _rdp_git_may_take(sub, word):
         word not in _RDP_GIT_FREE_LONG)
 
 
+# A pretty-format signature placeholder (%G?, %GG, %GS, %GK, %GF, %GP, %GT), also with git's one modifier
+# character between % and it (%+G?, %-GG, % GK; a padding or wrapping placeholder such as %<(5) or %w(9) is a
+# placeholder of its own, so the signature one keeps its %), or a ref-filter signature atom, also of the
+# commit a tag points to (%(signature), %(*signature:grade)): each makes git run gpg.program.
+_RDP_GIT_SIGNATURE_FORMAT = re.compile(r"%[-+ ]?G|%\(\*?signature")
+
+
 def _rdp_git_program_under(sub, before, after):
     """The first word that runs a program when the git subcommand sub is called with the words after,
     after the global options before; None when none does (_rdp_git_runs_program)."""
@@ -11898,7 +11905,7 @@ def _rdp_git_program_under(sub, before, after):
     # free, surely takes it or stops git, _rdp_git_waits). A -- ends the options only when reached neither.
     skip = form = ended = held = data = False
     for word in after:
-        if form and ("%G" in word or "%(signature" in word):
+        if form and _RDP_GIT_SIGNATURE_FORMAT.search(word):
             return word
         name = word.split("=", 1)[0]
         if sub in _RDP_GIT_TRANSPORTS and _rdp_git_helper_url(word):
@@ -11926,7 +11933,7 @@ def _rdp_git_program_under(sub, before, after):
             skip = form = False
             continue
         form = _rdp_long_option(name, ("--format", "--pretty"))
-        if form and ("%G" in word or "%(signature" in word):
+        if form and _RDP_GIT_SIGNATURE_FORMAT.search(word):
             return word
         form = form and name == word
         if word == "--help":
@@ -11972,11 +11979,12 @@ def _rdp_git_runs_program(words):
     """The first word of a plain git command that makes it run a program, named in it or configured; None
     when the command is no git command or runs none that way: a global -p or --paginate (the pager), an
     option of _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or
-    not), a %G placeholder or %(signature) atom in a --format or --pretty value (gpg.program), a short
-    option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u and -c, commit -S and
-    -p, tag -s, -u and -v), a --help after the subcommand (git help's viewer), a TRANSPORT::ADDRESS URL
-    for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are
-    read with their operands first: a word taken as the value of an option before it (attached, or the
+    not), a signature placeholder or atom in a --format or --pretty value (_RDP_GIT_SIGNATURE_FORMAT,
+    gpg.program), a short option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u
+    and -c, commit -S and -p, tag -s, -u and -v), a --help after the subcommand (git help's viewer), a
+    TRANSPORT::ADDRESS URL for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of
+    _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are read with their operands first: a word taken as the value of
+    an option before it (attached, or the
     next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
     --ext-diff searches for --ext-diff. Every other word is judged up to a -- ending the options of a
     subcommand of _RDP_GIT_DASHDASH_ENDS, one the scan reaches surely free (the word before it may not
