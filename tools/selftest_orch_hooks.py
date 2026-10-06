@@ -1200,7 +1200,7 @@ def _rdp_ls(cwd, background):
 
 def _rdp_scope_cases(base, plain):
     """Scope vectors: a session with no registry anywhere is never withheld (a linked worktree of a bare
-    repository, a failed common-directory probe, a git that echoes --path-format back), and a bound
+    repository, a failed common-directory probe, a git that echoes --git-common-dir back), and a bound
     session cannot switch the hook off through a plain command that writes or removes its registry."""
     src = base / "baresrc"
     _rdp_git(base, "init", "-q", "-b", "main", str(src))
@@ -1217,13 +1217,11 @@ def _rdp_scope_cases(base, plain):
         raise OSError("git cannot read the common git directory of {}".format(root))
 
     def _old_git(repo, *args, stdin=None):
-        # git before 2.31 echoes an option rev-parse does not know as if it were a path.
-        if args[:1] == ("rev-parse",) and "--path-format=absolute" in args:
-            p = real_git(repo, *[a for a in args if a != "--path-format=absolute"], stdin=stdin)
-            if p is not None:
-                p.stdout = b"--path-format=absolute\n" + p.stdout
-            return p
-        return real_git(repo, *args, stdin=stdin)
+        # git before 2.5 echoes an option rev-parse does not know (--git-common-dir) as if it were a path.
+        p = real_git(repo, *args, stdin=stdin)
+        if p is not None and args[:1] == ("rev-parse",) and "--git-common-dir" in args and p.returncode == 0:
+            p.stdout = b"--git-common-dir\n" + p.stdout.split(b"\n", 1)[-1]
+        return p
     got = []
     try:
         aiqt_hooks._rdp_main_worktree = _probe_fails
@@ -1254,6 +1252,84 @@ def _rdp_scope_cases(base, plain):
     (rg.root / ".aiqt" / "orchestration.json").write_text(json.dumps(reg), encoding="utf-8")
     local.write_text(json.dumps(dict(version=1, state_dir=str(rg.briefs / "state"))), encoding="utf-8")
     check("rdp/bindingless-local-registry-cannot-hide-committed-binding", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The .aiqt directory named without its plain name: a value glued to a short option (alone or in a
+    # group), a quoted glob git expands itself, a pathspec after its magic, a subdirectory entered with -C
+    # while another word climbs with .., and a .. resolved against a cwd inside .aiqt. Other .aiqt paths,
+    # and prose holding a glob character, are not refused.
+    (rg.root / ".aiqt" / "core").mkdir()
+    check("rdp/plain-registry-indirect-name-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git rm -rfq '.aiq*'", "git clean -fdxq '.aiq*'", "git -C .aiqt/core rm -rfq ..",
+        "cp -rt.aiqt " + str(rg.briefs) + "/.", "tar -C.aiqt -xf x.tar", "git rm -rq ':/.aiqt'",
+        "git rm -rq ':(icase).AIQT'", "git rm -rq '.aiqt/orch*'", "git rm -rq '.a?qt/'")] + [
+        _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(rg.root / ".aiqt" / "core"), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=c, run_in_background=False)))) for c in ("rm -rf ..", "git rm -rq -C..")],
+        ["deny"] * 11)
+    check("rdp/plain-aiqt-subpath-and-glob-prose-allow", [_rdp_kind(rg.run(c)) for c in (
+        "git add .aiqt/core/x.toml", "git commit -m 'why?'", "cd .aiqt/core", "git rm -q '*.py'")],
+        ["allow"] * 4)
+    # A plain git command that moves the repository or its work tree off the bound registry (core.worktree,
+    # core.bare, a configuration include, a separated git directory) is refused; a read of the key is not.
+    check("rdp/plain-git-repository-move-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git config core.worktree " + str(base), "git config --worktree Core.WorkTree " + str(base),
+        "git config core.bare true", "git config --unset core.worktree", "git config set core.bare true",
+        "git config include.path " + str(unbound), "git config includeIf.gitdir:/x/.path " + str(unbound),
+        "git init -q --separate-git-dir=" + str(base / "regdisarm-meta"), "git -c core.worktree=/x config x y",
+        "git -c core.bare=true branch --list")],
+        ["deny"] * 10)
+    check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in (
+        "git config --get core.worktree", "git config --list", "git config get core.bare")], ["allow"] * 3)
+    # core.worktree moved onto ANOTHER bound tree: the binding above the session cwd still governs, and a
+    # dispatch either binding declares is withheld, never checked against the other repository (before,
+    # the redirected tree's binding decided and the cwd's dispatcher went undeclared, so it was allowed).
+    ca = RdpFixture(base, "conflict-a")
+    cb = RdpFixture(base, "conflict-b")
+    cb.write_registry(dict(cb.binding, commands=["another-dispatch"]))
+    cs = RdpFixture(base, "conflict-same")
+    ca_bad = ca.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    cf_got = [_rdp_kind(ca.dispatch(ca_bad))]
+    _rdp_git(ca.root, "config", "core.worktree", str(cb.root))
+    cf_got += [_rdp_kind(ca.run(c)) for c in (
+        "orch-dispatch --brief " + ca_bad, "another-dispatch --brief " + ca_bad, "ls", "rm -rf .aiqt")]
+    _rdp_git(ca.root, "config", "core.worktree", str(cs.root))
+    cf_got.append(_rdp_kind(ca.dispatch(cs.good())))
+    check("rdp/redirected-bound-tree-conflict-withholds", cf_got,
+          ["deny", "unverifiable", "unverifiable", "allow", "deny", "unverifiable"])
+    # The cannot-say withholds, each on its own: a failed common-directory probe where the raw .git file,
+    # its examination, or the commondir file cannot be read withholds every call (no registry anywhere is
+    # needed for that), and a gone .git/worktrees/NAME directory still names its main worktree.
+    fake = base / "rawgit-fake"
+    fake.mkdir()
+    meta = base / "rawgit-meta" / "worktrees" / "n"
+    (meta / "commondir").mkdir(parents=True)
+    real_root, real_main, real_lstat = aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree, aiqt_hooks.os.lstat
+    dotgit = os.path.join(os.path.realpath(str(fake)), ".git")
+
+    def _denied_lstat(path, *a, **k):
+        if str(path) == dotgit:
+            raise PermissionError(13, "Permission denied", dotgit)
+        return real_lstat(path, *a, **k)
+    raw_got = []
+    try:
+        aiqt_hooks._orch_root = lambda data: str(fake)
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        for text in ("not a pointer\n", "gitdir: " + str(meta) + "\n"):
+            (fake / ".git").write_text(text, encoding="utf-8")
+            raw_got.append(_rdp_ls(fake, False))
+        aiqt_hooks.os.lstat = _denied_lstat
+        try:
+            raw_got.append(_rdp_ls(fake, False))
+        finally:
+            aiqt_hooks.os.lstat = real_lstat
+        (fake / ".git").write_text("gitdir: " + str(rg.root / ".git" / "worktrees" / "gone") + "\n",
+                                   encoding="utf-8")
+        raw_got.append(_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(fake), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="rm -rf .aiqt", run_in_background=False)))))
+    finally:
+        aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree = real_root, real_main
+        aiqt_hooks.os.lstat = real_lstat
+    check("rdp/raw-gitfile-cannot-say-withholds", raw_got, ["unverifiable", "unverifiable", "unverifiable", "deny"])
 
 
 def main(report_path=None):

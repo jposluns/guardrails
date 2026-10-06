@@ -166,6 +166,7 @@ genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does 
 """
 import collections
 import datetime
+import fnmatch
 import json
 import math
 import os
@@ -11125,10 +11126,13 @@ def _rdp_decide_within(data):
     binding, never remove one, so a repository configuration (core.worktree, a separate git directory) or a
     broken shared configuration cannot turn the check off, and a registry WITHOUT a binding never ends the
     search: every registry of the session repository and its main worktree is read, then every registry on
-    the cwd's ancestors, nearest first, and the first binding (or malformed registry) decides. A binding
-    found anywhere but the session repository's own registry (or its main worktree's) is FOREIGN: a
-    dispatch under it is a cannot-evaluate, since the nested or redirected repository it would be checked
-    in is not the one the registry binds."""
+    the cwd's ancestors, nearest first. A binding found anywhere but the session repository's own registry
+    (or its main worktree's) is FOREIGN: a dispatch under it is a cannot-evaluate, since the nested or
+    redirected repository it would be checked in is not the one the registry binds. The registries on the
+    cwd's ancestors are always read: where they bind and the git-resolved registries bind too, from a
+    different directory (core.worktree moved the top level onto another bound tree, say), the cwd's binding
+    still governs and the conflict is a cannot-evaluate: every command either binding would dispatch is
+    withheld, never checked against the other repository, and every other command is judged under both."""
     cwd = data.get("cwd")
     tool_input = data.get("tool_input")
     root = _orch_root(data)
@@ -11152,26 +11156,43 @@ def _rdp_decide_within(data):
         main_top, withheld = _rdp_gitfile_main(cwd)
         if main_top is not None:
             own.append(main_top)
+    resolved = None
     for reg_dir in own:
         binding, cfg = _rdp_scope(reg_dir)
         if binding is not None:
-            return _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=False)
-    # git cannot resolve the session's top level (no repository, a broken configuration, a refused ownership
-    # check, a deleted cwd), or resolves one without a binding (a worktree or repository nested inside an
-    # orchestrated tree, or a top level moved off the cwd's ancestors by core.worktree). Neither is proof the
-    # session is out of scope: the registries on cwd's ancestors are read, nearest first, and the first
-    # binding found there scopes the session.
+            resolved = (binding, cfg, reg_dir)
+            break
+    # The registries on cwd's ancestors are read whatever git resolved: git cannot resolve the session's top
+    # level (no repository, a broken configuration, a refused ownership check, a deleted cwd), or resolves
+    # one without a binding (a worktree or repository nested inside an orchestrated tree, or a top level
+    # moved off the cwd's ancestors by core.worktree), or resolves one whose binding is not the cwd's own
+    # (a top level moved onto another bound tree). None of these is proof of the session's scope: the
+    # nearest binding on the cwd's ancestors governs.
     where, found = _rdp_registry_dir(cwd)
     if where == "fail":
         return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found)
-    seen = {os.path.realpath(d) for d in own}
+    near = None
     for found_dir in found:
-        if os.path.realpath(found_dir) in seen:
-            continue
         binding, cfg = _rdp_scope(found_dir)
         if binding is not None:
-            foreign = root is not None and os.path.realpath(found_dir) != os.path.realpath(root)
-            return _rdp_bound(data, tool_input, binding, cfg, root, found_dir, foreign=foreign)
+            near = (binding, cfg, found_dir)
+            break
+    if near is not None and resolved is not None and \
+            os.path.realpath(near[2]) != os.path.realpath(resolved[2]):
+        conflict = ("the registry above the session cwd ({}) and the registry of the repository git resolves "
+                    "({}) both bind review dispatch and are not the same registry, so the binding that governs "
+                    "this dispatch, and the repository it is checked in, cannot be known".format(
+                        near[2], resolved[2]))
+        for binding, cfg, reg_dir in (near, resolved):
+            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=conflict)
+            if result[0] != "allow":
+                return result
+        return ("allow", "")
+    if resolved is not None:
+        return _rdp_bound(data, tool_input, resolved[0], resolved[1], root, resolved[2], foreign=False)
+    if near is not None:
+        foreign = root is not None and os.path.realpath(near[2]) != os.path.realpath(root)
+        return _rdp_bound(data, tool_input, near[0], near[1], root, near[2], foreign=foreign)
     if withheld:
         return _rdp_withhold(tool_input, withheld)
     return ("allow", "")
@@ -11196,7 +11217,8 @@ def _rdp_scope(reg_dir):
 
 
 def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
-    """The decision in a session scoped by the binding of the registry at reg_dir."""
+    """The decision in a session scoped by the binding of the registry at reg_dir. foreign is False, True
+    (the registry is not the session repository's own), or the text of a conflict between registries."""
     if binding == "bad":
         # A malformed binding cannot say which commands dispatch.
         return _rdp_withhold(tool_input, "the orchestration registry or its review_dispatch binding is "
@@ -11215,22 +11237,85 @@ def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
 _RDP_REGISTRY_READERS = frozenset(("cat", "head", "tail", "wc", "ls", "stat", "grep", "jq", "cmp", "diff"))
 
 
-def _rdp_names_registry(words):
+def _rdp_word_values(folded):
+    """The texts a casefolded plain word may hand a program as a path: the word itself, what follows each
+    =, : or ) in it (an option value, a git pathspec after its magic), and, for a word of short options
+    (one leading dash), what follows each of its letters (a value glued to -t, -C or a group such as -rt)."""
+    values = {folded}
+    values.update(folded[i + 1:] for i, ch in enumerate(folded) if ch in "=:)")
+    if folded.startswith("-") and not folded.startswith("--"):
+        values.update(folded[k:] for k in range(2, len(folded)))
+    return [value for value in values if value]
+
+
+def _rdp_component_names(component, names):
+    """Whether one path component names one of names (casefolded): equal to it, or, holding a glob
+    character (a quoted glob git or another program expands itself), matching it."""
+    if any(ch in component for ch in "*?["):
+        return any(fnmatch.fnmatchcase(name, component) for name in names)
+    return component in names
+
+
+def _rdp_names_registry(words, cwd=None):
     """The first word of a plain command that names an orchestration registry file (its file name anywhere
-    in the word, without regard to case) or the .aiqt directory holding it (the last component of the
-    word, or of its value after an =, once normalized); None when no word does, or the command only reads
-    (_RDP_REGISTRY_READERS). A Bash call that writes, moves or removes the registry would switch the hook
-    off for every later call."""
+    in the word, without regard to case) or the .aiqt directory holding it; None when no word does, or the
+    command only reads (_RDP_REGISTRY_READERS). The .aiqt directory is named by a value of the word
+    (_rdp_word_values) whose last component, once normalized, or once resolved against the session cwd,
+    is .aiqt or a glob matching it or a registry file; and by a word entering a .aiqt directory (-C
+    .aiqt/core) in a command that also climbs with .., which can then reach it. A Bash call that writes,
+    moves or removes the registry would switch the hook off for every later call."""
     if words[0].casefold() in _RDP_REGISTRY_READERS:
         return None
     names = tuple(rel.rsplit("/", 1)[-1].casefold() for rel in _ORCH_REGISTRY_FILES)
+    targets = names + (".aiqt",)
+    bases = []
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        bases = [os.path.normpath(cwd), os.path.realpath(cwd)]
+    enters = climbs = None
     for word in words[1:]:
         folded = word.casefold()
         if any(name in folded for name in names):
             return word
-        for value in (folded, folded.split("=", 1)[-1]):
-            if value and os.path.basename(os.path.normpath(value)) == ".aiqt":
+        for value in _rdp_word_values(folded):
+            forms = [os.path.normpath(value)] + [os.path.normpath(os.path.join(b, value)) for b in bases]
+            if any(_rdp_component_names(os.path.basename(form).casefold(), targets) for form in forms):
                 return word
+            parts = value.split("/")
+            if ".." in parts:
+                climbs = climbs or word
+            if any(_rdp_component_names(part, (".aiqt",)) for part in parts):
+                enters = enters or word
+    if enters is not None and climbs is not None:
+        return climbs
+    return None
+
+
+# The git configuration a plain git command may not change in a bound session: it moves the work tree
+# (core.worktree), makes the repository bare (core.bare), or includes another configuration file that may
+# set either. A separated git directory (--separate-git-dir) moves the repository the same way. Each would
+# point git's top level away from the registry that binds the session.
+_RDP_REPOSITORY_KEYS = ("core.worktree", "core.bare", "include.path", "includeif.", "--separate-git-dir")
+_RDP_GIT_CONFIG_READS = frozenset(("--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+                                   "get", "list"))
+_RDP_GIT_CONFIG_WRITES = frozenset(("--add", "--replace-all", "--unset", "--unset-all", "--rename-section",
+                                    "--remove-section", "-e", "--edit", "set", "unset", "edit",
+                                    "rename-section", "remove-section"))
+
+
+def _rdp_moves_repository(words):
+    """The first word of a plain git command that names a configuration key or option of
+    _RDP_REPOSITORY_KEYS (compared without regard to case, anywhere in the word, so -c core.bare=true and
+    --separate-git-dir=PATH are found); None when the command is no git command, names none, or is a
+    git config call that only reads (a read action and no write action)."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    folded = [word.casefold() for word in words[1:]]
+    if "config" in folded and any(w in _RDP_GIT_CONFIG_READS for w in folded) and \
+            not any(w in _RDP_GIT_CONFIG_WRITES for w in folded):
+        return None
+    for word, low in zip(words[1:], folded):
+        if any(key in low for key in _RDP_REPOSITORY_KEYS):
+            return word
     return None
 
 
@@ -11263,12 +11348,18 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     words, why = _rdp_plain_words(command)
     if words is None:
         return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
-    touched = _rdp_names_registry(words)
+    touched = _rdp_names_registry(words, data.get("cwd"))
     if touched is not None:
         return ("deny", "the command names the orchestration registry ({}) that binds review dispatch in "
                 "this session; a Bash call that may write, move or remove it would switch this check off, so "
                 "only a read ({}) may name it, and an operator changes the registry outside the "
                 "session".format(touched, ", ".join(sorted(_RDP_REGISTRY_READERS))))
+    moved = _rdp_moves_repository(words)
+    if moved is not None:
+        return ("deny", "the git command changes where the repository or its work tree is ({}); in a session "
+                "whose registry binds review dispatch, a moved top level would be checked against another "
+                "registry, so an operator changes core.worktree, core.bare, configuration includes and "
+                "separated git directories outside the session".format(moved))
     word = _rdp_basename(words[0])
     if word.casefold() not in {name.casefold() for name in commands}:
         # The one dispatch's own arguments may mention a declared name (in a brief path, say); a plain
@@ -11298,6 +11389,8 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     if root is None:
         return ("unverifiable", "git cannot resolve the session repository from the cwd {!r}, so the "
                 "{} dispatch cannot be checked".format(cwd, word))
+    if isinstance(foreign, str):
+        return ("unverifiable", "{}; the {} dispatch is withheld".format(foreign, word))
     if foreign:
         return ("unverifiable", "the session repository {} is not the repository of the registry that "
                 "binds the {} dispatch ({}): a nested repository, or a top level moved by core.worktree, "
