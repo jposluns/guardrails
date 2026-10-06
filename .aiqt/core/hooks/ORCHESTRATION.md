@@ -277,8 +277,9 @@ directory not named `.git` is protected like `.git`. A directory holding it is r
 that can delete, move or recursively rewrite it: `rm` with `-r`, `-R` or `-d`, `rmdir`, `mv` of it (or
 `mv --exchange` into it), `chmod` in any form (a mode alone can cut every path to the git directory),
 `cp -r` or `cp -a` of it, a `cp`, `mv` or `ln` whose written path merges into it (`x/.`, `-T`) or
-resolves into the git directory, `opf` or a dispatch command naming it, and an option word the coreutils
-option tables do not model. Writing a new file or directory into it (`cp x .`, `touch ./f`, `mkdir d`,
+resolves into the git directory, `opf` naming it, and an option word the coreutils option tables do not
+model. A dispatch command may name a directory holding the git directory (`--workdir .`); one naming the
+git directory or a path inside it is refused. Writing a new file or directory into it (`cp x .`, `touch ./f`, `mkdir d`,
 `ln -s t ./l`) is allowed, and `git add .` is not refused, since git writes its own directory through no
 pathspec. Where git cannot resolve the session repository, the git directory the
 raw `.git` and `commondir` files name is protected, and one they cannot locate refuses every command but a

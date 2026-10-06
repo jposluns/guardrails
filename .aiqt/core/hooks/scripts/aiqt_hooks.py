@@ -11633,9 +11633,8 @@ _RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
 # path or revision for each of them (no unknown-option error), and git diff, log -p and show run no
 # diff.external for -- --ext-diff while they do for --ext-diff. log, show, diff, rev-list and shortlog end
 # at the first -- whatever comes before it (git log --grep -- x lacks a --grep value); the others end at a
-# -- not taken as an option's value. The -- is read as ending them only where it comes first or follows a
-# word that is no option (a word the hook does not know to take the next word could still take it), and a
-# TRANSPORT::ADDRESS after it is still judged. Any other subcommand (stash, whose show passes its words to
+# -- not taken as an option's value. The -- is read as ending them unless the word before it may take it
+# as a value (_rdp_git_takes_dashdash), and a TRANSPORT::ADDRESS after it is still judged. Any other subcommand (stash, whose show passes its words to
 # a diff, config, remote, worktree, cat-file, mv, cherry-pick, revert, merge-base and the rest) judges a
 # word after -- as before, which only refuses.
 _RDP_GIT_DASHDASH_ENDS = frozenset(("status", "log", "diff", "show", "rev-list", "shortlog", "ls-files",
@@ -11719,6 +11718,36 @@ _RDP_GIT_NEXT_LONG = {
                         "--revision", "--depth", "--shallow-since", "--shallow-exclude", "--separate-git-dir",
                         "--ref-format", "--server-option", "--filter", "--bundle-uri")),
     "rm": frozenset(("--pathspec-from-file",))}
+# For each subcommand of _RDP_GIT_DASHDASH_ENDS, its options that take a value git requires, which it reads
+# from the next word when none is written with the option: (the long options, the short letters). Read
+# from git SUB --help-all (git 2.53), which lists the hidden options too, for status (none), ls-files,
+# grep, add, rm, commit, checkout, restore and reset, and for blame and shortlog, whose words git passes
+# to the revision options when they are not their own, joined with those of log; for log, show, diff and
+# rev-list (whose -h lists no option) the git-log, git-show, git-diff and git-rev-list documentation
+# pages, as _RDP_GIT_NEXT_LONG and the next-word letters of _RDP_GIT_PROGRAM_LETTERS hold them.
+_RDP_GIT_REV_TAKES = (_RDP_GIT_NEXT_LONG["log"], _RDP_GIT_PROGRAM_LETTERS["log"][2])
+_RDP_GIT_DASHDASH_TAKES = {
+    "status": (frozenset(), ""), "log": _RDP_GIT_REV_TAKES,
+    "show": (_RDP_GIT_NEXT_LONG["show"], _RDP_GIT_PROGRAM_LETTERS["show"][2]),
+    "diff": (_RDP_GIT_NEXT_LONG["diff"], _RDP_GIT_PROGRAM_LETTERS["diff"][2]),
+    "rev-list": (_RDP_GIT_NEXT_LONG["rev-list"], _RDP_GIT_PROGRAM_LETTERS["rev-list"][2]),
+    "shortlog": (_RDP_GIT_REV_TAKES[0] | frozenset(("--group",)), _RDP_GIT_REV_TAKES[1]),
+    "ls-files": (frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--format",
+                            "--with-tree")), "xX"),
+    "blame": (_RDP_GIT_REV_TAKES[0] | frozenset(("--contents", "--diff-algorithm", "--ignore-rev",
+                                                 "--ignore-revs-file")), _RDP_GIT_REV_TAKES[1] + "LS"),
+    "grep": (frozenset(("--after-context", "--before-context", "--context", "--max-count", "--max-depth",
+                        "--threads")), "ABCefm"),
+    "add": (frozenset(("--chmod", "--inter-hunk-context", "--pathspec-from-file", "--unified")), "U"),
+    "rm": (frozenset(("--pathspec-from-file",)), ""),
+    "commit": (frozenset(("--author", "--cleanup", "--date", "--file", "--fixup", "--inter-hunk-context",
+                          "--message", "--pathspec-from-file", "--reedit-message", "--reuse-message", "--squash",
+                          "--template", "--trailer", "--unified")), "CFUcmt"),
+    "checkout": (frozenset(("--conflict", "--inter-hunk-context", "--orphan", "--pathspec-from-file",
+                            "--unified")), "BUb"),
+    "restore": (frozenset(("--conflict", "--inter-hunk-context", "--pathspec-from-file", "--source",
+                           "--unified")), "Us"),
+    "reset": (frozenset(("--inter-hunk-context", "--pathspec-from-file", "--unified")), "U")}
 # The subcommands that reach a remote, where a URL written TRANSPORT::ADDRESS runs the remote helper
 # git-remote-TRANSPORT found on PATH.
 _RDP_GIT_TRANSPORTS = frozenset(("fetch", "push", "clone", "remote"))
@@ -11761,6 +11790,26 @@ def _rdp_long_option(name, options):
         any(option.startswith(name) for option in options)
 
 
+def _rdp_git_takes_dashdash(sub, word):
+    """Whether the option word, just before a -- given to the git subcommand sub, may take that -- as its
+    value (_RDP_GIT_DASHDASH_TAKES): a long option written without = that is one of its value-taking options
+    or an abbreviation of one, or a word of short options whose first value-taking letter ends it. A
+    --opt=value word, a short letter with its value glued (-n5, -U3), a count (-1) and an option taking no
+    value never take it; a word that is no option takes nothing, and an option of a subcommand without a
+    set may take it."""
+    if not word.startswith("-") or word == "-":
+        return False
+    if sub not in _RDP_GIT_DASHDASH_TAKES:
+        return True
+    longs, letters = _RDP_GIT_DASHDASH_TAKES[sub]
+    if word.startswith("--"):
+        return "=" not in word and any(option.startswith(word) for option in longs)
+    for k, ch in enumerate(word[1:], 1):
+        if ch in letters:
+            return k == len(word) - 1
+    return False
+
+
 def _rdp_git_program_under(sub, before, after):
     """The first word that runs a program when the git subcommand sub is called with the words after,
     after the global options before; None when none does (_rdp_git_runs_program)."""
@@ -11783,7 +11832,7 @@ def _rdp_git_program_under(sub, before, after):
         if ended:
             continue
         if word == "--" and not skip and sub in _RDP_GIT_DASHDASH_ENDS and (
-                k == 0 or not after[k - 1].startswith("-")):
+                k == 0 or not _rdp_git_takes_dashdash(sub, after[k - 1])):
             # The end of the options (_RDP_GIT_DASHDASH_ENDS): every word after it is a path.
             ended = True
             continue
@@ -11847,8 +11896,8 @@ def _rdp_git_runs_program(words):
     read with their operands first: a word taken as the value of an option before it (attached, or the
     next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
     --ext-diff searches for --ext-diff. Every other word is judged up to a -- ending the options of a
-    subcommand of _RDP_GIT_DASHDASH_ENDS (first, or after a word that is no option), after which a word is a
-    path (git diff -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a global
+    subcommand of _RDP_GIT_DASHDASH_ENDS (unless the word before it may take it as a value,
+    _rdp_git_takes_dashdash), after which a word is a path (git diff --cached -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a global
     option this hook does not know, every word that may be the subcommand is tried."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
