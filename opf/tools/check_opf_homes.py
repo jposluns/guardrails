@@ -755,9 +755,12 @@ _CONTRACT = {
         _D("The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2)."),
         _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
         'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
+        'Each release MUST ship that declaration as one file, and that file is the declaration that every check of it reads.',
+        "The documentation of the release and every conformance report MUST restate that file's declaration exactly; where either states a declaration that differs from that file's, the declaration is malformed: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.",
         'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
         'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
         'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
         "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
         'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
@@ -2805,6 +2808,28 @@ def _self_test_vectors():
     check("spec-flip-9.2-idempotence", lambda: removed == 1 and
           "spec 9.2 missing contract: The upgrade MUST be idempotent." in
           contract_findings(text.replace(body, mutated, 1)))
+    # Section 16.1 declaration rules: deleting the wrapped sentence in place, or rewording its
+    # operative clause, turns the gate red with that pin's own finding.
+    body = _sections(text)["16.1"]
+    for start, rewordings in (
+            ("Each release MUST ship that declaration",
+             (("as one file, and that file is", "as a file, and a file is"),)),
+            ("The documentation of the release and every",
+             (("declaration exactly;", "declaration;"),
+              ("the declaration is malformed:", "the documentation is malformed:"))),
+            ("A declaration that carries its release identity,",
+             (("omits only its class, declares no class:", "omits only its class, is malformed:"),))):
+        pin = [f for f in _CONTRACT["16.1"] if f.startswith(start)]
+        sentence = pin[0] if len(pin) == 1 else start
+        finding = "spec 16.1 missing contract: " + sentence
+        pattern = r"\s+".join("`?" + "`?".join(map(re.escape, w)) + "`?" for w in sentence.split())
+        deleted, removed = re.subn(pattern, "", body)
+        check("spec-flip-16.1-" + start, lambda d=deleted, r=removed, f=finding, p=pin:
+              len(p) == 1 and r == 1 and f in contract_findings(text.replace(body, d, 1)))
+        for old, new in rewordings:
+            reworded, changed = re.subn(r"\s+".join(map(re.escape, old.split())), new, body)
+            check("spec-reword-16.1-" + old, lambda w=reworded, c=changed, f=finding:
+                  c == 1 and f in contract_findings(text.replace(body, w, 1)))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())

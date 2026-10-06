@@ -39,29 +39,29 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`6850500e694d7e16c8259467e3518c09b6dcb744` of `jposluns/guardrails`. Read them from the pinned URLs,
+`f6b25dbf0572b547bfb9cf668e772ea38a903870` of `jposluns/guardrails`. Read them from the pinned URLs,
 not from a branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `245cb883fb4c3b948b8c7fdb300b6f4bd5c551174776642bc82f29ea5672e885` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `15f2de4e6307efe708ccf6a76fe07b26f86ae64d4fa5c76610ae4e83492eeb44` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `69f62d00fa86a2d19576717df0356ddcbd1c56367586199250b28d370f90b16a` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/f6b25dbf0572b547bfb9cf668e772ea38a903870/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/f6b25dbf0572b547bfb9cf668e772ea38a903870/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -86,9 +86,11 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
-  fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
-  and completion), which a fresh start does not perform, so there are no import prompts to run.
+  `version = "0.3.0"`) lists one member, `flow/SKILL.md`, an operating-loop skill for an AI
+  development assistant, which is not an import prompt. The pack has two roles in the
+  specification, and this fresh start needs neither. Its prompts drive post-adoption import
+  (section 14.1, One approval and completion), which a fresh start does not perform, so there are
+  no import prompts to run.
   Separately, section 14.1 says every `opf.adoption.plan/v2` plan MUST bind "the version and digest
   of the prompt pack". This prompt reads section 14 as not requiring an adoption plan for a scaffold
   with nothing to disposition (open point 14); if the maintainer rules otherwise, the plan binds the
@@ -1036,29 +1038,31 @@ Build the primitives every later step relies on.
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
 - The class declaration check. Read the declaration file of "Choices to make before you start"
-  from the running release and check it. Section 16.1 states three rules for the declaration: "An
-  implementation MUST declare, in the documentation of each release and in every conformance
-  report it emits, its release identity, its class, and its supported `spec_version`, homes
-  generation, and worklog storage generation. An implementation that declares no class MUST be
-  treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
-  operation." The specification defines no format for the declaration and does not define the
-  three failing cases, so the cases below other than no class and an absent file are this prompt's
-  reading, yours to confirm with the maintainer. Every command of yours that reads, grades or writes
-  a store, `opf init` and the step 13 and step 14 checks included, runs this check before it
-  resolves, reads or writes any store, and on cannot-evaluate it stops with exit 2 and performs no
-  store operation.
+  from the running release and check it. Section 16.1 states four rules for the declaration: "An
+  implementation MUST declare, in the documentation of each release and in every conformance report
+  it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
+  worklog storage generation. An implementation that declares no class MUST be treated as
+  upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A
+  declaration that is absent, or that omits its release identity, its `spec_version`, its homes
+  generation, or its worklog storage generation, is malformed rather than one that declares no
+  class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation." The
+  specification defines no format for the declaration and defines the failing cases only in part:
+  its fourth rule makes an absent declaration, and one that omits its release identity, its
+  `spec_version` or either generation, malformed. The other cases below, apart from no class, are
+  this prompt's reading, yours to confirm with the maintainer. Every command of yours that reads,
+  grades or writes a store, `opf init` and the step 13 and step 14 checks included, runs this check
+  before it resolves, reads or writes any store, and on cannot-evaluate it stops with exit 2 and
+  performs no store operation.
   The check gives each declaration one of these outcomes:
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed, as a later revision of section 16.1 states: "A declaration that is absent, or that
-    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
-    generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate
-    and MUST NOT authorize any store operation"; section 16.1 at the pinned commit does not yet name
-    the absent case.
-    Cannot-evaluate.
+    malformed. Section 16.1 states the absent case and each lacking field in its fourth rule: "A
+    declaration that is absent, or that omits its release identity, its `spec_version`, its homes
+    generation, or its worklog storage generation, is malformed rather than one that declares no
+    class". The other malformed cases are this prompt's reading. Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
@@ -1071,9 +1075,10 @@ Build the primitives every later step relies on.
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
-    absent file, because that file declares nothing at all and so lacks the release identity,
-    `spec_version` and generations that the first rule also requires, which makes it malformed under
-    the third rule rather than a declaration that omits only its class.
+    absent file or a file that lacks another field: the fourth rule makes each of them malformed
+    rather than a declaration that declares no class. The class is not among the fields whose
+    omission that rule makes malformed, so a file that carries the release identity, the
+    `spec_version` and both generations and lacks only its class key falls under the no-class rule.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 
