@@ -11315,6 +11315,18 @@ _RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--n
 _RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
                                    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
                                    "--icase-pathspecs", "--no-optional-locks"))
+# The options that make a read-only git subcommand run a configured or named program, so a read carrying
+# one (abbreviated or not) gets the full checks: an external diff (diff.external, a diff driver's command),
+# a textconv filter, cat-file's smudge and clean filters, and a signature check running gpg.program. For
+# log, show and diff, so does an option asking for patch output, to which a textconv filter applies, and a
+# %G format placeholder, which runs gpg.program; a global -p or --paginate runs the pager.
+_RDP_GIT_RUNS_PROGRAM = ("--ext-diff", "--textconv", "--filters", "--show-signature")
+_RDP_GIT_PATCH_OPTIONS = ("--patch", "--patch-with-raw", "--patch-with-stat", "--unified", "--cc", "--dd",
+                          "--combined-all-paths", "--remerge-diff", "--diff-merges", "--word-diff",
+                          "--word-diff-regex", "--color-words", "--function-context", "--binary")
+# The short options of log, show and diff that ask for patch output (-p, -u, -U, -c, -m, -W, -L), found
+# anywhere in a word of short options, a glued value included.
+_RDP_GIT_PATCH_LETTERS = "pucmUWL"
 # The git config read actions, each with the least and most operands it takes, and the options that may
 # precede one without changing what it does (--show-origin only before a list).
 _RDP_GIT_CONFIG_READS = {"--get": (1, 2), "--get-all": (1, 2), "--get-regexp": (1, 2), "--list": (0, 0),
@@ -11347,21 +11359,42 @@ def _rdp_git_subcommand(words):
     return (None, configured)
 
 
+def _rdp_long_option(name, options):
+    """Whether the option name (the part of a word before any =) is one of options or an abbreviation git
+    may expand to one (--text is an option of its own, not --textconv)."""
+    return len(name) > 2 and name.startswith("--") and name != "--text" and \
+        any(option.startswith(name) for option in options)
+
+
 def _rdp_git_reads(words):
     """Whether a plain command is a git command that only reads: its subcommand is on _RDP_GIT_READS, no
-    global option sets configuration, and no word is an --output option (abbreviated or not), which writes
-    a file, or, for grep, an -O or --open-files-in-pager option, which runs a program on the matches."""
+    global option sets configuration or runs the pager (-p, --paginate), and no word is an --output option
+    (abbreviated or not), which writes a file, an option that runs a configured or named program
+    (_RDP_GIT_RUNS_PROGRAM), or, for grep, an -O or --open-files-in-pager option, which runs a program on
+    the matches, or, for log, show and diff, an option asking for patch output (_RDP_GIT_PATCH_OPTIONS,
+    _RDP_GIT_PATCH_LETTERS) or a %G placeholder. Configuration set before the session can still make such
+    a read run a program (git diff runs diff.external and textconv filters by default); see the residue."""
     if _rdp_basename(words[0]) != "git":
         return False
     at, configured = _rdp_git_subcommand(words)
     if at is None or configured or words[at] not in _RDP_GIT_READS:
         return False
+    if any(word in ("-p", "--paginate") for word in words[1:at]):
+        return False
+    sub = words[at]
     for word in words[at + 1:]:
         name = word.split("=", 1)[0]
         if len(name) > 2 and "--output".startswith(name):
             return False
-        if words[at] == "grep" and ((len(name) > 3 and "--open-files-in-pager".startswith(name)) or
-                                    (name.startswith("-") and not name.startswith("--") and "O" in name)):
+        if _rdp_long_option(name, _RDP_GIT_RUNS_PROGRAM):
+            return False
+        if sub == "grep" and ((len(name) > 3 and "--open-files-in-pager".startswith(name)) or
+                              (name.startswith("-") and not name.startswith("--") and "O" in name)):
+            return False
+        if sub in ("log", "show", "diff") and (
+                _rdp_long_option(name, _RDP_GIT_PATCH_OPTIONS) or "%G" in word or
+                (word.startswith("-") and not word.startswith("--") and
+                 any(ch in _RDP_GIT_PATCH_LETTERS for ch in word[1:]))):
             return False
     return True
 
@@ -11372,8 +11405,8 @@ def _rdp_git_config_reads(args):
     _RDP_GIT_CONFIG_READS after modifiers only, followed by the number of operands it takes, none an
     option. Every other form may write: a trailing word is a value there, so git config core.worktree get
     sets core.worktree to get."""
-    if len(args) == 1:
-        return not args[0].startswith("-") and "." in args[0]
+    if len(args) == 1 and not args[0].startswith("-"):
+        return "." in args[0]
     i = 0
     while i < len(args) and (args[i] in _RDP_GIT_CONFIG_MODIFIERS or args[i] == "--show-origin" or
                              args[i].startswith("--type=")):
@@ -11387,43 +11420,85 @@ def _rdp_git_config_reads(args):
     return least <= len(operands) <= most and not any(word.startswith("-") for word in operands)
 
 
-def _rdp_config_names_repository(word):
-    """Whether a word of a git config call that may write names repository configuration: a key or option
-    of _RDP_REPOSITORY_KEYS, the core, include or includeIf section (a --rename-section target), or an edit
-    action, whose editor can set any key (compared without regard to case)."""
-    low = word.casefold()
-    name = low.split("=", 1)[0]
-    return any(key in low for key in _RDP_REPOSITORY_KEYS) or low in ("core", "include", "edit") or \
-        low.startswith("includeif") or (len(name) > 3 and "--edit".startswith(name)) or \
-        (low.startswith("-") and not low.startswith("--") and "e" in low)
+def _rdp_git_configures(words):
+    """The first word of a plain git command that sets git configuration; None when the command is no git
+    command or sets none. Configuration can make any git command, a read among them, run a program
+    (diff.external, a diff driver's command or textconv, core.pager and pager.*, core.editor,
+    core.fsmonitor, core.hooksPath, an alias, a filter or merge driver, credential.helper, gpg.program), so
+    no key list closes it: a -c or --config-env global, and a git config call in any form but a read
+    (_rdp_git_config_reads), whatever its key, sets it. Behind a global option this hook does not know, a
+    config, -c or --config-env word anywhere does."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    if at is None:
+        return next((word for word in words[1:] if word.casefold() == "config" or
+                     word.split("=", 1)[0] in ("-c", "--config-env")), None)
+    for word in words[1:at]:
+        if word.split("=", 1)[0] in ("-c", "--config-env"):
+            return word
+    if words[at].casefold() == "config" and not _rdp_git_config_reads(words[at + 1:]):
+        return words[at]
+    return None
 
 
 def _rdp_moves_repository(words):
     """The first word of a plain git command that may change where the repository or its work tree is; None
-    when the command is no git command or changes neither. A git config call is judged by position: a read
-    (_rdp_git_config_reads) changes nothing, and any other form naming repository configuration
-    (_rdp_config_names_repository), or a -c or --config-env global naming a repository key, does. Any other
-    subcommand does when a word names a key or option of _RDP_REPOSITORY_KEYS (compared without regard to
-    case, anywhere in the word, so -c core.bare=true and --separate-git-dir=PATH are found). A git command
-    that only reads (_rdp_git_reads) is not judged here."""
+    when the command is no git command or changes neither: a word naming a key or option of
+    _RDP_REPOSITORY_KEYS (compared without regard to case, anywhere in the word, so --separate-git-dir=PATH
+    is found). A git config read changes nothing, and every other config call, like every -c or
+    --config-env global, is refused before this (_rdp_git_configures). A git command that only reads
+    (_rdp_git_reads) is not judged here."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
     at, _configured = _rdp_git_subcommand(words)
-    if at is None and "config" in [word.casefold() for word in words[1:]]:
-        # A subcommand behind a global option this hook does not know may be config: every word is judged
-        # as a word of a config call that may write.
-        return next((word for word in words[1:] if _rdp_config_names_repository(word)), None)
     if at is not None and words[at].casefold() == "config":
-        for word in words[1:at]:
-            if any(key in word.casefold() for key in _RDP_REPOSITORY_KEYS):
-                return word
-        args = words[at + 1:]
-        if _rdp_git_config_reads(args):
-            return None
-        return next((word for word in args if _rdp_config_names_repository(word)), None)
+        return None
     for word in words[1:]:
         if any(key in word.casefold() for key in _RDP_REPOSITORY_KEYS):
             return word
+    return None
+
+
+# The programs of rule 4's allowlist that write no file, so they may name a git directory or a git
+# configuration file: the registry readers and programs that only print or test.
+_RDP_GIT_DIR_READERS = _RDP_REGISTRY_READERS | frozenset((
+    "echo", "printf", "test", "pwd", "true", "false", "date", "basename", "dirname", "realpath", "readlink",
+    "du", "df"))
+# The last components of git's global and system configuration files (~/.gitconfig, /etc/gitconfig).
+_RDP_GIT_CONFIG_FILES = (".gitconfig", "gitconfig")
+
+
+def _rdp_names_git_dir(words, cwd=None):
+    """The first word of a plain command that may write git configuration or hooks by path; None when no
+    word does, or the command only reads (_RDP_GIT_DIR_READERS, or a git read, judged by the caller). A
+    word does when a value of it (_rdp_word_values) holds a .git component (.git/config, .git/hooks,
+    -C .git, a quoted glob matching it), ends in a global or system configuration file
+    (_RDP_GIT_CONFIG_FILES) or holds git/config (the XDG file), or, from a cwd inside a .git directory, is
+    relative; and a git --template option, which copies hooks into the git directory. A configuration
+    file or hook copied, linked or moved into place would make a later git command, a read among them,
+    run a program."""
+    if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
+        return None
+    inside = False
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        inside = any(part.casefold() == ".git" for form in (os.path.normpath(cwd), os.path.realpath(cwd))
+                     for part in form.split("/"))
+    git = _rdp_basename(words[0]).casefold() == "git"
+    for word in words[1:]:
+        folded = word.casefold()
+        if git and folded.split("=", 1)[0].startswith("--template"):
+            return word
+        for value in _rdp_word_values(folded):
+            if inside and not os.path.isabs(value):
+                return word
+            parts = [part for part in os.path.normpath(value).split("/") if part]
+            if any(_rdp_component_names(part, (".git",)) for part in parts):
+                return word
+            if parts and _rdp_component_names(parts[-1], _RDP_GIT_CONFIG_FILES):
+                return word
+            if any(parts[k:k + 2] == ["git", "config"] for k in range(len(parts))):
+                return word
     return None
 
 
@@ -11466,6 +11541,20 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
                 "this session; a Bash call that may write, move or remove it would switch this check off, so "
                 "only a read ({}) may name it, and an operator changes the registry outside the "
                 "session".format(touched, ", ".join(sorted(_RDP_REGISTRY_READERS))))
+    configures = _rdp_git_configures(words)
+    if configures is not None:
+        return ("deny", "the git command sets git configuration ({}); configuration can make any git "
+                "command, a read among them, run a program (diff.external, a textconv or filter driver, "
+                "core.pager, core.fsmonitor, core.hooksPath, an alias), so in a session whose registry binds "
+                "review dispatch every git config write, whatever the key, and every -c or --config-env "
+                "global is refused, and an operator changes git configuration outside the "
+                "session".format(configures))
+    gitdir = None if reads else _rdp_names_git_dir(words, data.get("cwd"))
+    if gitdir is not None:
+        return ("deny", "the command names a git directory, a git configuration file or a hook template "
+                "({}); a configuration file or hook written there can make any git command, a read among "
+                "them, run a program, so in a session whose registry binds review dispatch only a read may "
+                "name one, and an operator changes them outside the session".format(gitdir))
     moved = None if reads else _rdp_moves_repository(words)
     if moved is not None:
         return ("deny", "the git command changes where the repository or its work tree is ({}); in a session "
@@ -11551,8 +11640,10 @@ def review_dispatch_pin(data):
     dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
     is not one provably plain command (its command word on the allowlist, or a declared dispatch command)
     is withheld, a plain one naming the registry is refused unless it only reads, a plain git command that
-    may move the repository is refused (git config judged by position, a read-only git subcommand's words
-    taken as data), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
+    sets configuration (every git config write, every -c or --config-env global) or may move the
+    repository is refused, as is a plain command that may write into a git directory or a git
+    configuration file (a read-only git subcommand's words taken as data, unless it carries an option that
+    runs a program), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
     withholds every Bash call.
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
     declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a

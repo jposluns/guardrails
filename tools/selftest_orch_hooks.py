@@ -1148,10 +1148,10 @@ def _rdp_cases(tmp):
         "/usr/local/bin/orch-dispatc? --brief " + as_bad, "orch-dis$(true)patch --brief " + as_bad)],
         ["unverifiable"] * 4)
     # A plain command that names a declared command inside an argument (a git alias that runs it), compared
-    # without regard to case.
+    # without regard to case: refused, since its -c global sets configuration, which no bound session may.
     check("rdp/plain-command-naming-dispatch-unverifiable", [_rdp_kind(sw_run.run(c)) for c in (
         "git -c 'alias.r=!orch-dispatch --brief " + as_bad + "' r",
-        "git -c 'alias.r=!ORCH-Dispatch --brief " + as_bad + "' r")], ["unverifiable"] * 2)
+        "git -c 'alias.r=!ORCH-Dispatch --brief " + as_bad + "' r")], ["deny"] * 2)
     # Each rule of the plain-command specification on its own: every forbidden character, bare or in a
     # double-quoted segment (but literal in a single-quoted one), a tab or a line break, an unterminated
     # quote, every wrapper command word, also in another case, and rule 4's allowlist: each allowed program,
@@ -1328,6 +1328,53 @@ def _rdp_scope_cases(base, plain):
               "git commit -m 'document core.worktree handling'", "git init -q --separate-git-dir=/tmp/x")
     check("rdp/plain-git-read-that-writes-or-runs-judged", [_rdp_kind(rg.run(c)) for c in judged],
           ["deny"] * len(judged))
+    # Configuration can make any git command, a read among them, run a program, so no key list closes it:
+    # the external diff sequence (set diff.external to rm -f, then diff the registry with --ext-diff), each
+    # call run only where the hook allows it, would delete the registry and let a missing-brief dispatch
+    # through; every git config write and -c or --config-env global is refused, whatever the key.
+    ed = RdpFixture(base, "extdiff")
+    (ed.root / "other").write_text("different\n", encoding="utf-8")
+    ed_got = []
+    for command, args in (("git config diff.external 'rm -f'", ["config", "diff.external", "rm -f"]),
+                          ("git diff --no-index --ext-diff .aiqt/orchestration.local.json other",
+                           ["diff", "--no-index", "--ext-diff", ".aiqt/orchestration.local.json", "other"])):
+        ed_got.append(_rdp_kind(ed.run(command)))
+        if ed_got[-1] == "allow":
+            subprocess.run(["git", "-C", str(ed.root)] + args, capture_output=True, timeout=30)
+    ed_got += [_rdp_kind(ed.dispatch("/missing")), (ed.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-external-diff-sequence-cannot-remove-registry", ed_got,
+          ["deny", "deny", "unverifiable", True])
+    keys = ("git config core.pager 'rm -f'", "git config alias.l '!rm -f x'", "git config core.fsmonitor x",
+            "git config --global diff.x.textconv x", "git config filter.x.smudge x", "git config set diff.external x",
+            "git config --file x diff.external x", "git config --add core.hooksPath x",
+            "git config --unset diff.external", "git -c diff.external=x status", "git -c x.y=z commit -m x",
+            "git --config-env=core.pager=V status", "git --exec-path=/x -c diff.external=x status",
+            "git --exec-path=/x config diff.external x")
+    check("rdp/plain-git-config-write-any-key-denies", [_rdp_kind(ed.run(c)) for c in keys], ["deny"] * len(keys))
+    # A read carrying an option that runs a configured or named program (an external diff, a textconv or
+    # smudge filter, a patch a textconv applies to, a signature check, the pager) gets the full checks.
+    runs = ("git diff --textconv .aiqt/orchestration.local.json other", "git diff --textc -- .aiqt",
+            "git show --textconv HEAD:.aiqt/orchestration.local.json", "git cat-file --textconv HEAD:.aiqt/orchestration.json",
+            "git cat-file --filters HEAD:.aiqt/orchestration.json", "git grep --textconv x .aiqt", "git blame --textconv -- .aiqt",
+            "git log -p -- .aiqt", "git log --patch -- .aiqt", "git show -U3 -- .aiqt", "git log -pS x -- .aiqt",
+            "git diff --ext -- .aiqt", "git log --cc -- .aiqt", "git log --word-diff -- .aiqt",
+            "git log --show-signature -- .aiqt", "git log --format='%G?' -- .aiqt", "git -p log -- .aiqt",
+            "git --paginate status .aiqt")
+    check("rdp/plain-git-read-running-program-judged", [_rdp_kind(ed.run(c)) for c in runs], ["deny"] * len(runs))
+    # A plain command that may write into a git directory or a git configuration file (a configuration
+    # file or hook copied, linked or moved into place) is refused; reads of them, and a read naming the
+    # registry with no program-running option, are not.
+    gitdir = ("cp other .git/config", "ln -sf other .git/hooks/post-index-change", "mv other .GIT/config",
+              "git show HEAD:seed.txt --output=.git/config", "cp other x/.gitconfig",
+              "cp other x/.config/git/config", "git init -q --template=/x", "cp -rT other '.gi?'",
+              "chmod +x .git/hooks/pre-commit", "git -C .git commit -m x")
+    check("rdp/plain-git-dir-write-denies", [_rdp_kind(ed.run(c)) for c in gitdir], ["deny"] * len(gitdir))
+    quiet = ("git config --get diff.external", "git config --list", "ls .git", "test -d .git",
+             "cat .git/config", "git diff --stat -- .aiqt/orchestration.local.json",
+             "git log --oneline -- .aiqt/orchestration.local.json", "git diff --text -- .aiqt",
+             "git log --no-ext-diff --no-textconv -S x -- .aiqt", "git status")
+    check("rdp/plain-git-read-without-program-allows", [_rdp_kind(ed.run(c)) for c in quiet],
+          ["allow"] * len(quiet))
     # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
     # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
     # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
