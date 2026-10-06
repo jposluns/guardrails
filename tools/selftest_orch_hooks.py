@@ -1730,6 +1730,120 @@ def _main_isolated(report_path=None):
               (_dt_code, "truncation guard: ACTIVE" in _dt_out, "a registry entry was found" in _dt_out,
                "git toplevel cannot be opened as a directory" in _dt_out),
               (2, True, False, True))
+        # ROUND 8, ONE BARRIER TRUTH: both resume-barrier writers (the SessionStart hook and the doctor's
+        # --resume-audit) arm from aiqt_hooks._orch_resume_audit_findings, so a SessionStart after the
+        # doctor armed the barrier for the strict scope deny (the symlinked registry above) keeps it
+        # armed with the same findings; unset mode is clean in both. Red when the hook audits the resume
+        # probes alone (it then clears the barrier while the guard still denies). A registry the loader
+        # reports bad arms the barrier with its own finding in both writers (red when that finding is
+        # dropped from the shared list). In default mode a cannot-evaluate scope found ABOVE a root with no
+        # registry is reported as the fault, not as a registry found (red when the doctor's fault branch
+        # tests only "toplevel-unopenable").
+        _r8_bad = Fixture(tmp, "doc-bad-registry")
+        (_r8_bad.root / ".aiqt" / "orchestration.local.json").write_text("{", encoding="utf-8")
+        _r8_bad_bar = Path(aiqt_hooks._orch_state_dir_for_root(str(_r8_bad.root))) / "resume-barrier.json"
+        (tmp / "doc-cev" / ".aiqt" / "orchestration.json").mkdir(parents=True)
+        (tmp / "doc-cev" / "nested").mkdir()
+
+        def _r8_bar(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                bar = json.load(fh)
+            return bar.get("active"), bar.get("findings")
+        try:
+            _r8_drs = _doc_run(_doc_fx.root, "1", "--resume-audit")[0]
+            _r8_drs_bar = _r8_bar(_doc_barrier)
+            _r8_hrs = _verdict(aiqt_hooks.orch_resume_audit(_doc_fx.payload("SessionStart")))
+            _r8_hrs_bar = _r8_bar(_doc_barrier)
+            os.environ.pop(_doc_env, None)
+            _r8_hru = _verdict(aiqt_hooks.orch_resume_audit(_doc_fx.payload("SessionStart")))
+            _r8_hru_bar = _r8_bar(_doc_barrier)
+            _r8_dbad = _doc_run(_r8_bad.root, None, "--resume-audit")[0]
+            _r8_dbad_bar = _r8_bar(_r8_bad_bar)
+            _r8_hbad = _verdict(aiqt_hooks.orch_resume_audit(_r8_bad.payload("SessionStart")))
+            _r8_hbad_bar = _r8_bar(_r8_bad_bar)
+            _r8_cev_code, _r8_cev_out = _doc_run(tmp / "doc-cev" / "nested", None)
+        finally:
+            _doc.repo_root = _doc_root
+            if _doc_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _doc_old
+        check("doctor/hook-resume-audit-keeps-strict-scope-barrier",
+              (_r8_drs, _r8_drs_bar[0], _r8_hrs, _r8_hrs_bar == _r8_drs_bar,
+               [f for f in _r8_hrs_bar[1] or [] if "is DENIED" in f] != [], _r8_hru, _r8_hru_bar),
+              (1, True, "warn", True, True, "allow", (False, [])))
+        _r8_read = "the orchestration registry could not be read ("
+        check("doctor/resume-audit-registry-unreadable-arms-barrier",
+              (_r8_dbad, _r8_dbad_bar[0], [f for f in _r8_dbad_bar[1] or [] if _r8_read in f] != [],
+               _r8_hbad, _r8_hbad_bar == _r8_dbad_bar),
+              (1, True, True, "warn", True))
+        check("doctor/default-cannot-evaluate-above-root-reports-fault-not-registry",
+              (_r8_cev_code, "truncation guard: ACTIVE" in _r8_cev_out,
+               "hit a fault it reads as present" in _r8_cev_out, "a registry entry was found" in _r8_cev_out,
+               "cannot be confirmed as a registry" in _r8_cev_out),
+              (2, True, True, False, True))
+        # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
+        # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
+        # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
+        # mode with the absent-registry reason (fail-closed there), never the unopenable-toplevel reason.
+        _mt_top = aiqt_hooks._recovery_toplevel
+        _mt_old = os.environ.get(_doc_env)
+        try:
+            aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "no-such-toplevel")
+            _mt_probe = aiqt_hooks._orch_git_toplevel_has_registry(fcb_cwd)
+            _mt_scope = aiqt_hooks._orch_truncation_scope(fcb_cwd)
+            os.environ.pop(_doc_env, None)
+            _mt_plain = _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok"))))
+            os.environ[_doc_env] = "1"
+            _mt_res = aiqt_hooks.orch_truncation_guard(dict(
+                nocwd, cwd=fcb_cwd, tool_input=dict(command="printf ok")))
+            _mt_why = (_mt_res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        finally:
+            aiqt_hooks._recovery_toplevel = _mt_top
+            if _mt_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _mt_old
+        check("trunc/union-missing-toplevel-reads-absent-strict-denies",
+              (_mt_probe, _mt_scope, _mt_plain, _verdict(_mt_res),
+               "no .aiqt/orchestration.local.json or" in _mt_why, "could not be opened" in _mt_why),
+              (False, ("none", None), "allow", "deny", True, False))
+        # ROUND 8, SEARCH PERMISSION DECIDES A .aiqt DIRECTORY'S PROBE (the documented attribute): mode
+        # 0o100 (search only, no read) confirms the registry inside it; 0o600 (read and write, no search)
+        # and 0o000 cannot be evaluated. A root run is not bound by these modes, so there the seam supplies
+        # the kernel's EACCES for a registry-name stat under a .aiqt lacking the owner search bit.
+        _sp_stat = aiqt_hooks.os.stat
+        _sp_dirs = {}
+        for _sp_mode in (0o100, 0o600, 0o000):
+            _sp_dir = tmp / "search-perm" / ("m%03o" % _sp_mode)
+            (_sp_dir / ".aiqt").mkdir(parents=True)
+            (_sp_dir / ".aiqt" / "orchestration.json").write_text("{}", encoding="utf-8")
+            _sp_dirs[_sp_mode] = _sp_dir
+
+        def _sp_stat_seam(path, *a, **k):
+            dfd = k.get("dir_fd")
+            if dfd is not None and path in _reg_names and not (_sp_stat(dfd).st_mode & 0o100):
+                raise PermissionError(13, "Permission denied", path)
+            return _sp_stat(path, *a, **k)
+        _sp_res = []
+        try:
+            for _sp_mode, _sp_dir in sorted(_sp_dirs.items(), reverse=True):
+                os.chmod(str(_sp_dir / ".aiqt"), _sp_mode)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.stat = _sp_stat_seam
+            for _sp_mode in (0o100, 0o600, 0o000):
+                _sp_fd = os.open(str(_sp_dirs[_sp_mode]), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+                try:
+                    _sp_res.append(aiqt_hooks._orch_dirfd_has_registry(_sp_fd))
+                finally:
+                    os.close(_sp_fd)
+        finally:
+            aiqt_hooks.os.stat = _sp_stat
+            for _sp_dir in _sp_dirs.values():
+                os.chmod(str(_sp_dir / ".aiqt"), 0o755)
+        check("trunc/aiqt-search-permission-decides-probe", tuple(_sp_res),
+              (True, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE))
         saved_recheck_fc = aiqt_hooks._orch_walk_recheck
         saved_realpath = aiqt_hooks.os.path.realpath
         saved_open_fc = aiqt_hooks.os.open

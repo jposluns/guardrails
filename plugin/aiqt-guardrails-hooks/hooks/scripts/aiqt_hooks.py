@@ -8154,9 +8154,13 @@ def _orch_dirfd_has_registry(dirfd):
     the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
     not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
     guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
-    lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, an unreadable
-    directory, or any other fault), or a first present registry name that is not a regular file (a
-    directory, a symlink, a FIFO, a socket, a device) or whose no-follow stat faults. That value is TRUTHY,
+    lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, or any other
+    fault), or a first present registry name that is not a regular file (a directory, a symlink, a FIFO, a
+    socket, a device) or whose no-follow stat faults. For a real `.aiqt` directory the deciding permission
+    is SEARCH (execute) on it, not read: the O_PATH open needs none, and each registry name is examined by
+    a no-follow stat relative to it, which needs search permission only. So a `.aiqt` of mode 0o100
+    evaluates normally (no read bit needed), and one of mode 0o600 or 0o000 (no search bit, so the stat
+    faults with EACCES) is _ORCH_REG_CANNOT_EVALUATE for a process those modes bind. That value is TRUTHY,
     so every boolean caller reads it as PRESENT in the deny-safe direction it always had (it must never
     read as absent - that would silently disarm an orchestrated tree), while the truncation guard's
     registry-required mode denies it rather than counting a discovery fault as a registry."""
@@ -8376,14 +8380,19 @@ def _orch_git_toplevel_has_registry(cwd):
     there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
     registry-required mode) when that probe neither rules a registry out nor confirms one, and
     _ORCH_REG_TOPLEVEL_UNOPENABLE (truthy and denied in that mode the same way, with its own reason) when
-    the resolved toplevel exists but cannot be opened as a directory (a toplevel git can name but this
-    probe cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable
-    read). Returns False when git cannot resolve a toplevel at
-    all (BY DEFAULT git success can only ADD a deny and a git failure alone never denies; in
-    registry-required mode a False here with nothing on the walk is the ABSENT registry the caller denies,
-    so a git failure where the registry is reachable only through the git toplevel is denied, and git
-    success can then remove that deny), when the resolved toplevel is cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
-    not-present."""
+    opening the resolved toplevel as a directory fails with any error other than FileNotFoundError (it is
+    present but not a directory, or this process may not reach it: a toplevel git can name but this probe
+    cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable read).
+    Returns False when git cannot resolve a toplevel at all (BY DEFAULT git success can only ADD a deny
+    and a git failure alone never denies; in registry-required mode a False here with nothing on the walk
+    is the ABSENT registry the caller denies, so a git failure where the registry is reachable only
+    through the git toplevel is denied, and git success can then remove that deny), when its registry
+    probe is a clean not-present, and when the resolved toplevel DOES NOT EXIST (FileNotFoundError, e.g.
+    core.worktree naming a removed directory). That last case is deliberate (round 8): a directory that
+    does not exist holds no registry, exactly as the walk reads a missing `.aiqt` entry as a clean
+    not-present, so there is no fault to report. It still fails closed where that matters: with nothing
+    on the walk the scope is then ('none', None), which registry-required mode DENIES as an absent
+    registry, and the default mode is inert there exactly as for any other absent registry."""
     top = _recovery_toplevel(cwd)
     if top is None:
         return False
@@ -9955,8 +9964,9 @@ def _orch_registry_required():
     Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
     there a git failure alone denies; a registry entry the discovery probe cannot confirm
-    (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or an unreadable directory,
-    or a first present registry name that is not a regular file or cannot be stat'ed) is not a registry
+    (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
+    lacks search (execute) permission on, such as mode 0o600 or 0o000 (mode 0o100 evaluates normally), or a
+    first present registry name that is not a regular file or cannot be stat'ed) is not a registry
     either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
     surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
     located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
@@ -10009,11 +10019,13 @@ def orch_truncation_guard(data):
     leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
     evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
     toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
-    file, a symlink, or an unreadable directory; a first present registry name that is not a regular file
-    or whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
-    toplevel that cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6, with its own
-    reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a present
-    registry does. PRE-SCOPE DENIES, checked BEFORE the
+    file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000,
+    while mode 0o100 evaluates normally; a first present registry name that is not a regular file or
+    whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
+    toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
+    with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
+    present registry does (a git toplevel that does not exist is absent: inert by default, denied as an
+    absent registry in that mode). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -10095,14 +10107,16 @@ def orch_truncation_guard(data):
         return _deny(
             "AIQT rule trkasy (track-launched-work) (registry-required mode): "
             "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry, and "
-            "the nearest .aiqt entry on this cwd's ancestor chain (or, with none there, at the git-resolved "
-            "toplevel) could not be confirmed as one: .aiqt is not a directory this process can open "
-            "without following a symlink, or its first present registry name (orchestration.local.json, "
+            "the nearest directory on this cwd's ancestor chain whose registry probe is not a clean "
+            "not-present (the git-resolved toplevel is consulted only when every directory probes clean) "
+            "could not be confirmed as one: its .aiqt is not a directory this process can open without "
+            "following a symlink and search, or its first present registry name (orchestration.local.json, "
             "then orchestration.json) is not a regular file or cannot be examined. A registry this guard "
             "cannot evaluate is not a registry, so the call is denied rather than read as registry-present "
-            "(check-fails-closed-on-unreadable). Make that .aiqt a real, readable directory holding a "
-            "regular registry file, remove the stray .aiqt entry, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
-            "restore the default scoping (where such an entry keeps this guard active).",
+            "(check-fails-closed-on-unreadable). Make that .aiqt a real directory with search (execute) "
+            "permission holding a regular registry file, remove the stray .aiqt entry, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry keeps this "
+            "guard active).",
             "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
             "could not be evaluated (rule trkasy, fail-closed).")
     if scope == "toplevel-unopenable" and _orch_registry_required():
@@ -10562,6 +10576,71 @@ def orch_prompt_stamp(data):
                              .format(gap)}}, None)
 
 
+# The truncation guard's registry-required deny reasons for each scope it denies, as tools/orch_doctor.py
+# and the resume audit report them (_orch_truncation_scope decides the scope exactly as the guard does).
+_ORCH_STRICT_SCOPE_FINDINGS = dict((
+    ("none", "no orchestration registry on this repository root's ancestor chain or at its git "
+             "toplevel"),
+    ("cannot-evaluate", "the nearest directory on this repository root's ancestor chain whose registry "
+                        "probe is not a clean not-present (the git toplevel is consulted only when every "
+                        "directory probes clean) cannot be confirmed as a registry: its .aiqt is not a "
+                        "directory openable without following a symlink and searchable (execute "
+                        "permission) by this process, or its first present registry name "
+                        "(orchestration.local.json, then orchestration.json) is not a regular file (a "
+                        "symlinked registry file included) or cannot be examined"),
+    ("toplevel-unopenable", "no registry on this repository root's ancestor chain, and its git toplevel "
+                            "cannot be opened as a directory (it is present but not an openable "
+                            "directory; a toplevel that does not exist reads as no registry there)"),
+))
+
+
+def _orch_guard_scope_report(root):
+    """What orch_truncation_guard decides at its scope check for a Bash call whose cwd is the repository
+    root, in the CURRENT mode: (report lines, denies). A cwd the walk cannot carry out denies in every mode;
+    an absent or unconfirmable registry denies only in registry-required mode. Shared by
+    tools/orch_doctor.py and _orch_resume_audit_findings, so both resume-barrier writers read one scope."""
+    scope, found = _orch_truncation_scope(root)
+    env = _ORCH_REQUIRE_REGISTRY_ENV
+    if scope == "fail":
+        return (["truncation guard: a Bash call from the repository root is denied in every mode: its "
+                 "cwd %s" % found[0]], True)
+    if _orch_registry_required() and scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        return (["truncation guard (registry-required mode, %s set to a value other than an off value): "
+                 "a Bash call from the repository root is DENIED: %s"
+                 % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
+    if scope == "none":
+        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+                 "ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
+                 "value other than an off value, such as 1, it denies instead)" % env], False)
+    if scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        # Default mode reads a discovery fault as present (the deny-safe direction): the guard is active
+        # without a confirmed registry, which is reported as the fault it is, not as a registry found.
+        return (["truncation guard: ACTIVE for a Bash call from the repository root because its registry "
+                 "discovery hit a fault it reads as present, not because a registry was confirmed: %s "
+                 "(with registry-required mode enabled, %s set to a value other than an off value, such as "
+                 "1, it denies instead)" % (_ORCH_STRICT_SCOPE_FINDINGS[scope], env)], False)
+    return (["truncation guard: ACTIVE for a Bash call from the repository root (a registry entry was "
+             "found on its ancestor chain, which can lie above this repository, or at its git "
+             "toplevel)"], False)
+
+
+def _orch_resume_audit_findings(status, reg, root):
+    """The ONE resume-audit finding list both resume-barrier writers (orch_resume_audit at SessionStart and
+    tools/orch_doctor.py --resume-audit) arm or clear resume-barrier.json from (round 8), so neither clears
+    a barrier the other armed for a condition that still holds: a registry the loader reports bad, the
+    truncation guard's deny at its scope check for a Bash call from the root (_orch_guard_scope_report),
+    then the resume probes (over an empty registry when it is bad). Empty means clean."""
+    findings = []
+    if status == "bad":
+        findings.append("the orchestration registry could not be read ({})".format(reg))
+        reg = {}
+    scope_lines, scope_denies = _orch_guard_scope_report(root)
+    if scope_denies:
+        findings.extend(scope_lines)
+    findings.extend(_orch_resume_probes(reg, root))
+    return findings
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
     finding strings; empty means the recorded state matches observed reality."""
@@ -10989,9 +11068,9 @@ def orch_resume_audit(data):
     barrier_path = os.path.join(_orch_state_dir_for_root(root), "resume-barrier.json")
     if status == "bad":
         _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
-        findings = ["the orchestration registry could not be read ({})".format(reg)]
-    else:
-        findings = _orch_resume_probes(reg, root)
+    # The same finding list tools/orch_doctor.py --resume-audit writes (round 8: one barrier truth), so a
+    # SessionStart never clears a barrier the doctor armed for a scope deny that still holds.
+    findings = _orch_resume_audit_findings(status, reg, root)
     try:
         os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
         with open(barrier_path, "w", encoding="utf-8") as fh:

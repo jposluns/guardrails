@@ -43,15 +43,20 @@ What an absent registry means (two modes, truncation guard only):
 - DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
   `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
   scope the truncation guard is inert and allows every Bash call that passes those pre-scope
-  checks. A `.aiqt` entry it cannot evaluate (a regular file, a symlink, or an unreadable directory
-  named `.aiqt`; a registry name that is not a regular file or cannot be examined) counts as
-  present, so the guard stays active there, and a git toplevel that cannot be opened as a directory
-  (consulted only when the whole chain probes as a clean not-present) keeps it active the same way.
+  checks. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
+  `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
+  or `0000`; a `.aiqt` of mode `0100` evaluates normally, because read permission is never needed;
+  or a registry name that is not a regular file or cannot be examined) counts as present, so the
+  guard stays active there. The git toplevel is consulted only when the whole chain probes as a
+  clean not-present: one that exists but cannot be opened as a directory (it is a regular file, or
+  the process may not reach it) keeps the guard active the same way, while one that does not exist
+  (for example `core.worktree` naming a removed directory) holds no registry and reads as absent.
 - REGISTRY-REQUIRED (`AIQT_ORCH_REQUIRE_REGISTRY` set to any other value, including a padded or
   garbled one): with no registry in its scope the truncation guard DENIES every Bash call that
   passes the pre-scope checks, and an entry it cannot evaluate also DENIES (a discovery fault is
-  not a registry), as does a git toplevel that cannot be opened as a directory (with its own
-  reason). A registry reachable only through the git toplevel reads as absent when git fails. A
+  not a registry), as does a git toplevel that exists but cannot be opened as a directory (with
+  its own reason). A git toplevel that does not exist reads as absent, so it DENIES as an absent
+  registry does. A registry reachable only through the git toplevel reads as absent when git fails. A
   symlink at the first present registry name DENIES in this mode, although the registry loader the
   other components use follows it and accepts it; a symlinked `orchestration.json` beside a regular
   `orchestration.local.json` is never examined. Discovery checks presence and file type only: a
