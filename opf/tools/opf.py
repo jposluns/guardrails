@@ -1130,6 +1130,43 @@ def _watchdog_isolation_self_test():
 # deadline-flips mutant forces a timeout ABOVE this bound and must stay
 # red, and the per-case subprocess budget still bounds a hang.
 _DEADLINE_EXECUTION_BOUND = 5.0
+# The deadline fixture's requested run_bounded timeout, and the allowance it
+# grants after the guardian's declared drain deadline for receipt delivery and
+# parent scheduling (its cleanup check). Named so the regression runner can
+# derive each leg's process bound from them.
+_DEADLINE_CASE_TIMEOUT = 0.25
+_DEADLINE_RECEIPT_ALLOWANCE = 1.0
+# Interpreter start, `import opf` and _bootstrap for one fixture process: the
+# launch margin the regression runner adds on top of a leg's own budget.
+_WATCHDOG_LAUNCH_MARGIN = 30
+# The per-launch timeout of _watchdog_completion_case's launch() helper.
+_COMPLETION_LAUNCH_TIMEOUT = 10
+
+
+def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
+    """The longest run one _watchdog_deadline_case may take after its own start
+    without failing: execution up to the larger of the requested timeout and the
+    tolerated execution bound, then the guardian's full cleanup grace, then the
+    receipt allowance its cleanup check grants. A run_bounded override (the
+    deadline-flips late mutant) passes its own timeout."""
+    import _opf_emit
+    return (max(timeout_s, _DEADLINE_EXECUTION_BOUND) + _opf_emit._FIXTURE_CLEANUP_GRACE
+            + _DEADLINE_RECEIPT_ALLOWANCE)
+
+
+def _watchdog_bound_faults(bounds, budgets):
+    """The kill-timeout rule for the regression runner: every leg's independent
+    process bound must cover the leg's own budget plus the launch margin, so a
+    slow but in-budget leg is never killed and reported as a hang. Returns the
+    faults: a leg without a declared budget, or a bound below budget + margin."""
+    faults = []
+    for label, bound in bounds.items():
+        if label not in budgets:
+            faults.append(label + ": no declared budget")
+        elif bound < budgets[label] + _WATCHDOG_LAUNCH_MARGIN:
+            faults.append("{}: bound {}s below its budget {}s plus the {}s launch margin".format(
+                label, bound, budgets[label], _WATCHDOG_LAUNCH_MARGIN))
+    return faults
 
 
 def _watchdog_deadline_case(mode):
@@ -1224,7 +1261,7 @@ def _watchdog_deadline_case(mode):
                 patch.object(_opf_emit, "_fixture_children", census):
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
-            result = _opf_emit.run_bounded(thunk, timeout_s=0.25,
+            result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
                                            keep_fds=(started_w, events.fileno()))
         finished = time.monotonic()
         elapsed = finished - start
@@ -1235,13 +1272,14 @@ def _watchdog_deadline_case(mode):
         cancelled = min(cancellations) if cancellations else None
         # Execution latency ends at the observed signal, never at cleanup end.
         execution_ok = (cancelled is not None and
-                        0.25 <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
-        # Cleanup is checked against its own declared deadline. One second is
-        # allowed separately for receipt delivery and parent scheduling.
+                        _DEADLINE_CASE_TIMEOUT <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
+        # Cleanup is checked against its own declared deadline. One second
+        # (_DEADLINE_RECEIPT_ALLOWANCE) is allowed separately for receipt
+        # delivery and parent scheduling.
         cleanup_limit = max([row[2] for row in drains] or
                             [(cancelled or start) + _opf_emit._FIXTURE_CLEANUP_GRACE])
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
-                      and finished <= cleanup_limit + 1)
+                      and finished <= cleanup_limit + _DEADLINE_RECEIPT_ALLOWANCE)
         if mode == "transient-census":
             # The old combined 1.5 s assertion rejects this passing cleanup.
             assert elapsed > 1.5 and drains, (elapsed, rows)
@@ -1479,7 +1517,8 @@ def _watchdog_completion_case(mode):
 
     def launch(code="return 0", **kwargs):
         return emit.run_status_owned([*command[:4], code],
-                                     fixture_id="completion/" + mode, timeout=10, **kwargs)
+                                     fixture_id="completion/" + mode,
+                                     timeout=_COMPLETION_LAUNCH_TIMEOUT, **kwargs)
 
     def refuses(error, call):
         try:
@@ -11076,6 +11115,7 @@ def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import signal
     import subprocess
+    import _opf_emit
     from _opf_emit import run_status_owned
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
         print("opf watchdog regressions: FAIL (unowned SIGCHLD disposition)")
@@ -11122,23 +11162,68 @@ def _watchdog_regression_self_test():
                        + len(completion_modes) + 1),  # + blocked-isolation
         "shared": 1,             # a single patched run_status_owned launch
     }
-    launcher_bounds = {label: 2 * launches * 5 + 30
-                       for label, launches in nested_launches.items()}
-    cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
+    # Every other family follows the same rule (the kill-timeout rule): a leg's
+    # process bound is its own budget plus the launch margin, never a flat
+    # constant below what the leg is sanctioned to wait for. The old flat 10 s
+    # deadline bound sat below one deadline case's own budget (execution
+    # bound + cleanup grace + receipt allowance = 11 s), so a slow but
+    # in-budget leg under host load was killed and reported as a hang.
+    deadline_budget = _deadline_case_budget()
+    # Sequential launch() calls per completion mode, each up to its launch
+    # timeout, plus any other in-budget waits the passing path performs.
+    completion_launches = dict([("nonce", 2), ("fixture-id", 2), ("status", 2),
+                                ("early-exit", 3), ("premature-exit", 5),
+                                ("empty-children", 3), ("guardian-error", 3), ("reaper", 2),
+                                ("audit-ignore", 1), ("cleanup-budget", 1),
+                                ("cleanup-cancel", 1)])
+    completion_extra = dict([
+        ("reaper", 2 * 5),  # one bounded competing-reaper join per launch
+        # The late mutant (timeout above the execution bound), the expired
+        # cleanup-deadline mutant (whose refusal escalates through close()'s
+        # doubled grace) and the swallowed-send transient census.
+        ("deadline-flips", _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
+         + deadline_budget + 2 * _opf_emit._FIXTURE_CLEANUP_GRACE + deadline_budget)])
+    # The remaining completion modes' inner waits are hang guards on events that
+    # occur within milliseconds; their passing path stays inside the default.
+    completion_default = 40 - _WATCHDOG_LAUNCH_MARGIN
+    budgets = dict((mode, deadline_budget) for mode in deadline_modes)
+    # overlap: B's run_bounded (15 s) plus its cleanup grace, after A's
+    # millisecond barrier handshakes, stays inside the unchanged 30 s budget.
+    budgets.update(("overlap-" + mode, 30) for mode in overlap_modes)
+    # safety: liveness-permission and missing-reap each run one deadline case;
+    # the other modes run_bounded at most 1 s plus the same grace and allowance.
+    budgets.update((mode, deadline_budget) for mode in safety_modes)
+    budgets.update((label + "-" + disposition, 2 * nested_launches[label] * 5)
+                   for label in launcher_labels for disposition in launcher_dispositions)
+    budgets.update(("completion-" + mode,
+                    max(completion_default,
+                        completion_launches.get(mode, 0) * _COMPLETION_LAUNCH_TIMEOUT
+                        + completion_extra.get(mode, 0)))
+                   for mode in completion_modes)
+    budgets["blocked-isolation"] = 31 * 180  # the isolation matrix's full budget
+
+    def bound(label):
+        return budgets[label] + _WATCHDOG_LAUNCH_MARGIN
+
+    cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")",
+              bound(mode))
              for mode in deadline_modes]
     cases.extend(("overlap-" + mode,
-                  prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")", 60)
+                  prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")",
+                  bound("overlap-" + mode))
                  for mode in overlap_modes)
-    cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
+    cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")",
+                  bound(mode))
                  for mode in safety_modes)
     cases.extend((label + "-" + disposition,
                   prefix + "return opf._watchdog_launcher_case("
                   + repr(label) + ", " + repr(disposition) + ")",
-                  launcher_bounds[label])
+                  bound(label + "-" + disposition))
                  for label in launcher_labels
                  for disposition in launcher_dispositions)
     cases.extend(("completion-" + mode,
-                  prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")", 40)
+                  prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")",
+                  bound("completion-" + mode))
                  for mode in completion_modes)
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
@@ -11147,7 +11232,25 @@ def _watchdog_regression_self_test():
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
                   + "return rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']()",
-                  31 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
+                  bound("blocked-isolation")))
+    # The rule holds for every leg, and it is discriminating: the pre-fix flat
+    # bounds (deadline 10 s, safety 15 s, completion 40 s) must be refused,
+    # naming the deadline legs and the completion modes they under-cover.
+    live = dict((label, timeout) for label, _code, timeout in cases)
+    flat = dict(live)
+    flat.update((mode, 10) for mode in deadline_modes)
+    flat.update((mode, 15) for mode in safety_modes)
+    flat.update(("completion-" + mode, 40) for mode in completion_modes)
+    refused = " ".join(_watchdog_bound_faults(flat, budgets))
+    flip_missed = [label for label in deadline_modes + ("completion-premature-exit",
+                                                        "completion-deadline-flips")
+                   if label + ": bound" not in refused]
+    floor = _watchdog_bound_faults(live, budgets)
+    if floor or flip_missed:
+        print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
+              "flat pre-fix bounds not refused for: %s)" % (
+                  "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
+        return EXIT_FINDING
     failed = False
     for label, code, timeout in cases:
         try:
