@@ -870,13 +870,94 @@ def _main_isolated(report_path=None):
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
-        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
-        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
-        # as double-quoted text and allowed.
-        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
+        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
+        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _rr_old = os.environ.get(_rr)
+        try:
+            os.environ[_rr] = "1"
+            rr = aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": "ls", "run_in_background": False}))
+            rr_reason = (rr[1] or {}).get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", "")
+            check("trunc/registry-required-absent-denies",
+                  (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
+                  "allow")
+            check("trunc/registry-required-present-detach-denies",
+                  _verdict(bg("long_job &", rib=False)), "deny")
+            os.environ[_rr] = "off"
+            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash",
+                           {"command": "long_job &", "run_in_background": False}))), "allow")
+        finally:
+            if _rr_old is None:
+                os.environ.pop(_rr, None)
+            else:
+                os.environ[_rr] = _rr_old
+        # HERE-DOCUMENT BODIES ARE DATA (adopter reproducers H1-H11; the former over-refusal residual is
+        # withdrawn): the lines after a <<WORD / <<-WORD operator up to the terminator line, quoted or
+        # unquoted delimiter, several here-documents per command, are read as data, so neither quote
+        # balancing nor '&' detection sees them. Each H-case below DENIED at the pre-fix pin (an
+        # "unbalanced" or "detach" misread of body prose) and must ALLOW now.
+        check("trunc/fg-h1-heredoc-apostrophe-commit-allows",
+              _verdict(bg("git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF", rib=False)),
+              "allow")
+        check("trunc/fg-h2-heredoc-amp-body-allows",
+              _verdict(bg("gh pr create --title t --body-file - <<'EOF'\nRe-pin A & B\nEOF", rib=False)),
+              "allow")
+        check("trunc/fg-h3-heredoc-apostrophe-file-allows",
+              _verdict(bg("cat > /tmp/brief.md <<'EOF'\nthe worker's deliverable\nEOF", rib=False)),
+              "allow")
+        check("trunc/fg-h4-heredoc-amp-python-allows",
+              _verdict(bg("python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY", rib=False)), "allow")
+        check("trunc/fg-h5-commit-template-quoted-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\"",
+                          rib=False)), "allow")
+        check("trunc/fg-h7-unquoted-delim-apostrophe-allows",
+              _verdict(bg("cat <<EOF > /tmp/x.txt\nit's $HOME\nEOF", rib=False)), "allow")
+        check("trunc/fg-h10-stdin-brief-amp-apostrophe-allows",
+              _verdict(bg("orch-send <<BRIEF\nthe operator's plan & the fallback\nBRIEF", rib=False)),
+              "allow")
+        check("trunc/fg-h11-pr-comment-apostrophe-allows",
+              _verdict(bg("gh pr comment 2701 --body-file - <<'EOF'\nWe don't merge unpinned refs.\nEOF",
+                          rib=False)), "allow")
+        check("trunc/fg-heredoc-amp-body-allows",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "allow")
+        check("trunc/fg-heredoc-dash-tabbed-body-allows",
+              _verdict(bg("cat <<-EOF\n\tit's & indented\n\tEOF", rib=False)), "allow")
         check("trunc/fg-commit-template-amp-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
+        # $(( ... )) arithmetic is non-detach: its '&' is bitwise-AND (denied at the pre-fix pin) and a
+        # '<<' inside it is a left shift, never a here-document (a pre-fix pass kept as a control).
+        check("trunc/fg-arith-bitwise-and-allows", _verdict(bg("echo $((3 & 1))", rib=False)), "allow")
+        check("trunc/fg-arith-left-shift-allows", _verdict(bg("echo $((1<<2))", rib=False)), "allow")
+        # CLOSING THE HERE-DOCUMENT QUOTE-SHIFT FALSE-ALLOW (manifest case 5): body quotes no longer flip
+        # the scan's quote state, so a real bare '&' AFTER a here-document is seen. The two-heredoc form
+        # was a SILENT ALLOW at the pre-fix pin (the body apostrophes rebalanced the scan around the real
+        # detach); the trailing form denied there only via the unbalanced misread and must stay denied
+        # now, as a seen detach.
+        check("trunc/fg-detach-between-heredocs-denies",
+              _verdict(bg("cat <<'A'\nuser's\nA\nsleep 5 & cat <<'B'\nuser's\nB", rib=False)), "deny")
+        check("trunc/fg-detach-after-heredoc-denies",
+              _verdict(bg("cat <<'EOF' > /tmp/x\nthe user's file\nEOF\nsleep 100 &", rib=False)), "deny")
+        check("trunc/scan-detach-after-heredoc-kind",
+              aiqt_hooks._orch_foreground_detach_kind(
+                  "cat <<'EOF' > /tmp/x\nthe user's file\nEOF\nsleep 100 &"), "detach")
+        # An unquoted-delimiter body still runs $(...) and backtick substitutions: a real detach inside
+        # one stays caught, never silently re-allowed by the body-as-data fix.
+        check("trunc/fg-heredoc-cmdsub-detach-denies",
+              _verdict(bg("cat <<EOF\n$(job &)\nEOF", rib=False)), "deny")
+        check("trunc/fg-heredoc-backtick-detach-denies",
+              _verdict(bg("cat <<EOF\n`job &`\nEOF", rib=False)), "deny")
+        # An UNTERMINATED here-document fails toward the deny with a reason naming it (bash would still
+        # be reading input). At the pre-fix pin this was a SILENT ALLOW when the body shifted no quotes.
+        ut = bg("cat <<'EOF'\nno terminator", rib=False)
+        ut_reason = (ut[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("trunc/fg-unterminated-heredoc-reason",
+              (_verdict(ut), "terminator" in ut_reason, "detaches a child" in ut_reason),
+              ("deny", True, False))
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -927,8 +1008,9 @@ def _main_isolated(report_path=None):
         check("trunc/fg-metachar-comment-quote-shift-denies",
               _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
-        # that a bare '&' was found (before this fix it reused the bare-& detach reason).
-        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        # that a bare '&' was found (before this fix it reused the bare-& detach reason). A genuinely
+        # unbalanced quote is used here: a here-document body apostrophe is data now and ALLOWS.
+        uq = bg("echo 'oops & bg", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
@@ -2311,11 +2393,14 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
-          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
-          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
-          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, and fails "
+          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
+          "reading a here-document body as DATA (a safe body '&' or apostrophe allows; an unquoted "
+          "delimiter's command/backtick substitution spans are still scanned; an unterminated here-document "
+          "denies with its own reason) and arithmetic as non-detach, and failing a scan that ends inside an "
+          "open quote toward a deny with its own reason (a quote the scan misreads in mid-string, such as "
+          "an ANSI-C escaped quote, can still shift it into a disclosed silent allow), reads a '#' comment "
+          "by bash's word-start rule as well, denies every in-scope call when the opt-in registry-required "
+          "mode is set and no registry is found, and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
           "a git-resolved toplevel; a git failure alone never denies), a malformed tool_input, "

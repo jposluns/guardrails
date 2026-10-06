@@ -9603,15 +9603,240 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
+def _orch_arith_end(command, j, n):
+    """Index just past the `))` that closes an arithmetic span (a `$((...))` expansion or a `((...))`
+    arithmetic command) whose CONTENT starts at `j` (just past the two opening parens), or -1 when no
+    `))` closes it at depth zero (a `$( (subshell) ...)` form, or a construct that never closes): the
+    caller then falls back to the plain character scan, which reads any `&` inside as a potential detach
+    (the over-deny direction, never a silent allow). Inner parens nest; quoting inside arithmetic is rare
+    and deliberately NOT modelled (a `)` inside a quoted arithmetic string can end the span early, which
+    again only falls back to the plain scan)."""
+    depth = 0
+    while j < n:
+        c = command[j]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth:
+                depth -= 1
+            elif j + 1 < n and command[j + 1] == ")":
+                return j + 2
+            else:
+                return -1
+        j += 1
+    return -1
+
+
+def _orch_backtick_end(text, j, n):
+    """Index just past the backtick that closes a backtick command substitution whose content starts at
+    `j`, or -1 when none closes it. A backslash escapes the next character, so an escaped backtick does
+    not close the span."""
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "`":
+            return j + 1
+        j += 1
+    return -1
+
+
+def _orch_cmdsub_end(command, j, n):
+    """Index just past the `)` that closes a `$(` command substitution whose content starts at `j`, read
+    STRUCTURALLY (quotes, backslash escapes, word-start `#` comments, nested parens, backtick spans, and
+    here-document bodies, whose lines are data and never toggle quotes or close parens), or -1 when the
+    walk cannot close the span (an unterminated quote, comment, backtick, or here-document). This finds
+    only the span END; the content is NOT judged here. It exists for the `$(...)`-inside-double-quotes
+    case, where the content is already the disclosed false-allow residual (1): skipping the span whole
+    keeps that residual exactly as it is, while stopping quotes inside the span (above all a
+    here-document body in the double-quoted commit-message form) from shifting the OUTER scan state."""
+    in_single = in_double = escaped = False
+    depth = 0
+    pending = []  # (delim, strip_tabs) for here-documents opened inside the span; bodies skipped as data
+    word_start = True
+    while j < n:
+        c = command[j]
+        if escaped:
+            escaped, word_start = False, False
+            j += 1
+            continue
+        if in_single:
+            if c == "'":
+                in_single = False
+            word_start = False
+            j += 1
+            continue
+        if in_double:
+            if c == "\\":
+                escaped = True
+            elif c == '"':
+                in_double = False
+            word_start = False
+            j += 1
+            continue
+        if c == "#" and word_start:
+            nl = command.find("\n", j)
+            if nl == -1:
+                return -1
+            j = nl
+            continue
+        if c == "\n" and pending:
+            j = _skip_heredoc_bodies(command, j + 1, n, pending)
+            del pending[:]
+            word_start = True
+            continue
+        if c.isspace():
+            word_start = True
+            j += 1
+            continue
+        if c == "\\":
+            escaped, word_start = True, False
+            j += 1
+            continue
+        if c == "'":
+            in_single, word_start = True, False
+            j += 1
+            continue
+        if c == '"':
+            in_double, word_start = True, False
+            j += 1
+            continue
+        if c == "`":
+            end = _orch_backtick_end(command, j + 1, n)
+            if end == -1:
+                return -1
+            j = end
+            word_start = False
+            continue
+        if c == "<" and command[j + 1:j + 2] == "<" and command[j + 2:j + 3] != "<":
+            parsed = _parse_heredoc_delim(command, j + 2, n)
+            if parsed is not None:
+                pending.append((parsed[1], parsed[2]))
+                j = parsed[3]
+                word_start = False
+                continue
+            j += 1
+            word_start = False
+            continue
+        if c == "(":
+            depth += 1
+            word_start = True
+            j += 1
+            continue
+        if c == ")":
+            if depth == 0:
+                return j + 1
+            depth -= 1
+            word_start = False
+            j += 1
+            continue
+        word_start = c in _ORCH_BASH_WORD_BREAKS
+        j += 1
+    return -1
+
+
+def _orch_scan_body_substitutions(body, bash_word_starts):
+    """Scan ONLY the substitution spans of an UNQUOTED-delimiter here-document body: bash still runs
+    `$(...)` and backtick substitutions inside such a body, so a real detach there is real, while the
+    plain body text is DATA and is never quote-balanced or `&`-scanned. A `$((...))` arithmetic span is
+    non-detach (its `&` is bitwise-AND) and is skipped whole, keeping residual (4) for a substitution
+    inside an arithmetic subscript. A `$(...)` or backtick span content is re-scanned as code by
+    _orch_foreground_scan, so a detach inside it stays caught; a span that never closes is scanned to
+    the end of the body (the over-deny direction). A backslash escapes the next character (bash: a
+    backslash-dollar or backslash-backtick in an unquoted-delimiter body suppresses the substitution).
+    Returns the inner scan's "detach"/"unbalanced"/"unterminated", or None."""
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "$" and body[i + 1:i + 3] == "((":
+            end = _orch_arith_end(body, i + 3, n)
+            if end != -1:
+                i = end
+                continue
+            i += 1
+            continue
+        if ch == "$" and body[i + 1:i + 2] == "(":
+            end = _orch_cmdsub_end(body, i + 2, n)
+            content = body[i + 2:end - 1] if end != -1 else body[i + 2:]
+            kind = _orch_foreground_scan(content, bash_word_starts)
+            if kind is not None:
+                return kind
+            i = end if end != -1 else n
+            continue
+        if ch == "`":
+            end = _orch_backtick_end(body, i + 1, n)
+            content = body[i + 1:end - 1] if end != -1 else body[i + 1:]
+            kind = _orch_foreground_scan(content, bash_word_starts)
+            if kind is not None:
+                return kind
+            i = end if end != -1 else n
+            continue
+        i += 1
+    return None
+
+
+def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
+    """Consume the BODIES of the queued here-documents starting at `i` (the character after the newline
+    that ends the line their `<<` operators appeared on), in operator order. Each body runs to the first
+    line that is EXACTLY its delimiter (leading tabs stripped first for the `<<-` form; the terminator
+    may be the final line with no trailing newline). Body lines are DATA: neither quote balancing nor
+    `&` detection reads them. For an UNQUOTED delimiter the body substitution spans are still scanned
+    (_orch_scan_body_substitutions): bash runs those even inside the body. Returns (next_i, kind): kind
+    is "detach"/"unbalanced"/"unterminated" from a substitution span, "unterminated" when the command
+    ends before a terminator line (bash would still be reading here-document input, so the scan cannot
+    see what follows; it fails toward the deny), or None."""
+    for delim, strip_tabs, literal in pending:
+        body_start = i
+        body_end = -1
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            cand = line.lstrip("\t") if strip_tabs else line
+            if cand == delim:
+                body_end = i
+                i = n if nl == -1 else nl + 1
+                break
+            if nl == -1:
+                i = n
+                break
+            i = nl + 1
+        if body_end == -1:
+            return n, "unterminated"
+        if not literal:
+            kind = _orch_scan_body_substitutions(command[body_start:body_end], bash_word_starts)
+            if kind is not None:
+                return i, kind
+    return i, None
+
+
 def _orch_foreground_scan(command, bash_word_starts):
-    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
-    unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
-    quote, None otherwise. bash_word_starts selects where a `#` opens a comment: False keeps the historical
-    rule (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
-    BOTH and denies when either reports, so the bash rule can only ADD denies to the historical one."""
+    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an
+    executable, unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a
+    single or double quote, "unterminated" when it ends with a here-document still awaiting its
+    terminator line, None otherwise. A HERE-DOCUMENT BODY IS DATA: a `<<`/`<<-` operator queues its
+    delimiter (_parse_heredoc_delim resolves quoted, partially quoted, ANSI-C, and locale delimiter
+    words), and after the next unquoted newline the body lines up to the terminator line are consumed
+    with no quote balancing and no `&` detection; several here-documents on one line consume their
+    bodies in operator order. For an UNQUOTED delimiter the body's `$(...)`/backtick substitution spans
+    (which bash still runs) are re-scanned as code and `$((...))` arithmetic inside the body is skipped
+    (_orch_scan_body_substitutions). A `$((...))` arithmetic expansion and a `((...))` arithmetic
+    command in the command itself are likewise skipped as non-detach (their `&` is bitwise-AND and a
+    `<<` inside them is a left shift); a `$((` that no `))` closes falls back to the plain character
+    scan (over-deny, never a silent allow). A `$(...)` opened INSIDE DOUBLE QUOTES is skipped
+    structurally to its closing paren (_orch_cmdsub_end): its content stays the disclosed false-allow
+    residual (1), and quotes inside it (above all a here-document body in the double-quoted
+    commit-message form) no longer shift the outer quote state. bash_word_starts selects where a `#`
+    opens a comment: False keeps the historical rule (after any str.isspace() character), True uses
+    bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs BOTH and denies when either reports, so the
+    bash rule can only ADD denies."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
+    pending_heredocs = []  # (delim, strip_tabs, literal) queued by `<<`/`<<-` operators on this line
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -9626,6 +9851,16 @@ def _orch_foreground_scan(command, bash_word_starts):
             i += 1
             continue
         if in_double:
+            if ch == "$" and command[i + 1:i + 3] == "((":
+                end = _orch_arith_end(command, i + 3, n)
+                if end != -1:  # a balanced arithmetic expansion: non-detach data to this scan
+                    i = end
+                    continue
+            if ch == "$" and command[i + 1:i + 2] == "(":
+                end = _orch_cmdsub_end(command, i + 2, n)
+                if end != -1:  # skip the whole substitution span: residual (1) content, outer state kept
+                    i = end
+                    continue
             if ch == "\\":
                 escaped = True
             elif ch == '"':
@@ -9641,7 +9876,17 @@ def _orch_foreground_scan(command, bash_word_starts):
             nl = command.find("\n", i)
             if nl == -1:
                 break  # no later line: the comment runs to the end of the string, nothing more to scan
-            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+            i = nl  # resume at the newline; the newline/whitespace branches consume it and begin a new line
+            continue
+        if ch == "\n" and pending_heredocs:
+            # The line that opened one or more here-documents ends here: what follows is their BODIES,
+            # which are data, not code (a body apostrophe or `&` is never an open quote or a detach),
+            # then the rest of the command after the last terminator line.
+            i, kind = _orch_scan_heredoc_bodies(command, i + 1, n, pending_heredocs, bash_word_starts)
+            del pending_heredocs[:]
+            if kind is not None:
+                return kind
+            prev_dup, word_start = False, True
             continue
         if ch.isspace():
             prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
@@ -9659,6 +9904,32 @@ def _orch_foreground_scan(command, bash_word_starts):
             in_double, prev_dup, word_start = True, False, False
             i += 1
             continue
+        if ch == "$" and command[i + 1:i + 3] == "((":
+            end = _orch_arith_end(command, i + 3, n)
+            if end != -1:  # `$((3 & 1))` is bitwise arithmetic and `$((1<<2))` a left shift: non-detach
+                i = end
+                prev_dup, word_start = False, bash_word_starts
+                continue
+            # no `))` closes it (a `$( (subshell) ...)` form): scan the characters plainly (over-deny)
+        if ch == "(" and command[i + 1:i + 2] == "(":
+            end = _orch_arith_end(command, i + 2, n)
+            if end != -1:  # a `((...))` arithmetic command: non-detach, and its `<<` is a left shift
+                i = end
+                prev_dup, word_start = False, bash_word_starts
+                continue
+            # no `))` closes it (nested subshells): scan the characters plainly (over-deny direction)
+        if ch == "<" and command[i + 1:i + 2] == "<" and command[i + 2:i + 3] != "<":
+            parsed = _parse_heredoc_delim(command, i + 2, n)
+            if parsed is not None:
+                # A here-document operator: queue (delim, strip_tabs, literal) and resume AFTER the
+                # delimiter word, so a quoted delimiter's quotes never toggle the scan's quote state.
+                # The body is consumed at the newline branch above. `literal` is True when ANY delimiter
+                # fragment was quoted or escaped (bash then expands nothing in the body).
+                pending_heredocs.append((parsed[1], parsed[2], parsed[0]))
+                i = parsed[3]
+                prev_dup, word_start = False, False
+                continue
+            # not a parseable here-document spec (`<<&`, end of string, ...): scan the `<` plainly
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
@@ -9677,22 +9948,29 @@ def _orch_foreground_scan(command, bash_word_starts):
         prev_dup = ch in (">", "<", "|")
         word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
         i += 1
+    if pending_heredocs:
+        # A `<<WORD` operator queued but the command ended before any newline began its body: bash would
+        # still be reading here-document input, so the body and anything after it are unseen. It fails
+        # toward the DENY (with its own unterminated-here-document reason), never a silent allow.
+        return "unterminated"
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
     # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
     return "unbalanced" if in_single or in_double else None
 
 
 def _orch_foreground_detach_kind(command):
-    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote,
-    else None. The historical rule and bash's `#` word-start rule are both run so that the bash rule only
-    ADDS denies: a `#` after a character bash does not treat as a word break (a carriage return, a
-    no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a comment to
-    bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to bash, so a
-    quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    """"detach" when either scan rule meets a bare `&`; else "unbalanced" when either rule ends inside a
+    quote; else "unterminated" when either rule ends with a here-document still awaiting its terminator
+    line; else None. The historical rule and bash's `#` word-start rule are both run so that the bash
+    rule only ADDS denies: a `#` after a character bash does not treat as a word break (a carriage
+    return, a no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a
+    comment to bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to
+    bash, so a quote in that comment no longer shifts the scan past a real `&` on the next line."""
     kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
-    if "detach" in kinds:
-        return "detach"
-    return "unbalanced" if "unbalanced" in kinds else None
+    for kind in ("detach", "unbalanced", "unterminated"):
+        if kind in kinds:
+            return kind
+    return None
 
 
 def _orch_foreground_detach(command):
@@ -9700,15 +9978,29 @@ def _orch_foreground_detach(command):
     that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
     detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
-    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
-    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, an `&`
+    inside an unquoted, word-start `#` comment (comment text dropped only to the END OF ITS LINE, so a
+    real `&` on a later line of a multi-line command is still caught), an `&` inside a `$((...))`
+    arithmetic expansion or a `((...))` arithmetic command (bitwise-AND: the span is skipped whole when a
+    `))` closes it), and an `&` inside a HERE-DOCUMENT BODY, which is data. A dedicated quote- and
     escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
-    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
-    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
-    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
-    is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
-    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or
-    metacharacter), and either rule's detach denies (_orch_foreground_detach_kind).
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. Where a `#`
+    starts a comment is read under two rules, the historical one (after any str.isspace() character) and
+    bash's (after a space, tab, newline, or metacharacter), and either rule's detach denies
+    (_orch_foreground_detach_kind).
+
+    A HERE-DOCUMENT BODY IS DATA (the over-refusal and the here-document quote-shift, both withdrawn):
+    the lines after a `<<WORD` or `<<-WORD` operator, up to the terminator line (quoted or unquoted
+    delimiter, several here-documents per command), are read as the data bash treats them as. Neither
+    quote balancing nor `&` detection sees them, so a safe body carrying an unquoted `&` (`Fix A & B`),
+    an apostrophe (`the user's file`), or stray double quotes is no longer denied, and no longer shifts
+    the scan's quote state, so a real bare `&` AFTER a here-document (between two here-documents, or
+    after the terminator) is now seen and denied. For an UNQUOTED delimiter bash still runs `$(...)` and
+    backtick substitutions inside the body, so ONLY those spans are re-scanned as code (a real detach
+    inside them stays caught; a span inside double quotes keeps residual (1) below); the plain body text
+    is never scanned. A here-document whose terminator line never arrives is "unterminated" and FAILS
+    TOWARD DENY with its own reason: bash would still be reading input, so the scan cannot see what
+    follows the body.
 
     A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
     or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
@@ -9719,36 +10011,33 @@ def _orch_foreground_detach(command):
     (the false-allow residual below). A genuinely balanced, quoted `&` is literal and correctly ignored.
 
     NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only, as its own quote
-    tracking reads the outer level. Grammar it does not model (a here-document body, a nested shell string,
-    an alias or function that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc)
-    is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
-    inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
-    (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest.
+    tracking reads the outer level. Grammar it does not model (a nested shell string, an alias or function
+    that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc) is a disclosed
+    residual; where such a construct still leaves an unquoted bare `&` (for example a parameter-expansion
+    default whose `&` bash reads as expansion text), or leaves the scan inside an unbalanced quote or an
+    unterminated here-document at the end, it errs toward the DENY, but a detacher that carries no bare
+    `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual
+    disclosed in the manifest.
 
-    OVER-REFUSAL RESIDUAL (disclosed): a here-document body is scanned as CODE, not data, even under a
-    quoted delimiter (<<'EOF'). A safe here-document whose body carries an unquoted `&` (`cat > f <<'EOF'`
-    then `Fix A & B`) or an unbalanced apostrophe (`the user's file`) is therefore DENIED although nothing
-    detaches. In the commit-message form wrapped in double quotes ("$(cat <<'EOF' ... EOF)") the body is
-    read as double-quoted text, and each double quote in the body toggles that reading, so whether a body
-    `&` is denied depends on where it falls relative to those quotes (`say "a & b"` is denied, `say "hi" &
-    bye` is allowed). The remedy is to write the text to a file and pass the file. This misreading is NOT
-    only in the safe direction: the same body quotes cause the quote-shift false-allow below.
-
-    KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the same
-    cases): the scan reads only the outer quoting level, and its quote and comment tracking can diverge from
-    bash's in further ways than those listed here, so this list is NOT complete. Known cases include a real
-    detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick wrapped in
-    double quotes (echo "$(job &)"); (2) inside a string that eval or quote removal re-reads as code
-    (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
-    quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
-    substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
-    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
-    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
-    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
-    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
-    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
-    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
+    KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the
+    same cases): the scan reads only the outer quoting level, and its quote and comment tracking can
+    diverge from bash's in further ways than those listed here, so this list is NOT complete. Known cases
+    include a real detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick
+    wrapped in double quotes (echo "$(job &)"; the `$(...)` span is skipped structurally to its closing
+    paren, so its content, including a here-document inside it, is never judged); (2) inside a string that
+    eval or quote removal re-reads as code (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3)
+    after an ANSI-C $'...' quote with an escaped quote that leaves the scan balanced but misaligned; (4)
+    inside an arithmetic subscript that runs a substitution (the `$((...))` span is skipped whole as
+    non-detach); (5) QUOTE SHIFT, NARROWED: after a quote character that bash reads as data but the scan
+    reads as a quote. The here-document body cases (an apostrophe or double quote in a body, quoted
+    delimiter or not, including the double-quoted commit-message form) are CLOSED: a body is data and a
+    quoted delimiter's quotes are consumed by the delimiter parser, so neither flips the quote state any
+    longer. What remains is the divergence class itself, not enumerated here: any other construct where
+    bash reads a quote character as data but this scan reads it as a quote (the ANSI-C misalignment (3)
+    is the known concrete case); and (6) COMMENT SHIFT: after a `#` that follows a blank inside an
+    unquoted {...} parameter expansion (a dollar-brace form), which bash reads as expansion text
+    but the scan reads as a comment start, so a real bare `&` later on that line is skipped
+    (echo ${x:- #} & job, echo ${line%% #*} & job)."""
     return _orch_foreground_detach_kind(command) is not None
 
 
@@ -9828,6 +10117,26 @@ def _orch_json_kind(value):
     return "an object" if isinstance(value, dict) else "a " + type(value).__name__
 
 
+_ORCH_REQUIRE_REGISTRY_ENV = "AIQT_ORCH_REQUIRE_REGISTRY"
+
+
+def _orch_registry_required():
+    """True when the adopter opted this session into REGISTRY-REQUIRED mode: the environment variable
+    AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
+    case-insensitive; unset is off). Under it, an ABSENT orchestration registry DENIES in-scope Bash
+    calls instead of leaving orch_truncation_guard inert; the default (variable unset) is unchanged. An
+    environment variable, not a pack config key, because every pack config surface
+    (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
+    located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
+    file-based key can never speak exactly when it is needed; the hook execution environment is the one
+    channel independent of that lookup. A garbled value reads as ON, the deny-safe direction for an
+    explicitly configured strict mode."""
+    value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -9846,6 +10155,11 @@ def orch_truncation_guard(data):
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
     and wait); every other foreground call remains out of scope (the harness returns its output directly).
+    The detach scan reads a HERE-DOCUMENT BODY as DATA (no quote balancing or '&' detection sees it; for
+    an unquoted delimiter only the body's command/backtick substitution spans are re-scanned as code) and
+    reads arithmetic ('$((...))' and '((...))') as non-detach; a foreground command whose scan ends inside
+    an open quote, or with a here-document still awaiting its terminator line, DENIES with a reason naming
+    that defect (fail-toward-deny, never a silent allow).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
@@ -9859,7 +10173,10 @@ def orch_truncation_guard(data):
     broken config, a bare repository - still never denies), so with NO registry entry on that chain and
     none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
     pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
-    unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
+    off value ('', '0', 'false', 'no', 'off', case-insensitive), an ABSENT registry DENIES instead of
+    leaving the guard inert (_orch_registry_required). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -9919,6 +10236,19 @@ def orch_truncation_guard(data):
         # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
         # failure alone still never denies (the union leg reads False then and the allow stands).
         if not _orch_git_toplevel_has_registry(cwd):
+            if _orch_registry_required():
+                # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
+                # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+                return _deny(
+                    "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+                    "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
+                    "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                    ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
+                    "toplevel. Commit the orchestration registry at the repository root, run from a "
+                    "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+                    "restore the default scoping (inert allow with no registry).",
+                    "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
+                    "registry found (rule trkasy, fail-closed).")
             return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -9962,11 +10292,20 @@ def orch_truncation_guard(data):
                 "double quote still open as this guard's scan reads it, so the scan cannot prove that a "
                 "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
                 "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
-                "or one the scan misreads: an apostrophe or double quote in a here-document body (scanned "
-                "as code even under a quoted delimiter) or an ANSI-C $'...' quote. Balance the quoting, or "
-                "write the text to a file and pass the file.",
+                "or one the scan misreads (an ANSI-C $'...' quote, or another quoting construct this scan "
+                "does not model; a here-document body is read as data and no longer leaves a quote open). "
+                "Balance the quoting, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
                 "end (rule trkasy, fail-closed).")
+        if detach_kind == "unterminated":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command opens a here-document "
+                "whose terminator line never arrives, so bash would still be reading input and this "
+                "guard cannot see what follows the body; it is denied rather than allowed unread "
+                "(check-fails-closed-on-unreadable). Close the here-document with its delimiter on its "
+                "own line, or write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command with an unterminated here-document (rule "
+                "trkasy, fail-closed).")
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -9974,10 +10313,10 @@ def orch_truncation_guard(data):
                 "failure would be lost; it is denied. Use the platform's tracked background dispatch "
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
-                "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
-                "arithmetic expansion, or an '&' in a here-document body, which this scan reads as code "
-                "even under a quoted delimiter), write the text to a file and pass the file instead; the "
-                "background-dispatch advice applies only to a real detach.",
+                "and run it foreground. If this '&' is not a detach at all (a construct this scan does not "
+                "model that leaves it looking like an unquoted operator; a '$((...))' bitwise AND and a "
+                "here-document body's '&' are already read as non-detach), write the text to a file and "
+                "pass the file instead; the background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
