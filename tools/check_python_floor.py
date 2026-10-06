@@ -190,13 +190,16 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import ast
 import importlib.util
+import io
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
+import tokenize
 import tomllib
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -356,7 +359,32 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
     raise SystemExit(2)
 '''
 HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
-                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+                 ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py",
+                 ".preview/preview-launch.py",
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py")
+# The launcher leg. A hook file is compiled whole before its guard runs, so a hook written in newer
+# syntax stops with a SyntaxError (exit 1, which does not block a PreToolUse call) on an interpreter too
+# old to compile it. Each registration therefore runs a launcher (a HOOK_SURFACES entry carrying the hook
+# form of the guard) that compiles under the OLD_GRAMMAR, refuses below the floor, and then runs the
+# hook in the same process. LAUNCHERS maps each launcher to the hook whose FLOOR_FAIL_OPEN_MODES literal
+# it must equal (None: it dispatches to several hooks); REGISTRATIONS maps each registration file to
+# the launcher every registration in it must name.
+LAUNCHERS = {".aiqt/core/hooks/scripts/aiqt_hooks_launch.py": ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+             ".preview/preview-launch.py": None,
+             "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py":
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"}
+REGISTRATIONS = (("plugin/aiqt-guardrails-hooks/hooks/hooks.json",
+                  "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py"),
+                 (".preview/README.md", ".preview/preview-launch.py"))
+OLD_GRAMMAR = (3, 4)
+# Syntax newer than OLD_GRAMMAR that ast.parse(feature_version=OLD_GRAMMAR) does not itself refuse.
+NEWER_TOKENS = ("FSTRING_START", "TSTRING_START")
+NEWER_OPS = (":=", "@", "@=")
+NEWER_NODES = ("AnnAssign", "AsyncFor", "AsyncFunctionDef", "AsyncWith", "Await", "JoinedStr", "Match",
+               "NamedExpr", "TemplateStr", "TypeAlias")
+README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
+SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.py\b")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
 MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
 DENY_PROBE_MODE = "floor_deny_probe"
@@ -1145,6 +1173,79 @@ def dynamic_findings(root, surfaces, floor, nonblocking=()):
     return findings
 
 
+def old_syntax_findings(rel, text):
+    """Each construct in text newer than OLD_GRAMMAR: a launcher must compile on every Python 3 that
+    accepts -I."""
+    found = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ast.parse(text, feature_version=OLD_GRAMMAR)
+    except SyntaxError as exc:
+        found.append("{}:{}: does not compile under the Python {}.{} grammar: {}".format(
+            rel, exc.lineno, *OLD_GRAMMAR, exc.msg))
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        tree = ast.parse(text)
+    except (SyntaxError, tokenize.TokenError, ValueError) as exc:
+        raise CannotEvaluate("{}: cannot tokenize or parse: {}".format(rel, exc))
+    for token in tokens:
+        if tokenize.tok_name[token.type] in NEWER_TOKENS or (token.type == tokenize.OP and token.string
+                                                              in NEWER_OPS) \
+                or (token.type == tokenize.NUMBER and "_" in token.string):
+            found.append("{}:{}: {!r} is newer than Python {}.{}".format(rel, token.start[0], token.string,
+                                                                         *OLD_GRAMMAR))
+    for node in ast.walk(tree):
+        if type(node).__name__ in NEWER_NODES:
+            found.append("{}:{}: {} is newer than Python {}.{}".format(rel, node.lineno,
+                                                                      type(node).__name__, *OLD_GRAMMAR))
+    return found
+
+
+def registered_scripts(registry, text):
+    """(where, script file name) for each hook registration in a registration file."""
+    if registry.endswith(".json"):
+        try:
+            data = json.loads(text)
+            return [("{} {}".format(registry, event), Path(hook["args"][1]).name)
+                    for event, groups in data["hooks"].items() for group in groups
+                    for hook in group["hooks"]]
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise CannotEvaluate("{}: not a readable hooks file: {}".format(registry, exc))
+    return [("{}:{}".format(registry, text.count("\n", 0, match.start()) + 1), name)
+            for match in README_LAUNCH_RE.finditer(text) for name in SCRIPT_NAME_RE.findall(match.group(0))]
+
+
+def launcher_findings(root, surfaces):
+    """Each registration names its launcher; each launcher is a guarded surface, compiles under the
+    OLD_GRAMMAR and carries its hook's FLOOR_FAIL_OPEN_MODES literal."""
+    findings, required = [], set()
+    for registry, launcher in REGISTRATIONS:
+        if not os.path.lexists(root / registry):
+            continue
+        required.add(launcher)
+        named = registered_scripts(registry, _read_text(root / registry))
+        if not named:
+            findings.append("{}: names no hook registration to check".format(registry))
+        findings.extend("{}: registers {}, not the launcher {} (a hook compiled whole on an old "
+                        "interpreter fails open)".format(where, name, Path(launcher).name)
+                        for where, name in named if name != Path(launcher).name)
+    for launcher, target in sorted(LAUNCHERS.items()):
+        if not os.path.lexists(root / launcher):
+            if launcher in required:
+                findings.append("{}: a registered launcher is missing".format(launcher))
+            continue
+        if launcher not in surfaces:
+            findings.append("{}: a launcher missing from guarded-surfaces in {}".format(launcher, SOURCE_REL))
+        findings.extend(old_syntax_findings(launcher, _read_text(root / launcher)))
+        if target is not None and os.path.lexists(root / target):
+            want, got = hook_modes(_parse(root, target)), hook_modes(_parse(root, launcher))
+            if want != got:
+                findings.append("{}: {} {!r} differs from {} in {}".format(launcher, MODES_NAME, got, want,
+                                                                            target))
+    return findings
+
+
 def _excluded(rel):
     return any(rel == tree.rstrip("/") or rel.startswith(tree) for tree in EXCLUDED_TREES)
 
@@ -1238,6 +1339,7 @@ def evaluate(root):
         findings.extend(pin_findings(root, floor))
         findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(launcher_findings(root, source["surfaces"]))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
@@ -1268,6 +1370,7 @@ REVERT_CALLS = (
     ("pins", "pin_findings(root, floor)"),
     ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("launcher", "launcher_findings(root, source[\"surfaces\"])"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
     ("claims", "documentation_claim_findings(root, floor)"),
@@ -1896,6 +1999,18 @@ def _self_test_cases(base):
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
         "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
 
+    # The launchers: each real launcher compiles under the OLD_GRAMMAR, and run with a patched version
+    # below the floor and a PreToolUse mode it refuses with the blocking exit 2.
+    check("launcher/real-launchers-old-grammar", [rel for rel in LAUNCHERS
+                                                  if old_syntax_findings(rel, _read_text(ROOT / rel))], [])
+    old = OLD_GRAMMAR + (0,)
+    check("launcher/real-launchers-block-below-floor", [
+        refusal_observed(ROOT / rel, old, (), [mode])[0] for rel, mode in sorted(LAUNCHERS.items())
+        for mode in (("absolute_paths",) if LAUNCHERS[rel] else ("future_stamp_write", "ungated_record"))],
+        [2, 2, 2, 2])
+    check("launcher/newer-syntax-findings", [len(old_syntax_findings("x.py", text)) for text in (
+        "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n", "x = 1000\n")],
+        [1, 2, 2, 1, 0])
     _red_on_revert(base, good)
     _rule_reverts(base)
 
@@ -1934,6 +2049,9 @@ def _red_on_revert(base, good):
          "canonical floor guard"),
         ("dynamic", dict(source=listed, files={"tools/demo.py": _entry(good, after="return\n")}),
          "at patched"),
+        ("launcher", dict(files={REGISTRATIONS[0][0]: json.dumps(dict(hooks=dict(PreToolUse=[dict(
+            hooks=[dict(args=["-I", "/p/hooks/scripts/aiqt_hooks.py", "absolute_paths"])])])))}),
+         "registers aiqt_hooks.py, not the launcher"),
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
@@ -1953,6 +2071,7 @@ def _red_on_revert(base, good):
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
+    check("revert/launcher-leg", results["launcher"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
     check("revert/claims-leg", results["claims"], (1, True, 0))

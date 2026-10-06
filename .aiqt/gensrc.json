@@ -239,7 +239,8 @@
       "regenerate": "python3 tools/gen_hooks.py",
       "sources": [
         ".aiqt/core/hooks/manifest.toml",
-        ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+        ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+        ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py"
       ],
       "target": "plugin/aiqt-guardrails-hooks/hooks/"
     },

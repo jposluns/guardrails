@@ -4322,7 +4322,7 @@ def _main_isolated(monitor):
         ]
         _pl239_expected_entry = {
             "type": "command", "command": "python3",
-            "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py", "protected_line"],
+            "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py", "protected_line"],
             "timeout": 10,
         }
         if _pl239_entries != [_pl239_expected_entry]:

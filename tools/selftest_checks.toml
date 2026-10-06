@@ -1090,6 +1090,10 @@ expected-check-ids = [
   "revert/completeness-leg",
   "revert/documentation-leg",
   "revert/claims-leg",
+  "revert/launcher-leg",
+  "launcher/real-launchers-old-grammar",
+  "launcher/real-launchers-block-below-floor",
+  "launcher/newer-syntax-findings",
 ]
 
 [[suite]]

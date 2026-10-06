@@ -10,7 +10,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "absolute_paths"
             ],
             "timeout": 10
@@ -25,7 +25,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "bash_absolute_paths"
             ],
             "timeout": 10
@@ -40,7 +40,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "branch_root"
             ],
             "timeout": 10
@@ -55,7 +55,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "commit_identity"
             ],
             "timeout": 10
@@ -70,7 +70,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "commit_msg_subst"
             ],
             "timeout": 10
@@ -85,7 +85,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "diff_source_pretool"
             ],
             "timeout": 10
@@ -100,7 +100,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "gate_weakening"
             ],
             "timeout": 10
@@ -115,7 +115,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "gensrc_guard"
             ],
             "timeout": 10
@@ -130,7 +130,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "git_discard"
             ],
             "timeout": 10
@@ -145,7 +145,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "git_explicit_binding"
             ],
             "timeout": 10
@@ -160,7 +160,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "git_stash_ref"
             ],
             "timeout": 10
@@ -175,7 +175,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_ask_guard"
             ],
             "timeout": 10
@@ -190,7 +190,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_resume_barrier"
             ],
             "timeout": 10
@@ -205,7 +205,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_truncation_guard"
             ],
             "timeout": 10
@@ -220,7 +220,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_untracked_wait_loop"
             ],
             "timeout": 10
@@ -235,7 +235,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_yield_tool"
             ],
             "timeout": 10
@@ -250,7 +250,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "protected_line"
             ],
             "timeout": 10
@@ -265,7 +265,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "secrets_shift_left"
             ],
             "timeout": 10
@@ -280,7 +280,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "write_scope_guard"
             ],
             "timeout": 10
@@ -297,7 +297,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_dispatch_ledger"
             ],
             "timeout": 10
@@ -313,7 +313,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_prompt_stamp"
             ],
             "timeout": 10
@@ -329,7 +329,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "diff_wall_stop"
             ],
             "timeout": 10
@@ -343,7 +343,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_stop_guard"
             ],
             "timeout": 10
@@ -359,7 +359,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_resume_audit"
             ],
             "timeout": 10
@@ -375,7 +375,7 @@
             "command": "python3",
             "args": [
               "-I",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
               "orch_teammate_idle"
             ],
             "timeout": 10

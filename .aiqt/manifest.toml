@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6463cd82432eab560c09e2f661ccc8b75294965cf0a4b3ad5d4364c55221e51b"
+tree-sha256 = "43f2d1abac983c98a9662c655f75b3453f9f2e96abc846569742c739b759f489"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -80,6 +80,11 @@ bytes = 761573
 sha256 = "d79fdacb6a058b646cf0cd972a53a2aaa736aaf36302b6d5db697ff4d179d68c"
 
 [[sources]]
+path = ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py"
+bytes = 2344
+sha256 = "a1732d1691a03ec7db70e72b41e55e16bc1e01b3b2c70bc9ef85a1b7c66cb293"
+
+[[sources]]
 path = ".aiqt/core/id-history.toml"
 bytes = 36833
 sha256 = "32fa693ac2d4d7f8d3be3d6b9d6620b5105a99a80f1ce0436e792b4629cb229b"
@@ -111,8 +116,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7067
-sha256 = "b32d53beba878d51c37b5b1fcf3e97fa6660f519b9ab422915b0d6f8ec4621cc"
+bytes = 7456
+sha256 = "daae23d72ada6a08eb8eae57e75c561cf8e41f6ec6969d041b42219aed3eec6a"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -806,8 +811,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10189
-sha256 = "b18a8b0bfd3f2a1d7a1b721945d641932f92fc9a438f045774c7aec3feb4a932"
+bytes = 10246
+sha256 = "a4f3131b8c41b2ed338ba445f0a5a1f7ca95db8b4f494591efebb097f21da569"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2241,8 +2246,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41527
-sha256 = "7d855714c2b0dc105ff579cf0cee6cfea90fad2ca7b7bd1e54fb0258830ea12d"
+bytes = 41700
+sha256 = "d909adf91a78a5b987ef15800f696ed968fb8b93377e47fb380231caab92d89e"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2251,13 +2256,13 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 24091
-sha256 = "cfccaf582a0c26d056049b85939fbd8a95281e0ed715658c214b341c4eb6a3e9"
+bytes = 24790
+sha256 = "a0f8555b70cae88628db8cacac8ce2ee2dc20f919a941534e43445419a1f52a4"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
-bytes = 636
-sha256 = "a6e14f5b6cc5b4455ddf3b0c070094f199e2773c7c8b10c69da216198abddaa9"
+bytes = 720
+sha256 = "e8bcff1533cabf2c5177bed6105b5a569d0d34fac642daff36bd64ec9948c213"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2268,6 +2273,11 @@ sha256 = "c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a"
 path = ".preview/future-stamp-write.py"
 bytes = 422102
 sha256 = "4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a"
+
+[[sources]]
+path = ".preview/preview-launch.py"
+bytes = 5296
+sha256 = "0b9c41d6b405606196d416d45597aa5fcff59b7b5e011180443fbd2264470119"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
@@ -2966,13 +2976,18 @@ sha256 = "d0a878cceb8a33d2baa4c0f658e1cac39b92fbdccdf859e6bc73eedfb49f2915"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
-bytes = 9005
-sha256 = "cd7f86d1569c8138f95392a7912dab35b9817ece40d0302f47d8ff4ae25d3121"
+bytes = 9180
+sha256 = "0e67ba846cbf4595e049f44d048f185f2d4ea4cfccdca782a5a684d590077031"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
 bytes = 761573
 sha256 = "d79fdacb6a058b646cf0cd972a53a2aaa736aaf36302b6d5db697ff4d179d68c"
+
+[[sources]]
+path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py"
+bytes = 2344
+sha256 = "a1732d1691a03ec7db70e72b41e55e16bc1e01b3b2c70bc9ef85a1b7c66cb293"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3336,8 +3351,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 130152
-sha256 = "bff17ed0699844d3f46b19b198db7aaaf68636ccc94722723793b72014ebfb32"
+bytes = 137485
+sha256 = "4d5aa56fb3ac6661d48ab8ebcd8dfe1d36d2fd625a4c4cae3ce1df6f6bb7a10b"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3491,8 +3506,8 @@ sha256 = "f1c8ab469a3e9ca02c1159281fa159cb9d75ee19189d8e28cbdaf4bb74cdd2d5"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 35957
-sha256 = "8be3abda3d4fb20f67b94c474c3729207cffc07703b3723fab5a0279c4eff4f3"
+bytes = 37964
+sha256 = "1a629fcf5b431bce94a23ee6bc6cc9f059cd33434a12cac84777f2da7bbc62d3"
 
 [[sources]]
 path = "tools/gen_install.py"
@@ -3611,13 +3626,13 @@ sha256 = "2721586ca547f7f8940ee4beb3409d28143649a9525972bbaf685b506cf2d070"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 618598
-sha256 = "361b78ed866f39444a6af506fcbea9a0ab723cd6bc6066b45a1774618b8cf02c"
+bytes = 618605
+sha256 = "d8089643d57fc665255cbf9033708799ed5a16a3429917a17f84c1fb0561ce07"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 41993
-sha256 = "6387d1ef71113eb56cf7aea844053d8f230f324a7e27bab8f0da84f9bd2c2432"
+bytes = 42142
+sha256 = "27748511a538396b800a4feca10851633f98cb0357a7e0cea8bb6cbbad38a40f"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
