@@ -116,12 +116,25 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      exact long options, -n or --dry-run among them) writes nothing and is exempt; outside every
      bound product such a command denies when the session cwd, a directory it names or the
      repository top above either holds the pack own tree (R8); a member that runs code (bisect,
-     submodule, filter-branch) is not plain and takes the coarse rule below, which applies the
-     same repository-top check when the command passes rules 1 to 3. Every other git subcommand
+     submodule other than its read forms, filter-branch) is not plain and takes the coarse rule
+     below, which applies the same repository-top check (round 14: to every not-plain command,
+     below). Every other git subcommand
      (commit, add, push, status, log, diff, show, fetch and the rest) is judged by the exact path
      check alone, so it is allowed unless it references or resolves to a protected path. The
      dashed builtin forms (git-checkout, /usr/lib/git-core/git-rm) are off the allowlist and take
-     the coarse rule. Past the derived-spelling, base
+     the coarse rule. Round 14: a cp, mv or ln command word carrying ANY backup option (-b, -S,
+     --backup or --suffix, bare, valued or abbreviated, or a short-option cluster holding b or S;
+     _backup_option) DENIES with a named reason when it acts in a bound product, because the
+     backup renames an existing destination to that destination plus a suffix no word spells
+     (cp --backup=simple --suffix=.md notes.txt docs/STATUS overwrites docs/STATUS.md); install,
+     which takes the same options, is not plain, and the coarse rule names the same reason when
+     it denies one; ln also joins every argument basename into the session cwd (ln with one
+     operand links it there under its basename); git submodule status and summary (after any -q
+     or --quiet) are plain read forms, never a code-running subcommand; and the coarse rule
+     reads the git work-tree subcommand over EVERY literal word after any word naming git, and
+     over every dashed git-<name> builtin word (_git_worktree_words), so a global option outside
+     the grammar (git -c core.abbrev=7 checkout -- .) or a second command (git checkout -- .;
+     true) no longer hides it from the repository-top check. Past the derived-spelling, base
      or resolved-target budget the command
      DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
@@ -243,9 +256,9 @@ per-platform residual coverage carry the same list):
     --dir-diff, svn, p4, cvsimport, archimport and cvsexportcommit, documented to write a work
     tree but not confirmed by a probe here; each is judged by the exact path check alone, or by
     the coarse rule where it runs code, as the git work-tree rule's subcommand list directs), a
-    git work-tree subcommand that runs code inside a command failing rules 1 to 3 (git bisect
-    start; true from a repository top holding the pack own tree: the coarse rule reads no
-    subcommand there), and a
+    not-plain command, run from a repository whose top holds the pack own tree and binding no
+    product, whose git command word or work-tree subcommand no literal word spells (a variable,
+    substitution, alias or function supplies it: g=git; $g checkout -- .), and a
     work-tree rewrite or a recursive remove reaching a product root that the session neither sits
     in nor binds (no product root above the cwd or any operand: git reset --hard, git stash or git
     rm -r '*' run from a repository top or a sibling directory above or beside the product root,
@@ -311,6 +324,18 @@ per-platform residual coverage carry the same list):
   - An R7 payload string is judged WHOLE: the option-glued and delimiter-embedded derivation of R5
     applies to Bash words only, so an unknown tool string such as -o/abs/TODO.md binds no roster by
     its glued spelling (its textual token scan still applies once a roster is bound).
+  - Destinations a command forms without spelling them (round 14 scope). A backup option outside
+    every bound product is judged by the exact path check alone: its backup lands beside a
+    destination that is itself judged, so it reaches the pack own tree only through a
+    destination inside that tree, which R8 already denies, and a rename never replaces a
+    non-empty directory. SIMPLE_BACKUP_SUFFIX and VERSION_CONTROL only name a backup that an
+    option already asks for. The other forms of the allowlisted programs that write a
+    destination no operand spells literally were checked and are handled: cp, mv and ln -t and
+    --target-directory (the round-9 joins), cp --parents (the source spelling resolves against
+    the named directory as a base) and ln with one operand (the round-14 cwd join); ln -r and
+    ln -s change only the link text, and cp -T, mv -T, ln -T and mv --exchange write only named
+    operands. install (-D, -t, a backup option) is off the allowlist and takes the coarse rule,
+    so outside every bound product it is judged by that rule alone.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
@@ -358,7 +383,14 @@ per-platform residual coverage carry the same list):
     Round 11 also withdraws the round-10 over-refusals that wrote nothing: ls docs ., du -sh docs
     ., git log -- docs ., grep -rn mv docs, cat rm-old.txt docs, ls git -la, grep git -r src,
     grep -rn python src, git clean -n, git rm -n notes.txt, git add :/docs and git show :docs/x
-    are allowed when they reference no protected path. R6 denies every write under a
+    are allowed when they reference no protected path. Round 14: in a bound product every cp,
+    mv or ln carrying a backup option denies, even where the backup lands on nothing protected
+    (cp -b notes.txt n2.txt); ln joins every argument basename into the session cwd, so ln -s
+    /elsewhere/TODO.md links/TODO.md from a product root whose TODO.md is a view denies; and at a
+    location whose repository top holds the pack own tree, a not-plain command carrying a git
+    word and any later work-tree subcommand name, even as data (git log; echo reset), denies.
+    Round 14 withdraws the round-13 refusal of git submodule status and git submodule --quiet
+    summary in a bound product. R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -622,6 +654,16 @@ CONTAINER_VERBS = frozenset(("rm", "rmdir", "mv", "chmod"))
 # cp -t docs X, mv X /abs/docs, ln X docs): only their directory-plus-basename joins are judged
 # (_joined_targets); a read-only program naming a directory beside a file (ls docs .) joins nothing.
 JOIN_WRITERS = frozenset(("cp", "mv", "ln"))
+# The backup-making writers (round 14): a backup option of cp, mv or ln (install takes the same
+# options but is off the rule-4 allowlist and takes the coarse rule) renames an EXISTING destination
+# to that destination plus a suffix before writing, so cp --backup=simple --suffix=.md notes.txt
+# docs/STATUS overwrites docs/STATUS.md, a path no word spells. Such a command denies in a bound
+# product, whatever the suffix (_backup_option): every backup option counts, -b, -S, --backup with or
+# without a value, --suffix with or without a value, an abbreviation of either long option, and a
+# short-option cluster carrying b or S anywhere (a glued value included, fail closed).
+BACKUP_WRITERS = frozenset(("cp", "mv", "ln", "install"))
+BACKUP_LONG_OPTIONS = ("--backup", "--suffix")
+BACKUP_SHORT_LETTERS = frozenset(("b", "S"))
 # The payload-key spelling of a path-like file-tool field (round 11): a write-capable file tool whose
 # tool_input carries such a key anywhere other than its one evaluated target field is denied, since
 # this hook judges only that field.
@@ -1229,7 +1271,7 @@ def _git_runs_code(words):
     if i is None:
         return None
     sub, rest = words[i], words[i + 1:]
-    if sub in GIT_CODE_SUBCOMMANDS:
+    if sub in GIT_CODE_SUBCOMMANDS and not _git_submodule_read(sub, rest):
         return "the git subcommand %r runs or configures a command" % (sub,)
     for word in rest:
         if word.startswith(GIT_CODE_OPTIONS):
@@ -1562,6 +1604,53 @@ def _git_grammar(words):
     return i, None
 
 
+def _backup_option(words):
+    """The first backup option word among `words` (the words after a BACKUP_WRITERS command word),
+    or None (round 14): -b or -S in any short-option cluster, and --backup or --suffix, bare,
+    valued or abbreviated to any unique-or-not prefix of at least one letter. A lone -- does NOT
+    end the scan (a valued option may take it as its value, cp -t -- --backup x, so the words
+    after it can still be options): a file operand spelled like a backup option only over-refuses."""
+    for word in words:
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if len(name) > 2 and any(full.startswith(name) for full in BACKUP_LONG_OPTIONS):
+                return word
+        elif word.startswith("-") and any(ch in BACKUP_SHORT_LETTERS for ch in word[1:]):
+            return word
+    return None
+
+
+def _backup_reason(words, root):
+    """The round-14 backup deny reason when a BACKUP_WRITERS word among `words` is followed by a
+    backup option (_backup_option) and the command acts in the bound product root `root`, else
+    None. The exact path check calls it only when the plain command word is such a writer (an
+    allowlisted program never runs another); the coarse rule passes every literal word."""
+    if root is None:
+        return None
+    for k, word in enumerate(words):
+        if os.path.basename(word) not in BACKUP_WRITERS:
+            continue
+        option = _backup_option(words[k + 1:])
+        if option is not None:
+            return ("%s carries the backup option %r, which renames an existing destination to "
+                    "that destination plus a backup suffix (cp --backup=simple --suffix=.md notes.txt "
+                    "docs/STATUS overwrites docs/STATUS.md), a target no word of the command spells, "
+                    "and this command acts in the bound OPF product root %r, so it is denied "
+                    "fail-closed (R5). %s." % (os.path.basename(word), option, root, SANCTIONED))
+    return None
+
+
+def _git_submodule_read(sub, rest):
+    """True when git `sub` with the words `rest` after it is a read form of git submodule (round
+    13; round 14 shares it with the plain semantic check, so a read form is plain): the first word
+    after any -q or --quiet is a GIT_SUBMODULE_READ name."""
+    if sub != "submodule":
+        return False
+    while rest and rest[0] in ("-q", "--quiet"):
+        rest = rest[1:]
+    return bool(rest) and rest[0] in GIT_SUBMODULE_READ
+
+
 def _git_dry_run(sub, rest):
     """True when git `sub` (rm, mv or clean) with the words `rest` after it is a dry run by the
     GIT_DRY_RUN_GRAMMAR: every option word before a lone -- is a listed short-letter run or an
@@ -1601,12 +1690,38 @@ def _git_worktree_sub(words):
     sub, rest = words[i], words[i + 1:]
     if sub not in GIT_WORKTREE_SUBCOMMANDS or _git_dry_run(sub, rest):
         return None
-    if sub == "submodule":
-        while rest and rest[0] in ("-q", "--quiet"):
-            rest = rest[1:]
-        if rest and rest[0] in GIT_SUBMODULE_READ:
-            return None
+    if _git_submodule_read(sub, rest):
+        return None
     return sub
+
+
+def _git_worktree_words(words):
+    """The work-tree or index rewriting git subcommands a NOT plain command may run (round 14),
+    read over its literal words (_literal_words) without trusting any segmentation or any global
+    option grammar: after the first word whose basename is git, EVERY later word that is a
+    GIT_WORKTREE_SUBCOMMANDS name (git -c core.abbrev=7 checkout -- ., git status; git checkout
+    -- ., true; git reset --hard), and every dashed builtin word whose basename is git-<name> for
+    such a name (/usr/lib/git-core/git-checkout), unless the words after it make it a dry run
+    (_git_dry_run) or a submodule read form (_git_submodule_read). A later word that is such a
+    name only as data (git log; echo reset) counts too: the over-refusal is disclosed."""
+    found, seen_git = [], False
+    for j, word in enumerate(words):
+        base = os.path.basename(word)
+        if base == "git":
+            seen_git = True
+            continue
+        if base.startswith("git-") and base[4:] in GIT_WORKTREE_SUBCOMMANDS:
+            sub = base[4:]
+        elif seen_git and word in GIT_WORKTREE_SUBCOMMANDS:
+            sub = word
+        else:
+            continue
+        rest = words[j + 1:]
+        if _git_dry_run(sub, rest) or _git_submodule_read(sub, rest):
+            continue
+        if sub not in found:
+            found.append(sub)
+    return found
 
 
 def _git_unbound_rule(cwd, cands, protected):
@@ -1786,7 +1901,11 @@ def _exotic_bash_rule(command, cwd, tokens):
     roots, reason = _cwd_product_roots(cwd)
     if reason is not None:
         return reason + "; failing closed (R6)"
+    words = _literal_words(command)
     if roots:
+        backup = _backup_reason(words, roots[0])
+        if backup is not None:
+            return backup
         return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
                 "read-only, and the session working directory lies inside the OPF product root %r "
                 "(its store tree is protected); it is denied fail-closed (R5). %s."
@@ -1805,7 +1924,6 @@ def _exotic_bash_rule(command, cwd, tokens):
             rest = rest[1:]
         if rest:
             exempt = frozenset(_candidates(rest[0], cwd) or ())
-    words = _literal_words(command)
     if len(words) > MAX_RESOLVED_WORDS:
         return ("this Bash command is not provably plain and names more than %d words, over the "
                 "word-resolution budget, so it cannot be fully examined; failing closed (R6)"
@@ -1821,6 +1939,9 @@ def _exotic_bash_rule(command, cwd, tokens):
         if reason is not None:
             return reason + "; failing closed (R6)"
         if got:
+            backup = _backup_reason(words, got[0])
+            if backup is not None:
+                return backup
             return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
                     "read-only, and a path it names (%r) lies inside the OPF product root %r "
                     "(its store tree is protected); it is denied fail-closed (R5). %s."
@@ -1830,9 +1951,11 @@ def _exotic_bash_rule(command, cwd, tokens):
             if reason is not None:
                 return reason
     # Round 13: a git work-tree subcommand that runs code (bisect, submodule, filter-branch) or
-    # carries another not-plain trait, read through the plain word split, takes the unbound
-    # repository-top check of the git work-tree rule (R8).
-    if tokens and _git_worktree_sub(tokens) is not None:
+    # carries another not-plain trait takes the unbound repository-top check of the git work-tree
+    # rule (R8). Round 14: the subcommand is read over EVERY literal word after a git word
+    # (_git_worktree_words), so a global option outside the grammar (git -c x=y checkout -- .) and
+    # a second command (git checkout -- .; true) no longer hide it.
+    if _git_worktree_words(words):
         return _git_unbound_rule(cwd, cands, set(_guarded_prefixes()))
     return None
 
@@ -1859,9 +1982,16 @@ def _plain_bash_rule(command, words, cwd):
     if reason is not None:
         return reason
     program = os.path.basename(words[0])
-    joined = []
+    joined, cwd_joined = [], []
     if program in JOIN_WRITERS:
         joined, reason = _joined_targets(cands, words[1:] + derived)
+        if reason is not None:
+            return reason
+    if program == "ln":
+        # Round 14: ln with one operand links it into the CURRENT directory under its basename
+        # (ln -f notes/STATUS.md from docs replaces docs/STATUS.md), a target no word spells.
+        cwd_joined, reason = _joined_targets(_candidates(cwd, None, "literal") or [],
+                                             words[1:] + derived)
         if reason is not None:
             return reason
     container = program in CONTAINER_VERBS
@@ -1869,7 +1999,7 @@ def _plain_bash_rule(command, words, cwd):
     roots, reason = _bound_roots(command, cwd, spellings)
     if reason is not None:
         return reason + "; failing closed (R6)"
-    for cand in cands + joined:
+    for cand in cands + joined + cwd_joined:
         got, reason = _roots_above(cand)
         if reason is not None:
             return reason + "; failing closed (R6)"
@@ -1902,7 +2032,7 @@ def _plain_bash_rule(command, words, cwd):
         reason = _container_rule(cand, protected)
         if reason is not None:
             return reason
-    for cand in cands + joined:
+    for cand in cands + joined + cwd_joined:
         if _store_rule(cand) is not None:
             return ("a word of this Bash command resolves into the %s store tree and the "
                     "command is not a single plain invocation of the sanctioned writer, so it "
@@ -1920,6 +2050,10 @@ def _plain_bash_rule(command, words, cwd):
         reason = _registration_rule(cand, reg_idents)
         if reason is not None:
             return reason
+    if program in BACKUP_WRITERS:
+        # Round 14: checked last, so a backup command that the exact check already denies keeps
+        # that more specific reason.
+        return _backup_reason(words, roots[0] if roots else None)
     return None
 
 

@@ -1211,7 +1211,12 @@ def _claude_hook_self_test():
     through a strict grammar, while every other git subcommand allows; one vector per subcommand,
     per container verb and per dry-run grammar branch pins the rule, the round-11 reproductions
     FAIL on the predecessor pin, and a file-tool payload carrying an unevaluated path-like field
-    denies.
+    denies. The round-14 change denies, in a bound product, a cp, mv, ln or install carrying any
+    backup option (a backup renames an existing destination to that destination plus a suffix no
+    word spells), joins an ln operand basename into the cwd, treats git submodule status and
+    summary as plain read forms, and reads a not-plain command git work-tree subcommand over every
+    literal word after a git word; its pack-repository vectors run against a synthetic pack
+    repository holding a copy of the hook, so they no longer depend on the checkout .git entry.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1234,11 +1239,12 @@ def _claude_hook_self_test():
         if got != want:
             failures.append("claude-hook " + label + ": got " + repr(got) + ", expected " + repr(want))
 
-    def run_hook(payload=None, raw=None, env=None):
+    def run_hook(payload=None, raw=None, env=None, via=None):
         """One hook child. Returns (exit status, decision, reason, stderr text): decision is None for a
         silent allow (no stdout), the permissionDecision string for a structured decision, or the label
         "malformed-output" for stdout that is not the documented decision shape. `env` overlays the
-        child environment (the tilde vectors pin expanduser against a fixture HOME)."""
+        child environment (the tilde vectors pin expanduser against a fixture HOME); `via` launches
+        another copy of the hook (the round-14 synthetic pack repository) instead of the shipped one."""
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
         # The hook judges the git variables of its own environment (round 8), so every child runs
         # with the ambient GIT_* variables scrubbed (a git-hook or CI context must not change a
@@ -1247,7 +1253,7 @@ def _claude_hook_self_test():
         if env is not None:
             child_env.update(env)
         try:
-            proc = subprocess.run([sys.executable, "-I", str(hook)], input=data, env=child_env,
+            proc = subprocess.run([sys.executable, "-I", str(via or hook)], input=data, env=child_env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise OSError("could not run the deny hook " + str(hook) + " (" + repr(exc) + ")")
@@ -1268,15 +1274,15 @@ def _claude_hook_self_test():
     def payload(tool, tool_input, cwd):
         return dict(hook_event_name="PreToolUse", tool_name=tool, tool_input=tool_input, cwd=cwd)
 
-    def deny(label, p, needle, env=None):
-        rc, decision, reason, _err = run_hook(p, env=env)
+    def deny(label, p, needle, env=None, via=None):
+        rc, decision, reason, _err = run_hook(p, env=env, via=via)
         expect(label, (rc, decision), (0, "deny"))
         if decision == "deny" and needle not in reason:
             failures.append("claude-hook " + label + ": the deny reason does not name " + repr(needle)
                             + " (got " + repr(reason) + ")")
 
-    def allow(label, p, env=None):
-        rc, decision, _reason, _err = run_hook(p, env=env)
+    def allow(label, p, env=None, via=None):
+        rc, decision, _reason, _err = run_hook(p, env=env, via=via)
         expect(label, (rc, decision), (0, None))
 
     RUN_ID = "adopt-20260101T000000Z-0123456789abcdef"
@@ -2522,6 +2528,89 @@ def _claude_hook_self_test():
                                    ("submodule-quiet-summary", "git submodule --quiet summary")):
                     allow("bash-r13-git-" + label + "-pack-repo-allowed",
                           payload("Bash", dict(command=cmd), pack_sub))
+            # ROUND 14 (QA round 12): a cp, mv or ln (and install, which is not plain) carrying ANY
+            # backup option denies in a bound product with a named reason, since the backup renames
+            # an existing destination to that destination plus a suffix no word spells (cp
+            # --backup=simple --suffix=.md notes.txt docs/STATUS overwrites the view docs/STATUS.md;
+            # coreutils 9.7 confirmed for cp, mv and ln); ln with one operand links it into the cwd
+            # under its basename; git submodule status and summary are plain read forms inside a
+            # bound product. On the predecessor pin 7718fd29 every -denied backup and ln vector
+            # below ALLOWED (install denied by the coarse rule, unnamed), the two submodule
+            # read-form vectors the QA named DENIED, and the two cp -t vectors (pinning the
+            # round-9 joins the class review checked) already denied.
+            for label, cmd in (
+                    ("cp-backup-suffix", "cp --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("mv-backup-suffix", "mv --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("ln-backup-suffix", "ln -f --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("cp-short-b", "cp -b notes.txt n2.txt"),
+                    ("cp-short-S-separate", "cp -S .md notes.txt docs/STATUS"),
+                    ("cp-cluster-bS-glued", "cp -fbS.md notes.txt docs/STATUS"),
+                    ("cp-abbreviated-longs", "cp --back --suf=.md notes.txt docs/STATUS"),
+                    ("mv-suffix-separate", "mv --suffix .md notes.txt docs/STATUS"),
+                    ("ln-backup-numbered", "ln -s --backup=numbered notes.txt n2.txt"),
+                    ("cp-b-after-dashdash", "cp -t docs -- -b notes.txt"),
+                    ("install-backup-suffix", "install -b -S .md notes.txt docs/STATUS")):
+                deny("bash-r14-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "backup option")
+            deny("bash-r14-cp-backup-absolute-operand-denied",
+                 payload("Bash", dict(command="cp --backup=simple --suffix=.md notes.txt "
+                                      + os.path.join(root, "docs", "STATUS")), elsewhere),
+                 "backup option")
+            allow("bash-r14-cp-backup-unbound-allowed",
+                  payload("Bash", dict(command="cp --backup=simple --suffix=.md a b"), elsewhere))
+            allow("bash-r14-cp-plain-allowed",
+                  payload("Bash", dict(command="cp notes.txt n2.txt"), root))
+            for label, cmd in (("ln-single-operand", "ln -f notes/STATUS.md"),
+                               ("ln-s-single-operand", "ln -sf /elsewhere/STATUS.md")):
+                deny("bash-r14-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), os.path.join(root, "docs")),
+                     "declared view")
+            for label, cmd in (("cp-t-joined", "cp -t docs notes/STATUS.md"),
+                               ("cp-target-directory-glued",
+                                "cp --target-directory=docs notes/STATUS.md")):
+                deny("bash-r14-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "declared view")
+            for label, cmd in (("submodule-status", "git submodule status"),
+                               ("submodule-quiet-summary", "git submodule --quiet summary"),
+                               ("submodule-q-status-recursive", "git submodule -q status --recursive")):
+                allow("bash-r14-git-" + label + "-bound-allowed",
+                      payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("submodule-update", "git submodule update --init"),
+                               ("submodule-quiet-foreach", "git submodule --quiet foreach true")):
+                deny("bash-r14-git-" + label + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 14: a synthetic pack repository (a .git entry, the hook copied to its
+            # opf/enforcement/claude/ and an opf/tools/ directory, bound to no product), so the
+            # unbound repository-top vectors run on every checkout. A not-plain command reads its
+            # git work-tree subcommand over every literal word after a git word: a global option
+            # outside the grammar and a second command no longer hide it, and a dashed builtin
+            # word counts. On the predecessor pin 7718fd29 every -denied vector here but the
+            # bare checkout ALLOWED.
+            pack_repo = os.path.join(basestr, "packrepo")
+            pack_hook = os.path.join(pack_repo, "opf", "enforcement", "claude", "pretooluse_deny.py")
+            for d in (os.path.join(pack_repo, ".git"), os.path.join(pack_repo, "opf", "tools"),
+                      os.path.join(pack_repo, "docs"), os.path.dirname(pack_hook)):
+                os.makedirs(d)
+            shutil.copyfile(str(hook), pack_hook)
+            pack_docs = os.path.join(pack_repo, "docs")
+            for label, cmd in (("c-override-checkout", "git -c core.abbrev=7 checkout -- ."),
+                               ("checkout-then-true", "git checkout -- .; true"),
+                               ("true-then-checkout", "true && git checkout -- ."),
+                               ("attr-source-reset", "git --attr-source HEAD reset --hard"),
+                               ("c-override-submodule-update", "git -c a.b=c submodule update"),
+                               ("dashed-checkout", "/usr/lib/git-core/git-checkout -- ."),
+                               ("bare-checkout", "git checkout -- .")):
+                deny("bash-r14-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("status-then-true", "git status; true"),
+                               ("c-override-log", "git -c core.abbrev=7 log"),
+                               ("c-override-rm-dry-run", "git -c core.abbrev=7 rm -n x"),
+                               ("c-override-submodule-status", "git -c a.b=c submodule status")):
+                allow("bash-r14-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            allow("bash-r14-c-override-checkout-unbound-allowed",
+                  payload("Bash", dict(command="git -c core.abbrev=7 checkout -- ."), elsewhere))
             notes = os.path.join(root, "notes.txt")
             deny("multiedit-r11-nested-path-field-denied",
                  payload("MultiEdit", dict(file_path=notes, edits=[dict(
