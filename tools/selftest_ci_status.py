@@ -27,6 +27,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -52,6 +53,13 @@ NO_AUTO_MAINTENANCE = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false",
 SCRIPT = ROOT / "tools" / "ci-status.sh"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
+# The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
+# back to min(committer date, now) minus its 24-hour margin; these mirror that arithmetic.
+COMMIT_TIME = 1789990000
+NOW = 1790000000
+MARGIN = 86400
+LOWER_BOUND = COMMIT_TIME - MARGIN
+MAX_PAGES = 50
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
@@ -60,19 +68,25 @@ FAKE_GH = r"""import json
 import os
 import sys
 
-# A poll is either a list of pages served to BOTH the head_sha query and the unfiltered listing, a
-# dict with "filtered" and "scan" page lists, or a dict with "error" (first query fails) or
-# "scan_error" (only the unfiltered listing fails). Only the head_sha query advances the poll counter.
+# A poll is either a list of pages served as the head_sha query's pages (the unfiltered listing then
+# serves the same runs as one consistent listing, 100 per page), a dict with "filtered" and "scan" page
+# lists or "scan_every_page" (one page served for every page number), or a dict with "error" (first
+# query fails) or "scan_error" (only the unfiltered listing fails). Only the head_sha query advances the
+# poll counter; every unfiltered page number read is appended to the scan log.
 args = sys.argv[1:]
 endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
-if (endpoint.startswith("repos/fixture/repository/actions/runs?head_sha=")
-        and endpoint.endswith("&per_page=100")):
+listing = "repos/fixture/repository/actions/runs"
+scan_prefix = listing + "?per_page=100&page="
+if (endpoint.startswith(listing + "?head_sha=") and endpoint.endswith("&per_page=100")
+        and "--paginate" in args and "--slurp" in args):
     source = "filtered"
-elif endpoint == "repos/fixture/repository/actions/runs?per_page=100":
+elif (endpoint.startswith(scan_prefix) and endpoint[len(scan_prefix):].isdigit()
+        and "--paginate" not in args and "--slurp" not in args):
     source = "scan"
+    page_no = int(endpoint[len(scan_prefix):])
 else:
-    print("gh fixture: query must request head_sha with per_page=100, "
-          "or the unfiltered listing with only per_page=100", file=sys.stderr)
+    print("gh fixture: query must request head_sha with per_page=100 and --paginate --slurp, "
+          "or one unfiltered page with only per_page and page", file=sys.stderr)
     sys.exit(1)
 with open(os.environ["MOCK_GH_COUNTER"], "r", encoding="utf-8") as handle:
     call = int(handle.read().strip())
@@ -83,24 +97,38 @@ if source == "filtered":
 elif call == 0:
     print("gh fixture: unfiltered listing requested before the head_sha query", file=sys.stderr)
     sys.exit(1)
+else:
+    with open(os.environ["MOCK_GH_SCAN_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(str(page_no) + "\n")
 with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
     polls = json.load(handle)["polls"]
 poll = polls[min(call - 1, len(polls) - 1)]
 if isinstance(poll, dict) and "error" in poll:
     print(poll["error"], file=sys.stderr)
     sys.exit(poll.get("exit", 1))
-if isinstance(poll, dict) and source == "scan" and "scan_error" in poll:
+if source == "filtered":
+    pages = poll.get("filtered") if isinstance(poll, dict) else poll
+    if not isinstance(pages, list) or not pages:
+        print("gh fixture: malformed poll", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(pages))
+    sys.exit(0)
+if isinstance(poll, dict) and "scan_error" in poll:
     print(poll["scan_error"], file=sys.stderr)
     sys.exit(1)
+if isinstance(poll, dict) and "scan_every_page" in poll:
+    print(json.dumps(poll["scan_every_page"]))
+    sys.exit(0)
 if isinstance(poll, dict):
-    poll = poll.get(source)
-if not isinstance(poll, list) or not poll:
-    print("gh fixture: malformed poll", file=sys.stderr)
+    pages = poll.get("scan")
+else:
+    runs = [run for item in poll for run in item["workflow_runs"]]
+    pages = [{"total_count": len(runs), "workflow_runs": runs[start:start + 100]}
+             for start in range(0, max(len(runs), 1), 100)]
+if not isinstance(pages, list) or page_no < 1 or page_no > len(pages):
+    print("gh fixture: no unfiltered page {}".format(page_no), file=sys.stderr)
     sys.exit(1)
-
-pages = poll if "--paginate" in args else poll[:1]
-payload = pages if "--slurp" in args else pages[0]
-print(json.dumps(payload))
+print(json.dumps(pages[page_no - 1]))
 """
 
 FAKE_DATE = r"""import os
@@ -141,8 +169,13 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def workflow_run(run_id, status, conclusion, name, head_sha):
+def iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600):
     return {
+        "created_at": iso(created),
         "id": run_id,
         "head_sha": head_sha,
         "status": status,
@@ -157,10 +190,15 @@ def page(runs, total_count=None):
             "workflow_runs": runs}
 
 
+def consistent_scan(pages):
+    runs = [run for item in pages for run in item["workflow_runs"]]
+    return [page(runs[start:start + 100], len(runs)) for start in range(0, max(len(runs), 1), 100)]
+
+
 def jq_program():
     source = SCRIPT.read_text(encoding="utf-8")
-    prefix = '      jq -s --arg requested_sha "$SHA" -r \'\n'
-    suffix = "'\n  } 2>&1\n}"
+    prefix = "CI_STATUS_JQ='\n"
+    suffix = "'\n\nci_jq()"
     if source.count(prefix) != 1:
         raise ValueError("ci-status.sh must contain exactly one jq program")
     start = source.index(prefix) + len(prefix)
@@ -168,12 +206,19 @@ def jq_program():
     return source[start:end]
 
 
-def run_jq(program, pages, requested_sha, scan_pages=None):
-    # The script slurps two documents: the head_sha-filtered pages, then the unfiltered listing's pages.
-    scan = pages if scan_pages is None else scan_pages
+def run_jq(program, pages, requested_sha, scan_pages=None, mode="verdict"):
+    # Verdict mode slurps two documents: the head_sha-filtered pages, then the scan's pages (by default
+    # one consistent listing of the same runs). Step mode slurps one raw unfiltered page (pages).
+    if mode == "step":
+        stdin = json.dumps(pages) + "\n"
+    else:
+        scan = consistent_scan(pages) if scan_pages is None else scan_pages
+        stdin = json.dumps(pages) + "\n" + json.dumps(scan) + "\n"
     return subprocess.run(
-        [JQ, "-s", "--arg", "requested_sha", requested_sha, "-r", program],
-        input=json.dumps(pages) + "\n" + json.dumps(scan) + "\n", text=True,
+        [JQ, "-s", "-r", "--arg", "mode", mode, "--arg", "requested_sha", requested_sha,
+         "--argjson", "lower_bound", str(LOWER_BOUND), "--argjson", "max_pages", str(MAX_PAGES),
+         program],
+        input=stdin, text=True,
         capture_output=True, timeout=10,
         env={"PATH": SYSTEM_PATH, "LC_ALL": "C", "TZ": "UTC"},
     )
@@ -200,12 +245,15 @@ class Fixture:
         (self.repo / "seed.txt").write_text("seed\n", encoding="utf-8")
         subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + ["add", "seed.txt"],
                        check=True, capture_output=True, timeout=30, env=self.base_env)
+        commit_env = dict(self.base_env)
+        commit_env["GIT_COMMITTER_DATE"] = "{} +0000".format(COMMIT_TIME)
+        commit_env["GIT_AUTHOR_DATE"] = "{} +0000".format(COMMIT_TIME)
         subprocess.run(
             [GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE
             + ["-c", "user.name=Selftest",
                "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
                "commit", "-q", "-m", "seed"],
-            check=True, capture_output=True, timeout=30, env=self.base_env)
+            check=True, capture_output=True, timeout=30, env=commit_env)
         result = subprocess.run(
             [GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + ["rev-parse", "HEAD"],
             check=True, capture_output=True, text=True, timeout=30, env=self.base_env,
@@ -214,20 +262,24 @@ class Fixture:
         self.response = base / "responses.json"
         self.counter = base / "calls.txt"
         self.clock = base / "clock.txt"
+        self.scan_log = base / "scan-pages.txt"
+        self.scan_pages = []
         for name, body in (("gh", FAKE_GH), ("date", FAKE_DATE), ("sleep", FAKE_SLEEP)):
             executable = self.bin / name
             executable.write_text("#!{}\n{}".format(sys.executable, body), encoding="utf-8")
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
-    def invoke(self, polls, wait=False, timeout="900"):
+    def invoke(self, polls, wait=False, timeout="900", clock=NOW):
         self.response.write_text(json.dumps({"polls": polls}), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
-        self.clock.write_text("100000\n", encoding="utf-8")
+        self.scan_log.write_text("", encoding="utf-8")
+        self.clock.write_text("{}\n".format(clock), encoding="utf-8")
         env = dict(self.base_env)
         env["PATH"] = str(self.bin) + os.pathsep + SYSTEM_PATH
         env["MOCK_GH_RESPONSE"] = str(self.response)
         env["MOCK_GH_COUNTER"] = str(self.counter)
         env["MOCK_CLOCK"] = str(self.clock)
+        env["MOCK_GH_SCAN_LOG"] = str(self.scan_log)
         env["CI_STATUS_REPO"] = "fixture/repository"
         env["CI_STATUS_TIMEOUT"] = timeout
         command = [str(SCRIPT), "HEAD"]
@@ -236,6 +288,7 @@ class Fixture:
         result = subprocess.run(command, cwd=self.repo, env=env, text=True,
                                 capture_output=True, timeout=30)
         calls = int(self.counter.read_text(encoding="utf-8").strip())
+        self.scan_pages = [int(line) for line in self.scan_log.read_text(encoding="utf-8").split()]
         return result.returncode, result.stdout + result.stderr, calls
 
 
@@ -458,16 +511,148 @@ def main(report_path=None):
                 "filtered": filtered, "scan_error": "gh: HTTP 502"}])
             scan_closed.append((rc, "could not read workflow runs" in output))
             rc, output, _calls = fixture.invoke([{
-                "filtered": filtered, "scan": [page(other_commits, 250)]}])
+                "filtered": filtered,
+                "scan": [page(other_commits, 250), page(other_commits[:40], 250)]}])
             scan_closed.append((rc, "incomplete unfiltered workflow-runs listing" in output))
         check("ci/scan-unanswered-fail-closed", scan_closed, [(2, True)] * 4)
 
-        # The two sources disagreeing about one run's state is an API error, never a verdict.
-        rc, output, _calls = fixture.invoke([{
+        # The two sources disagreeing about one run's state is an API error, never a verdict; one-shot
+        # mode re-reads once first (MINOR 4), so a persistent disagreement costs two head_sha queries.
+        rc, output, calls = fixture.invoke([{
             "filtered": [page([success_a, success_b])],
             "scan": [page([success_a, failed_b])]}])
         check("ci/scan-source-conflict-fail-closed",
-              (rc, "conflicting duplicate workflow-run records" in output), (2, True))
+              (rc, "conflicting duplicate workflow-run records" in output, calls), (2, True, 2))
+
+        # A run changing state between the two sources' reads settles on the one-shot re-read.
+        rc, output, calls = fixture.invoke([
+            {"filtered": [page([success_a, pending_b])], "scan": [page([success_a, success_b])]},
+            [page([success_a, success_b])]])
+        check("ci/oneshot-conflict-retried-once",
+              (rc, calls, "re-reading once" in output), (0, 2, True))
+
+        # The scan is bounded: a full page holding only runs created before the lower bound ends it,
+        # so page 2 (absent from the fixture, an error if read) is never requested.
+        old_commits = [workflow_run(7000 + index, "completed", "success",
+                                    "Old run {}".format(index), "e" * 40,
+                                    created=LOWER_BOUND - 60 - index)
+                       for index in range(100)]
+        rc, _output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page(old_commits, 900)]}])
+        check("ci/scan-stops-at-lower-bound", (rc, fixture.scan_pages), (0, [1]))
+
+        # The 24-hour margin: a run of this commit created two hours BEFORE its committer date (a
+        # committer clock running ahead) is still read, beyond a page of runs inside the margin.
+        skewed = [workflow_run(7200 + index, "completed", "success", "Skew run {}".format(index),
+                               "e" * 40, created=COMMIT_TIME - 3600 - index)
+                  for index in range(100)]
+        early_failure = dict(failed_b, created_at=iso(COMMIT_TIME - 7200))
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page(skewed, 101), page([early_failure], 101)]}])
+        check("ci/scan-margin-covers-clock-skew",
+              (rc, fixture.scan_pages, "failure" in output), (1, [1, 2], True))
+
+        # A committer date in the future is clamped to now before the margin is applied.
+        clock = COMMIT_TIME - 2 * MARGIN
+        recent = [workflow_run(7400 + index, "completed", "success", "Recent run {}".format(index),
+                               "e" * 40, created=clock - 1800 - index)
+                  for index in range(100)]
+        late_failure = dict(failed_b, created_at=iso(clock - 3600))
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page(recent, 101), page([late_failure], 101)]}],
+            clock=clock)
+        check("ci/scan-future-commit-date-clamped",
+              (rc, fixture.scan_pages, "failure" in output), (1, [1, 2], True))
+
+        # A scan that never reaches the bound fails closed after the page limit.
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan_every_page": page(other_commits, 100000)}])
+        check("ci/scan-unbounded-fail-closed",
+              (rc, len(fixture.scan_pages), "not bounded within 50 pages" in output), (2, MAX_PAGES, True))
+
+        # MINOR 1 / MAJOR A: a deletion ahead of the page boundary shifts this commit's run off page 2
+        # unseen; total_count falling between the pages is the only trace, and it must fail closed.
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(other_commits, 150), page(other_commits[:49], 149)]}])
+        check("ci/scan-shrinking-listing-fail-closed",
+              (rc, calls, "listing shrank during the scan" in output), (2, 2, True))
+
+        # MAJOR B: run 101 green at this SHA in the filtered source but failed at another SHA in the
+        # scan. Identities are reconciled BEFORE selecting this commit's runs.
+        moved = dict(success_a, head_sha="e" * 40, conclusion="failure")
+        identity_conflicts = []
+        for polls in ([{"filtered": [page([success_a])], "scan": [page([moved])]}],
+                      [{"filtered": [page([success_b])], "scan": [page([moved, success_a])]}]):
+            rc, output, _calls = fixture.invoke(polls)
+            identity_conflicts.append((rc, "conflicting duplicate workflow-run records" in output))
+        check("ci/scan-head-sha-conflict-fail-closed", identity_conflicts, [(2, True)] * 2)
+
+        # Ordering jitter: a page holding SOME runs below the bound does not end the scan; only a page
+        # holding nothing but such runs does.
+        mixed = other_commits[:99] + [dict(old_commits[0])]
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page(mixed, 101), page([failed_b], 101)]}])
+        check("ci/scan-mixed-page-continues",
+              (rc, fixture.scan_pages, "failure" in output), (1, [1, 2], True))
+
+        # MEDIUM C: an unidentifiable scan record (empty head_sha, bad id, bad created_at) is an API
+        # error even beside a valid green run, and never "no run".
+        other = workflow_run(9000, "completed", "success", "Other", "e" * 40)
+        malformed_scan = []
+        for bad in (dict(other, head_sha=""), dict(other, id=0),
+                    dict(other, created_at="yesterday")):
+            for filtered in ([page([success_a])], [page([])]):
+                rc, output, _calls = fixture.invoke([{
+                    "filtered": filtered, "scan": [page([success_a, bad])]}])
+                malformed_scan.append(
+                    (rc, "malformed workflow run record" in output,
+                     "no workflow run registered" in output))
+        check("ci/scan-malformed-identity-fail-closed", malformed_scan, [(2, True, False)] * 6)
+
+        # A record of this commit's run seen by only one source is validated in full.
+        malformed_run_seen = []
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page([success_a, dict(success_b, name="")])]}])
+        malformed_run_seen.append((rc, "malformed workflow run record" in output))
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([dict(success_a, name="")])], "scan": [page([])]}])
+        malformed_run_seen.append((rc, "malformed workflow run record" in output))
+        check("ci/single-source-malformed-run-fail-closed", malformed_run_seen, [(2, True)] * 2)
+
+        # A failure seen ONLY by the head_sha query is still reported.
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a, failed_b])], "scan": [page([success_a])]}])
+        check("ci/filtered-only-failure-reported",
+              (rc, "Repository quality checks" in output and "failure" in output), (1, True))
+
+        try:
+            steps = (
+                run_jq(program, page([success_a]), head_sha, mode="step"),
+                run_jq(program, page(other_commits, 300), head_sha, mode="step"),
+                run_jq(program, page(old_commits, 300), head_sha, mode="step"),
+                run_jq(program, page([dict(other, head_sha="")]), head_sha, mode="step"),
+                run_jq(program, [page([success_a])], head_sha,
+                       [page(other_commits, 100)] * (MAX_PAGES + 1)),
+                run_jq(program, [page([success_a])], head_sha,
+                       [page([success_a, dict(other, head_sha="")])]),
+                run_jq(program, [page([success_a])], head_sha,
+                       [page(other_commits[:50], 150), page(old_commits, 150)]),
+            )
+            step_result = (
+                (steps[0].returncode, steps[0].stdout.split("\n")[0]),
+                (steps[1].returncode, steps[1].stdout.split("\n")[0]),
+                (steps[2].returncode, steps[2].stdout.split("\n")[0]),
+                steps[3].returncode != 0 and "malformed workflow run record" in steps[3].stderr,
+                steps[4].returncode != 0 and "not bounded within the page limit" in steps[4].stderr,
+                steps[5].returncode != 0 and "malformed workflow run record" in steps[5].stderr,
+                steps[6].returncode != 0
+                and "incomplete unfiltered workflow-runs listing" in steps[6].stderr,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            step_result = "jq-step setup failed: {}".format(exc)
+        check("ci/jq-step-direct-cases", step_result,
+              ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True))
 
     if not _write_report(report_path):
         return 2

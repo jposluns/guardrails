@@ -494,6 +494,18 @@ expected-check-ids = [
   "ci/scan-finds-dropped-failure",
   "ci/scan-unanswered-fail-closed",
   "ci/scan-source-conflict-fail-closed",
+  "ci/oneshot-conflict-retried-once",
+  "ci/scan-stops-at-lower-bound",
+  "ci/scan-margin-covers-clock-skew",
+  "ci/scan-future-commit-date-clamped",
+  "ci/scan-unbounded-fail-closed",
+  "ci/scan-shrinking-listing-fail-closed",
+  "ci/scan-head-sha-conflict-fail-closed",
+  "ci/scan-mixed-page-continues",
+  "ci/scan-malformed-identity-fail-closed",
+  "ci/single-source-malformed-run-fail-closed",
+  "ci/filtered-only-failure-reported",
+  "ci/jq-step-direct-cases",
 ]
 [[suite]]
 id = "git-fixture-env-selftest"

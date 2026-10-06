@@ -15,9 +15,9 @@
 # 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
 # Anything treating it as the green signal hangs; anything inverting it merges on a lie.
 #
-# This reads every paginated run from `actions/runs?head_sha=` AND every page of the unfiltered
-# `actions/runs` listing, keeping the runs whose head_sha is exactly this commit. Both need only
-# Actions: Read.
+# This reads every paginated run from `actions/runs?head_sha=` AND the newest pages of the unfiltered
+# `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
+# runs whose head_sha is exactly this commit. Both need only Actions: Read.
 #
 # Usage:
 #   tools/ci-status.sh                 # current HEAD, report once
@@ -51,7 +51,39 @@ if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
   exit 2
 fi
-DEADLINE=$(( $(date +%s) + ${CI_STATUS_TIMEOUT:-900} ))
+if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
+    ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
+  printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
+  exit 2
+fi
+NOW="$(date +%s)"
+DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
+
+# BOUNDED SCAN. The unfiltered listing is read newest first, one page per request, and paging stops at
+# the first page that is short (the end of the listing) or holds only runs created before LOWER_BOUND.
+# A run for this commit is created after the commit is pushed, so after the commit object exists; its
+# created_at (GitHub's clock) can precede the committer date only when the committer's clock ran ahead.
+# LOWER_BOUND is therefore min(committer date, now) minus SCAN_MARGIN_SECONDS. The clamp to now
+# neutralises a committer date in the future. The 24-hour margin covers a committer clock that is
+# ahead by up to a day, which includes the largest error a wrong time zone setting can introduce
+# (UTC offsets reach +14 hours), and it equally absorbs any ordering jitter in the listing: a run of
+# this commit would have to be listed after a full page of runs created up to 24 hours before it.
+# RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours, still ahead when
+# the commit was made, can place this commit's runs below LOWER_BOUND; they are then visible only to
+# the head_sha query, which is exactly the parent script's coverage. ASSUMPTION: the listing is ordered
+# newest first by creation, so a new run enters at the head (observed GitHub behaviour, not a
+# documented contract). Cost scales with the runs created since LOWER_BOUND: one request for the
+# head_sha query plus one per page, typically one or two pages for a recent commit; a scan that has not
+# reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an API error, never a verdict.
+SCAN_MARGIN_SECONDS=86400
+SCAN_MAX_PAGES=50
+SCAN_FROM="$COMMIT_TIME"
+[ "$NOW" -lt "$SCAN_FROM" ] && SCAN_FROM="$NOW"
+LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
+# One-shot mode re-reads once, after RETRY_SECONDS, when the sources disagree about a run or the
+# listing shrank between pages (both are the signature of a run changing state, or being deleted,
+# between requests); a disagreement that persists is reported as an API error (exit 2).
+RETRY_SECONDS=5
 
 POLL_SECONDS=15
 SETTLE_OBSERVATIONS=5
@@ -68,116 +100,183 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
+# One jq program, two modes. "step" validates ONE raw page of the unfiltered listing, prints "stop" or
+# "more", then the page reduced to the fields used here as one compact JSON line. "verdict" receives the
+# head_sha query's pages and the reduced scan pages, re-checks every completeness condition, and emits
+# the run rows. Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs,
+# newlines, and backslashes in display fields from becoming record delimiters, so a workflow name cannot
+# move either gating field. Name and URL remain display-only. The no-run case gets an explicit sentinel
+# rather than a rendered "null", because a real run's .status is nullable in the schema and must not be
+# mistaken for "no run yet".
+#
+# TWO SOURCES. The server-side head_sha filter alone is not a complete answer: on 2026-10-06 it returned
+# zero runs for commit 0a0c0ca3 while the repository's run listing showed run 37498869615 for that exact
+# head_sha as completed/success, an hour after the same filtered query had listed that run as
+# in_progress. A failed run dropping out the same way would leave only its green siblings, so the scan
+# runs on EVERY query, whatever the filtered query returned, and the two sources are merged by run ID.
+#
+# Fail closed (API error, never "no run" and never a verdict) when: either source fails; a page or any
+# record in either source is malformed (every scan record's id, head_sha, and created_at are validated
+# before it counts toward completeness or results, and a matching scan record is validated as fully
+# as a filtered one); the scan did not end on a terminal page within SCAN_MAX_PAGES; a page other than
+# the last is not full; a short last page disagrees with its own total_count; the listing's total_count
+# fell between two pages; the sources, or two pages, disagree about a run ID's head_sha (checked across
+# ALL records, BEFORE selecting this commit's runs); the filtered source's unique count differs from its
+# total_count; or two records of this commit's run disagree about status, conclusion, name, or URL.
+#
+# DELETION DURING THE SCAN. Offset pagination skips a run only when the runs ahead of the page boundary
+# shift up, which needs more deletions ahead of the boundary than insertions; new runs enter at the
+# head, so every skip makes total_count fall between the two page reads. Rejecting a falling
+# total_count therefore closes that skip, ASSUMING each page's total_count is the untruncated count of
+# the listing at that read (unverified live; GitHub documents a 1,000-result cap only for filtered
+# listings). A total_count that is itself truncated would defeat this check and the short-last-page
+# check alike. A same-count replacement within the filtered source, described above, stays open.
+CI_STATUS_JQ='
+def malformed_page:
+  (type != "object")
+  or ((.total_count | type) != "number")
+  or (.total_count < 0)
+  or ((.total_count | floor) != .total_count)
+  or ((.workflow_runs | type) != "array")
+  or ((.workflow_runs | length) > 100);
+def malformed_pages:
+  (type != "array") or (length == 0) or any(.[]; malformed_page);
+def malformed_id:
+  (type != "object")
+  or ((.id | type) != "number")
+  or (.id <= 0)
+  or ((.id | floor) != .id)
+  or ((.head_sha | type) != "string")
+  or ((.head_sha | test("^([0-9a-f]{40}|[0-9a-f]{64})$")) | not);
+def malformed_scan_record:
+  malformed_id
+  or ((.created_at | type) != "string")
+  or ((.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) | not)
+  or ((.created_at | try fromdateiso8601 catch null) == null);
+def malformed_run:
+  malformed_id
+  or (.head_sha != $requested_sha)
+  or ((.status != null)
+      and (((.status | type) != "string") or ((.status | length) == 0)))
+  or ((.conclusion != null)
+      and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
+  or ((.name | type) != "string")
+  or ((.name | length) == 0)
+  or ((.html_url | type) != "string")
+  or ((.html_url | length) == 0);
+def terminal_page:
+  ((.workflow_runs | length) < 100)
+  or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
+def unique_records:
+  (sort_by(.id) | group_by(.id)) as $groups
+  | if any($groups[];
+      (([.[].status] | unique | length) > 1)
+      or (([.[].conclusion] | unique | length) > 1)) then
+      error("conflicting duplicate workflow-run records")
+    elif any($groups[]; ((unique | length) > 1)) then
+      error("non-identical duplicate workflow-run records")
+    else
+      $groups | map(.[0])
+    end;
+def projection: [.head_sha, .status, .conclusion, .name, .html_url];
+if $mode == "step" then
+  if (length != 1) or (.[0] | malformed_page) then
+    error("malformed workflow-runs response")
+  elif any(.[0].workflow_runs[]; malformed_scan_record) then
+    error("malformed workflow run record")
+  else
+    .[0]
+    | (if terminal_page then "stop" else "more" end),
+      ({total_count,
+        workflow_runs: [.workflow_runs[]
+                        | {id, head_sha, status, conclusion, name, html_url, created_at}]}
+       | tojson)
+  end
+elif $mode != "verdict" then
+  error("unknown mode")
+elif (length != 2) then
+  error("malformed workflow-runs response")
+else
+  .[0] as $filtered_pages
+  | .[1] as $scan_pages
+  | if ($filtered_pages | malformed_pages) or ($scan_pages | malformed_pages) then
+      error("malformed workflow-runs response")
+    else
+      ([$filtered_pages[] | .workflow_runs[]]) as $filtered_all
+      | ([$scan_pages[] | .workflow_runs[]]) as $scan_all
+      | ($scan_pages | length) as $page_count
+      | ($scan_pages[-1]) as $last
+      | if any($filtered_all[]; malformed_run)
+          or any($scan_all[]; malformed_scan_record)
+          or any($scan_all[]; (.head_sha == $requested_sha) and malformed_run) then
+          error("malformed workflow run record")
+        elif $page_count > $max_pages then
+          error("unfiltered workflow-runs listing not bounded within the page limit")
+        elif any($scan_pages[:-1][]; (.workflow_runs | length) != 100)
+          or (($last | terminal_page) | not)
+          or ((($last.workflow_runs | length) < 100)
+              and ($last.total_count
+                   != (100 * ($page_count - 1) + ($last.workflow_runs | length)))) then
+          error("incomplete unfiltered workflow-runs listing")
+        elif any(range(1; $page_count);
+            $scan_pages[.].total_count < $scan_pages[. - 1].total_count) then
+          error("workflow-runs listing shrank during the scan")
+        else
+          (($filtered_all + $scan_all) | sort_by(.id) | group_by(.id)) as $by_id
+          | if any($by_id[]; (([.[].head_sha] | unique | length) > 1)) then
+              error("conflicting duplicate workflow-run records")
+            else
+              ($filtered_all | unique_records) as $filtered_runs
+              | ([$filtered_pages[].total_count] | unique) as $totals
+              | if (($totals | length) != 1) or (($filtered_runs | length) != $totals[0]) then
+                  error("inconsistent paginated workflow-runs snapshot")
+                else
+                  [$by_id[] | select(.[0].head_sha == $requested_sha)] as $runs
+                  | if any($runs[]; ((map(projection) | unique | length) > 1)) then
+                      error("conflicting duplicate workflow-run records")
+                    elif ($runs | length) == 0 then
+                      "__NORUN__"
+                    else
+                      $runs[]
+                      | .[0]
+                      | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                      | @tsv
+                    end
+                end
+            end
+        end
+    end
+end'
+
+ci_jq() {
+  jq -s -r --arg mode "$1" --arg requested_sha "$SHA" --argjson lower_bound "$LOWER_BOUND" \
+    --argjson max_pages "$SCAN_MAX_PAGES" "$CI_STATUS_JQ"
+}
+
 query() {
-  # Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs, newlines, and
-  # backslashes in display fields from becoming record delimiters, so a workflow name cannot move either
-  # gating field. Name and URL remain display-only.
-  # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
-  # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
-  #
-  # TWO SOURCES, BOTH READ TO EXHAUSTION. The server-side head_sha filter alone is not a complete
-  # answer: on 2026-10-06 it returned zero runs for commit 0a0c0ca3 while the repository's run listing
-  # showed run 37498869615 for that exact head_sha as completed/success, an hour after the same filtered
-  # query had listed that run as in_progress. Trusting the filter alone misreported "no workflow run
-  # registered", and a failed run dropping out the same way would leave only its green siblings. So
-  # this also reads every page of the unfiltered listing (no branch, event, status, or created filter),
-  # selects runs whose head_sha equals the requested SHA client-side, and merges both sets by run ID.
-  # Either source failing, a malformed page or record in either, an unfiltered listing that returned
-  # fewer unique runs than its smallest reported total_count, or the two sources disagreeing about a
-  # run's status, conclusion, name, URL, or head_sha is an API error (fail closed), never "no run".
-  #
-  # Pagination is part of the verdict: within each source, reject non-identical records sharing a run
-  # ID and collapse only identical duplicates; reconcile the filtered source's unique count with its
-  # reported total_count. This detects count changes and conflicting duplicates, but cannot detect the
-  # same-count replacement race described above.
+  local filtered raw step decision view page_no=1 scan_json=""
   {
-    {
-      gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp &&
-        gh api "repos/${REPO}/actions/runs?per_page=100" --paginate --slurp
-    } |
-      jq -s --arg requested_sha "$SHA" -r '
-      def malformed_pages:
-        (type != "array")
-        or (length == 0)
-        or any(.[];
-            (type != "object")
-            or ((.total_count | type) != "number")
-            or (.total_count < 0)
-            or ((.total_count | floor) != .total_count)
-            or ((.workflow_runs | type) != "array")
-            or ((.workflow_runs | length) > 100));
-      def malformed_id:
-        (type != "object")
-        or ((.id | type) != "number")
-        or (.id <= 0)
-        or ((.id | floor) != .id)
-        or ((.head_sha | type) != "string");
-      def malformed_run:
-        malformed_id
-        or (.head_sha != $requested_sha)
-        or ((.status != null)
-            and (((.status | type) != "string") or ((.status | length) == 0)))
-        or ((.conclusion != null)
-            and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
-        or ((.name | type) != "string")
-        or ((.name | length) == 0)
-        or ((.html_url | type) != "string")
-        or ((.html_url | length) == 0);
-      def unique_records:
-        (sort_by(.id) | group_by(.id)) as $groups
-        | if any($groups[];
-            (([.[].status] | unique | length) > 1)
-            or (([.[].conclusion] | unique | length) > 1)) then
-            error("conflicting duplicate workflow-run records")
-          elif any($groups[]; ((unique | length) > 1)) then
-            error("non-identical duplicate workflow-run records")
-          else
-            $groups | map(.[0])
-          end;
-      def projection: [.status, .conclusion, .name, .html_url, .head_sha];
-      if ((type != "array") or (length != 2)) then
-        error("malformed workflow-runs response")
-      else
-        .[0] as $filtered_pages
-        | .[1] as $scan_pages
-        | if ($filtered_pages | malformed_pages) or ($scan_pages | malformed_pages) then
-            error("malformed workflow-runs response")
-          else
-            ([$filtered_pages[] | .workflow_runs[]]) as $filtered_all
-            | ([$scan_pages[] | .workflow_runs[]]) as $scan_all
-            | if any($filtered_all[]; malformed_run) or any($scan_all[]; malformed_id) then
-                error("malformed workflow run record")
-              else
-                ([$scan_all[] | select(.head_sha == $requested_sha)]) as $scan_matching
-                | if any($scan_matching[]; malformed_run) then
-                    error("malformed workflow run record")
-                  else
-                    ($filtered_all | unique_records) as $filtered_runs
-                    | ($scan_matching | unique_records) as $scan_runs
-                    | ([$filtered_pages[].total_count] | unique) as $totals
-                    | ([$scan_pages[].total_count] | min) as $scan_floor
-                    | ([$scan_all[].id] | unique | length) as $scanned
-                    | if (($totals | length) != 1) or (($filtered_runs | length) != $totals[0]) then
-                        error("inconsistent paginated workflow-runs snapshot")
-                      elif $scanned < $scan_floor then
-                        error("incomplete unfiltered workflow-runs listing")
-                      else
-                        (($filtered_runs + $scan_runs) | sort_by(.id) | group_by(.id)) as $runs
-                        | if any($runs[]; ((map(projection) | unique | length) > 1)) then
-                            error("conflicting duplicate workflow-run records")
-                          elif ($runs | length) == 0 then
-                            "__NORUN__"
-                          else
-                            $runs[]
-                            | .[0]
-                            | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
-                            | @tsv
-                          end
-                      end
-                  end
-              end
-          end
-      end'
+    filtered="$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --paginate --slurp)" ||
+      return 1
+    while :; do
+      if [ "$page_no" -gt "$SCAN_MAX_PAGES" ]; then
+        echo "unfiltered workflow-runs listing not bounded within $SCAN_MAX_PAGES pages"
+        return 1
+      fi
+      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no")" || return 1
+      step="$(printf '%s\n' "$raw" | ci_jq step)" || return 1
+      decision="$(printf '%s\n' "$step" | sed -n 1p)"
+      view="$(printf '%s\n' "$step" | sed -n 2p)"
+      # Each view is one compact object from jq, so joining views with commas stays one JSON array.
+      [ -n "$scan_json" ] && scan_json+=","
+      scan_json+="$view"
+      case "$decision" in
+        stop) break ;;
+        more) page_no=$((page_no + 1)) ;;
+        *) echo "unexpected scan step output"; return 1 ;;
+      esac
+    done
+    printf '%s\n[%s]\n' "$filtered" "$scan_json" | ci_jq verdict
   } 2>&1
 }
 
@@ -190,6 +289,7 @@ report() {
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
+RETRIED=0
 
 while :; do
   lines="$(query)"
@@ -198,6 +298,17 @@ while :; do
   # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
   # deadline, keeping API diagnostics separate from display fields in successful run rows.
   if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
+    case "$lines" in
+      *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*)
+        if [ "$WAIT" != "--wait" ] && [ "$RETRIED" -eq 0 ]; then
+          RETRIED=1
+          echo "NOTE: workflow-run records changed between requests; re-reading once."
+          echo "  raw: $lines"
+          sleep "$RETRY_SECONDS"
+          continue
+        fi
+        ;;
+    esac
     SETTLE_FINGERPRINT=""
     SETTLE_COUNT=0
     last_summary="workflow-runs API query failed"
