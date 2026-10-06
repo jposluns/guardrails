@@ -25,12 +25,15 @@
 #                        Raised 129060 -> 129585 on 2026-10-04 when guard-input-soundness gained its paragraph
 #                        on a hand-kept list that selects a generated view (grdinp.12): rule files 112564 ->
 #                        113089 (+525 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 129585 -> 130132 on 2026-10-06 when guard-input-soundness gained its paragraph
+#                        on a check run ahead of an apply step (grdinp.13 to grdinp.15): rule files 113089 ->
+#                        113636 (+547 units); managed block 360 and file headers 16136 unchanged.
 #   ceiling              the target PACK figure; reported, not enforced. Its value predates header counting,
 #                        which added 16136 units to PACK at the 112222 -> 128358 ratchet raise; it was not
 #                        raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 129585
+ratchet = 130132
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
