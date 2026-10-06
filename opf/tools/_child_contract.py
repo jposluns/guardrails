@@ -91,7 +91,8 @@ THE CONTRACT, in the order it runs:
        fires whatever hook is installed), and residual (a) (a thread's fault under a
        threading.excepthook replaced and put back) still applies to a thread started BEFORE the
        handler, while one started inside it is refused by the thread rule above.
-6. NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE LAST CHECK (the ordering invariant; merge
+6. NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION, residuals (c), (e) and (f) apart
+   (the ordering invariant; merge
    train 2 QA r9, codex MAJOR, reproduced: the re-check restored the machinery and settled the
    collection BEFORE its own sys.stdout and sys.stderr flushes, so a stdout wrapper whose SECOND
    flush replaced a hook, or dropped cyclic garbage whose finalizer raises, did so after the checks
@@ -100,12 +101,42 @@ THE CONTRACT, in the order it runs:
    Python-level flushes of sys.stdout and sys.stderr (a wrapper's write or flush), then the
    collection passes (finalizers, gc callbacks, audit hooks on gc.get_objects), each pass judged
    by its own after-comparison; and only THEN the checks that cover them: the machinery restored
-   and compared, the thread starts counted. After the FINAL check the handler runs only what that
-   code cannot reach: os.write on saved_stdout and saved_stderr (the seal, or a diagnostic) and
-   os._exit; no Python-level stream write or flush, no collection, no callback. The handler blocks
-   every blockable signal in its thread when it starts, so a signal handler the loaded code
-   installed does not run after the final check (one already pending runs at the next check's
-   entry, before the checks; residual (c) bounds this for other threads).
+   and compared, the thread starts counted. The FINAL check alone does not end what that code can
+   run: an interpreter-level callback it left ARMED is called with no Python-level call from the
+   handler (merge train 2 QA r10, claude MAJOR 1, reproduced through both callers: a profile
+   function's c_call event on os.write, a trace function's line event, a sys.monitoring CALL
+   event, or a gc callback under a lowered collection threshold fired DURING the seal, after the
+   decision, so a fault it raised under a silenced sys.unraisablehook was recorded by the audit
+   hook but never read, and the child exited 0 with its seal). So after the final check the
+   handler DISARMS (_disarm): it turns automatic collection off, empties gc.callbacks, clears
+   sys.setprofile and sys.settrace for its own thread and clears and frees every sys.monitoring
+   tool id in use, refuses each one it found armed by name, and reads them all again so one that a
+   callback re-armed meanwhile is refused too; it then restores and compares the reporting
+   machinery and counts the thread starts once more, and only THEN reads the faults for the
+   decision, so whatever the disarming itself ran (a callback firing on the disarming's own calls,
+   a finalizer of a callback it released) is judged. When nothing is armed the disarming runs no
+   code the loaded or tested module controls (none of its calls raises an audit event). After the
+   decision the handler runs only os.write on saved_stdout and saved_stderr (the seal, or a
+   diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
+   hook the loaded code added, which cannot be removed, does not run after the decision; no
+   Python-level stream write or flush, no collection, no callback. The rest of the class:
+     - signal handlers: the handler blocks every blockable signal in its thread when it starts, so
+       a handler the loaded code installed does not run after the final check (one already
+       pending runs at the next check's entry, before the checks); delivery through another thread
+       is residual (c);
+     - threading.setprofile and threading.settrace store a function used only when a thread
+       STARTS, and no thread starts after the decision without code already running; a profile or
+       trace function set on ANOTHER thread runs in that thread, residual (c);
+     - sys.unraisablehook, sys.excepthook and threading.excepthook replacements are restored and
+       compared by every check and once more after the disarming, and on a passing path nothing
+       after the decision raises or reports an exception, so no hook is called;
+     - finalizers, weakref callbacks and weakref.finalize run only when an object dies: with
+       collection off, the handler releases after the decision only bytes and ints it made itself;
+     - faulthandler runs no Python code; its fatal-signal dump or dump_traceback_later exit can only
+       end the child early (a missing seal or a nonzero exit) and write to the error stream, which
+       both parents refuse;
+     - sys.activate_stack_trampoline (the perf trampoline) runs no Python code;
+     - sys.remote_exec, another process injecting a script, is residual (f).
 
 DISCLOSED RESIDUALS -- the channels this contract CANNOT close, disclosed here ONCE (the two
 callers' docstrings point here instead of restating them):
@@ -132,6 +163,16 @@ callers' docstrings point here instead of restating them):
       pass that changed nothing (CPython reuses freed addresses; not reproduced -- the probing
       hosts allocated fresh addresses for the reproduction shapes, which free list objects and
       create instances of new classes).
+  (e) the disarming reads every mechanism before and after switching them off, and one found
+      armed either time is refused; a callback that, each time it fires during the disarming,
+      switches its OWN mechanism off before that mechanism is read and re-arms another one already
+      read the second time is not seen, and can run after the decision (a deliberate shape: an
+      accidental callback left armed is found by the first read; not reproduced).
+  (f) CPython 3.14's sys.remote_exec lets ANOTHER process with permission to trace this one (a
+      descendant of the loaded code under a permissive ptrace policy, or any same-user debugger)
+      make this interpreter run a script at its next eval-breaker check, which the seal loop
+      reaches, so such a script can run after the decision; the children are not launched with
+      -X disable_remote_debug (not reproduced).
 
 The parent-side halves of the contract stay with the parents: what each accepts (a complete record
 bound to the child, an empty error stream), and the channel by which reviewed, pinned loaded code
@@ -154,6 +195,9 @@ FAULT_EVENTS = frozenset(("sys.unraisablehook", "sys.excepthook"))
 # started inside the record handler runs after the interpreter's thread join and is ended by the
 # os._exit unobserved, so the handler counts these and refuses one started inside it (QA r8).
 THREAD_EVENTS = frozenset(("_thread.start_joinable_thread", "_thread.start_new_thread"))
+# The sys.monitoring tool ids a tool can claim: 0 to 5 (Python/instrumentation.c; ids 6 and 7 are
+# the ones CPython itself uses for sys.setprofile and sys.settrace, which are read separately).
+MONITORING_TOOLS = range(6)
 # The reporting machinery a cleanup fault is reported through: the error stream and the three
 # hooks CPython hands an uncaught or unraisable exception.
 REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook"),
@@ -291,8 +335,23 @@ class FailClosedChild:
             # since the callback started voids the record (merge train 2 QA r8, codex MAJOR).
             stage = "after the record callback"
             self._check(threads)
+            # The final check is done, but an interpreter-level callback the loaded code left
+            # armed (a profile or trace function, a sys.monitoring tool, a gc callback under a
+            # lowered threshold) would still fire on the writes below, after the decision, and
+            # its fault would never be read (merge train 2 QA r10, claude MAJOR 1). So each one is
+            # switched off HERE, and one found armed is a fault by name; anything the disarming
+            # itself runs is judged, because the machinery and thread checks run again after it
+            # and the decision reads self.faults only then (contract step 6).
+            stage = "disarming the interpreter callbacks"
+            armed = self._disarm()
+            if armed:
+                self.faults.append(
+                    "an interpreter callback was still armed after the final check ({}), so it "
+                    "could run after the decision unjudged".format(", ".join(armed)))
+            self._judge(self.restore_reporting(), threads)
             # From here on only os.write on the saved descriptors and the os._exit (contract
-            # step 6, merge train 2 QA r9): no flush, no collection, no callback.
+            # step 6, merge train 2 QA r9 and r10): no flush, no collection, no callback, and no
+            # audit event (CPython raises none for os.write or os._exit).
             if len(self.faults) > seen:
                 code = self.fail_code
                 self._callback_fault(self.faults[seen:])
@@ -354,8 +413,11 @@ class FailClosedChild:
         callback returns (QA r8). The ORDER is contract step 6: the flushes (a wrapper the loaded
         code installed runs in them) and then the collection passes (finalizers, gc callbacks)
         come FIRST, each pass judged by its own after-comparison, and the machinery comparison and
-        the thread count come LAST, so nothing runs after them that could invalidate either (QA
-        r9: the flushes used to come after the machinery check and the collection)."""
+        the thread count come LAST, so no code the check itself calls runs after them (QA r9: the
+        flushes used to come after the machinery check and the collection). An interpreter-level
+        callback left armed can still run after the check, on the handler's own later calls;
+        after the FINAL check _record_at_exit therefore disarms (_disarm) and judges once more
+        before its decision (QA r10)."""
         replaced = self.restore_reporting()
         try:
             sys.stdout.flush()
@@ -374,6 +436,13 @@ class FailClosedChild:
                 "garbage collection still freed or created objects after {} passes, so cleanup "
                 "work its finalizers keep creating cannot be shown complete".format(GC_PASS_BOUND))
         replaced += self.restore_reporting()
+        self._judge(replaced, threads)
+
+    def _judge(self, replaced, threads):
+        """The last part of every check: a fault for the reporting machinery found `replaced`
+        (names from restore_reporting) and one for any thread started since the audit hook had
+        counted `threads` thread starts. It runs no code the loaded or tested module controls once
+        _disarm has found nothing armed."""
         if replaced:
             self.faults.append("cleanup code replaced the reporting machinery ({})".format(
                 ", ".join(sorted(set(replaced)))))
@@ -382,6 +451,52 @@ class FailClosedChild:
             self.faults.append(
                 "{} thread start(s) inside the record handler, after the interpreter joined its "
                 "threads, so the work and any fault of such a thread cannot be seen".format(started))
+
+    def _disarm(self):
+        """Switch off, after the FINAL check, every interpreter-level mechanism that can call code
+        the loaded or tested module controls without a Python-level call from this handler, and
+        return, by name, each one found armed (the caller refuses them; contract step 6, merge train
+        2 QA r10, claude MAJOR 1): automatic garbage collection is disabled (not itself a fault) and
+        gc.callbacks emptied, sys.setprofile and sys.settrace are cleared for this thread, and every
+        sys.monitoring tool id in use is cleared and freed. A callback still armed here would
+        otherwise fire on the seal's writes -- a profile function's c_call event on os.write, a
+        trace function's line event, a monitoring CALL event, a collection a lowered threshold
+        starts -- after the decision. When nothing is armed this runs no such code (none of these
+        calls raises an audit event either); when something is, a callback firing on these very
+        calls runs here, before the decision, and the run is refused anyway. Every mechanism is
+        read again once all are off, so one a callback re-armed meanwhile is refused too (residual
+        (e) of the module docstring is the shape this second read cannot see)."""
+        gc.disable()
+        armed = self._armed()
+        if gc.callbacks:
+            del gc.callbacks[:]
+        if sys.getprofile() is not None:
+            sys.setprofile(None)
+        if sys.gettrace() is not None:
+            sys.settrace(None)
+        monitoring = getattr(sys, "monitoring", None)
+        for tool in MONITORING_TOOLS if monitoring is not None else ():
+            if monitoring.get_tool(tool) is not None:
+                if hasattr(monitoring, "clear_tool_id"):
+                    monitoring.clear_tool_id(tool)
+                else:
+                    monitoring.set_events(tool, 0)
+                monitoring.free_tool_id(tool)
+        again = self._armed() + (["automatic garbage collection"] if gc.isenabled() else [])
+        return armed + ["{} (re-armed while being disarmed)".format(name) for name in again]
+
+    def _armed(self):
+        """The interpreter-level callback mechanisms armed right now, by name (reads only)."""
+        armed = ["gc.callbacks"] if gc.callbacks else []
+        if sys.getprofile() is not None:
+            armed.append("sys.setprofile")
+        if sys.gettrace() is not None:
+            armed.append("sys.settrace")
+        monitoring = getattr(sys, "monitoring", None)
+        for tool in MONITORING_TOOLS if monitoring is not None else ():
+            if monitoring.get_tool(tool) is not None:
+                armed.append("sys.monitoring tool {}".format(tool))
+        return armed
 
 
 # --- self-test -----------------------------------------------------------------------------------
@@ -926,6 +1041,73 @@ class Output:
 sys.stdout = Output(sys.stdout)
 """
 
+# QA r10, claude MAJOR 1: an interpreter-level callback the loaded code left armed. Each seed's
+# callback faults (an unraisable exception under a silenced sys.unraisablehook) the first time it
+# fires once the record handler's stage is PAST its final check -- on d2d1df5f that is the stage
+# "sealing the record", after the decision, so the audit-recorded fault was never read and the
+# child exited 0 with its seal; now the disarming finds the callback armed and refuses it (and a
+# callback that fires on the disarming's own calls is judged before the decision). The `_LATE`
+# condition skips the stages up to and including the final check; the in-check controls use
+# `_IN_CHECK`, which fires only in the final check, and fail with or without the disarming.
+_LATE = "stage in (\"before the record\", \"in the record callback\", \"after the record callback\")"
+_IN_CHECK = "stage != \"after the record callback\""
+_CALLBACK_FAULT = """
+fired = []
+
+
+def late_fault():
+    frame = sys._getframe()
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        frame = frame.f_back
+    stage = None if frame is None else frame.f_locals.get("stage")
+    if stage is None or fired or {skip}:
+        return
+    fired.append(stage)
+    sys.unraisablehook = lambda unraisable: None
+
+    class Raiser:
+        def __del__(self):
+            raise RuntimeError("an interpreter callback faulted at " + stage)
+
+    Raiser()
+"""
+_ARM_PROFILE = "sys.setprofile(lambda frame, event, arg: late_fault())\n"
+_ARM_TRACE = """
+
+def tracer(frame, event, arg):
+    late_fault()
+    return tracer
+
+
+sys.settrace(tracer)
+"""
+_ARM_MONITORING = """
+monitoring = sys.monitoring
+monitoring.use_tool_id(3, "child-contract-selftest")
+monitoring.register_callback(3, monitoring.events.CALL, lambda *args: late_fault())
+monitoring.set_events(3, monitoring.events.CALL)
+"""
+_ARM_GC = """
+gc.set_threshold(1)
+gc.callbacks.append(lambda phase, info: late_fault())
+"""
+# Controls that must PASS: a profile function and a monitoring tool used and then removed by the
+# loaded code, and a lowered collection threshold with no callback, leave nothing armed.
+_SEED_CALLBACKS_REMOVED = """
+sys.setprofile(lambda frame, event, arg: None)
+sys.setprofile(None)
+sys.monitoring.use_tool_id(3, "child-contract-selftest")
+sys.monitoring.register_callback(3, sys.monitoring.events.CALL, lambda *args: None)
+sys.monitoring.set_events(3, sys.monitoring.events.CALL)
+sys.monitoring.set_events(3, 0)
+sys.monitoring.free_tool_id(3)
+gc.set_threshold(1)
+"""
+_ARMED = ("a fault was observed during the record callback", "exit 2",
+          "an interpreter callback was still armed after the final check")
+_IN_CHECK_FAULT = ("a fault was observed during the record callback",
+                   "a cleanup fault reached sys.unraisablehook", "exit 2")
+
 # (name, source before register(), source after arm_audit(), expected exit, expected record line
 # or None for provably no record, needles the error stream must carry, whether it must be empty).
 _CASES = (
@@ -988,6 +1170,19 @@ _CASES = (
     ("final-flush-signal-blocked", "", _SEED_FINAL_FLUSH_SIGNAL, 0, "record 0", (), True),
     ("earlier-handler-thread-residual-passes", "", _SEED_EARLIER_HANDLER_THREAD, 0, "record 0",
      (), True),
+    ("profile-left-armed-faults-late", "", _CALLBACK_FAULT.format(skip=_LATE) + _ARM_PROFILE, 2,
+     "record 0", _ARMED + ("(sys.setprofile)",), False),
+    ("trace-left-armed-faults-late", "", _CALLBACK_FAULT.format(skip=_LATE) + _ARM_TRACE, 2,
+     "record 0", _ARMED + ("(sys.settrace)",), False),
+    ("monitoring-left-armed-faults-late", "", _CALLBACK_FAULT.format(skip=_LATE) + _ARM_MONITORING,
+     2, "record 0", _ARMED + ("(sys.monitoring tool 3)",), False),
+    ("gc-callback-low-threshold-faults-late", "", _CALLBACK_FAULT.format(skip=_LATE) + _ARM_GC, 2,
+     "record 0", _ARMED + ("(gc.callbacks)",), False),
+    ("profile-faults-in-final-check", "", _CALLBACK_FAULT.format(skip=_IN_CHECK) + _ARM_PROFILE, 2,
+     "record 0", _IN_CHECK_FAULT, False),
+    ("gc-callback-faults-in-final-check", "", _CALLBACK_FAULT.format(skip=_IN_CHECK) + _ARM_GC, 2,
+     "record 0", _IN_CHECK_FAULT, False),
+    ("callbacks-removed-pass", "", _SEED_CALLBACKS_REMOVED, 0, "record 0", (), True),
 )
 
 
@@ -1020,8 +1215,8 @@ def self_test():
     passing seal."""
     failures = []
     for needle in ("DELETED sys.unraisablehook", "threading.excepthook", "SAME addresses",
-                   "never finalized", "NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE LAST CHECK",
-                   "CONCURRENTLY"):
+                   "never finalized", "NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION",
+                   "CONCURRENTLY", "switches its OWN mechanism off", "sys.remote_exec"):
         if needle not in (__doc__ or ""):
             failures.append("the module docstring no longer discloses {!r}".format(needle))
     for name, pre, body, want_code, want_record, needles, want_quiet in _CASES:
@@ -1072,8 +1267,11 @@ def self_test():
           "the error stream, which the parents refuse; the re-check's own second flush that "
           "replaces threading.excepthook or drops a cyclic raising finalizer (QA r9) exits 2 by "
           "name, a signal it sends finds its handler blocked, an earlier exit handler's waiting "
-          "thread passes exactly as residual (c) discloses, and every passing child's stdout "
-          "ends with the seal written after the final check)")
+          "thread passes exactly as residual (c) discloses; a profile function, a trace function, "
+          "a sys.monitoring tool and a gc callback under a lowered threshold, each left armed to "
+          "fault once the handler is past its final check (QA r10), exit 2 by name with no seal, "
+          "while their in-check controls exit 2 and callbacks removed by the loaded code pass; "
+          "and every passing child's stdout ends with the seal written after the final check)")
     return 0
 
 

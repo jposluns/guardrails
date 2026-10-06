@@ -691,9 +691,13 @@ def parity_child(spec):
     machinery left replaced, a thread started, a flush failure on the re-check) also exits 2,
     with the contract's diagnostic, because the contract re-runs its checks after the record
     callback and a new fault voids the result (merge train 2 QA r8). That re-check is the
-    FINAL check, and nothing loaded code can reach runs after it (contract step 6, merge train 2
-    QA r9, codex MAJOR: its own stdout flush, which runs a loaded wrapper, used to come after its
-    machinery check and collection): the result line is written and flushed through sys.stdout
+    FINAL check, and no code the check calls runs after its own judgments (contract step 6, merge
+    train 2 QA r9, codex MAJOR: its own stdout flush, which runs a loaded wrapper, used to come
+    after its machinery check and collection); after it the contract disarms every interpreter
+    callback loaded code left armed (a profile or trace function, a sys.monitoring tool, a gc
+    callback), refuses one it finds and judges again before its decision (QA r10), so what loaded
+    code can still run after the decision is only the contract module's disclosed residuals (c),
+    (e) and (f): the result line is written and flushed through sys.stdout
     before it, and the PARITY_COMPLETE terminator only after it, by os.write on the stdout
     descriptor the contract saved at register(), so a fault the final check finds leaves the
     result without its terminator and the exit 2. Exit 2 also

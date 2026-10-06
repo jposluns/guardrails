@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8addefe83581cb06e143fd6d1ef83d4e4c02899bbdb291167ea34006bee70e9a"
+tree-sha256 = "d7b00ddb7d488964c06e40e4daa906fe5ccd1c78b3976cfc49fa1c823a52fe89"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 256396
-sha256 = "59ed6f281f6a7af2c54e72113e5df02a077f7a00cc7550b0b2e0c426c470c2e5"
+bytes = 256942
+sha256 = "ad5c46aeb92cc0c72be9d7b067c423fd4bfb6b3900ace4728932f4adc1e728b9"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -806,8 +806,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 346165
-sha256 = "b98101343593651b913df67a3e272599d392d81364b7e810e3aad356b4d54494"
+bytes = 347257
+sha256 = "9e12b046c611ff7d496d93db73483b46d39daa757c3a7624bf3ebb2eb79c1bac"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2306,8 +2306,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 196818
-sha256 = "58e80aaf2005e656a91fe260d3ae9105bd8582dd1db683a712b5e41916e1eb2d"
+bytes = 197364
+sha256 = "23e0d50dfe4bcddee5f85e9edd3995740b4441f8fc3133dbd6549436b556a1f0"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2566,8 +2566,8 @@ sha256 = "d2247bf246136735bef911aa3129a9e2895c0bc2297a0480b9d1daf2d8fdbd99"
 
 [[sources]]
 path = "opf/tools/_child_contract.py"
-bytes = 48985
-sha256 = "0f61e56c86a0e0568f1aaece3e6b18ddece2a46bd42e03b9703cd9bb625c868c"
+bytes = 61531
+sha256 = "e8d3ac304ed76cc420d3b2e4b2c4d00565d4bc2534e900759434fe956aad16fa"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -2941,8 +2941,8 @@ sha256 = "bd9f2ed39cb01c64e41cb355c7ef3c4a1d3b89265e51c66e39163c6eb9a855e7"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1455323
-sha256 = "07e4793f54fbfb32724a12715368a51c642f6b79258ce568c5c4a5e9679a3f2c"
+bytes = 1455971
+sha256 = "87ae209d7942be6ff3fa084e49ae4c67d897ef3c4300f1079f0b40c49aecaccd"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 245845
-sha256 = "9a8e8a5d1ffb6b94ac5d8f66fe265f7a44cdea2674bbca7f9d7550d3d879acfc"
+bytes = 246391
+sha256 = "7a1277f84a6c5ac0f30b67e48ae8210a5f809d5594cd92ce89cac99bc05e1d58"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3261,8 +3261,8 @@ sha256 = "b013edeeefca5054b5351bab57530a8874d6bc2aaacdc7dd598110e80f5e78eb"
 
 [[sources]]
 path = "tools/check_hook_scripts.py"
-bytes = 83460
-sha256 = "69d54999029a31c34d66d2580939665dbea222f3573cd4abc8954280220ec8df"
+bytes = 83823
+sha256 = "912a0a1d83a0133e88f76397b039ff3dcd73aec0929e7c23f1a7a372117160e0"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"

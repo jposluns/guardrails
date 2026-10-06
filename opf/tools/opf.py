@@ -22750,8 +22750,9 @@ def _unit_open_record():
     (None when the variable is absent, the unit entry run by hand, so there is nothing to write).
     The open is O_WRONLY|O_CREAT|O_TRUNC, mode 0600 (the watchdog's record convention), guarded by
     _unit_guard_flags() (a symlink is not followed, a FIFO never blocks the open) and required
-    regular by fstat on the opened descriptor, so the file is EMPTY from here until the seal is
-    written after the contract's final check (merge train 2 QA r10). An open that fails, or a
+    regular by fstat on the opened descriptor, so this child writes nothing there until the seal
+    is written after the contract's final check (merge train 2 QA r10; another writer holding the
+    path is _unit_write_record's case). An open that fails, or a
     path that is not a regular file, is a named line on stderr and None: no record is ever
     written, and the parent's missing-record check fails the unit closed. The descriptor is held
     until the record handler's os._exit ends the child (or, on a path that never reaches the
@@ -22788,7 +22789,8 @@ def _unit_write_record(label, code, fd):
     the runner named in OPF_SELF_TEST_RESULT, RETURNED as the seal [(fd, bytes)] (fd from
     _unit_open_record, opened before any unit code ran; nothing, (), when fd is None) and NEVER
     written here. _cmd_self_test_unit's record callback returns it to _child_contract's record
-    handler, which writes it with os.write only AFTER its final check passes and then ends the
+    handler, which writes it with os.write only AFTER its final check and its disarming of the
+    interpreter callbacks pass (QA r10) and then ends the
     child with os._exit (contract step 6; merge train 2 QA r10: this function used to open and
     write the file inside the callback, BEFORE the final check, whose own stream flushes run a
     wrapper the unit left installed, so a stdout wrapper whose flush called os._exit(0) there
@@ -22809,15 +22811,19 @@ def _unit_write_record(label, code, fd):
     early passes (the disclosed forged-record sabotage residual, D-385-ACCIDENTAL-UNIT, QA31 codex;
     _run_unit_subprocess (h)). The r10 seal does NOT narrow that residual: such a unit writes the
     line through the path itself, after the register-time truncation, and the parent reads the
-    path; the seal closes only the ACCIDENTAL end after the record (the record is now never on
-    disk before the final check). A seal write that fails is the contract's named fail_code exit,
-    and a missing or empty record the parent's missing-record check (fail closed). Before it
-    returns the seal it truncates the file and rewinds the descriptor (os.ftruncate, os.lseek; no
-    unit code runs in either): a process the unit launched inherits OPF_SELF_TEST_RESULT and may
-    have written there meanwhile (the opf-unit-bound watchdog vectors do), bytes the retired
-    truncating open used to replace, so the file is EMPTY again from here to the seal, which then
-    makes it exactly the record. A truncate that fails raises in the callback: the contract's named
-    fail_code exit."""
+    path; the seal closes only the ACCIDENTAL end after the record (this child never puts the
+    record on disk before the final check). A seal write that fails is the contract's named
+    fail_code exit, and a missing or empty record the parent's missing-record check (fail closed).
+    Before it returns the seal it truncates the file and rewinds the descriptor (os.ftruncate,
+    os.lseek; no unit code runs in either): a process the unit launched inherits
+    OPF_SELF_TEST_RESULT and may have written there meanwhile (the opf-unit-bound watchdog vectors
+    do), bytes the retired truncating open used to replace. The truncation empties the file at
+    that moment only: a writer that still holds the path (such a process, or a wrapper the unit
+    left that writes there during the contract's final check) can add bytes after it, and the seal
+    then writes the record from offset 0 over whatever lies there, so the file is exactly the
+    record only when no such bytes lie past its end; bytes that do are left trailing, and the
+    parent's exact match of the record line refuses the file (fail closed). A truncate that fails
+    raises in the callback: the contract's named fail_code exit."""
     if fd is None:
         return ()
     os.ftruncate(fd, 0)
@@ -23019,8 +23025,9 @@ def _cmd_self_test_unit(label):
     where the identity comparison sees the released and created objects themselves) -- so
     pending finalizers run before
     the record, flushes the
-    streams, re-runs the same checks after the record callback (the final check), only then writes
-    the sealed record and then ends the process ITSELF with os._exit(code), so no
+    streams, re-runs the same checks after the record callback (the final check), disarms every
+    interpreter callback the unit left armed and refuses one it finds (contract step 6, QA r10),
+    only then writes the sealed record and then ends the process ITSELF with os._exit(code), so no
     interpreter finalization runs after it (an object still reachable then is never finalized,
     so its finalizer neither runs nor faults). The child half of this contract is implemented
     ONCE in the sibling _child_contract module (shared with the hook-scripts parity child) and
