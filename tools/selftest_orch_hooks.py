@@ -1246,6 +1246,58 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\nnow: $(date) and `pwd`\nEOF"), None)
         check("trunc/fg-r7-body-exact-spans-allows",
               _verdict(bg("cat <<EOF\nnow: $(date) and `pwd`\nEOF", rib=False)), "allow")
+        # QA round 8 BLOCKER: a closed body span whose content holds a quote or a nested substitution
+        # opener was scanned as code and inherited that scan's residuals: `echo "$(job & wait)"` in a body
+        # backtick span read as double-quoted text (each ALLOWED at a72d694f; the quote forms DENIED on
+        # main; bash 5.3 ran the '&' in each). Only a FLAT span is judged now; any other closed span is
+        # cannot-evaluate, never the inner scan's result.
+        r8_job = "true & echo BG=$!; wait"
+        r8_repro = "cat <<EOF\n\"\n`echo \"$(printf DETACHED & wait)\"`\n\"\nEOF"
+        for name, cmd in (
+                ("trunc/scan-r8-body-backtick-dq-cmdsub-kind", r8_repro),
+                ("trunc/scan-r8-body-backtick-squote-eval-kind", "cat <<EOF\n'\n`eval '" + r8_job + "'`\n'\nEOF"),
+                ("trunc/scan-r8-body-cmdsub-squote-eval-kind", "cat <<EOF\n'\n$(eval '" + r8_job + "')\n'\nEOF"),
+                ("trunc/scan-r8-body-cmdsub-dquote-eval-kind",
+                 "cat <<EOF\n\"\n$(eval \"sleep 0 & jobs -p; wait\")\n\"\nEOF"),
+                ("trunc/scan-r8-body-backtick-dquote-eval-kind",
+                 "cat <<EOF\n\"\n`eval \"sleep 0 & jobs -p; wait\"`\n\"\nEOF"),
+                ("trunc/scan-r8-body-backtick-paramexp-comment-kind",
+                 "cat <<EOF\n`echo ${x:- #}; " + r8_job + "`\nEOF"),
+                ("trunc/scan-r8-body-backtick-nested-cmdsub-kind",
+                 "cat <<EOF\n`echo $(echo ${x:- #}); " + r8_job + "`\nEOF"),
+                # Nested openers that the inner scan did catch now deny unread too (the class rule).
+                ("trunc/scan-r8-body-backtick-dollar-bracket-kind", "cat <<EOF\n`echo $[1]; " + r8_job + "`\nEOF"),
+                ("trunc/scan-r8-body-backtick-procsub-kind", "cat <<EOF\n`cat <(echo x); " + r8_job + "`\nEOF"),
+                ("trunc/scan-r8-body-backtick-arith-kind", "cat <<EOF\n`echo $((1)); " + r8_job + "`\nEOF"),
+                # The disclosed over-refusal this adds: a safe span holding a quote denies too.
+                ("trunc/scan-r8-body-cmdsub-dq-safe-overrefusal-kind", "cat <<EOF\nhi $(echo \"x\")\nEOF"),
+                ("trunc/scan-r8-body-backtick-dq-safe-overrefusal-kind", "cat <<EOF\nd `date +\"%F\"`\nEOF")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
+        r8_res = bg(r8_repro, rib=False)
+        check("trunc/fg-r8-body-backtick-dq-cmdsub-denies",
+              (_verdict(r8_res), "cannot be evaluated" in _why(r8_res), "class (d)" in _why(r8_res),
+               "nested substitution opener" in _why(r8_res)), ("deny", True, True, True))
+        # Its nested backtick sibling (a backtick in a $(...) span) was already unreadable to the walk; a
+        # flat span is still judged, so its real detach denies as one.
+        check("trunc/scan-r8-body-cmdsub-nested-backtick-denies",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n\"\n$(echo \"`" + r8_job + "`\")\n\"\nEOF")
+              is not None, True)
+        check("trunc/scan-r8-body-flat-cmdsub-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$(" + r8_job + ")\nEOF"), "detach")
+        check("trunc/scan-r8-body-flat-backtick-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n`" + r8_job + "`\nEOF"), "detach")
+        # QA round 8 (found while checking siblings): `)` is a metacharacter, so a `#` right after a
+        # subshell's closing paren opens a comment to bash. The walk read it as word text, closed the body
+        # span on its first line, and left the next line's real '&' in the body as data (ALLOWED at
+        # a72d694f, DENIED on main; bash 5.3 ran it). The walk now reads the comment and finds bash's end.
+        r8_paren = "cat <<EOF\n$( (true)# )\n" + r8_job + "\n)\nEOF"
+        check("trunc/scan-r8-body-paren-comment-detach-kind", aiqt_hooks._orch_foreground_detach_kind(r8_paren),
+              "detach")
+        check("trunc/fg-r8-body-paren-comment-detach-denies", _verdict(bg(r8_paren, rib=False)), "deny")
+        check("trunc/cmdsub-end-r8-paren-comment",
+              aiqt_hooks._orch_cmdsub_end("$( (true)# )\nx\n)", 2, 16), (16, False, True))
+        check("trunc/fg-r8-body-paren-comment-safe-allows",
+              _verdict(bg("cat <<EOF\n$( (true)# )\nsafe\n)\nEOF", rib=False)), "allow")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
