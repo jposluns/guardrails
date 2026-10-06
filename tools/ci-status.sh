@@ -64,8 +64,8 @@ DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
 # A run for this commit is created after the commit is pushed, so after the commit object exists; its
 # created_at (GitHub's clock) can precede the committer date only when the committer's clock ran ahead.
 # LOWER_BOUND is therefore min(committer date, now) minus SCAN_MARGIN_SECONDS. The clamp to now
-# neutralises a committer date in the future; it can only lower the bound, so a wrong local clock never
-# narrows the scan. WHAT THE 24-HOUR MARGIN COVERS: a committer clock ahead of GitHub's by at most 24
+# neutralises a committer date in the future; it can only lower the bound, so through the clamp a wrong
+# clock on the machine running this check never narrows the scan. WHAT THE 24-HOUR MARGIN COVERS: a committer clock ahead of GitHub's by at most 24
 # hours, whatever the cause. A clock behind is always covered, since it only lowers the bound. A wrong
 # time zone setting on a clock showing the right local time shifts the committer date by the
 # difference of two UTC offsets, which span UTC-12 to UTC+14, so up to 26 hours either way: an error of
@@ -98,6 +98,8 @@ LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
 # a run is created between page reads on both the first read and the one re-read, one-shot mode exits 2
 # (API error) even if every run of this commit was read. On a repository that creates runs that often,
 # report-once can fail this way repeatedly; --wait keeps polling through it until the deadline.
+# (That short-page example is also rejected by the end-of-listing count check; the cost that belongs to
+# the duplicate-ID check alone is the shape where the scan ends at the age bound.)
 RETRY_SECONDS=5
 
 POLL_SECONDS=15

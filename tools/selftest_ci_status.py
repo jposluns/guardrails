@@ -782,9 +782,15 @@ def main(report_path=None):
     if not _write_report(report_path):
         return 2
     if HARNESS_ERRORS:
+        # Assertion failures seen in the same run are still printed, and they make the run a FAIL
+        # (exit 1), not a cannot-evaluate: a harness error never hides a behaviour failure.
+        if FAILURES:
+            print("SELF-TEST FAIL:")
+            for failure in FAILURES:
+                print("  - " + failure)
         print("SELF-TEST HARNESS ERROR: {} check(s) not evaluated; see the labelled errors above "
               "(cannot evaluate)".format(len(HARNESS_ERRORS)), file=sys.stderr)
-        return 2
+        return 1 if FAILURES else 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
