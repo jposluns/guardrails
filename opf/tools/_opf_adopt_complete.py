@@ -842,16 +842,18 @@ _CANONICAL_JOB_KEYS = frozenset(("name", "runs-on", "steps", "timeout-minutes", 
 # GitHub's permission forms (workflow syntax, `permissions` and `jobs.<job_id>.permissions`,
 # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions):
 # `read-all`, `write-all`, an empty flow mapping, or a mapping of scope names to an access level. Each
-# scope maps to the levels it accepts (id-token only write or none, models only read or none); a scope
-# missing here or a level outside its set refuses, which leaves a valid workflow unproven, never an
-# invalid one VALID.
+# scope maps to the levels it accepts; a scope missing here or a level outside its set refuses, which
+# leaves a valid workflow unproven, never an invalid one VALID. The scope list and levels are that page's
+# as retrieved on 2026-10-06: id-token takes only write or none, vulnerability-alerts only read or none
+# (the page: write is not valid), every other listed scope read, write or none. The page lists no models
+# or repository-projects scope, so either refuses.
 _PERMISSION_WHOLE = frozenset(("read-all", "write-all"))
 _RWN = frozenset(("read", "write", "none"))
 _PERMISSION_SCOPES = {
-    "actions": _RWN, "attestations": _RWN, "checks": _RWN, "contents": _RWN, "deployments": _RWN,
-    "discussions": _RWN, "id-token": frozenset(("write", "none")), "issues": _RWN,
-    "models": frozenset(("read", "none")), "packages": _RWN, "pages": _RWN, "pull-requests": _RWN,
-    "repository-projects": _RWN, "security-events": _RWN, "statuses": _RWN}
+    "actions": _RWN, "artifact-metadata": _RWN, "attestations": _RWN, "checks": _RWN, "code-quality": _RWN,
+    "contents": _RWN, "deployments": _RWN, "discussions": _RWN, "id-token": frozenset(("write", "none")),
+    "issues": _RWN, "packages": _RWN, "pages": _RWN, "pull-requests": _RWN, "security-events": _RWN,
+    "statuses": _RWN, "vulnerability-alerts": frozenset(("read", "none"))}
 # A step id: a letter or `_`, then letters, digits, `_` and `-`.
 _STEP_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
@@ -1822,6 +1824,17 @@ def self_test():
                  VALID),
                 ("workflow-permissions-banana", b"permissions:\n  contents: banana\n" + _CI_BYTES, CANNOT_EVALUATE),
                 ("workflow-permissions-read", b"permissions:\n  contents: read\n" + _CI_BYTES, VALID),
+                # Round 8b: the scope table is the workflow syntax page's (retrieved 2026-10-06).
+                ("workflow-permissions-models", b"permissions:\n  models: read\n" + _CI_BYTES, CANNOT_EVALUATE),
+                ("job-permissions-repository-projects", _CI_BYTES.replace(
+                    b"    runs-on: ubuntu-latest\n",
+                    b"    runs-on: ubuntu-latest\n    permissions: {repository-projects: read}\n"), CANNOT_EVALUATE),
+                ("job-permissions-vulnerability-alerts-write", _CI_BYTES.replace(
+                    b"    runs-on: ubuntu-latest\n",
+                    b"    runs-on: ubuntu-latest\n    permissions: {vulnerability-alerts: write}\n"), CANNOT_EVALUATE),
+                ("workflow-permissions-vulnerability-alerts-read",
+                 b"permissions:\n  vulnerability-alerts: read\n  artifact-metadata: write\n  code-quality: read\n"
+                 + _CI_BYTES, VALID),
                 ("multi-dot-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1.2.3\n"),
                  VALID),
                 ("float-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1.5\n"),
@@ -2097,14 +2110,25 @@ def self_test():
                 (b"continue-on-error", (b"false",), (b"true", b"'false'", b"${{ false }}", b"[false]")),
                 (b"permissions", (b"read-all", b"{}", b"{contents: read}", b"{contents: read, 'id-token': \"write\"}",
                                   b"\n      contents: read", b"write-all", b"'read-all'", b"{'contents': 'none'}",
-                                  b"\n      id-token: write\n      pull-requests: 'write'\n      models: read",
+                                  b"\n      id-token: write\n      pull-requests: 'write'"
+                                  b"\n      vulnerability-alerts: read",
                                   b"{actions: read, attestations: write, checks: none, deployments: read, discussions: "
-                                  b"write, issues: none, packages: read, pages: write, repository-projects: none, "
-                                  b"security-events: read, statuses: write}"),
+                                  b"write, issues: none, packages: read, pages: write, security-events: read, "
+                                  b"statuses: write}",
+                                  # Round 8b: the scopes the workflow syntax page lists (retrieved 2026-10-06)
+                                  # that the round 8 table lacked, each at a level it accepts.
+                                  b"{artifact-metadata: read}", b"{artifact-metadata: write}", b"{code-quality: none}",
+                                  b"{code-quality: write}", b"{vulnerability-alerts: read}",
+                                  b"\n      vulnerability-alerts: none"),
                  (b"[read]", b"5", b"{contents: [read]}", b"\n      contents:\n        x: y", b"\n      contents: true",
                   b"", b"{contents: banana}", b"\n      contents: banana", b"{banana: read}", b"\n      banana: read",
                   b"read", b"none", b"READ-ALL", b"read-all-x", b"{id-token: read}", b"{models: write}",
-                  b"{contents: Read}", b"{contents: ~}", b"\n      contents:", b"{contents: read, x: none}")),
+                  b"{contents: Read}", b"{contents: ~}", b"\n      contents:", b"{contents: read, x: none}",
+                  # Round 8b: vulnerability-alerts takes only read or none; models and repository-projects
+                  # are not on the page's scope list.
+                  b"{vulnerability-alerts: write}", b"\n      vulnerability-alerts: write", b"{models: read}",
+                  b"{models: none}", b"\n      repository-projects: none", b"{repository-projects: write}",
+                  b"{contents: read, models: read}")),
                 (b"defaults", (b"\n      run:\n        shell: bash",),
                  (b"\n      run:\n        shell: bash\n      other: x", b"\n      run:\n        foo: x",
                   b"\n      other: x")),
