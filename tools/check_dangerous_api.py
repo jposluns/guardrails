@@ -104,7 +104,8 @@ a context, is a call of a verifying constructor); a name that may also
 hold an assignment, a parameter or any other value the scan cannot name, an unbound name, and
 an expression prove nothing, so they are findings. A reviewed site is admitted only by an
 ALLOWLIST entry (path, enclosing qualname, kind, exact count, reason); an entry whose count no
-longer matches is itself a finding.
+longer matches is itself a finding. A site is counted by its line and column, so two sites on
+one line count twice.
 
 Fail closed: each file is decoded as Python decodes it (tokenize.detect_encoding, so a BOM and
 a PEP 263 coding cookie are honoured) and a cookie other than utf-8 is cannot-evaluate, since
@@ -294,7 +295,7 @@ CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", 
           "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
           "shell-subprocess", "shell-always", "code-ref", "code-loader",
           "fail-encoding", "fail-read", "fail-parse", "fail-nonregular", "fail-symlink",
-          "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape")
+          "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape", "site-column")
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry
 # names a current legitimate site and why it is safe; a count that no longer matches the
@@ -750,7 +751,9 @@ class _Scanner(ast.NodeVisitor):
 
     def add(self, node, kind, check, detail):
         qual = ".".join(self.qual) if self.qual else "<module>"
-        self.findings.append((getattr(node, "lineno", 0), qual, kind, check, detail))
+        # The column keeps two sites on one line apart, so each call site counts once.
+        column = getattr(node, "col_offset", 0) if self.on("site-column") else 0
+        self.findings.append((getattr(node, "lineno", 0), column, qual, kind, check, detail))
 
     def candidates(self, name, fallback=True):
         """Every binding the bare name may hold at this point (a dotted import target, or None
@@ -1327,12 +1330,12 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
             raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
         hits.extend((rel,) + item for item in found)
     counts = {}
-    for rel, _line, qual, kind, _check, _detail in hits:
+    for rel, _line, _column, qual, kind, _check, _detail in hits:
         counts[(rel, qual, kind)] = counts.get((rel, qual, kind), 0) + 1
     allowed = {entry[:3]: entry[3] for entry in allowlist}
     stale_off = "allowlist-stale" in disabled
     findings = []
-    for rel, line, qual, kind, check, detail in hits:
+    for rel, line, _column, qual, kind, check, detail in hits:
         key = (rel, qual, kind)
         if key in allowed and (stale_off or counts[key] == allowed[key]):
             continue
@@ -1987,6 +1990,8 @@ _ENTRY = ("tools/a.py", "f", "code", 1, _REASON)
 _GBK = (b"# -*- coding: gbk -*-\ns = \x22\xe3\x81\x82\x5c\x22; exec(\x27print(1+1)\x27);"
         b" print(\x27X\x27) #\x22\n")
 CE = "cannot-evaluate"
+_TWO_ON_ONE_LINE = (b"def f(spec, a, b):\n"
+                    b"    spec.loader.exec_module(a); spec.loader.exec_module(b)\n")
 # Tree vectors: (name, files, allowlist, setup, expected, check, outcome without the check).
 TREE_VECTORS = (
     # Parses, but nests deeper than the visitor can recurse: RecursionError is cannot-evaluate.
@@ -2033,6 +2038,10 @@ TREE_VECTORS = (
      2, "allowlist-stale", 0),
     ("allowlist entry vanished", {"tools/a.py": b"x = 1\n"}, (_ENTRY,), None, 1,
      "allowlist-stale", 0),
+    # The QA reproduction: two exec_module calls on one line are two sites, so a one-site
+    # allowance leaves both reported plus the count drift.
+    ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
+     (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),
      None, CE, "allowlist-shape", 0),
     ("allowlist boolean count", {"tools/a.py": _SITE}, (_ENTRY[:3] + (True, _REASON),),
@@ -2053,7 +2062,7 @@ def self_test():
     for source, checks in POSITIVE_VECTORS + tuple((s, (c,)) for s, c in generated):
         exercised.update(checks)
         got = scan_source(source)
-        if not any(item[3] in checks for item in got):
+        if not any(item[4] in checks for item in got):
             failures.append("positive not detected: " + repr(source))
         for check in checks:
             if scan_source(source, disabled=(check,)):

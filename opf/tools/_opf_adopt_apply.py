@@ -5595,13 +5595,7 @@ def _self_test_checks():
     _emit_inventory = globals()["emit_inventory"]
     _run_adopt_transaction = globals()["run_adopt_transaction"]
 
-    def fixture_plan(run_id_):
-        """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
-        digest of its canonical emission without that field), so the bundle verifier proves it exactly as
-        it proves a real plan (spec 4.2)."""
-        body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
-        digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
-        return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+    fixture_plan = _st_fixture_plan
 
     def emit_inventory(run_id_, rows, phase=None, plan_digest=None):
         """Self-test shadow of the module emitter: every fixture inventory carries its run's fixture plan
@@ -5609,18 +5603,7 @@ def _self_test_checks():
         return _emit_inventory(run_id_, rows, phase,
                                fixture_plan(run_id_)[1] if plan_digest is None else plan_digest)
 
-    def run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
-        """Self-test shadow of the module transaction: a base transaction that names no plan digest
-        stages its run's fixture plan first, as apply stages the approved plan, and every transaction
-        that names none carries that plan's digest."""
-        plan_bytes_, digest = fixture_plan(run_id_)
-        staged = compose
-        if phase is None and plan_digest is None:
-            def staged(ops):
-                ops.create(plan_rel(run_id_), plan_bytes_)
-                return compose(ops)
-        return _run_adopt_transaction(product_root, run_id_, staged, phase,
-                                      digest if plan_digest is None else plan_digest)
+    run_adopt_transaction = _st_run_adopt_transaction
 
     def stage_fixture_plan(product_root, run_id_):
         """Write the run's fixture plan into a hand-built bundle."""
@@ -6077,15 +6060,7 @@ def _self_test_checks():
     # 5: the journaled shell over throwaway fixtures. An occupied view destination and an occupying
     # machine-store file (a foreign manifest-shaped file, so no store resolves) are archived preserve-first
     # and removed; a non-occupying source takes only its preimage and stays frozen in place.
-    def fixture(temp):
-        root = Path(temp).resolve()
-        files = {".working/TODO.md": b"hand-kept todo\n",
-                 ".working/toml/manifest.toml": b"# a foreign manifest-shaped file\n",
-                 "legacy/RULES.md": b"old rules\n"}
-        for rel, payload in files.items():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_bytes(payload)
-        return root, files
+    fixture = _st_fixture
 
     def snapshot(root):
         # the regular files outside `.aiqt/`, read through the same fail-closed walk as tree_state
@@ -6139,16 +6114,7 @@ def _self_test_checks():
     def plan_digest(payload):
         return "sha256:" + _sha256(payload)
 
-    def compose_full(files, drift=False):
-        def compose(ops):
-            todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
-            ops.archive_occupying(".working/TODO.md", plan_digest(todo))
-            ops.archive_occupying(".working/toml/manifest.toml", plan_digest(files[".working/toml/manifest.toml"]))
-            ops.preserve("legacy/RULES.md", plan_digest(files["legacy/RULES.md"]))
-        return compose
-
-    def lock_free(root):
-        return _journal.read_lock_owner(_journal_root(root)) is None
+    compose_full, lock_free = _st_compose_full, _st_lock_free
 
     def txn_state(root, txn):
         jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
@@ -7843,17 +7809,7 @@ def _self_test_checks():
                       ("B", "ordinary"): lambda: _InjectedCloseFault("B-ordinary-read-back-fault"),
                       ("B", "interrupt"): lambda: _InjectedCloseInterrupt("B-interrupt-read-back-interrupt")}
 
-        def rendering(exc):
-            """Every exception of `exc`'s chain (cause and context), each as str and with its notes."""
-            seen, todo, parts = [], [exc], []
-            while todo:
-                cur = todo.pop(0)
-                if cur is None or any(cur is was for was in seen):
-                    continue
-                seen.append(cur)
-                parts.append("{} {}".format(cur, _journal._exc_said(cur)))
-                todo += [cur.__cause__, cur.__context__]
-            return " ".join(parts)
+        rendering = _st_rendering
         for (r_kind, b_kind), want in table_stop.items():
             for mine_none in (False, True):
                 for committed in (True, False):
@@ -8001,372 +7957,24 @@ def _self_test_checks():
               and raised_p is fired_p[0] and verdict_p is None and not leaked,
               observed="control={!r} verdict={!r} raised={!r} injected={!r} leaked={!r}".format(
                   control_p, verdict_p, raised_p, fired_p, leaked))
-        # 6a'''b3o (rounds 18 and 19, the close-exception CLASS): a raise after a REAL close at EVERY close
-        # event of seven runs (commit, refusal, body interrupt, body fault, failed acquire, lock stays,
-        # failed transaction with rollback), one injection per run, EVERY probe class at EVERY event. The
-        # classes are read from the code, never a hand list (close_site_classes): every exception class
-        # named at a raise, except or isinstance site of every module whose code is on the stack at any
-        # close event of those runs (StoreError and FileNotFoundError among them), plus an ordinary fault and
-        # an interrupt no site names. The injected exception is named in the outcome (raised itself, or in
-        # the message, notes, cause or context chain of what was raised) on every run, except the disclosed
-        # unnamed close OSErrors (a quiet teardown close, or one yielding to an exception in flight). Red
-        # against any handler in the run's reach that reads a close exception as a clean signal (absent,
-        # unreadable, cannot-evaluate, not reached). The probe runs make fsync a no-op (no close event
-        # depends on it, re-proved below by equal event counts) so the full set fits a self-test run.
-        import ast
-        import builtins
-        import inspect
-        import warnings
-        real_acquire_c, real_apply_c = _journal.acquire_lock, _journal.apply_ops
-
-        def class_failed_acquire(journal_root, session_id):
-            real_acquire_c(journal_root, session_id)
-            fault = OSError(errno.EIO, "CLASS-ACQUIRE-EIO")
-            fault.lock_created = True
-            raise fault
-
-        def class_apply_then_fail(root_fd, ops, reader):
-            real_apply_c(root_fd, ops, reader)
-            raise _journal.JournalError("CLASS-ROLLBACK-TRIGGER")
-
-        def class_body_interrupt(ops):
-            raise _InjectedCloseInterrupt("CLASS-BODY-INTERRUPT")
-
-        def class_body_fault(ops):
-            raise _InjectedCloseFault("CLASS-BODY-FAULT")
-        class_scenarios = (("commit", None, ()), ("refusal", compose_refused_here, ()),
-                           ("body-interrupt", class_body_interrupt, ()), ("body-fault", class_body_fault, ()),
-                           ("failed-acquire", None, (("acquire_lock", class_failed_acquire),)),
-                           ("lock-stays", None, (("release_lock", lambda journal_root: None),)),
-                           ("rollback", None, (("apply_ops", class_apply_then_fail),)))
-        quiet_code = _journal._close_fd_quietly.__code__
-        # Every descriptor class_run reclaims, one row per run: (scenario, the injected exceptions, the code
-        # that opened each descriptor reclaimed). Judged once the sweeps below have run.
-        class_reclaims = []
-        # The disclosed windows (module docstring): _open_dir_contained's duplicate, and the store's
-        # _open_working_dir_fd `.working` descriptor, each left open when a parent close raises anything
-        # but OSError.
-        class_reclaim_windows = frozenset(("_journal.py:_open_dir_contained", "_opf_store.py:_open_working_dir_fd"))
-
-        def class_run(scenario, plan, sites=None):
-            """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
-            close event n (counted from 1, or only beneath a frame running `plan["under"]` when given; with
-            plan["fast"], fsync a no-op): (events counted, [(exception, disclosed-unnamed)], what the run
-            raised). `sites`, a set, collects the module of every frame on the stack at each close event, from
-            the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
-            name, compose_c, patches = scenario
-            under = plan.get("under")
-            # The descriptors this run owns: each one os.open, os.dup or os.pipe returns on this thread while
-            # the run's patches stand, with its identity (st_dev, st_ino) then and the code that opened it,
-            # dropped when os.close is called on it. Another thread's descriptor (or one a run left a callback
-            # to keep) is never entered here.
-            owner, owned = threading.get_ident(), {}
-            real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
-
-            def own(*fds):
-                if threading.get_ident() == owner:
-                    opener = sys._getframe(2).f_code
-                    for fd in fds:
-                        st = _real_fstat(fd)
-                        owned[fd] = (st.st_dev, st.st_ino, opener)
-                return fds
-
-            def owned_open(*args, **kwargs):
-                return own(real_open_c(*args, **kwargs))[0]
-
-            def owned_dup(fd):
-                return own(real_dup_c(fd))[0]
-
-            def owned_pipe():
-                return own(*real_pipe_c())
-            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-                root, files = fixture(temp)
-                real_close_c, seen, fired = os.close, [0], []
-
-                def close_then_raise(fd):
-                    owned.pop(fd, None)
-                    real_close_c(fd)
-                    if under is not None:
-                        frame = sys._getframe(1)
-                        while frame is not None and frame.f_code is not under:
-                            frame = frame.f_back
-                        if frame is None:
-                            return
-                    seen[0] += 1
-                    if sites is not None:
-                        frame = sys._getframe(1)
-                        while frame is not None:
-                            sites.add(frame.f_globals.get("__name__"))
-                            frame = None if frame.f_code is _run_adopt_transaction.__code__ else frame.f_back
-                    if seen[0] in plan:
-                        exc = plan[seen[0]]()
-                        fired.append((exc, sys._getframe(1).f_code is quiet_code or sys.exc_info()[1] is not None))
-                        raise exc
-                raised = None
-                with contextlib.ExitStack() as stack:
-                    for attr, value in patches:
-                        stack.enter_context(mock.patch.object(_journal, attr, value))
-                    stack.enter_context(mock.patch.object(os, "close", close_then_raise))
-                    stack.enter_context(mock.patch.object(os, "open", owned_open))
-                    stack.enter_context(mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {owned_open}))
-                    stack.enter_context(mock.patch.object(os, "dup", owned_dup))
-                    stack.enter_context(mock.patch.object(os, "pipe", owned_pipe))
-                    if plan.get("fast"):
-                        stack.enter_context(mock.patch.object(os, "fsync", lambda fd: None))
-                    try:
-                        run_adopt_transaction(root, rid, compose_c or compose_full(files))
-                    except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
-                        raised = exc
-            # An injection at a disclosed close window (the store's _open_working_dir_fd parent close among
-            # them; leak-freedom under interrupt is not claimed) leaves a descriptor open: close each one this
-            # run itself opened and never closed, only while its number still names the file it opened (a
-            # number released some other way and reused elsewhere is left alone), so the sweep's runs never
-            # leave them to the modules tested after this one and never close a descriptor they do not own.
-            # Each one reclaimed is recorded with its opener (class_reclaims), so a leak is judged, never
-            # hidden: the check after the sweeps admits only the disclosed windows.
-            reclaimed = []
-            for fd, (dev, ino, opener) in sorted(owned.items()):
-                try:
-                    st = _real_fstat(fd)
-                except OSError:
-                    continue
-                if (st.st_dev, st.st_ino) == (dev, ino):
-                    os.close(fd)
-                    reclaimed.append(opener)
-            if reclaimed:
-                class_reclaims.append((name, tuple(type(exc) for exc, _quiet in fired), tuple(reclaimed)))
-            return seen[0], fired, raised
-
-        def class_named(exc, raised):
-            return raised is exc or (raised is not None and str(exc.args[-1]) in rendering(raised))
-
-        def close_site_classes(module_names):
-            """Every exception class named at a raise, an except or an isinstance site of each module in
-            `module_names` that lives beside this one (its self-test functions excluded), resolved in that
-            module's namespace: the classes a close-site path can raise or a handler on it can read."""
-            found = set()
-            here = os.path.dirname(os.path.abspath(__file__))
-            for module_name in sorted(n for n in module_names if n in sys.modules):
-                module = sys.modules[module_name]
-                if os.path.dirname(os.path.abspath(getattr(module, "__file__", None) or "/")) != here:
-                    continue
-                todo = [ast.parse(inspect.getsource(module))]
-                while todo:
-                    node = todo.pop()
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name:
-                        continue
-                    named = []
-                    if isinstance(node, ast.ExceptHandler) and node.type is not None:
-                        named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
-                    elif isinstance(node, ast.Raise) and node.exc is not None:
-                        named = [node.exc.func if isinstance(node.exc, ast.Call) else node.exc]
-                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 2 \
-                            and node.func.id in ("isinstance", "issubclass"):
-                        named = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
-                    for expr in named:
-                        chain = []
-                        while isinstance(expr, ast.Attribute):
-                            chain.append(expr.attr)
-                            expr = expr.value
-                        if isinstance(expr, ast.Name):
-                            obj = vars(module).get(expr.id, builtins.__dict__.get(expr.id))
-                            for attr in reversed(chain):
-                                obj = getattr(obj, attr, None)
-                            if isinstance(obj, type) and issubclass(obj, BaseException):
-                                found.add(obj)
-                    todo.extend(ast.iter_child_nodes(node))
-            return found
-
-        def class_maker(cls, said):
-            """An instance of `cls` whose last argument carries `said`, or None when no form constructs one."""
-            forms = (((errno.EIO, said),) if issubclass(cls, OSError) else ()) \
-                + ((("utf-8", b"", 0, 1, said),) if issubclass(cls, UnicodeDecodeError) else ()) \
-                + ((said,), (said, "", 0), (said, said))
-            for args in forms:
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("error")
-                        made = cls(*args)
-                except Exception:   # noqa: BLE001  the next constructor form is tried
-                    continue
-                if made.args and said in str(made.args[-1]):
-                    return made
-            return None
-        class_sites, class_counts = set(), []
-        for scenario in class_scenarios:
-            class_counts.append((class_run(scenario, dict(), class_sites)[0],
-                                 class_run(scenario, dict(fast=True))[0]))
-        # The cleanup closes only what the run owns: a descriptor another thread opens while the run is in
-        # flight (here /dev/null, opened from inside the run's lock acquisition) is still open, and still
-        # names /dev/null, after class_run returns. Red against a census sweep that closes every descriptor
-        # opened during the run.
-        foreign = []
-
-        def foreign_open():
-            fd = os.open(os.devnull, os.O_RDONLY)
-            st = _real_fstat(fd)
-            foreign.append((fd, (st.st_dev, st.st_ino)))
-
-        def acquire_then_foreign_open(journal_root, session_id):
-            got = real_acquire_c(journal_root, session_id)
-            opener = threading.Thread(target=foreign_open)
-            opener.start()
-            opener.join()
-            return got
-        _n, _fired, foreign_raised = class_run(("foreign-open", None,
-                                                (("acquire_lock", acquire_then_foreign_open),)), dict())
-        foreign_kept = []
-        for fd, identity in foreign:
-            try:
-                st = _real_fstat(fd)
-            except OSError as exc:
-                foreign_kept.append((fd, exc.errno))
-                continue
-            foreign_kept.append((fd, (st.st_dev, st.st_ino) == identity))
-            os.close(fd)
-        check("class-run-leaves-a-foreign-thread-descriptor-open",
-              foreign_raised is None and len(foreign) == 1 and foreign_kept == [(foreign[0][0], True)],
-              observed=(foreign_raised, foreign_kept))
-        class_set = sorted(close_site_classes(class_sites) | {_InjectedCloseFault, _InjectedCloseInterrupt},
-                           key=lambda cls: (cls.__module__, cls.__qualname__))
-        class_unmade = [cls.__qualname__ for cls in class_set if class_maker(cls, "probe") is None]
-        class_bad, class_runs = [], 0
-        for scenario, (total, _fast_total) in zip(class_scenarios, class_counts):
-            for at in range(1, total + 1):
-                for cls in class_set:
-                    said = "CLASS-CLOSE-%s-%d-%s" % (scenario[0], at, cls.__qualname__)
-                    if class_maker(cls, said) is None:
-                        continue
-                    _n, fired, raised = class_run(scenario, dict(((at, lambda: class_maker(cls, said)),
-                                                                  ("fast", True))))
-                    class_runs += 1
-                    if fired and not (isinstance(fired[0][0], OSError) and fired[0][1]) \
-                            and not class_named(fired[0][0], raised):
-                        class_bad.append((scenario[0], at, repr(fired[0][0]), repr(raised)[:300]))
-        class_names = {cls.__qualname__ for cls in class_set}
-        check("close-class-every-close-event-named-or-raised",
-              all(total == fast_total for total, fast_total in class_counts) and not class_unmade
-              and {"StoreError", "FileNotFoundError", "JournalError", "OSError", "KeyError"} <= class_names
-              and class_runs == sum(total for total, _fast in class_counts) * len(class_set) and not class_bad,
-              observed="counts={} classes={} unmade={} runs={} unnamed (scenario, class): events={!r}; first "
-              "(scenario, event, injected, raised)={!r}".format(
-                  class_counts, sorted(class_names), class_unmade, class_runs,
-                  sorted({(sc, inj.split("(")[0]): [ev for sc2, ev, inj2, _r in class_bad
-                                                    if sc2 == sc and inj2.split("(")[0] == inj.split("(")[0]]
-                          for sc, _ev, inj, _r in class_bad}.items()), class_bad[:8]))
-        # round 19: a close after the COMPLETE frame is durable (publish's frames-log close, then its
-        # transaction-directory close) that raises any probe class but an interrupt leaves the commit
-        # standing: AdoptCommittedLockError naming COMMITTED and the injected exception, the transaction
-        # complete and the lock released (red against the handler refusing it as FAILED with the lock kept)
-        publish_code = _journal.publish.__code__
-        complete_bad, complete_runs = [], 0
-        for nth in (1, 2):
-            for cls in (cls for cls in class_set if issubclass(cls, Exception)):
-                said = "COMPLETE-CLOSE-%d-%s" % (nth, cls.__qualname__)
-                real_close_q, seen_q, fired_q, outcome_q = os.close, [0], [], None
-
-                def close_q(fd):
-                    real_close_q(fd)
-                    frame = sys._getframe(1)
-                    while frame is not None and not (frame.f_code is publish_code
-                                                     and frame.f_locals.get("ftype") == _journal.F_COMPLETE):
-                        frame = frame.f_back
-                    if frame is not None:
-                        seen_q[0] += 1
-                        if seen_q[0] == nth:
-                            fired_q.append(class_maker(cls, said))
-                            raise fired_q[0]
-                with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-                    root, files = fixture(temp)
-                    with mock.patch.object(os, "close", close_q), mock.patch.object(os, "fsync", lambda fd: None):
-                        try:
-                            outcome_q = run_adopt_transaction(root, rid, compose_full(files))
-                        except BaseException as exc:    # noqa: BLE001  inspected below
-                            outcome_q = exc
-                    state_q, free_q = txn_state(root, rid), lock_free(root)
-                complete_runs += 1
-                if not (fired_q and type(outcome_q) is AdoptCommittedLockError and "COMMITTED" in str(outcome_q)
-                        and said in rendering(outcome_q) and state_q == "complete" and free_q):
-                    complete_bad.append((nth, cls.__qualname__, repr(outcome_q)[:240], state_q, free_q))
-        check("complete-publish-close-commit-stands-and-names-it", complete_runs > 20 and not complete_bad,
-              observed="runs={} bad (close, class, outcome, state, lock free)={!r}".format(
-                  complete_runs, complete_bad[:6]))
-        # round 19: a StoreError a close beneath _resolve_at's discovery raises (marked as it left the close
-        # helper) is raised as itself, never read as a cannot-evaluate posture that _store_posture_or_refuse
-        # then admits (red against _resolve_at's handler returning CANNOT-EVALUATE on it): at
-        # _lstat_contained's close; and an ordinary fault at _read_contained's file close, then a StoreError
-        # at its parent close, the StoreError raised with the first recorded on it
-        resolve_code, classify_code = store._resolve_at.__code__, store._classify_working_names.__code__
-        lstat_code, read_code = _journal._lstat_contained.__code__, _journal._read_contained.__code__
-
-        def resolve_close_run(where, makers):
-            """One run with an empty composer, os.close making the real close, then raising the next of
-            `makers` at each close made directly by `where` beneath _resolve_at and _classify_working_names:
-            (the exceptions raised there, what the run raised or returned)."""
-            real_close_r, fired_r, outcome_r = os.close, [], None
-
-            def close_r(fd):
-                real_close_r(fd)
-                frame, codes, direct = sys._getframe(1), set(), None
-                while frame is not None:
-                    codes.add(frame.f_code)
-                    if direct is None and frame.f_code not in (_journal._close_fd_propagating.__code__,
-                                                               _journal._close_fd_yielding.__code__):
-                        direct = frame.f_code
-                    frame = frame.f_back
-                if direct is where and resolve_code in codes and classify_code in codes \
-                        and len(fired_r) < len(makers):
-                    fired_r.append(makers[len(fired_r)]())
-                    raise fired_r[-1]
-            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-                root, files = fixture(temp)
-                with mock.patch.object(os, "close", close_r):
-                    try:
-                        outcome_r = run_adopt_transaction(root, rid, lambda ops: None)
-                    except BaseException as exc:    # noqa: BLE001  inspected below
-                        outcome_r = exc
-            return fired_r, outcome_r
-        fired_r, outcome_r = resolve_close_run(lstat_code, (lambda: store.StoreError("STORE-CLOSE-SENTINEL"),))
-        check("resolve-at-close-store-error-raised-as-itself", len(fired_r) == 1 and outcome_r is fired_r[0],
-              observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
-        fired_r, outcome_r = resolve_close_run(read_code, (lambda: RuntimeError("INNER-CLOSE-SENTINEL"),
-                                                           lambda: store.StoreError("OUTER-CLOSE-SENTINEL")))
-        check("resolve-at-read-close-fault-then-store-error-both-named",
-              len(fired_r) == 2 and outcome_r is fired_r[1] and "INNER-CLOSE-SENTINEL" in rendering(outcome_r),
-              observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
-        # the sweep (_remove_journal_dirs): an ordinary fault at one of its closes, then a JournalError at
-        # the next (the second raised with the first recorded on it), at every consecutive pair: both are
-        # named beside the refusal (red against the sweep keeping only the JournalError's message)
-        sweep_bad, sweep_runs = [], 0
-        sweep_total = class_run(class_scenarios[1], dict(under=_remove_journal_dirs.__code__))[0]
-        for at in range(1, sweep_total):
-            _n, fired, raised = class_run(class_scenarios[1], dict((
-                ("under", _remove_journal_dirs.__code__),
-                (at, lambda: _InjectedCloseFault("SWEEP-FIRST-%d" % at)),
-                (at + 1, lambda: _journal.JournalError("SWEEP-SECOND-%d" % at)))))
-            sweep_runs += 1
-            if not isinstance(raised, AdoptApplyError) or "an injected compose refusal" not in rendering(raised) \
-                    or not all(class_named(exc, raised) for exc, _quiet in fired):
-                sweep_bad.append((at, [repr(exc) for exc, _quiet in fired], repr(raised)[:300]))
-        check("close-class-sweep-close-pairs-both-named", sweep_runs > 3 and not sweep_bad,
-              observed="pairs={} unnamed={!r}".format(sweep_runs, sweep_bad[:6]))
-        # What class_run reclaimed across every run above, judged (train review round 1): a run with no
-        # injection reclaims nothing, and every descriptor reclaimed was opened at a disclosed close window
-        # (class_reclaim_windows) in a run whose injected exceptions are none of them an OSError, the only
-        # classes those windows disclose. Red against a production leak the reclaim would otherwise hide (a
-        # descriptor a close helper opens on its propagate path, for one). The per-scenario tally is named.
-        reclaim_tally, reclaim_bad = {}, {}
-        for sc, injected, openers in class_reclaims:
-            classes = ",".join(sorted({cls.__qualname__ for cls in injected})) or "none"
-            for opener in openers:
-                where = "{}:{}".format(os.path.basename(opener.co_filename), opener.co_qualname)
-                reclaim_tally[(sc, where)] = reclaim_tally.get((sc, where), 0) + 1
-                if not injected or where not in class_reclaim_windows \
-                        or any(issubclass(cls, OSError) for cls in injected):
-                    reclaim_bad[(sc, classes, where)] = reclaim_bad.get((sc, classes, where), 0) + 1
-        check("class-run-reclaims-only-at-disclosed-windows", reclaim_tally and not reclaim_bad,
-              observed="undisclosed (scenario, injected, opener): count={!r}; reclaimed (scenario, opener): "
-              "count={!r}".format(sorted(reclaim_bad.items()), sorted(reclaim_tally.items())))
+        # 6a'''b3o (rounds 18 and 19, the close-exception CLASS): the class sweep (_CLASS_SWEEP_CHECKS, judged
+        # in _close_class_sweep_checks) runs in a fresh interpreter (--selftest-class-sweep-child, python -I
+        # -B), so every descriptor its runs leave open (the disclosed windows) dies with that child, and this
+        # process (and every module a self-test run loads after this one) is untouched by construction: the
+        # sweep closes nothing it did not open itself. Fail closed: a nonzero exit, a timeout, or a result
+        # that is missing, incomplete or does not name exactly those checks in order fails every one of them,
+        # named with the reason. This process's descriptor set is the same after the child as before it.
+        sweep_before = _fds_open()
+        sweep_rows, sweep_why = _run_class_sweep_child()
+        for sweep_index, sweep_name in enumerate(_CLASS_SWEEP_CHECKS):
+            if sweep_rows is None:
+                check(sweep_name, False, observed="class sweep child: " + sweep_why)
+            else:
+                check(sweep_name, sweep_rows[sweep_index][1], observed=sweep_rows[sweep_index][2])
+        sweep_after = _fds_open()
+        check("class-sweep-child-leaves-this-process-descriptors-unchanged", sweep_after == sweep_before,
+              observed="opened={!r} closed={!r}".format(sorted(sweep_after - sweep_before),
+                                                     sorted(sweep_before - sweep_after)))
         # U10's record-and-report rule at the under-lock probe of this run's transaction directory (train
         # review round 1): its parent close making the real close, then raising EIO, raises that OSError as
         # itself, marked as a close's exception, never the "cannot inspect the adoption journal" refusal
@@ -12364,6 +11972,547 @@ def _self_test_checks():
     return 0
 
 
+def _st_fixture_plan(run_id_):
+    """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
+    digest of its canonical emission without that field), so the bundle verifier proves it exactly as
+    it proves a real plan (spec 4.2)."""
+    body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+    digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
+
+def _st_run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
+    """Self-test shadow of the module transaction: a base transaction that names no plan digest
+    stages its run's fixture plan first, as apply stages the approved plan, and every transaction
+    that names none carries that plan's digest."""
+    plan_bytes_, digest = _st_fixture_plan(run_id_)
+    staged = compose
+    if phase is None and plan_digest is None:
+        def staged(ops):
+            ops.create(plan_rel(run_id_), plan_bytes_)
+            return compose(ops)
+    return run_adopt_transaction(product_root, run_id_, staged, phase,
+                                 digest if plan_digest is None else plan_digest)
+
+
+def _st_fixture(temp):
+    """The journaled shell's throwaway fixture: (root, the bytes of each relpath) written beneath temp."""
+    root = Path(temp).resolve()
+    files = dict(((".working/TODO.md", b"hand-kept todo\n"),
+                  (".working/toml/manifest.toml", b"# a foreign manifest-shaped file\n"),
+                  ("legacy/RULES.md", b"old rules\n")))
+    for rel, payload in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(payload)
+    return root, files
+
+
+def _st_compose_full(files, drift=False):
+    def compose(ops):
+        todo = files[".working/TODO.md"] + (b"drift" if drift else b"")
+        ops.archive_occupying(".working/TODO.md", "sha256:" + _sha256(todo))
+        ops.archive_occupying(".working/toml/manifest.toml",
+                              "sha256:" + _sha256(files[".working/toml/manifest.toml"]))
+        ops.preserve("legacy/RULES.md", "sha256:" + _sha256(files["legacy/RULES.md"]))
+    return compose
+
+
+def _st_lock_free(root):
+    return _journal.read_lock_owner(_journal_root(root)) is None
+
+
+def _st_rendering(exc):
+    """Every exception of `exc`'s chain (cause and context), each as str and with its notes."""
+    seen, todo, parts = [], [exc], []
+    while todo:
+        cur = todo.pop(0)
+        if cur is None or any(cur is was for was in seen):
+            continue
+        seen.append(cur)
+        parts.append(str(cur) + " " + str(_journal._exc_said(cur)))
+        todo += [cur.__cause__, cur.__context__]
+    return " ".join(parts)
+
+
+# The checks the close-fault class sweep child reports, in the order it runs them.
+_CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
+                       "close-class-every-close-event-named-or-raised",
+                       "complete-publish-close-commit-stands-and-names-it",
+                       "resolve-at-close-store-error-raised-as-itself",
+                       "resolve-at-read-close-fault-then-store-error-both-named",
+                       "close-class-sweep-close-pairs-both-named",
+                       "class-run-reclaims-only-at-disclosed-windows")
+_CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
+
+
+def _run_class_sweep_child(timeout=1800):
+    """Run the close-fault class sweep in a fresh interpreter of this module (python -I -B,
+    --selftest-class-sweep-child), with a bounded wait: (the rows (check, passed, observed) in
+    _CLASS_SWEEP_CHECKS order, None) on exit 0 with a complete result, else (None, why). A crash, a
+    nonzero exit, a timeout (the child is killed), or a result that is missing, malformed or names other
+    checks is the (None, why) failure."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-sweep-") as temp:
+        result_path = Path(temp) / "class-sweep-result.json"
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__),
+                                   "--selftest-class-sweep-child", str(result_path)],
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, "no result within " + str(timeout) + "s (killed)"
+        except OSError as exc:
+            return None, "could not start: " + repr(exc)
+        said = proc.stderr.decode("utf-8", "replace").strip()[-800:]
+        if proc.returncode != 0:
+            return None, "exit " + str(proc.returncode) + " (" + said + ")"
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return None, "no readable result: " + repr(exc)
+    rows = result.get("checks") if isinstance(result, dict) else None
+    if not (isinstance(rows, list) and result.get("format") == _CLASS_SWEEP_FORMAT
+            and result.get("complete") is True
+            and all(isinstance(row, list) and len(row) == 3 and type(row[1]) is bool
+                    and (row[2] is None or isinstance(row[2], str)) for row in rows)
+            and [row[0] for row in rows] == list(_CLASS_SWEEP_CHECKS)):
+        return None, ("incomplete or malformed result: " + repr(result))[:800]
+    return [tuple(row) for row in rows], None
+
+
+def _class_sweep_child_main(args):
+    """`--selftest-class-sweep-child RESULT`, a self-test harness entry the self-test alone starts (never
+    an adoption interface): in THIS fresh interpreter, run the close-fault class sweep and write its JSON
+    result (format, complete true, and checks, each row [check, passed, observed]) to RESULT, then exit 0.
+    Any exception exits 2 with no result written, which the parent fails closed."""
+    if len(args) != 1:
+        print("usage: --selftest-class-sweep-child RESULT", file=sys.stderr)
+        return 2
+    try:
+        _journal.require_containment()
+        rows = _close_class_sweep_checks()
+        payload = json.dumps(dict(format=_CLASS_SWEEP_FORMAT, complete=True, checks=rows))
+    except Exception as exc:  # noqa: BLE001  any harness error is a missing result, failed by the parent
+        print("class sweep child: harness error " + repr(exc), file=sys.stderr)
+        return 2
+    Path(args[0]).write_text(payload, encoding="utf-8")
+    return 0
+
+
+def _close_class_sweep_checks():
+    """The close-fault class sweep, run only in the --selftest-class-sweep-child interpreter, so the
+    descriptors its runs leave open die with that process: rows [check, passed, observed or None] in
+    _CLASS_SWEEP_CHECKS order."""
+    import errno
+    import tempfile
+    from unittest import mock
+    rows = []
+
+    def check(name, cond, observed=None):
+        if cond or observed is None:
+            rows.append([name, bool(cond), None])
+        else:
+            rows.append([name, False, observed if isinstance(observed, str) else repr(observed)])
+    _run_adopt_transaction = globals()["run_adopt_transaction"]
+    run_adopt_transaction = _st_run_adopt_transaction
+    fixture, compose_full, lock_free, rendering = _st_fixture, _st_compose_full, _st_lock_free, _st_rendering
+    rid = mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc), "0123456789abcdef")
+    _real_fstat = os.fstat
+
+    def txn_state(root, txn):
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+        try:
+            return _journal.classify_state(jr_fd, _journal_root(root) / txn)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+
+    def _fds_open():
+        out = set()
+        for fd_name in os.listdir("/proc/self/fd"):
+            try:
+                _real_fstat(int(fd_name))
+            except OSError:
+                continue
+            out.add(int(fd_name))
+        return out
+
+    def compose_refused_here(ops):
+        raise AdoptApplyError("an injected compose refusal")
+
+    class _InjectedCloseFault(RuntimeError):
+        pass
+
+    class _InjectedCloseInterrupt(KeyboardInterrupt):
+        pass
+    # 6a'''b3o (rounds 18 and 19, the close-exception CLASS): a raise after a REAL close at EVERY close
+    # event of seven runs (commit, refusal, body interrupt, body fault, failed acquire, lock stays,
+    # failed transaction with rollback), one injection per run, EVERY probe class at EVERY event. The
+    # classes are read from the code, never a hand list (close_site_classes): every exception class
+    # named at a raise, except or isinstance site of every module whose code is on the stack at any
+    # close event of those runs (StoreError and FileNotFoundError among them), plus an ordinary fault and
+    # an interrupt no site names. The injected exception is named in the outcome (raised itself, or in
+    # the message, notes, cause or context chain of what was raised) on every run, except the disclosed
+    # unnamed close OSErrors (a quiet teardown close, or one yielding to an exception in flight). Red
+    # against any handler in the run's reach that reads a close exception as a clean signal (absent,
+    # unreadable, cannot-evaluate, not reached). The probe runs make fsync a no-op (no close event
+    # depends on it, re-proved below by equal event counts) so the full set fits a self-test run.
+    import ast
+    import builtins
+    import inspect
+    import warnings
+    real_acquire_c, real_apply_c = _journal.acquire_lock, _journal.apply_ops
+
+    def class_failed_acquire(journal_root, session_id):
+        real_acquire_c(journal_root, session_id)
+        fault = OSError(errno.EIO, "CLASS-ACQUIRE-EIO")
+        fault.lock_created = True
+        raise fault
+
+    def class_apply_then_fail(root_fd, ops, reader):
+        real_apply_c(root_fd, ops, reader)
+        raise _journal.JournalError("CLASS-ROLLBACK-TRIGGER")
+
+    def class_body_interrupt(ops):
+        raise _InjectedCloseInterrupt("CLASS-BODY-INTERRUPT")
+
+    def class_body_fault(ops):
+        raise _InjectedCloseFault("CLASS-BODY-FAULT")
+    class_scenarios = (("commit", None, ()), ("refusal", compose_refused_here, ()),
+                       ("body-interrupt", class_body_interrupt, ()), ("body-fault", class_body_fault, ()),
+                       ("failed-acquire", None, (("acquire_lock", class_failed_acquire),)),
+                       ("lock-stays", None, (("release_lock", lambda journal_root: None),)),
+                       ("rollback", None, (("apply_ops", class_apply_then_fail),)))
+    quiet_code = _journal._close_fd_quietly.__code__
+    # Every descriptor a class_run run leaves open, one row per run: (scenario, the injected exceptions,
+    # the code that opened each descriptor left open, None when unattributed). Judged once the sweeps below
+    # have run. Nothing is closed for it: this child process ends, and every descriptor with it.
+    class_reclaims = []
+    # The descriptors the foreign-thread vector's other thread opens (below), never counted as a run's.
+    foreign = []
+    # The disclosed windows (module docstring): _open_dir_contained's duplicate, and the store's
+    # _open_working_dir_fd `.working` descriptor, each left open when a parent close raises anything
+    # but OSError.
+    class_reclaim_windows = frozenset(("_journal.py:_open_dir_contained", "_opf_store.py:_open_working_dir_fd"))
+
+    def class_run(scenario, plan, sites=None):
+        """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
+        close event n (counted from 1, or only beneath a frame running `plan["under"]` when given; with
+        plan["fast"], fsync a no-op): (events counted, [(exception, disclosed-unnamed)], what the run
+        raised). `sites`, a set, collects the module of every frame on the stack at each close event, from
+        the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
+        name, compose_c, patches = scenario
+        under = plan.get("under")
+        # Attribution only, never ownership: the code that opened each descriptor os.open, os.dup or
+        # os.pipe returns while the run's patches stand, with its identity (st_dev, st_ino) then, dropped
+        # when os.close is called on it. What the run leaves open is read from the census (below), so a
+        # descriptor opened around these patches is still counted, as unattributed.
+        opened = {}
+        real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
+
+        def note(*fds):
+            opener = sys._getframe(2).f_code
+            for fd in fds:
+                st = _real_fstat(fd)
+                opened[fd] = (st.st_dev, st.st_ino, opener)
+            return fds
+
+        def noted_open(*args, **kwargs):
+            return note(real_open_c(*args, **kwargs))[0]
+
+        def noted_dup(fd):
+            return note(real_dup_c(fd))[0]
+
+        def noted_pipe():
+            return note(*real_pipe_c())
+        census_before = _fds_open()
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            real_close_c, seen, fired = os.close, [0], []
+
+            def close_then_raise(fd):
+                opened.pop(fd, None)
+                real_close_c(fd)
+                if under is not None:
+                    frame = sys._getframe(1)
+                    while frame is not None and frame.f_code is not under:
+                        frame = frame.f_back
+                    if frame is None:
+                        return
+                seen[0] += 1
+                if sites is not None:
+                    frame = sys._getframe(1)
+                    while frame is not None:
+                        sites.add(frame.f_globals.get("__name__"))
+                        frame = None if frame.f_code is _run_adopt_transaction.__code__ else frame.f_back
+                if seen[0] in plan:
+                    exc = plan[seen[0]]()
+                    fired.append((exc, sys._getframe(1).f_code is quiet_code or sys.exc_info()[1] is not None))
+                    raise exc
+            raised = None
+            with contextlib.ExitStack() as stack:
+                for attr, value in patches:
+                    stack.enter_context(mock.patch.object(_journal, attr, value))
+                stack.enter_context(mock.patch.object(os, "close", close_then_raise))
+                stack.enter_context(mock.patch.object(os, "open", noted_open))
+                stack.enter_context(mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {noted_open}))
+                stack.enter_context(mock.patch.object(os, "dup", noted_dup))
+                stack.enter_context(mock.patch.object(os, "pipe", noted_pipe))
+                if plan.get("fast"):
+                    stack.enter_context(mock.patch.object(os, "fsync", lambda fd: None))
+                try:
+                    run_adopt_transaction(root, rid, compose_c or compose_full(files))
+                except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
+                    raised = exc
+        # An injection at a disclosed close window (the store's _open_working_dir_fd parent close among
+        # them; leak-freedom under interrupt is not claimed) leaves a descriptor open. Each descriptor open
+        # now that was not open before the run (the foreign-thread vector's excepted) is recorded with its
+        # opener (class_reclaims), or as unattributed when its number no longer names the file that opener
+        # opened, so a leak is judged, never hidden: the check after the sweeps admits only the disclosed
+        # windows. None is closed here; the child's exit releases them all.
+        left = []
+        for fd in sorted(_fds_open() - census_before - {fd for fd, _identity in foreign}):
+            dev, ino, opener = opened.get(fd, (None, None, None))
+            try:
+                st = _real_fstat(fd)
+            except OSError:
+                continue
+            left.append(opener if (st.st_dev, st.st_ino) == (dev, ino) else None)
+        if left:
+            class_reclaims.append((name, tuple(type(exc) for exc, _quiet in fired), tuple(left)))
+        return seen[0], fired, raised
+
+    def class_named(exc, raised):
+        return raised is exc or (raised is not None and str(exc.args[-1]) in rendering(raised))
+
+    def close_site_classes(module_names):
+        """Every exception class named at a raise, an except or an isinstance site of each module in
+        `module_names` that lives beside this one (its self-test functions excluded), resolved in that
+        module's namespace: the classes a close-site path can raise or a handler on it can read."""
+        found = set()
+        here = os.path.dirname(os.path.abspath(__file__))
+        for module_name in sorted(n for n in module_names if n in sys.modules):
+            module = sys.modules[module_name]
+            if os.path.dirname(os.path.abspath(getattr(module, "__file__", None) or "/")) != here:
+                continue
+            todo = [ast.parse(inspect.getsource(module))]
+            while todo:
+                node = todo.pop()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name:
+                    continue
+                named = []
+                if isinstance(node, ast.ExceptHandler) and node.type is not None:
+                    named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+                elif isinstance(node, ast.Raise) and node.exc is not None:
+                    named = [node.exc.func if isinstance(node.exc, ast.Call) else node.exc]
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 2 \
+                        and node.func.id in ("isinstance", "issubclass"):
+                    named = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
+                for expr in named:
+                    chain = []
+                    while isinstance(expr, ast.Attribute):
+                        chain.append(expr.attr)
+                        expr = expr.value
+                    if isinstance(expr, ast.Name):
+                        obj = vars(module).get(expr.id, builtins.__dict__.get(expr.id))
+                        for attr in reversed(chain):
+                            obj = getattr(obj, attr, None)
+                        if isinstance(obj, type) and issubclass(obj, BaseException):
+                            found.add(obj)
+                todo.extend(ast.iter_child_nodes(node))
+        return found
+
+    def class_maker(cls, said):
+        """An instance of `cls` whose last argument carries `said`, or None when no form constructs one."""
+        forms = (((errno.EIO, said),) if issubclass(cls, OSError) else ()) \
+            + ((("utf-8", b"", 0, 1, said),) if issubclass(cls, UnicodeDecodeError) else ()) \
+            + ((said,), (said, "", 0), (said, said))
+        for args in forms:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    made = cls(*args)
+            except Exception:   # noqa: BLE001  the next constructor form is tried
+                continue
+            if made.args and said in str(made.args[-1]):
+                return made
+        return None
+    class_sites, class_counts = set(), []
+    for scenario in class_scenarios:
+        class_counts.append((class_run(scenario, dict(), class_sites)[0],
+                             class_run(scenario, dict(fast=True))[0]))
+    # The sweep closes nothing it did not open: a descriptor another thread opens while the run is in
+    # flight (here /dev/null, opened from inside the run's lock acquisition) is still open, and still
+    # names /dev/null, after class_run returns. Red against a census sweep that closes every descriptor
+    # opened during the run.
+    def foreign_open():
+        fd = os.open(os.devnull, os.O_RDONLY)
+        st = _real_fstat(fd)
+        foreign.append((fd, (st.st_dev, st.st_ino)))
+
+    def acquire_then_foreign_open(journal_root, session_id):
+        got = real_acquire_c(journal_root, session_id)
+        opener = threading.Thread(target=foreign_open)
+        opener.start()
+        opener.join()
+        return got
+    _n, _fired, foreign_raised = class_run(("foreign-open", None,
+                                            (("acquire_lock", acquire_then_foreign_open),)), dict())
+    foreign_kept = []
+    for fd, identity in foreign:
+        try:
+            st = _real_fstat(fd)
+        except OSError as exc:
+            foreign_kept.append((fd, exc.errno))
+            continue
+        foreign_kept.append((fd, (st.st_dev, st.st_ino) == identity))
+        os.close(fd)
+    check("class-run-leaves-a-foreign-thread-descriptor-open",
+          foreign_raised is None and len(foreign) == 1 and foreign_kept == [(foreign[0][0], True)],
+          observed=(foreign_raised, foreign_kept))
+    class_set = sorted(close_site_classes(class_sites) | {_InjectedCloseFault, _InjectedCloseInterrupt},
+                       key=lambda cls: (cls.__module__, cls.__qualname__))
+    class_unmade = [cls.__qualname__ for cls in class_set if class_maker(cls, "probe") is None]
+    class_bad, class_runs = [], 0
+    for scenario, (total, _fast_total) in zip(class_scenarios, class_counts):
+        for at in range(1, total + 1):
+            for cls in class_set:
+                said = "CLASS-CLOSE-%s-%d-%s" % (scenario[0], at, cls.__qualname__)
+                if class_maker(cls, said) is None:
+                    continue
+                _n, fired, raised = class_run(scenario, dict(((at, lambda: class_maker(cls, said)),
+                                                              ("fast", True))))
+                class_runs += 1
+                if fired and not (isinstance(fired[0][0], OSError) and fired[0][1]) \
+                        and not class_named(fired[0][0], raised):
+                    class_bad.append((scenario[0], at, repr(fired[0][0]), repr(raised)[:300]))
+    class_names = {cls.__qualname__ for cls in class_set}
+    check("close-class-every-close-event-named-or-raised",
+          all(total == fast_total for total, fast_total in class_counts) and not class_unmade
+          and {"StoreError", "FileNotFoundError", "JournalError", "OSError", "KeyError"} <= class_names
+          and class_runs == sum(total for total, _fast in class_counts) * len(class_set) and not class_bad,
+          observed="counts={} classes={} unmade={} runs={} unnamed (scenario, class): events={!r}; first "
+          "(scenario, event, injected, raised)={!r}".format(
+              class_counts, sorted(class_names), class_unmade, class_runs,
+              sorted({(sc, inj.split("(")[0]): [ev for sc2, ev, inj2, _r in class_bad
+                                                if sc2 == sc and inj2.split("(")[0] == inj.split("(")[0]]
+                      for sc, _ev, inj, _r in class_bad}.items()), class_bad[:8]))
+    # round 19: a close after the COMPLETE frame is durable (publish's frames-log close, then its
+    # transaction-directory close) that raises any probe class but an interrupt leaves the commit
+    # standing: AdoptCommittedLockError naming COMMITTED and the injected exception, the transaction
+    # complete and the lock released (red against the handler refusing it as FAILED with the lock kept)
+    publish_code = _journal.publish.__code__
+    complete_bad, complete_runs = [], 0
+    for nth in (1, 2):
+        for cls in (cls for cls in class_set if issubclass(cls, Exception)):
+            said = "COMPLETE-CLOSE-%d-%s" % (nth, cls.__qualname__)
+            real_close_q, seen_q, fired_q, outcome_q = os.close, [0], [], None
+
+            def close_q(fd):
+                real_close_q(fd)
+                frame = sys._getframe(1)
+                while frame is not None and not (frame.f_code is publish_code
+                                                 and frame.f_locals.get("ftype") == _journal.F_COMPLETE):
+                    frame = frame.f_back
+                if frame is not None:
+                    seen_q[0] += 1
+                    if seen_q[0] == nth:
+                        fired_q.append(class_maker(cls, said))
+                        raise fired_q[0]
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                root, files = fixture(temp)
+                with mock.patch.object(os, "close", close_q), mock.patch.object(os, "fsync", lambda fd: None):
+                    try:
+                        outcome_q = run_adopt_transaction(root, rid, compose_full(files))
+                    except BaseException as exc:    # noqa: BLE001  inspected below
+                        outcome_q = exc
+                state_q, free_q = txn_state(root, rid), lock_free(root)
+            complete_runs += 1
+            if not (fired_q and type(outcome_q) is AdoptCommittedLockError and "COMMITTED" in str(outcome_q)
+                    and said in rendering(outcome_q) and state_q == "complete" and free_q):
+                complete_bad.append((nth, cls.__qualname__, repr(outcome_q)[:240], state_q, free_q))
+    check("complete-publish-close-commit-stands-and-names-it", complete_runs > 20 and not complete_bad,
+          observed="runs={} bad (close, class, outcome, state, lock free)={!r}".format(
+              complete_runs, complete_bad[:6]))
+    # round 19: a StoreError a close beneath _resolve_at's discovery raises (marked as it left the close
+    # helper) is raised as itself, never read as a cannot-evaluate posture that _store_posture_or_refuse
+    # then admits (red against _resolve_at's handler returning CANNOT-EVALUATE on it): at
+    # _lstat_contained's close; and an ordinary fault at _read_contained's file close, then a StoreError
+    # at its parent close, the StoreError raised with the first recorded on it
+    resolve_code, classify_code = store._resolve_at.__code__, store._classify_working_names.__code__
+    lstat_code, read_code = _journal._lstat_contained.__code__, _journal._read_contained.__code__
+
+    def resolve_close_run(where, makers):
+        """One run with an empty composer, os.close making the real close, then raising the next of
+        `makers` at each close made directly by `where` beneath _resolve_at and _classify_working_names:
+        (the exceptions raised there, what the run raised or returned)."""
+        real_close_r, fired_r, outcome_r = os.close, [], None
+
+        def close_r(fd):
+            real_close_r(fd)
+            frame, codes, direct = sys._getframe(1), set(), None
+            while frame is not None:
+                codes.add(frame.f_code)
+                if direct is None and frame.f_code not in (_journal._close_fd_propagating.__code__,
+                                                           _journal._close_fd_yielding.__code__):
+                    direct = frame.f_code
+                frame = frame.f_back
+            if direct is where and resolve_code in codes and classify_code in codes \
+                    and len(fired_r) < len(makers):
+                fired_r.append(makers[len(fired_r)]())
+                raise fired_r[-1]
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            with mock.patch.object(os, "close", close_r):
+                try:
+                    outcome_r = run_adopt_transaction(root, rid, lambda ops: None)
+                except BaseException as exc:    # noqa: BLE001  inspected below
+                    outcome_r = exc
+        return fired_r, outcome_r
+    fired_r, outcome_r = resolve_close_run(lstat_code, (lambda: store.StoreError("STORE-CLOSE-SENTINEL"),))
+    check("resolve-at-close-store-error-raised-as-itself", len(fired_r) == 1 and outcome_r is fired_r[0],
+          observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
+    fired_r, outcome_r = resolve_close_run(read_code, (lambda: RuntimeError("INNER-CLOSE-SENTINEL"),
+                                                       lambda: store.StoreError("OUTER-CLOSE-SENTINEL")))
+    check("resolve-at-read-close-fault-then-store-error-both-named",
+          len(fired_r) == 2 and outcome_r is fired_r[1] and "INNER-CLOSE-SENTINEL" in rendering(outcome_r),
+          observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
+    # the sweep (_remove_journal_dirs): an ordinary fault at one of its closes, then a JournalError at
+    # the next (the second raised with the first recorded on it), at every consecutive pair: both are
+    # named beside the refusal (red against the sweep keeping only the JournalError's message)
+    sweep_bad, sweep_runs = [], 0
+    sweep_total = class_run(class_scenarios[1], dict(under=_remove_journal_dirs.__code__))[0]
+    for at in range(1, sweep_total):
+        _n, fired, raised = class_run(class_scenarios[1], dict((
+            ("under", _remove_journal_dirs.__code__),
+            (at, lambda: _InjectedCloseFault("SWEEP-FIRST-%d" % at)),
+            (at + 1, lambda: _journal.JournalError("SWEEP-SECOND-%d" % at)))))
+        sweep_runs += 1
+        if not isinstance(raised, AdoptApplyError) or "an injected compose refusal" not in rendering(raised) \
+                or not all(class_named(exc, raised) for exc, _quiet in fired):
+            sweep_bad.append((at, [repr(exc) for exc, _quiet in fired], repr(raised)[:300]))
+    check("close-class-sweep-close-pairs-both-named", sweep_runs > 3 and not sweep_bad,
+          observed="pairs={} unnamed={!r}".format(sweep_runs, sweep_bad[:6]))
+    # What class_run runs left open across every run above, judged (train review round 1): a run with no
+    # injection leaves nothing open, and every descriptor left open was opened at a disclosed close window
+    # (class_reclaim_windows) in a run whose injected exceptions are none of them an OSError, the only
+    # classes those windows disclose; an unattributed one is never admitted. Red against a production
+    # leak (a descriptor a close helper opens on its propagate path, for one). The per-scenario tally is
+    # named.
+    reclaim_tally, reclaim_bad = {}, {}
+    for sc, injected, openers in class_reclaims:
+        classes = ",".join(sorted({cls.__qualname__ for cls in injected})) or "none"
+        for opener in openers:
+            where = "unattributed" if opener is None else "{}:{}".format(os.path.basename(opener.co_filename),
+                                                                         opener.co_qualname)
+            reclaim_tally[(sc, where)] = reclaim_tally.get((sc, where), 0) + 1
+            if not injected or where not in class_reclaim_windows \
+                    or any(issubclass(cls, OSError) for cls in injected):
+                reclaim_bad[(sc, classes, where)] = reclaim_bad.get((sc, classes, where), 0) + 1
+    check("class-run-reclaims-only-at-disclosed-windows", reclaim_tally and not reclaim_bad,
+          observed="undisclosed (scenario, injected, opener): count={!r}; left open (scenario, opener): "
+          "count={!r}".format(sorted(reclaim_bad.items()), sorted(reclaim_tally.items())))
+    return rows
+
+
 def _kill_injection_child(spec_path):
     """The self-test's kill-injection child, `--selftest-child SPEC` (the migrate.py crash-harness model,
     entered as `_opf_init_operation --selftest-child` is): in THIS fresh interpreter, run ONE adoption
@@ -14113,6 +14262,8 @@ def main():
         return _kill_injection_child(args[1])
     if args[:1] == ["--selftest-init-store-child"]:
         return _init_store_child_main(args[1:])
+    if args[:1] == ["--selftest-class-sweep-child"]:
+        return _class_sweep_child_main(args[1:])
     if "--self-test" in args or "--selftest" in args:
         return self_test()
     print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is `opf adopt`)",
