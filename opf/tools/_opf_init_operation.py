@@ -3443,16 +3443,43 @@ def _physical_tests(base, env, ok, signal):
     rc, res, err = _child(wt, env)
     gd = _git(["rev-parse", "--absolute-git-dir"], wt, env, allow_fail=True)
     wt_gitdir = gd.stdout.decode().strip() if gd.returncode == 0 else ""
-    wt_home = os.path.join(wt_gitdir, _opf_init_substrate.SUBSTRATE_DIRNAME) if wt_gitdir else ""
+
+    def _entry(path):
+        # Any directory entry at path, a dangling symlink included; only a missing entry reads as
+        # absent, any other lstat error propagates rather than passing as absence.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _wt_gitdir_clean():
+        # The per-worktree git dir is git's own, distinct from the main one, and holds neither the
+        # substrate home nor the lock module's control directory.
+        return (bool(wt_gitdir) and os.path.isdir(wt_gitdir)
+                and os.path.realpath(wt_gitdir) != os.path.realpath(os.path.join(main, ".git"))
+                and not any(_entry(os.path.join(wt_gitdir, name)) for name in (
+                    _opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME)))
     ok("R11-linked-worktree", res and res["status"] == VIEWS_READY
-       and os.path.isdir(_ops_dir(main)) and os.path.isdir(wt_gitdir)
-       and os.path.realpath(wt_gitdir) != os.path.realpath(os.path.join(main, ".git"))
-       and not os.path.lexists(wt_home),
-       str(res) + err[-400:])
-    # The probe above must be able to fail: the per-worktree home it names is visible once created.
-    if wt_home and not os.path.lexists(wt_home):
-        os.mkdir(wt_home)
-    ok("R11-linked-worktree-probe-live", bool(wt_home) and os.path.isdir(wt_home))
+       and os.path.isdir(_ops_dir(main)) and _wt_gitdir_clean(), str(res) + err[-400:])
+    # The probe above must be able to fail: each name present where git itself places it for this
+    # worktree (--git-path, derived apart from the probe's own join; planted when absent) makes the
+    # SAME predicate false.
+    for name in (_opf_init_substrate.SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME):
+        gp = _git(["rev-parse", "--path-format=absolute", "--git-path", name], wt, env, allow_fail=True)
+        plant = gp.stdout.decode().strip() if gp.returncode == 0 else ""
+        present = bool(plant) and _entry(plant)
+        planted = False
+        if plant and not present:
+            try:
+                os.mkdir(plant)
+                planted = True
+            except OSError:
+                pass
+        ok("R11-linked-worktree-probe-live-" + name, (present or planted) and not _wt_gitdir_clean(),
+           plant)
+        if planted:
+            os.rmdir(plant)
     plain_dir = os.path.join(base, "not-a-repo")
     os.mkdir(plain_dir)
     rc, res, _err = _child(plain_dir, env)
