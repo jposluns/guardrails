@@ -950,6 +950,30 @@ def _main_isolated(report_path=None):
         # '<<' inside it is a left shift, never a here-document (a pre-fix pass kept as a control).
         check("trunc/fg-arith-bitwise-and-allows", _verdict(bg("echo $((3 & 1))", rib=False)), "allow")
         check("trunc/fg-arith-left-shift-allows", _verdict(bg("echo $((1<<2))", rib=False)), "allow")
+        # QA round 3 BLOCKER: only the arithmetic TEXT is non-detach. A $(...) or backtick substitution
+        # nested in a $((...)) or ((...)) span still runs (bash 5.3 printed each marker on stderr), so
+        # it is scanned as code. Each of these was ALLOWED at ec85f8b0 (the span was skipped whole).
+        check("trunc/fg-heredoc-arith-cmdsub-detach-denies",
+              _verdict(bg("cat <<EOF\n$(( $(printf DETACHED >&2 & wait; printf 0) ))\nEOF", rib=False)),
+              "deny")
+        check("trunc/fg-arith-command-cmdsub-detach-denies",
+              _verdict(bg("(( $(printf DETACHED >&2 & wait; printf 1) ))", rib=False)), "deny")
+        for name, cmd in (
+                ("trunc/scan-arith-backtick-detach-kind", "echo $(( `printf X >&2 & wait; printf 0` ))"),
+                ("trunc/scan-dq-arith-cmdsub-detach-kind",
+                 "echo \"$(( $(printf X >&2 & wait; printf 0) ))\""),
+                ("trunc/scan-nested-arith-cmdsub-detach-kind",
+                 "echo $(( 1 + $(( $(printf X >&2 & wait; printf 0) )) ))"),
+                ("trunc/scan-arith-subshell-cmdsub-detach-kind",
+                 "echo $(( 1 + $((printf X >&2 & wait); printf 0) ))"),
+                ("trunc/scan-heredoc-subshell-cmdsub-detach-kind",
+                 "cat <<EOF\n$((printf X >&2 & wait); printf 0)\nEOF")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
+        # Controls: a substitution with no detach inside arithmetic, and bitwise AND around it, allow.
+        check("trunc/fg-arith-safe-cmdsub-allows",
+              _verdict(bg("echo $(( $(printf 2) & 3 ))", rib=False)), "allow")
+        check("trunc/fg-arith-command-safe-cmdsub-allows",
+              _verdict(bg("(( $(printf 1) & 1 ))", rib=False)), "allow")
         # CLOSING THE HERE-DOCUMENT QUOTE-SHIFT FALSE-ALLOW (manifest case 5): body quotes no longer flip
         # the scan's quote state, so a real bare '&' AFTER a here-document is seen. The two-heredoc form
         # was a SILENT ALLOW at the pre-fix pin (the body apostrophes rebalanced the scan around the real
@@ -1052,6 +1076,24 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_cmdsub_end("$(cat <<EOF\nEO\\\nF\n)", 2, 19), -1)
         check("trunc/fg-dq-cmdsub-backslash-body-detach-denies",
               _verdict(bg("x=\"$(cat <<EOF\nEO\\\nF\n)\"; sleep 1 &\nEOF\n)\"", rib=False)), "deny")
+        # QA round 3 MEDIUM: a double-quoted $(...) the structural reader cannot close used to fall back to
+        # a character scan that stayed inside the balanced outer double quotes and ALLOWED (both forms at
+        # ec85f8b0; bash ran the detach). It now DENIES with a reason naming the unclosed substitution.
+        for name, cmd in (
+                ("trunc/fg-dq-cmdsub-continued-detach-denies",
+                 "x=\"$(cat <<EOF\n$\\\n(printf DETACHED >&2 & wait)\nEOF\n)\""),
+                ("trunc/fg-dq-cmdsub-escaped-bs-detach-denies",
+                 "x=\"$(cat <<EOF\n\\\\\nEOF\nprintf DETACHED >&2 &\nwait\n)\"")):
+            res = bg(cmd, rib=False)
+            check(name, (_verdict(res), "cannot close" in _why(res),
+                         aiqt_hooks._orch_foreground_detach_kind(cmd)),
+                  ("deny", True, "unclosed-substitution"))
+        # The safe double-quoted form with a backslash under an UNQUOTED delimiter is a disclosed deny;
+        # the same body under a quoted delimiter is literal and still allows.
+        check("trunc/fg-dq-cmdsub-unquoted-bs-safe-denies",
+              _verdict(bg("git commit -m \"$(cat <<EOF\nC:\\path\nEOF\n)\"", rib=False)), "deny")
+        check("trunc/fg-dq-cmdsub-quoted-bs-safe-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nC:\\path\nEOF\n)\"", rib=False)), "allow")
         # ANSI-C delimiter escapes (QA round 1, finding 3): bash decodes $'...' in a delimiter word, so
         # <<$'E\x4fF' ends at the line EOF. At the pre-fix pin any backslash in the ANSI-C word made the
         # parser give up, the body was scanned as code, and the safe body `A & B` was DENIED. The escapes
@@ -2518,7 +2560,9 @@ def _main_isolated(report_path=None):
           "reading a here-document body as DATA (a safe body '&' or apostrophe allows; an unquoted "
           "delimiter's command/backtick substitution spans are still scanned; an unquoted body holding a "
           "backslash is scanned as code and denied, a disclosed over-refusal; an unterminated here-document "
-          "denies with its own reason) and arithmetic as non-detach, and failing a scan that ends inside an "
+          "denies with its own reason) and arithmetic text as non-detach (a substitution nested in it is "
+          "scanned as code), denying a double-quoted command substitution it cannot close, and failing a "
+          "scan that ends inside an "
           "open quote toward a deny with its own reason (a quote the scan misreads in mid-string, such as "
           "an ANSI-C escaped quote, can still shift it into a disclosed silent allow), reads a '#' comment "
           "by bash's word-start rule as well, denies every in-scope call when the opt-in registry-required "
