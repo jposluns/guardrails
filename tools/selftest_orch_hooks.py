@@ -287,6 +287,9 @@ def _main_isolated(report_path=None):
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
     os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
+    # Hermetic registry scope: an inherited opt-in AIQT_ORCH_REQUIRE_REGISTRY would turn every no-registry
+    # allow below into a deny; the registry-required checks set and restore it themselves.
+    os.environ.pop(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, None)
     # Hermetic git fixtures on a DIRECT run (test-hermeticity): the selftest-execution gate
     # launches this runner git-neutral, but a direct run inherits the caller's environment,
     # where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook children) would
@@ -881,6 +884,49 @@ def _main_isolated(report_path=None):
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
+        # REGISTRY-REQUIRED MODE (opt-in, AIQT_ORCH_REQUIRE_REGISTRY): an ABSENT registry DENIES instead
+        # of leaving the guard inert, with a reason naming the mode and its repair; an explicit off value
+        # keeps the default inert allow, and a PRESENT registry behaves identically in both modes.
+        _rr = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _rr_old = os.environ.get(_rr)
+        try:
+            os.environ[_rr] = "1"
+            rr = aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": "ls", "run_in_background": False}))
+            rr_reason = (rr[1] or {}).get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", "")
+            check("trunc/registry-required-absent-denies",
+                  (_verdict(rr), _rr in rr_reason, "orchestration" in rr_reason), ("deny", True, True))
+            check("trunc/registry-required-present-plain-allows", _verdict(bg("python3 build.py")),
+                  "allow")
+            check("trunc/registry-required-present-detach-denies",
+                  _verdict(bg("long_job &", rib=False)), "deny")
+            os.environ[_rr] = "off"
+            check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash",
+                           {"command": "long_job &", "run_in_background": False}))), "allow")
+            # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): a comparison that
+            # stripped the value first would read a tab, a newline, or an off word wrapped in spaces or
+            # no-break spaces as OFF and allow without a registry. Each reads as ON.
+            _padded = ("\t", "\n", " ", "\u00a0off\u00a0", " off", "off\n", "\u00a0")
+            _padded_on = []
+            for _v in _padded:
+                os.environ[_rr] = _v
+                _padded_on.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-padded-off-reads-on", _padded_on, [True] * len(_padded))
+            os.environ[_rr] = "\u00a0off\u00a0"
+            check("trunc/registry-required-padded-off-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": ":", "run_in_background": False}))), "deny")
+            _exact_off = []
+            for _v in ("", "0", "false", "no", "off", "OFF", "False", "No"):
+                os.environ[_rr] = _v
+                _exact_off.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-exact-off-values-off", _exact_off, [False] * 8)
+        finally:
+            if _rr_old is None:
+                os.environ.pop(_rr, None)
+            else:
+                os.environ[_rr] = _rr_old
         # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
         # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
         # as double-quoted text and allowed.
@@ -2326,7 +2372,8 @@ def _main_isolated(report_path=None):
           "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
-          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, and fails "
+          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
+          "in-scope call when the opt-in registry-required mode is set and no registry is found, and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
           "a git-resolved toplevel; a git failure alone never denies), a malformed tool_input, "

@@ -9851,6 +9851,29 @@ def _orch_json_kind(value):
     return "an object" if isinstance(value, dict) else "a " + type(value).__name__
 
 
+_ORCH_REQUIRE_REGISTRY_ENV = "AIQT_ORCH_REQUIRE_REGISTRY"
+_ORCH_REQUIRE_REGISTRY_OFF_VALUES = ("", "0", "false", "no", "off")
+
+
+def _orch_registry_required():
+    """True when the adopter opted this session into REGISTRY-REQUIRED mode: the environment variable
+    AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
+    case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
+    nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
+    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES
+    in-scope Bash calls instead of leaving orch_truncation_guard inert; the default (variable unset) is
+    unchanged. An environment variable, not a pack config key, because every pack config surface
+    (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
+    located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
+    file-based key can never speak exactly when it is needed; the hook execution environment is the one
+    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction
+    for an explicitly configured strict mode."""
+    value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
+    if value is None:
+        return False
+    return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -9882,7 +9905,11 @@ def orch_truncation_guard(data):
     broken config, a bare repository - still never denies), so with NO registry entry on that chain and
     none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
     pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
-    unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
+    off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
+    stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
+    leaving the guard inert (_orch_registry_required). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -9942,6 +9969,19 @@ def orch_truncation_guard(data):
         # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
         # failure alone still never denies (the union leg reads False then and the allow stands).
         if not _orch_git_toplevel_has_registry(cwd):
+            if _orch_registry_required():
+                # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
+                # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+                return _deny(
+                    "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+                    "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
+                    "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                    ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
+                    "toplevel. Commit the orchestration registry at the repository root, run from a "
+                    "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+                    "restore the default scoping (inert allow with no registry).",
+                    "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
+                    "registry found (rule trkasy, fail-closed).")
             return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
