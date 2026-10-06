@@ -1022,7 +1022,9 @@ def lease_held_message(pfd, name, lease_rel, verb):
     """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
     A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
     lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy and the one case
-    in which opf itself releases another run's lease (FOREIGN_LEASE_SCOPE)."""
+    in which opf itself releases another run's lease (FOREIGN_LEASE_SCOPE). Its denial names only the lease
+    now present: a refusal met by the claim retried after this run released a confirmed-dead leftover
+    (_claim_after_release) appends that release, so no clause here denies every removal by this run."""
     detail = "a present lease with an unreadable payload"
     try:
         # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
@@ -1047,7 +1049,8 @@ def lease_held_message(pfd, name, lease_rel, verb):
     except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
         pass
     return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7).{} "
-            "release that lease as your own reconciliation step (this run removed no lease; {}), then re-run "
+            "release that lease as your own reconciliation step (this run has not removed the lease now present; "
+            "{}), then re-run "
             "opf {}.".format(lease_rel, detail, HELD_REMEDY, FOREIGN_LEASE_SCOPE, verb))
 
 
@@ -1166,11 +1169,24 @@ def read_lease_payload(pfd, name, why=None):
         _opf_store._close_fd_exc_safe(fd)
 
 
-def lease_holder_of(raw):
+# What lease_holder_of says of an entry it read no bytes from, by the read_lease_payload cause.
+_UNREAD_ENTRY = {"absent": "the lease is absent",
+                 "non-regular": "the lease is a non-regular entry",
+                 "oversized": "the lease payload is OVERSIZED (over the 65536-byte bound)"}
+
+
+def lease_holder_of(raw, cause=None):
     """Best-effort holder identity from raw lease bytes, for a DIAGNOSTIC message only (never raises, never
-    load-bearing: the ownership decision is the full-payload byte compare in unlink_owned_lease)."""
+    load-bearing: the ownership decision is the full-payload byte compare in unlink_owned_lease). With no
+    bytes (raw None) it names no holder and says why, from `cause` (a read_lease_payload cause: absent,
+    non-regular, oversized, or unreadable with its error), or that the lease was not read when the caller
+    gives no cause; it never reports one cause as another."""
     if raw is None:
-        return "absent or a non-regular entry"
+        if cause is None:
+            return "no holder named (the lease was not read)"
+        if cause.startswith("unreadable"):
+            return "no holder named (the lease is {})".format(cause)
+        return "no holder named ({})".format(_UNREAD_ENTRY.get(cause, "the lease was not read"))
     try:
         data = tomllib.loads(raw.decode("utf-8"))
         if isinstance(data, dict) and data.get("holder") is not None:
@@ -1382,7 +1398,9 @@ def _lock_refusal(exc, held):
     while cause is not None and not isinstance(cause, OSError):
         cause = cause.__cause__
     if cause is not None and cause.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-        text = text.split(HELD_REMEDY, 1)[0]
+        # The LAST occurrence: the held-lease refusal ends with the remedy, and the holder it quotes from
+        # the lease file comes before it, so a holder carrying the remedy's words never cuts the text.
+        text = text.rsplit(HELD_REMEDY, 1)[0]
     return WriteGuardError("{} {}{}".format(exc, text[:1].upper(), text[1:]))
 
 
