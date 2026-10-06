@@ -2484,14 +2484,16 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest
             try:
                 prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
             except (_journal.JournalError, OSError) as exc:
+                _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never this refusal
                 raise AdoptApplyError("cannot inspect the adoption journal ({}); "
                                       "fail-closed".format(exc))
             if prior is not None:
                 raise AdoptApplyError("run {} grew its transaction {!r} before the lock was "
-                                      "acquired: one run takes one transaction per phase, and "
-                                      "changing approved work takes a fresh plan with its own "
-                                      "run id (spec 14.1); nothing written "
-                                      "(fail-closed)".format(run_id, txn))
+                                      "acquired: one run takes one base transaction and commits "
+                                      "one transaction per phase (a phase attempt that rolled back "
+                                      "may be retried as the next attempt), and changing approved "
+                                      "work takes a fresh plan with its own run id (spec 14.1); "
+                                      "nothing written (fail-closed)".format(run_id, txn))
             if phase is not None:
                 committed, committed_modes = _committed_base_or_refuse(root_fd, journal_root, run_id, phase)
             ops = _compose_checked(root_fd, run_id, phase, compose, plan_digest, committed, committed_modes)
@@ -8038,6 +8040,13 @@ def _self_test_checks():
                            ("lock-stays", None, (("release_lock", lambda journal_root: None),)),
                            ("rollback", None, (("apply_ops", class_apply_then_fail),)))
         quiet_code = _journal._close_fd_quietly.__code__
+        # Every descriptor class_run reclaims, one row per run: (scenario, the injected exceptions, the code
+        # that opened each descriptor reclaimed). Judged once the sweeps below have run.
+        class_reclaims = []
+        # The disclosed windows (module docstring): _open_dir_contained's duplicate, and the store's
+        # _open_working_dir_fd `.working` descriptor, each left open when a parent close raises anything
+        # but OSError.
+        class_reclaim_windows = frozenset(("_journal.py:_open_dir_contained", "_opf_store.py:_open_working_dir_fd"))
 
         def class_run(scenario, plan, sites=None):
             """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
@@ -8048,16 +8057,18 @@ def _self_test_checks():
             name, compose_c, patches = scenario
             under = plan.get("under")
             # The descriptors this run owns: each one os.open, os.dup or os.pipe returns on this thread while
-            # the run's patches stand, with its identity (st_dev, st_ino) then, dropped when os.close is called
-            # on it. Another thread's descriptor (or one a run left a callback to keep) is never entered here.
+            # the run's patches stand, with its identity (st_dev, st_ino) then and the code that opened it,
+            # dropped when os.close is called on it. Another thread's descriptor (or one a run left a callback
+            # to keep) is never entered here.
             owner, owned = threading.get_ident(), {}
             real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
 
             def own(*fds):
                 if threading.get_ident() == owner:
+                    opener = sys._getframe(2).f_code
                     for fd in fds:
                         st = _real_fstat(fd)
-                        owned[fd] = (st.st_dev, st.st_ino)
+                        owned[fd] = (st.st_dev, st.st_ino, opener)
                 return fds
 
             def owned_open(*args, **kwargs):
@@ -8111,13 +8122,19 @@ def _self_test_checks():
             # run itself opened and never closed, only while its number still names the file it opened (a
             # number released some other way and reused elsewhere is left alone), so the sweep's runs never
             # leave them to the modules tested after this one and never close a descriptor they do not own.
-            for fd, identity in sorted(owned.items()):
+            # Each one reclaimed is recorded with its opener (class_reclaims), so a leak is judged, never
+            # hidden: the check after the sweeps admits only the disclosed windows.
+            reclaimed = []
+            for fd, (dev, ino, opener) in sorted(owned.items()):
                 try:
                     st = _real_fstat(fd)
                 except OSError:
                     continue
-                if (st.st_dev, st.st_ino) == identity:
+                if (st.st_dev, st.st_ino) == (dev, ino):
                     os.close(fd)
+                    reclaimed.append(opener)
+            if reclaimed:
+                class_reclaims.append((name, tuple(type(exc) for exc, _quiet in fired), tuple(reclaimed)))
             return seen[0], fired, raised
 
         def class_named(exc, raised):
@@ -8333,6 +8350,54 @@ def _self_test_checks():
                 sweep_bad.append((at, [repr(exc) for exc, _quiet in fired], repr(raised)[:300]))
         check("close-class-sweep-close-pairs-both-named", sweep_runs > 3 and not sweep_bad,
               observed="pairs={} unnamed={!r}".format(sweep_runs, sweep_bad[:6]))
+        # What class_run reclaimed across every run above, judged (train review round 1): a run with no
+        # injection reclaims nothing, and every descriptor reclaimed was opened at a disclosed close window
+        # (class_reclaim_windows) in a run whose injected exceptions are none of them an OSError, the only
+        # classes those windows disclose. Red against a production leak the reclaim would otherwise hide (a
+        # descriptor a close helper opens on its propagate path, for one). The per-scenario tally is named.
+        reclaim_tally, reclaim_bad = {}, {}
+        for sc, injected, openers in class_reclaims:
+            classes = ",".join(sorted({cls.__qualname__ for cls in injected})) or "none"
+            for opener in openers:
+                where = "{}:{}".format(os.path.basename(opener.co_filename), opener.co_qualname)
+                reclaim_tally[(sc, where)] = reclaim_tally.get((sc, where), 0) + 1
+                if not injected or where not in class_reclaim_windows \
+                        or any(issubclass(cls, OSError) for cls in injected):
+                    reclaim_bad[(sc, classes, where)] = reclaim_bad.get((sc, classes, where), 0) + 1
+        check("class-run-reclaims-only-at-disclosed-windows", reclaim_tally and not reclaim_bad,
+              observed="undisclosed (scenario, injected, opener): count={!r}; reclaimed (scenario, opener): "
+              "count={!r}".format(sorted(reclaim_bad.items()), sorted(reclaim_tally.items())))
+        # U10's record-and-report rule at the under-lock probe of this run's transaction directory (train
+        # review round 1): its parent close making the real close, then raising EIO, raises that OSError as
+        # itself, marked as a close's exception, never the "cannot inspect the adoption journal" refusal
+        # (red against that handler without _journal._fd_release_fault). Only that probe is injected: the
+        # _lstat_contained called from run_adopt_transaction itself on JOURNAL_REL/<its txn>.
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            (Path(temp) / JOURNAL_REL).mkdir(parents=True)
+            real_prop_u, fired_u, raised_u = _journal._close_fd_propagating, [], None
+            lstat_code = _journal._lstat_contained.__code__
+
+            def prop_u(fd):
+                real_prop_u(fd)
+                at = sys._getframe(2)
+                up = at.f_back
+                if not fired_u and at.f_code is lstat_code and up is not None \
+                        and up.f_code is _run_adopt_transaction.__code__ \
+                        and at.f_locals.get("relpath") == JOURNAL_REL + "/" + str(up.f_locals.get("txn")):
+                    fired_u.append(OSError(errno.EIO, "injected parent close failure"))
+                    raise fired_u[0]
+            baseline = _fds_open()
+            with mock.patch.object(_journal, "_close_fd_propagating", prop_u):
+                try:
+                    run_adopt_transaction(temp, rid, lambda ops: None)
+                except BaseException as exc:    # noqa: BLE001  the outcome is inspected below
+                    raised_u = exc
+            leaked_u = sorted(_fds_open() - baseline)
+        check("under-lock-txn-probe-close-fault-raised-as-itself",
+              len(fired_u) == 1 and raised_u is fired_u[0] and _journal._fd_release_raised(raised_u)
+              and not leaked_u,
+              observed="injected={!r} raised={!r} marked={!r} leaked={!r}".format(
+                  fired_u, raised_u, raised_u is not None and _journal._fd_release_raised(raised_u), leaked_u))
         # a KeyError a close inside _poststate_verifies raises rolls the transaction back (run_transaction
         # rolls back on any Exception a close raised) and is named in the refusal; the lock is released
         # (red against the transaction left open with its lock released)
@@ -10524,6 +10589,15 @@ def _self_test_checks():
         shutil.rmtree(root / ".aiqt")
         check("driver-fixture-restored", _snapshot(root) == before)
 
+        # apply over a plan carrying an unlanded op refuses before any write (no journal, no bundle) and
+        # names that op: the fixture plan's retire-file row is landed in this build, so it is pinned back to
+        # the refusing handler for this vector and the refusal names it among the plan ops (red against
+        # run_apply's plan-op gate removed, which the receipt-stage gate below would otherwise hide).
+        with mock.patch.dict(OP_HANDLERS, {"retire-file": _not_yet_executable}):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-unlanded-ops-refused", "not yet executable" in (err or "")
+              and "plan op(s) " in (err or "") and "retire-file" in (err or "") and _snapshot(root) == before,
+              observed=err)
         # apply in THIS build: the retire-file row is landed, so apply refuses before any write (no journal,
         # no bundle) on what is still unlanded (the driver's mandatory receipt stage, and any other plan op
         # whose slice has not landed), never on the retire-file row, and the frozen retire source stays
