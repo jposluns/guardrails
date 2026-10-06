@@ -965,10 +965,12 @@ def _main_isolated(report_path=None):
                 ("trunc/scan-nested-arith-cmdsub-detach-kind",
                  "echo $(( 1 + $(( $(printf X >&2 & wait; printf 0) )) ))"),
                 ("trunc/scan-arith-subshell-cmdsub-detach-kind",
-                 "echo $(( 1 + $((printf X >&2 & wait); printf 0) ))"),
-                ("trunc/scan-heredoc-subshell-cmdsub-detach-kind",
-                 "cat <<EOF\n$((printf X >&2 & wait); printf 0)\nEOF")):
+                 "echo $(( 1 + $((printf X >&2 & wait); printf 0) ))")):
             check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
+        # In an unquoted body a `$((` is off the `$` allowlist (QA round 9) and denies unread.
+        check("trunc/scan-heredoc-subshell-cmdsub-unread-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$((printf X >&2 & wait); printf 0)\nEOF"),
+              "body-substitution-unread")
         # QA round 4 BLOCKERS: '((' inside parameter-expansion text was read as an arithmetic opener and
         # hid a real detach (ALLOWED at 7a767a4a; bash 5.3 printed DETACHED), and a <<$(x) delimiter was
         # recorded as "$" so the lines through a later "$" line were hidden. Arithmetic skipping is removed
@@ -1033,8 +1035,9 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat <<EOF\n$(job &)\nEOF", rib=False)), "deny")
         check("trunc/fg-heredoc-backtick-detach-denies",
               _verdict(bg("cat <<EOF\n`job &`\nEOF", rib=False)), "deny")
-        # An UNTERMINATED here-document fails toward the deny with a reason naming it (bash would still
-        # be reading input). At the pre-fix pin this was a SILENT ALLOW when the body shifted no quotes.
+        # An UNTERMINATED here-document fails toward the deny with a reason naming it (bash 5.3 warns that
+        # it was delimited by end-of-file and runs the command; the scan does not model that). At the
+        # pre-fix pin this was a SILENT ALLOW when the body shifted no quotes.
         ut = bg("cat <<'EOF'\nno terminator", rib=False)
         ut_reason = (ut[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unterminated-heredoc-reason",
@@ -1298,6 +1301,54 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_cmdsub_end("$( (true)# )\nx\n)", 2, 16), (16, False, True))
         check("trunc/fg-r8-body-paren-comment-safe-allows",
               _verdict(bg("cat <<EOF\n$( (true)# )\nsafe\n)\nEOF", rib=False)), "allow")
+        # QA round 9 BLOCKER: bash 5.3's brace command substitutions ${ cmd; } and ${| cmd; } in an
+        # unquoted body ran a real '&' that no body opener named (both ALLOWED at 626606cd, DENIED on main;
+        # bash 5.3.9 printed BG=<pid>). Every `$` in an unquoted body is now read against an ALLOWLIST: a
+        # name character or digit, a special parameter, or a `(` opening a flat span (never `$((`); any
+        # other continuation denies unread. The ${x:-...}, $[...], and $((...)) forms below each ran
+        # BG=<pid> under bash 5.3.9; all but the two marked denied at 626606cd were ALLOWED there.
+        r9_job = "true & echo BG=$! >&2; wait"
+        r9_funsub = "cat <<EOF\n${ true & echo BG=$!; wait; }\nEOF"
+        for name, cmd in (
+                ("trunc/scan-r9-body-funsub-kind", r9_funsub),
+                ("trunc/scan-r9-body-valsub-kind", "cat <<EOF\n${| true & REPLY=BG=$!; wait; }\nEOF"),
+                ("trunc/scan-r9-body-paramexp-funsub-kind", "cat <<EOF\nA ${x:-${ " + r9_job + "; }} Z\nEOF"),
+                # Denied at 626606cd as a detach (its flat inner $(...) was judged); unread now.
+                ("trunc/scan-r9-body-paramexp-cmdsub-kind", "cat <<EOF\nA ${x:-$(" + r9_job + ")} Z\nEOF"),
+                ("trunc/scan-r9-body-dollar-bracket-funsub-kind",
+                 "cat <<EOF\nA $[ ${ " + r9_job + "; } 1 ] Z\nEOF"),
+                # Denied at 626606cd as a detach (read as a $( span); unread now.
+                ("trunc/scan-r9-body-arith-funsub-kind", "cat <<EOF\nA $(( ${ " + r9_job + "; } 1 )) Z\nEOF"),
+                # Arithmetic evaluates a variable's value, so $((a)) runs a command substitution held in a
+                # subscript there (bash 5.3.9 printed BG=<pid>; ALLOWED at 626606cd).
+                ("trunc/scan-r9-body-arith-indirect-kind",
+                 "a='x[$(" + r9_job + ")]'; cat <<EOF\nv=$((a))\nEOF"),
+                # The disclosed over-refusals this adds (class (d)): each is safe and ALLOWED at 626606cd.
+                ("trunc/scan-r9-body-brace-home-overrefusal-kind", "cat <<EOF\nhome: ${HOME}\nEOF"),
+                ("trunc/scan-r9-body-dollar-bracket-overrefusal-kind", "cat <<EOF\n$[1]\nEOF"),
+                ("trunc/scan-r9-body-arith-overrefusal-kind", "cat <<EOF\n$(( 1 ))\nEOF"),
+                ("trunc/scan-r9-body-ansic-overrefusal-kind", "cat <<EOF\n$'x'\nEOF"),
+                ("trunc/scan-r9-body-locale-overrefusal-kind", "cat <<EOF\n$\"y\"\nEOF"),
+                ("trunc/scan-r9-body-dollar-space-overrefusal-kind", "cat <<EOF\ncost $ 5\nEOF"),
+                ("trunc/scan-r9-body-dollar-eol-overrefusal-kind", "cat <<EOF\n^foo$\nEOF"),
+                ("trunc/scan-r9-dq-cmdsub-body-funsub-kind",
+                 "git commit -m \"$(cat <<EOF\n${ " + r9_job + "; }\nEOF\n)\"")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
+        r9_res = bg(r9_funsub, rib=False)
+        check("trunc/fg-r9-body-funsub-denies",
+              (_verdict(r9_res), "cannot be evaluated" in _why(r9_res), "class (d)" in _why(r9_res),
+               "${| cmd; }" in _why(r9_res), "safe ${HOME} denies" in _why(r9_res)),
+              ("deny", True, True, True, True))
+        # The allowlist itself: $name, $1, and every special parameter stay plain text (a special
+        # parameter's second character never opens a span: bash prints $$ then a literal "(x)"), a flat
+        # span is still judged, and a quoted delimiter's body stays literal.
+        for name, cmd, want in (
+                ("trunc/scan-r9-body-allowlist-none",
+                 "cat <<EOF\nit's $HOME $_x $1 $? $# $@ $* $! $$ $- $0 $$(x) $!(y)\nEOF", None),
+                ("trunc/scan-r9-body-flat-cmdsub-detach-kind", "cat <<EOF\n$HOME $(" + r9_job + ")\nEOF", "detach"),
+                ("trunc/scan-r9-quoted-body-funsub-none", "cat <<'EOF'\n${ " + r9_job + "; }\nEOF", None),
+                ("trunc/scan-r9-dq-quoted-body-funsub-none", "cat <<\"EOF\"\n${HOME} $[1]\nEOF", None)):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -2736,7 +2787,8 @@ def _main_isolated(report_path=None):
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
           "reading a here-document body under a simple delimiter word as DATA (a safe body '&' or apostrophe "
           "allows; an unquoted delimiter's command/backtick substitution spans are still scanned, one "
-          "whose end the scan cannot read exactly denying as cannot-evaluate, and a "
+          "whose end the scan cannot read exactly denying as cannot-evaluate, a '$' there followed by "
+          "anything but a name, a special parameter, or a flat '$(' span denying unread, and a "
           "double-quoted command substitution holding a here-document has its inner text scanned as code; "
           "an unquoted body holding a backslash and arithmetic '&' are scanned as code and denied, and a "
           "here-document under any other delimiter word or after an untracked construct denies as "
