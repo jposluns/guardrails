@@ -9853,10 +9853,15 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
     `$(...)` span's content when _orch_cmdsub_end closes it EXACTLY with no here-document inside, is
     re-scanned as code by _orch_foreground_scan. Otherwise (a `$(` the walk cannot close, holds a
     here-document, or holds a construct it does not track, such as a parameter expansion, arithmetic, or a
-    `case` pattern) the rest of the body from that `$(` is scanned as code (the over-deny direction). A
-    `$((...))` is read as a `$(` substitution, as on main, so an `&` in its arithmetic denies. A body that
-    holds any backslash never reaches this scan (_orch_scan_heredoc_bodies denies it first). Returns the
-    inner scan's "detach"/"unbalanced"/"unterminated"/"unclosed-substitution", or None."""
+    `case` pattern), and for a backtick the walk cannot close, the span's end is unknown, so the rest of
+    the body from that opener is scanned as code and its kind is returned, or "body-substitution-unread"
+    (cannot-evaluate) when that scan finds nothing: a body quote read as code there can rebalance the scan
+    around a later real substitution's `&`, so a None from it is never returned as clean (a disclosed
+    over-refusal: a safe body there DENIES too). A `$((...))` is read as a `$(` substitution, as on main,
+    so an `&` in its arithmetic denies. A body that holds any backslash never reaches this scan
+    (_orch_scan_heredoc_bodies denies it first). Returns the inner scan's
+    "detach"/"unbalanced"/"unterminated"/"unclosed-substitution"/"heredoc-unread",
+    "body-substitution-unread", or None (only when every substitution span was read exactly)."""
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -9864,7 +9869,11 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
             end, heredoc_seen, exact = _orch_cmdsub_end(body, i + 2, n)
             bounded = end != -1 and exact and not heredoc_seen
             kind = _orch_foreground_scan(body[i + 2:end - 1] if bounded else body[i + 2:], bash_word_starts)
-            if kind is not None or not bounded:
+            if not bounded:
+                # The span's end is unknown, so the rest of the body was scanned as code, where a body
+                # quote can hide a later real substitution's `&`: nothing found is cannot-evaluate.
+                return kind or "body-substitution-unread"
+            if kind is not None:
                 return kind
             i = end
             continue
@@ -9872,9 +9881,11 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
             end = _orch_backtick_end(body, i + 1, n)
             content = body[i + 1:end - 1] if end != -1 else body[i + 1:]
             kind = _orch_foreground_scan(content, bash_word_starts)
+            if end == -1:
+                return kind or "body-substitution-unread"  # unclosed: the rest was scanned as code
             if kind is not None:
                 return kind
-            i = end if end != -1 else n
+            i = end
             continue
         i += 1
     return None
@@ -9895,10 +9906,11 @@ def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
     of it is read as data; the rest of the command is scanned as code and its kind is returned, or
     "body-backslash" when that scan finds nothing, so a safe body holding a backslash is DENIED too. A
     quoted delimiter's body is literal and is never affected. Returns (next_i, kind): kind is
-    "detach"/"unbalanced"/"unterminated"/"unclosed-substitution" from a substitution span or the code
-    fallback, "body-backslash" from the fallback, "unterminated" when the command ends before a terminator
-    line (bash would still be reading here-document input, so the scan cannot see what follows; it fails
-    toward the deny), or None."""
+    "detach"/"unbalanced"/"unterminated"/"unclosed-substitution"/"heredoc-unread" from a substitution span
+    or the code fallback, "body-backslash" from the fallback, "body-substitution-unread" from a
+    substitution span whose end is unknown (_orch_scan_body_substitutions), "unterminated" when the
+    command ends before a terminator line (bash would still be reading here-document input, so the scan
+    cannot see what follows; it fails toward the deny), or None."""
     for delim, strip_tabs, literal in pending:
         body_start = i
         body_end, i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
@@ -9936,7 +9948,9 @@ def _orch_foreground_scan(command, bash_word_starts):
     keeps going (a detach it meets still returns "detach") and returns "heredoc-unread" at the end, before
     "unbalanced" (the disclosed over-refusal: a safe body there DENIES too). For an
     UNQUOTED delimiter the body's `$(...)`/backtick substitution spans (which bash still runs) are
-    re-scanned as code (_orch_scan_body_substitutions); an unquoted body that holds ANY backslash is not
+    re-scanned as code (_orch_scan_body_substitutions), and a span whose end it cannot read exactly
+    returns "body-substitution-unread" when nothing else is found (cannot-evaluate, never None); an
+    unquoted body that holds ANY backslash is not
     read as data at all (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH,
     _orch_scan_heredoc_bodies): the rest of the command is scanned as code and the result is never None
     ("body-backslash" when that code scan finds nothing). ARITHMETIC IS READ AS ON MAIN: an `&` in a
@@ -10116,7 +10130,9 @@ def _orch_foreground_detach_kind(command):
     whose body it cannot read as data while a later line exists (the disclosed over-refusal,
     _orch_foreground_scan); else "body-backslash" when either rule meets an unquoted-delimiter
     here-document body holding a backslash (the disclosed over-refusal, _orch_scan_heredoc_bodies); else
-    None. The historical rule and
+    "body-substitution-unread" when either rule meets, in an unquoted-delimiter here-document body, a
+    substitution span whose end it cannot read exactly (cannot-evaluate, the disclosed over-refusal,
+    _orch_scan_body_substitutions); else None. The historical rule and
     bash's `#` word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character
     bash does not treat as a word break (a carriage return, a no-break space, a 0x1c separator, any other
     non-blank str.isspace() character) is not a comment to bash, so an `&` after it is scanned; a `#` after
@@ -10124,7 +10140,7 @@ def _orch_foreground_detach_kind(command):
     real `&` on the next line."""
     kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
     for kind in ("detach", "unbalanced", "unterminated", "unclosed-substitution", "heredoc-unread",
-                 "body-backslash"):
+                 "body-backslash", "body-substitution-unread"):
         if kind in kinds:
             return kind
     return None
@@ -10156,11 +10172,12 @@ def _orch_foreground_detach(command):
     an apostrophe (`the user's file`), or stray double quotes is no longer denied, and no longer shifts
     the scan's quote state, so a real bare `&` AFTER a here-document (between two here-documents, or
     after the terminator) is now seen and denied. For an UNQUOTED delimiter bash still runs `$(...)` and
-    backtick substitutions inside the body, so ONLY those spans are re-scanned as code (a real detach
-    inside them stays caught; a span inside double quotes keeps residual (1) below); the plain body text
-    is never scanned. A here-document whose terminator line never arrives is "unterminated" and FAILS
-    TOWARD DENY with its own reason: bash would still be reading input, so the scan cannot see what
-    follows the body.
+    backtick substitutions inside the body, so ONLY those spans are re-scanned as code (a bare `&` in a
+    span read exactly denies as a detach; a span whose end the walk cannot read exactly DENIES whatever it
+    holds, below; the general residuals below still apply to a span's content, and a span inside double
+    quotes keeps residual (1) below); the plain body text is never scanned. A here-document whose
+    terminator line never arrives is "unterminated" and FAILS TOWARD DENY with its own reason: bash would
+    still be reading input, so the scan cannot see what follows the body.
 
     UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH (a disclosed over-refusal, deny direction): bash removes
     backslash-newline line continuations in an UNQUOTED delimiter's body, with an outcome that depends on
@@ -10192,7 +10209,10 @@ def _orch_foreground_detach(command):
     "heredoc-unread" reason when no detach is seen first; inside a double-quoted `$(...)`, the
     "unclosed-substitution" reason), so a safe here-document there is DENIED too; a `<<` with no later
     line (echo $((1<<2))) has no body to misread and is scanned on as before. In an unquoted body, a `$(...)` whose end the walk cannot read exactly (it holds such
-    a construct, a `case` word, or a here-document) is scanned as code to the end of the body. A
+    a construct, a `case` word, or a here-document, or never closes), and a backtick that never closes,
+    is scanned as code to the end of the body, and the call DENIES even when that scan finds nothing (the
+    "body-substitution-unread" reason, cannot-evaluate): a body quote read as code there can rebalance
+    the scan around a later real substitution's `&`, so a safe body there is DENIED too. A
     double-quoted `$((...))` whose text holds a `$(` or backtick is scanned as code, so its bitwise `&`
     denies too.
 
@@ -10258,7 +10278,8 @@ _ORCH_HEREDOC_OVERREFUSALS = (
     "track (a backtick, ${...}, $[...], $'...', $(...), [, ((, or a '(' inside a word) in the same "
     "command; (c) an unquoted-delimiter body holding a backslash; (d) in an unquoted-delimiter body, the "
     "rest of the body from a $(...) span the scan cannot close or read exactly (one holding such a "
-    "construct, a 'case' word, or a here-document); (e) a $(...) inside double quotes that holds a here-document "
+    "construct, a 'case' word, or a here-document) or from a backtick it cannot close, which denies even "
+    "when nothing is found; (e) a $(...) inside double quotes that holds a here-document "
     "together with such a construct, a 'case' word, a here-document still awaiting its body when the "
     "span closes, or a here-document of class (a) or (b); and (f) a here-document whose terminator line "
     "never arrives")
@@ -10575,6 +10596,22 @@ def orch_truncation_guard(data):
                 "the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose unquoted here-document body holds a "
                 "backslash (rule trkasy, disclosed over-refusal).")
+        if detach_kind == "body-substitution-unread":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command opens a here-document "
+                "whose delimiter is unquoted, and its body holds a $(...) or backtick command substitution "
+                "whose end this guard's structural reader cannot read exactly (it holds a construct the "
+                "scan does not track, such as ${...}, $((...)), a 'case' word, or a here-document, or it "
+                "never closes). bash runs such a substitution, and the rest of the body would be scanned "
+                "as code, where a quote in the body can shift the scan's quote state around a real bare "
+                "'&' in a later substitution, so the command cannot be evaluated; it is denied rather than "
+                "allowed unread (check-fails-closed-on-unreadable), even when nothing detaches (a "
+                "disclosed over-refusal, class (d): " + _ORCH_HEREDOC_OVERREFUSALS + "). Quote the "
+                "delimiter (<<'EOF') when the body needs no expansion, compute the value into a variable "
+                "before the here-document, or write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose here-document body holds a command "
+                "substitution this guard cannot read (rule trkasy, cannot-evaluate, disclosed "
+                "over-refusal).")
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "

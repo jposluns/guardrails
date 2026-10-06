@@ -997,7 +997,8 @@ def _main_isolated(report_path=None):
                 ("trunc/scan-dq-nested-quote-heredoc-text-detach-kind",
                  "echo \"${x:-\"<<EOF \"}\"\nprintf DETACHED >&2 & wait\nEOF"),
                 # An unquoted body's $(...) whose end the walk cannot read exactly (a ')' inside a
-                # parameter expansion, a case pattern) is scanned as code to the end of the body.
+                # parameter expansion, a case pattern) is scanned as code to the end of the body; a detach
+                # that scan finds is reported as one (else cannot-evaluate, QA round 7 below).
                 ("trunc/scan-heredoc-paramexp-paren-detach-kind",
                  "cat <<EOF\n$(echo ${x:-)}; printf DETACHED >&2 & wait)\nEOF"),
                 ("trunc/scan-heredoc-case-paren-detach-kind",
@@ -1218,6 +1219,33 @@ def _main_isolated(report_path=None):
               tuple(t in ub_why for t in ("<<E'OF'", "does not track", "holding a backslash",
                                           "cannot close or read exactly", "inside double quotes",
                                           "never arrives")), (True,) * 6)
+        # QA round 7 MAJOR: in an unquoted-delimiter body, a $(...) span the walk reads inexactly (it holds
+        # ${x}, $((1)), or a case pattern) had the rest of the body scanned as code and a None returned as
+        # clean, so body apostrophes wrapped a later real substitution's '&' (each ALLOWED at 5c5ea3aa and
+        # DENIED on main; bash 5.3 printed DETACHED). An unbounded body-substitution scan that finds nothing
+        # is now cannot-evaluate, never clean; an unclosed backtick in a body is held to the same rule.
+        r7_tail = " '\n$(printf DETACHED >&2 & wait)\n'\nEOF"
+        for name, cmd in (
+                ("trunc/scan-r7-body-paramexp-span-quote-shift-kind", "cat <<EOF\n'\n$(echo ${x})" + r7_tail),
+                ("trunc/scan-r7-body-arith-span-quote-shift-kind", "cat <<EOF\n'\n$(echo $((1)))" + r7_tail),
+                ("trunc/scan-r7-body-case-span-quote-shift-kind",
+                 "cat <<EOF\n'\n$(case x in x) :;; esac)" + r7_tail),
+                ("trunc/scan-r7-body-unclosed-backtick-quote-shift-kind",
+                 "cat <<EOF\n'\n`echo '\n$(printf DETACHED >&2 & wait)\n'\nEOF"),
+                # The disclosed over-refusal this adds: a safe body holding such a span denies too.
+                ("trunc/scan-r7-body-paramexp-span-safe-overrefusal-kind", "cat <<EOF\nhi $(echo ${x})\nEOF"),
+                ("trunc/scan-r7-body-heredoc-span-safe-overrefusal-kind",
+                 "cat <<EOF\n$(cat <<X\nhi\nX\n)\nEOF")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
+        r7_res = bg("cat <<EOF\n'\n$(echo ${x})" + r7_tail, rib=False)
+        check("trunc/fg-r7-body-paramexp-span-quote-shift-denies",
+              (_verdict(r7_res), "cannot be evaluated" in _why(r7_res), "class (d)" in _why(r7_res)),
+              ("deny", True, True))
+        # Spans read exactly stay clean, and a detach the fallback finds is still reported as one.
+        check("trunc/scan-r7-body-exact-spans-none",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\nnow: $(date) and `pwd`\nEOF"), None)
+        check("trunc/fg-r7-body-exact-spans-allows",
+              _verdict(bg("cat <<EOF\nnow: $(date) and `pwd`\nEOF", rib=False)), "allow")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -2655,7 +2683,8 @@ def _main_isolated(report_path=None):
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
           "reading a here-document body under a simple delimiter word as DATA (a safe body '&' or apostrophe "
-          "allows; an unquoted delimiter's command/backtick substitution spans are still scanned, and a "
+          "allows; an unquoted delimiter's command/backtick substitution spans are still scanned, one "
+          "whose end the scan cannot read exactly denying as cannot-evaluate, and a "
           "double-quoted command substitution holding a here-document has its inner text scanned as code; "
           "an unquoted body holding a backslash and arithmetic '&' are scanned as code and denied, and a "
           "here-document under any other delimiter word or after an untracked construct denies as "
