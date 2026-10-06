@@ -772,45 +772,53 @@ def _parse_heredoc_delim(command, at, n):
     return (quoted, delim, strip_tabs, j)
 
 
-def _read_heredoc_body_line(command, i, n, joined):
-    """Read one here-document body line starting at `i`. Returns (line, next_i, had_newline).
-    For an UNQUOTED delimiter (`joined` True) bash removes backslash-newline line continuations as it reads,
-    so the returned line is the JOINED logical line and next_i is just past the newline that ended the last
-    physical line it spans; a backslash immediately before a newline drops both and continues on the next
-    physical line. For a QUOTED delimiter (`joined` False) the body is literal: one physical line is returned
-    unchanged. had_newline is False when the line ran to the end of the command with no terminating newline."""
-    if not joined:
-        nl = command.find("\n", i)
-        if nl == -1:
-            return command[i:n], n, False
-        return command[i:nl], nl + 1, True
-    chars = []
+def _heredoc_body_bounds(command, i, n, delim, strip_tabs):
+    """Find the end of one here-document body that starts at `i`, read by PHYSICAL lines: the body ends at
+    the first physical line that is EXACTLY `delim` (leading tabs stripped first for the <<- form; the
+    terminator may be the final line with no trailing newline). Returns (body_end, next_i): body_end is the
+    index where that terminator line starts and next_i is just past it, or (-1, n) when no physical line
+    matches. bash's backslash-newline line continuations in an UNQUOTED delimiter's body are NOT emulated
+    (whether a backslash continues a line depends on how many backslashes precede it, and a continuation
+    can move the terminator line or join a substitution opener across lines), so a caller that reads an
+    unquoted body must not trust these bounds when the body holds a backslash
+    (_heredoc_unquoted_backslash)."""
     while i < n:
-        c = command[i]
-        if c == "\\" and command[i + 1:i + 2] == "\n":
-            i += 2  # a backslash-newline line continuation: drop both, join the next physical line
-            continue
-        if c == "\n":
-            return "".join(chars), i + 1, True
-        chars.append(c)
-        i += 1
-    return "".join(chars), n, False
+        nl = command.find("\n", i)
+        next_i = n if nl == -1 else nl + 1
+        line = command[i:(n if nl == -1 else nl)]
+        cand = line.lstrip("\t") if strip_tabs else line
+        if cand == delim:
+            return i, next_i
+        i = next_i
+    return -1, n
+
+
+def _heredoc_unquoted_backslash(command, i, n, heredocs):
+    """True when, reading the run of here-document bodies that starts at `i` by physical lines
+    (_heredoc_body_bounds), the body of an UNQUOTED delimiter holds ANY backslash in its text up to the first
+    physical line equal to its delimiter (or up to the end of the command when no such line exists).
+    `heredocs` is a list of (delim, strip_tabs, quoted). Such a body cannot be read as data here: bash's
+    backslash handling in it is not emulated (_heredoc_body_bounds), so callers fall back toward the deny
+    (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH)."""
+    for delim, strip_tabs, quoted in heredocs:
+        body_end, next_i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
+        if not quoted and "\\" in command[i:(n if body_end == -1 else body_end)]:
+            return True
+        i = next_i
+    return False
 
 
 def _skip_heredoc_bodies(command, i, n, heredocs):
     """Advance past the bodies of a run of heredocs (in the order their '<<' operators appeared on the line),
-    each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form; for an
-    UNQUOTED delimiter, backslash-newline line continuations are joined before the comparison, exactly as bash
-    reads them). `heredocs` is a list of (delim, strip_tabs, quoted). An unterminated heredoc consumes the
-    rest of the command (bash would still be reading input). Returns the index just past the last consumed
-    body. The bodies are data and are excluded from analysis."""
-    for delim, strip_tabs, quoted in heredocs:
-        while i < n:
-            line, next_i, _had_nl = _read_heredoc_body_line(command, i, n, not quoted)
-            cand = line.lstrip("\t") if strip_tabs else line
-            i = next_i
-            if cand == delim:
-                break
+    each ending at the first PHYSICAL line that is EXACTLY its delimiter (_heredoc_body_bounds; leading tabs
+    stripped for the <<- form). `heredocs` is a list of (delim, strip_tabs, quoted). An unterminated heredoc
+    consumes the rest of the command (bash would still be reading input). Returns the index just past the
+    last consumed body. The bodies are data and are excluded from analysis. bash's backslash-newline
+    continuations in an UNQUOTED delimiter's body are NOT emulated, so for an unquoted body holding a
+    backslash the end returned here may not be bash's; a caller that can meet one checks
+    _heredoc_unquoted_backslash first (_orch_cmdsub_end does)."""
+    for delim, strip_tabs, _quoted in heredocs:
+        _body_end, i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
     return i
 
 
@@ -9753,7 +9761,9 @@ def _orch_cmdsub_end(command, j, n):
     """Index just past the `)` that closes a `$(` command substitution whose content starts at `j`, read
     STRUCTURALLY (quotes, backslash escapes, word-start `#` comments, nested parens, backtick spans, and
     here-document bodies, whose lines are data and never toggle quotes or close parens), or -1 when the
-    walk cannot close the span (an unterminated quote, comment, backtick, or here-document). This finds
+    walk cannot close the span (an unterminated quote, comment, backtick, or here-document, or an
+    UNQUOTED-delimiter here-document whose body holds a backslash, whose end this walk does not predict:
+    _heredoc_unquoted_backslash). This finds
     only the span END; the content is NOT judged here. It exists for the `$(...)`-inside-double-quotes
     case, where the content is already the disclosed false-allow residual (1): skipping the span whole
     keeps that residual exactly as it is, while stopping quotes inside the span (above all a
@@ -9789,6 +9799,8 @@ def _orch_cmdsub_end(command, j, n):
             j = nl
             continue
         if c == "\n" and pending:
+            if _heredoc_unquoted_backslash(command, j + 1, n, pending):
+                return -1  # an unquoted body holding a backslash: its end is not predictable here
             j = _skip_heredoc_bodies(command, j + 1, n, pending)
             del pending[:]
             word_start = True
@@ -9857,9 +9869,10 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
     non-detach (its `&` is bitwise-AND) and is skipped whole, keeping residual (4) for a substitution
     inside an arithmetic subscript. A `$(...)` or backtick span content is re-scanned as code by
     _orch_foreground_scan, so a detach inside it stays caught; a span that never closes is scanned to
-    the end of the body (the over-deny direction). A backslash escapes the next character (bash: a
-    backslash-dollar or backslash-backtick in an unquoted-delimiter body suppresses the substitution).
-    Returns the inner scan's "detach"/"unbalanced"/"unterminated", or None."""
+    the end of the body (the over-deny direction). A body that holds any backslash never reaches this
+    scan (_orch_scan_heredoc_bodies denies it first, the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY
+    WITH A BACKSLASH); the backslash branch below is kept only as a defensive skip. Returns the inner
+    scan's "detach"/"unbalanced"/"unterminated", or None."""
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -9896,27 +9909,27 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
 def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
     """Consume the BODIES of the queued here-documents starting at `i` (the character after the newline
     that ends the line their `<<` operators appeared on), in operator order. Each body runs to the first
-    line that is EXACTLY its delimiter (leading tabs stripped first for the `<<-` form, and for an UNQUOTED
-    delimiter backslash-newline line continuations joined before the comparison as bash does; the terminator
-    may be the final line with no trailing newline). Body lines are DATA: neither quote balancing nor
-    `&` detection reads them. For an UNQUOTED delimiter the body substitution spans are still scanned
-    (_orch_scan_body_substitutions): bash runs those even inside the body. Returns (next_i, kind): kind
-    is "detach"/"unbalanced"/"unterminated" from a substitution span, "unterminated" when the command
-    ends before a terminator line (bash would still be reading here-document input, so the scan cannot
-    see what follows; it fails toward the deny), or None."""
+    PHYSICAL line that is EXACTLY its delimiter (_heredoc_body_bounds: leading tabs stripped first for the
+    `<<-` form; the terminator may be the final line with no trailing newline). Body lines are DATA:
+    neither quote balancing nor `&` detection reads them. For an UNQUOTED delimiter the body substitution
+    spans are still scanned (_orch_scan_body_substitutions): bash runs those even inside the body.
+    UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH (a disclosed over-refusal): bash removes backslash-newline
+    line continuations in an unquoted delimiter's body, with an outcome that depends on how many
+    backslashes precede the newline, so a continuation can move the terminator line or join a `$` and a
+    `(` into a substitution opener across lines. This scan does NOT emulate that: when the body text up to
+    the first physical line equal to the delimiter (or to the end of the command) holds ANY backslash, none
+    of it is read as data; the rest of the command is scanned as code and its kind is returned, or
+    "body-backslash" when that scan finds nothing, so a safe body holding a backslash is DENIED too. A
+    quoted delimiter's body is literal and is never affected. Returns (next_i, kind): kind is
+    "detach"/"unbalanced"/"unterminated" from a substitution span or the code fallback, "body-backslash"
+    from the fallback, "unterminated" when the command ends before a terminator line (bash would still be
+    reading here-document input, so the scan cannot see what follows; it fails toward the deny), or
+    None."""
     for delim, strip_tabs, literal in pending:
         body_start = i
-        body_end = -1
-        while i < n:
-            line, next_i, had_nl = _read_heredoc_body_line(command, i, n, not literal)
-            cand = line.lstrip("\t") if strip_tabs else line
-            if cand == delim:
-                body_end = i
-                i = next_i
-                break
-            i = next_i
-            if not had_nl:
-                break
+        body_end, i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
+        if not literal and "\\" in command[body_start:(n if body_end == -1 else body_end)]:
+            return n, _orch_foreground_scan(command[body_start:], bash_word_starts) or "body-backslash"
         if body_end == -1:
             return n, "unterminated"
         if not literal:
@@ -9937,7 +9950,10 @@ def _orch_foreground_scan(command, bash_word_starts):
     with no quote balancing and no `&` detection; several here-documents on one line consume their bodies
     in operator order. For an UNQUOTED delimiter the body's `$(...)`/backtick substitution spans (which
     bash still runs) are re-scanned as code and `$((...))` arithmetic inside the body is skipped
-    (_orch_scan_body_substitutions). A `$((...))` arithmetic expansion and a `((...))` arithmetic command
+    (_orch_scan_body_substitutions); an unquoted body that holds ANY backslash is not read as data at all
+    (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH, _orch_scan_heredoc_bodies):
+    the rest of the command is scanned as code and the result is never None ("body-backslash" when that
+    code scan finds nothing). A `$((...))` arithmetic expansion and a `((...))` arithmetic command
     in the command itself are likewise skipped as non-detach (their `&` is bitwise-AND and a `<<` inside
     them is a left shift); a `$((` that no `))` closes falls back to the plain character scan (over-deny,
     never a silent allow). A `$(...)` opened INSIDE DOUBLE QUOTES is skipped structurally to its closing
@@ -10084,13 +10100,15 @@ def _orch_foreground_scan(command, bash_word_starts):
 def _orch_foreground_detach_kind(command):
     """"detach" when either scan rule meets a bare `&`; else "unbalanced" when either rule ends inside a
     quote; else "unterminated" when either rule ends with a here-document still awaiting its terminator
-    line; else None. The historical rule and bash's `#` word-start rule are both run so that the bash
-    rule only ADDS denies: a `#` after a character bash does not treat as a word break (a carriage
-    return, a no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a
-    comment to bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to
-    bash, so a quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    line; else "body-backslash" when either rule meets an unquoted-delimiter here-document body holding a
+    backslash (the disclosed over-refusal, _orch_scan_heredoc_bodies); else None. The historical rule and
+    bash's `#` word-start rule are both run so that the bash rule only ADDS denies: a `#` after a character
+    bash does not treat as a word break (a carriage return, a no-break space, a 0x1c separator, any other
+    non-blank str.isspace() character) is not a comment to bash, so an `&` after it is scanned; a `#` after
+    a metacharacter (`;#`) IS a comment to bash, so a quote in that comment no longer shifts the scan past a
+    real `&` on the next line."""
     kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
-    for kind in ("detach", "unbalanced", "unterminated"):
+    for kind in ("detach", "unbalanced", "unterminated", "body-backslash"):
         if kind in kinds:
             return kind
     return None
@@ -10124,6 +10142,18 @@ def _orch_foreground_detach(command):
     is never scanned. A here-document whose terminator line never arrives is "unterminated" and FAILS
     TOWARD DENY with its own reason: bash would still be reading input, so the scan cannot see what
     follows the body.
+
+    UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH (a disclosed over-refusal, deny direction): bash removes
+    backslash-newline line continuations in an UNQUOTED delimiter's body, with an outcome that depends on
+    how many backslashes precede the newline (an escaped backslash before a newline does not continue the
+    line), so a continuation can move the terminator line or join a `$` and a `(` into a substitution
+    opener across lines. The scan does NOT emulate that. When such a body, up to the first physical line
+    equal to its delimiter (or to the end of the command when none is), holds ANY backslash, none of it is
+    read as data: the rest of the command is scanned as code and the call is DENIED, as a detach, an open
+    quote, or an unterminated here-document when that scan finds one, else with the "body-backslash"
+    reason. A safe body holding a backslash (a Windows path, an escaped dollar sign) is therefore denied
+    too; quoting the delimiter keeps the body literal (a quoted delimiter's body is never affected), and a
+    body with no backslash is read as data as above.
 
     DELIMITER WORDS THE PARSER CANNOT RESOLVE EXACTLY (a disclosed over-refusal, deny direction): an
     ANSI-C `$'...'` delimiter is decoded as bash decodes it (the single-character escapes, octal `\\NNN`,
@@ -10291,7 +10321,8 @@ def orch_truncation_guard(data):
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
     and wait); every other foreground call remains out of scope (the harness returns its output directly).
     The detach scan reads a HERE-DOCUMENT BODY as DATA (no quote balancing or '&' detection sees it; for
-    an unquoted delimiter only the body's command/backtick substitution spans are re-scanned as code) and
+    an unquoted delimiter only the body's command/backtick substitution spans are re-scanned as code, and an
+    unquoted body holding any backslash is scanned as code and denied, a disclosed over-refusal) and
     reads arithmetic ('$((...))' and '((...))') as non-detach; a foreground command whose scan ends inside
     an open quote, or with a here-document still awaiting its terminator line, DENIES with a reason naming
     that defect (fail-toward-deny, never a silent allow).
@@ -10429,7 +10460,8 @@ def orch_truncation_guard(data):
                 "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
                 "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
                 "or one the scan misreads (an ANSI-C $'...' quote, or another quoting construct this scan "
-                "does not model; a here-document body is read as data and no longer leaves a quote open). "
+                "does not model; a here-document body is read as data and no longer leaves a quote open, "
+                "except an unquoted-delimiter body holding a backslash, which is scanned as code). "
                 "Balance the quoting, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
                 "end (rule trkasy, fail-closed).")
@@ -10442,6 +10474,18 @@ def orch_truncation_guard(data):
                 "own line, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command with an unterminated here-document (rule "
                 "trkasy, fail-closed).")
+        if detach_kind == "body-backslash":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command opens a here-document "
+                "whose delimiter is unquoted and whose body holds a backslash. bash removes a "
+                "backslash-newline line continuation in such a body, with an outcome that depends on how "
+                "many backslashes precede the newline, so it can move the terminator line or join a "
+                "substitution across lines; this guard does not emulate that, so the body is not read as "
+                "data and the command is denied even though nothing was found to detach (a disclosed "
+                "over-refusal). Quote the delimiter (<<'EOF') when the body needs no expansion, or write "
+                "the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose unquoted here-document body holds a "
+                "backslash (rule trkasy, disclosed over-refusal).")
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -10451,7 +10495,8 @@ def orch_truncation_guard(data):
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (a construct this scan does not "
                 "model that leaves it looking like an unquoted operator; a '$((...))' bitwise AND and a "
-                "here-document body's '&' are already read as non-detach), write the text to a file and "
+                "here-document body's '&' are already read as non-detach, except in an unquoted-delimiter "
+                "body holding a backslash, which is scanned as code), write the text to a file and "
                 "pass the file instead; the background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")

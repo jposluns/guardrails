@@ -992,21 +992,66 @@ def _main_isolated(report_path=None):
               aiqt_hooks._orch_foreground_detach("cat <<<'hello'"), False)
         check("trunc/scan-herestring-word-then-detach",
               aiqt_hooks._orch_foreground_detach("cat <<<hello &"), True)
-        # Backslash-newline line continuation in an UNQUOTED here-document body (BLOCKER 2): bash joins the
-        # continued lines before matching the terminator, so `EN\<newline>D` becomes the delimiter `END` and
-        # the here-document ends there, leaving the rest as CODE. At the pre-fix pin the scanner compared
-        # PHYSICAL lines, never matched the joined terminator, and swallowed the trailing detach as body
-        # (silent allow). The safe counterpart (`EO\<newline>F` -> `EOF`) must ALLOW again. A QUOTED
-        # delimiter's body is literal and is NOT joined, so the same continuation stays an unterminated
-        # here-document (deny with its own reason), never a silent allow.
+        # Backslash in an UNQUOTED here-document body (QA round 1 BLOCKER 2 and QA round 2 BLOCKERS 1-2):
+        # bash removes backslash-newline continuations in such a body, with an outcome that depends on how
+        # many backslashes precede the newline, so a continuation can move the terminator line (`EN\<nl>D`
+        # ends at `END`, while `\\<nl>EOF` keeps EOF a separate line) or join `$\<nl>(` into a
+        # substitution opener. The round-1 join emulation got both wrong at 9c310c2c (an escaped backslash
+        # was joined, hiding the real terminator and a later detach; the joined text chose the terminator
+        # while the substitution scan read physical text): SILENT ALLOWS. The emulation is withdrawn: an
+        # unquoted body holding ANY backslash is not read as data, the rest of the command is scanned as
+        # code, and the call DENIES (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A
+        # BACKSLASH), so a safe body with a backslash denies too, with a reason naming the backslash. A
+        # QUOTED delimiter's body is literal and unchanged.
+        def _why(result):
+            return (result[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-heredoc-bsnl-join-detach-denies",
               _verdict(bg("cat <<END\nEN\\\nD\nsleep 100 &\nEND", rib=False)), "deny")
-        check("trunc/scan-heredoc-bsnl-join-detach-kind",
+        check("trunc/scan-heredoc-bsnl-body-detach-kind",
               aiqt_hooks._orch_foreground_detach_kind("cat <<END\nEN\\\nD\nsleep 100 &\nEND"), "detach")
-        check("trunc/fg-heredoc-bsnl-join-safe-allows",
-              _verdict(bg("cat <<EOF\nEO\\\nF", rib=False)), "allow")
+        # Allowed at 9c310c2c (joined `EO\<nl>F` read as the terminator); a disclosed deny now.
+        bsnl_safe = bg("cat <<EOF\nEO\\\nF", rib=False)
+        check("trunc/fg-heredoc-bsnl-safe-backslash-denies",
+              (_verdict(bsnl_safe), "holds a backslash" in _why(bsnl_safe)), ("deny", True))
         check("trunc/scan-quoted-delim-no-bsnl-join",
               aiqt_hooks._orch_foreground_detach_kind("cat <<'END'\nEN\\\nD\nsleep 100 &"), "unterminated")
+        # QA round 2 BLOCKER 1: an escaped backslash before a newline (two or four backslashes) does not
+        # continue the line, so the physical EOF line ends the body and the detach after it runs. ALLOWED
+        # at 9c310c2c (scan None); denies now as a seen detach.
+        esc_bs = "EOF() { :; }\ncat <<EOF\n\\\\\nEOF\nprintf DETACHED &\nwait\nEOF"
+        check("trunc/fg-heredoc-escaped-bs-detach-denies", _verdict(bg(esc_bs, rib=False)), "deny")
+        check("trunc/scan-heredoc-escaped-bs-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind(esc_bs), "detach")
+        check("trunc/scan-heredoc-four-bs-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind(
+                  "EOF() { :; }\ncat <<EOF\n\\\\\\\\\nEOF\nprintf DETACHED &\nwait\nEOF"), "detach")
+        # Its safe counterpart: denied at 9c310c2c as "unterminated" (a misread); a disclosed deny now,
+        # with the backslash reason.
+        esc_safe = bg("cat <<EOF\n\\\\\nEOF", rib=False)
+        check("trunc/fg-heredoc-escaped-bs-safe-denies",
+              (_verdict(esc_safe), "holds a backslash" in _why(esc_safe)), ("deny", True))
+        check("trunc/scan-heredoc-escaped-bs-safe-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n\\\\\nEOF"), "body-backslash")
+        # QA round 2 BLOCKER 2: `$\<nl>(` joins into a command substitution that bash runs. ALLOWED at
+        # 9c310c2c (scan None); denies now. Its safe counterpart (no detach inside) was ALLOWED at
+        # 9c310c2c and is a disclosed deny now.
+        check("trunc/fg-heredoc-continued-cmdsub-detach-denies",
+              _verdict(bg("cat <<EOF\n$\\\n(printf DETACHED & wait)\nEOF", rib=False)), "deny")
+        check("trunc/scan-heredoc-continued-cmdsub-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$\\\n(printf DETACHED & wait)\nEOF"),
+              "detach")
+        cont_safe = bg("cat <<EOF\n$\\\n(printf SAFE)\nEOF", rib=False)
+        check("trunc/fg-heredoc-continued-cmdsub-safe-denies",
+              (_verdict(cont_safe), "holds a backslash" in _why(cont_safe)), ("deny", True))
+        # Unchanged controls: a QUOTED delimiter's body with backslashes is literal data and allows; the
+        # structural end finder for a `$(...)` inside double quotes gives up (-1) on an unquoted body
+        # holding a backslash instead of predicting its end, so a detach after the real span stays seen.
+        check("trunc/fg-quoted-heredoc-backslash-body-allows",
+              _verdict(bg("cat <<'EOF'\nC:\\path & \\\\\nEOF", rib=False)), "allow")
+        check("trunc/cmdsub-end-unquoted-backslash-body-unclosed",
+              aiqt_hooks._orch_cmdsub_end("$(cat <<EOF\nEO\\\nF\n)", 2, 19), -1)
+        check("trunc/fg-dq-cmdsub-backslash-body-detach-denies",
+              _verdict(bg("x=\"$(cat <<EOF\nEO\\\nF\n)\"; sleep 1 &\nEOF\n)\"", rib=False)), "deny")
         # ANSI-C delimiter escapes (QA round 1, finding 3): bash decodes $'...' in a delimiter word, so
         # <<$'E\x4fF' ends at the line EOF. At the pre-fix pin any backslash in the ANSI-C word made the
         # parser give up, the body was scanned as code, and the safe body `A & B` was DENIED. The escapes
@@ -2471,7 +2516,8 @@ def _main_isolated(report_path=None):
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
           "reading a here-document body as DATA (a safe body '&' or apostrophe allows; an unquoted "
-          "delimiter's command/backtick substitution spans are still scanned; an unterminated here-document "
+          "delimiter's command/backtick substitution spans are still scanned; an unquoted body holding a "
+          "backslash is scanned as code and denied, a disclosed over-refusal; an unterminated here-document "
           "denies with its own reason) and arithmetic as non-detach, and failing a scan that ends inside an "
           "open quote toward a deny with its own reason (a quote the scan misreads in mid-string, such as "
           "an ANSI-C escaped quote, can still shift it into a disclosed silent allow), reads a '#' comment "
