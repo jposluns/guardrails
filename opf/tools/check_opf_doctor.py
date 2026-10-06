@@ -2670,13 +2670,40 @@ def _claude_hook_self_test():
             deny("bash-r16-git-format-patch-o-product-from-outside-denied",
                  payload("Bash", dict(command="git format-patch -1 -o "
                                       + os.path.join(root, "docs")), elsewhere), "constructs")
+            # ROUND 17 (QA round 15): the round-16 --stdout and output-location exemptions were
+            # decided by option membership, and git 2.53 writes the patch file for format-patch -1
+            # HEAD --stdout --no-stdout and --subject-prefix --stdout (and the pack for
+            # pack-objects --stdout --no-stdout pack). In a bound product a constructing
+            # subcommand now denies whatever its options and an output option denies wherever its
+            # value points (disclosed over-refusal); a lone -- no longer ends the option scan (git
+            # fast-export --refspec -- --export-marks=mk HEAD writes mk). Only the exact three
+            # words git <subcommand> -h are exempt. On the pin 85a2cd7c every -denied vector in
+            # this block but the git clone -h x control ALLOWED, and every -h -allowed vector
+            # DENIED.
             for label, cmd in (
+                    ("format-patch-stdout-negated", "git format-patch -1 HEAD --stdout --no-stdout"),
+                    ("format-patch-stdout-consumed",
+                     "git format-patch -1 HEAD --subject-prefix --stdout"),
+                    ("pack-objects-stdout-negated", "git pack-objects --stdout --no-stdout pack"),
                     ("format-patch-stdout", "git format-patch -1 --stdout"),
                     ("format-patch-o-outside", "git format-patch -1 -o " + elsewhere),
                     ("bundle-create-outside",
                      "git bundle create " + os.path.join(elsewhere, "x.bundle") + " HEAD"),
                     ("bundle-create-stdout", "git bundle create - HEAD"),
                     ("pack-objects-stdout", "git pack-objects --stdout"),
+                    ("log-output-outside", "git log --output=" + os.path.join(elsewhere, "x")),
+                    ("fast-export-marks-after-dashdash",
+                     "git fast-export --refspec -- --export-marks=mk HEAD"),
+                    ("clone-h-operand", "git clone -h x"),
+                    ("format-patch-h-stdout", "git format-patch -h --stdout")):
+                deny("bash-r17-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "constructs")
+            for label, cmd in (("clone-h", "git clone -h"),
+                               ("format-patch-h", "git format-patch -h"),
+                               ("bugreport-h", "git bugreport -h"),
+                               ("diagnose-h", "git diagnose -h")):
+                allow("bash-r17-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            for label, cmd in (
                     ("archive-stdout", "git archive HEAD"),
                     ("log-oneline", "git log --oneline"),
                     ("diff-output-indicator", "git diff --output-indicator-new=x")):

@@ -356,8 +356,21 @@ per-platform residual coverage carry the same list):
     mv and ln on the test host reject --parents (each exits 1) and are joined the same way.
     Round 16 also covers the git subcommands that write a file whose name they construct or an
     option names (GIT_OUTPUT_WRITERS below and _git_output_reason): such a file landing at or
-    under a product root, or in the pack own tree, denies with a named reason unless the form
-    writes to standard output. A git configuration value naming an output location
+    under a product root, or in the pack own tree, denies with a named reason. Round 17 withdraws
+    the round-16 standard-output and output-location exemptions, which were decided by option
+    membership (git format-patch -1 HEAD --stdout --no-stdout and git format-patch -1 HEAD
+    --subject-prefix --stdout write the patch file; git pack-objects --stdout --no-stdout pack
+    writes the pack): in a bound product a subcommand that constructs a file name (format-patch,
+    bugreport, diagnose, pack-objects, index-pack, bundle, clone, mailsplit) denies whatever its
+    options, and any other output-writing subcommand (diff, log, show, archive and the rest of
+    GIT_OUTPUT_WRITERS) denies when an output option word appears at all, wherever its value
+    points; a lone -- does not end that scan. This is a disclosed over-refusal: git format-patch
+    --stdout, git pack-objects --stdout, git bundle create - HEAD, git bundle verify, git
+    format-patch -o /elsewhere, git log --output=/elsewhere/x and git log -- --output=x are
+    refused from a product root; run them from outside every product root (redirecting standard
+    output there). Only the exact three words git <subcommand> -h, which print usage and write
+    nothing, are exempt; any other word sequence with -h (git clone -h x, git format-patch -h
+    --stdout) takes the normal rule. A git configuration value naming an output location
     (format.outputDirectory) is the configuration residual named above.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
@@ -429,7 +442,11 @@ per-platform residual coverage carry the same list):
     a product root (git format-patch -1 HEAD, git diff --output=out.patch, git bugreport), git
     clone denies whenever the cwd or any word lies in one (git clone url /elsewhere/x from a
     product root included), and git bundle create with an option outside its recognized
-    grammar denies. R6 denies every write under a
+    grammar denies. Round 17: in a bound product every such constructing subcommand denies
+    whatever its options (git format-patch -1 --stdout, git pack-objects --stdout and git bundle
+    create - HEAD included), and an output option denies wherever its value points (git
+    format-patch -1 -o /elsewhere, git log --output=/elsewhere/x); only git <subcommand> -h,
+    exactly those three words, is exempt. R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -713,11 +730,13 @@ PARENTS_OPTION = "--parents"
 # The git subcommands that write a file whose name they CONSTRUCT or an option names (round 16; each
 # checked against its git 2.53 -h output): format-patch (NNNN-subject.patch, the cover letter),
 # bugreport and diagnose (a suffixed report name) write into the cwd unless an output directory is
-# named, and format-patch --stdout writes no file; pack-objects (<base-name>-<hash>.pack, .idx, .rev;
-# --stdout writes no file) and index-pack (<pack>.idx, .rev, .keep) write beside a named base or
-# pack; bundle create writes its first operand (- is standard output); clone creates a directory
-# named after the repository, or its operand; mailsplit writes numbered files into its -o
-# directory. The valued options of GIT_OUTPUT_OPTIONS (any abbreviation) and, for the
+# named; pack-objects (<base-name>-<hash>.pack, .idx, .rev) and index-pack (<pack>.idx, .rev, .keep)
+# write beside a named base or pack; bundle create writes its first operand; clone creates a
+# directory named after the repository, or its operand; mailsplit writes numbered files into its -o
+# directory. Round 17: these GIT_GENERATED_WRITERS deny in a bound product whatever their options
+# (no --stdout or output-location exemption: git format-patch -1 HEAD --stdout --no-stdout and
+# --subject-prefix --stdout write the patch file, so membership of --stdout proves nothing), and
+# only the exact three words git <subcommand> -h (git's own usage-only form) are exempt. The valued options of GIT_OUTPUT_OPTIONS (any abbreviation) and, for the
 # GIT_SHORT_O_OUTPUT subcommands, -o name an output file or directory: --output on diff, diff-files,
 # diff-index, diff-tree, diff-pairs, log, show, whatchanged, range-diff and format-patch, -o or
 # --output on archive, --output-directory on format-patch, bugreport and diagnose, --export-marks on
@@ -734,10 +753,12 @@ GIT_SHORT_O_OUTPUT = frozenset(("archive", "bugreport", "diagnose", "format-patc
                                 "mailsplit"))
 GIT_OUTPUT_OPTIONS = ("--output", "--output-directory", "--export-marks", "--index-output",
                       "--expire-to", "--filter-to", "--object-dir")
-GIT_OUTPUT_WRITERS = GIT_CWD_WRITERS | GIT_BASE_WRITERS | GIT_SHORT_O_OUTPUT | frozenset((
-    "bundle", "clone", "diff", "diff-files", "diff-index", "diff-tree", "diff-pairs", "log",
-    "show", "whatchanged", "range-diff", "fast-export", "fast-import", "read-tree", "gc",
-    "repack", "commit-graph", "multi-pack-index"))
+GIT_GENERATED_WRITERS = GIT_CWD_WRITERS | GIT_BASE_WRITERS | frozenset(("bundle", "clone",
+                                                                       "mailsplit"))
+GIT_OUTPUT_WRITERS = GIT_GENERATED_WRITERS | GIT_SHORT_O_OUTPUT | frozenset((
+    "diff", "diff-files", "diff-index", "diff-tree", "diff-pairs", "log", "show", "whatchanged",
+    "range-diff", "fast-export", "fast-import", "read-tree", "gc", "repack", "commit-graph",
+    "multi-pack-index"))
 # The option words git bundle create accepts before its file operand (git 2.53 -h; --version takes
 # its value glued); any other option word there leaves the file operand uncomputed (deny).
 GIT_BUNDLE_CREATE_FLAGS = frozenset(("-q", "--quiet", "--no-quiet", "--progress", "--no-progress",
@@ -1785,11 +1806,15 @@ def _backup_reason(words, root):
 
 def _git_output_spots(sub, rest, cwd, cands):
     """Where git `sub` with the words `rest` after it writes a file whose name it constructs or an
-    option names (round 16, GIT_OUTPUT_WRITERS): (spots, None), each an absolute path at or under
-    which such a file lands, or (None, reason) when the location cannot be computed. A relative
+    option names (round 16, GIT_OUTPUT_WRITERS): (spots, named, None), each spot an absolute path
+    at or under which such a file lands and `named` true when an output option word appears, or
+    (None, True, reason) when the location cannot be computed. A relative
     location is resolved against the cwd and every directory the command names (an
     over-approximation: git -C and --work-tree move it), and a cwd-defaulted location is every one
-    of those directories."""
+    of those directories. Round 17: no --stdout or bundle - form is exempt, and a lone -- does NOT
+    end the scan (a valued option may take it as its value: git fast-export --refspec --
+    --export-marks=mk HEAD writes mk), so a word after it spelled like an output option only
+    over-refuses."""
     bases = [cwd] + [c for c in cands if os.path.isdir(c)]
     values, operands, k = [], [], 0
     while k < len(rest):
@@ -1799,9 +1824,6 @@ def _git_output_spots(sub, rest, cwd, cands):
                        and any(full.startswith(name) for full in GIT_OUTPUT_OPTIONS))
         short_output = (sub in GIT_SHORT_O_OUTPUT and word.startswith("-")
                         and not word.startswith("--") and "o" in word[1:])
-        if word == "--":
-            operands.extend(rest[k + 1:])
-            break
         if long_output or short_output:
             tail = glued if long_output else word[word.index("o", 1) + 1:]
             if (eq if long_output else tail):
@@ -1810,15 +1832,14 @@ def _git_output_spots(sub, rest, cwd, cands):
                 k += 1
                 values.append(rest[k])
             else:
-                return None, "its option %r carries no value" % (word,)
+                return None, True, "its option %r carries no value" % (word,)
         elif not word.startswith("-") or word == "-":
             operands.append(word)
         k += 1
     files, spots = list(values), []
     if sub in GIT_CWD_WRITERS and not values:
-        if not (sub == "format-patch" and "--stdout" in rest):
-            spots.extend(bases)
-    if sub in GIT_BASE_WRITERS and not (sub == "pack-objects" and "--stdout" in rest):
+        spots.extend(bases)
+    if sub in GIT_BASE_WRITERS:
         for word in operands:
             for base in bases:
                 spots.extend(os.path.dirname(c) for c in _candidates(word, base, "literal") or ())
@@ -1827,10 +1848,9 @@ def _git_output_spots(sub, rest, cwd, cands):
             if word in GIT_BUNDLE_CREATE_FLAGS or word.startswith("--version="):
                 continue
             if word.startswith("-") and word != "-":
-                return None, ("its create option %r is outside the recognized grammar, so the "
-                              "file operand cannot be computed" % (word,))
-            if word != "-":
-                files.append(word)
+                return None, True, ("its create option %r is outside the recognized grammar, so "
+                                    "the file operand cannot be computed" % (word,))
+            files.append(word)
             break
     if sub == "clone":
         spots.extend(bases)
@@ -1838,23 +1858,36 @@ def _git_output_spots(sub, rest, cwd, cands):
     for value in files:
         for base in bases:
             spots.extend(_candidates(value, base, "literal") or ())
-    return spots, None
+    return spots, bool(values), None
 
 
-def _git_output_reason(words, cwd, cands):
+def _git_output_reason(words, cwd, cands, roots):
     """The round-16 deny reason for a plain git command whose subcommand writes a file whose name
     it constructs or an option names (_git_output_spots), or None: such a file landing at or under
     a product root (judged with _roots_above, so a root is found whether or not it is already
-    bound) or inside the pack own tree (R8) denies, as does a location that cannot be computed. A
-    form that writes only to standard output (format-patch or pack-objects --stdout, bundle create
-    -, no output option) yields no spot, and the exact path check then applies."""
+    bound) or inside the pack own tree (R8) denies, as does a location that cannot be computed.
+    Round 17 removes every standard-output and output-location exemption in a bound product (the
+    bound roots `roots`): a GIT_GENERATED_WRITERS subcommand denies whatever its options, and any
+    other GIT_OUTPUT_WRITERS subcommand denies when it carries an output option word at all,
+    wherever its value points. Only the exact words git <subcommand> -h (usage only; git itself
+    treats just that two-argument form as a help request) are exempt."""
     if os.path.basename(words[0]) != "git":
         return None
     i, reason = _git_grammar(words)
     if reason is not None or i is None or words[i] not in GIT_OUTPUT_WRITERS:
         return None
     sub = words[i]
-    spots, reason = _git_output_spots(sub, words[i + 1:], cwd, cands)
+    if len(words) == 3 and words[0] == "git" and i == 1 and words[2] == "-h":
+        return None
+    spots, named, reason = _git_output_spots(sub, words[i + 1:], cwd, cands)
+    if roots and (sub in GIT_GENERATED_WRITERS or named):
+        return ("git %s writes a file whose name it constructs or an option names (a generated "
+                "patch, report, pack, bundle or clone, or an output option's value), and this "
+                "command acts in the bound OPF product root %r, so it is denied whatever its "
+                "options: no --stdout, output-location or other option is parsed into an "
+                "exemption (a later option can negate it or consume it as a value) (R5, R8); run "
+                "it from outside every product root, redirecting its standard output there. %s."
+                % (sub, roots[0], SANCTIONED))
     if reason is not None:
         return ("git %s writes a file whose name it constructs or an option names, and %s; it is "
                 "denied fail-closed (R5, R6). %s." % (sub, reason, SANCTIONED))
@@ -1872,8 +1905,8 @@ def _git_output_reason(words, cwd, cands):
         if where is not None:
             return ("git %s writes a file whose name it constructs or an option names (a "
                     "generated patch, report or pack name, or an output option's value) at %r, "
-                    "inside %r, so it is denied whatever name it constructs (R5, R8); write to "
-                    "standard output (--stdout) or to a location outside every product root. %s."
+                    "inside %r, so it is denied whatever name it constructs (R5, R8); run it "
+                    "from outside every product root and the pack own tree. %s."
                     % (sub, spot, where, SANCTIONED))
     return None
 
@@ -2280,7 +2313,7 @@ def _plain_bash_rule(command, words, cwd):
         return ("git %s rewrites the working tree or the index, and this command acts in the bound "
                 "OPF product root %r, so it is denied whatever its pathspec spelling (git expands "
                 "a glob or pathspec magic itself) (R5). %s." % (git_sub, roots[0], SANCTIONED))
-    reason = _git_output_reason(words, cwd, cands)
+    reason = _git_output_reason(words, cwd, cands, roots)
     if reason is not None:
         return reason
     protected = set(frozen[0]) | set(views[0]) | set(reg_idents) | set(_guarded_prefixes())
