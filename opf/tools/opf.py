@@ -1154,19 +1154,292 @@ def _deadline_case_budget(timeout_s=_DEADLINE_CASE_TIMEOUT):
             + _DEADLINE_RECEIPT_ALLOWANCE)
 
 
+def _watchdog_finite_seconds(value):
+    """A usable bound or budget: a finite, positive int or float (never a bool)."""
+    import math
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value > 0)
+
+
 def _watchdog_bound_faults(bounds, budgets):
     """The kill-timeout rule for the regression runner: every leg's independent
     process bound must cover the leg's own budget plus the launch margin, so a
     slow but in-budget leg is never killed and reported as a hang. Returns the
-    faults: a leg without a declared budget, or a bound below budget + margin."""
+    faults: a leg without a declared budget, a non-numeric, non-finite or
+    non-positive bound or budget (a NaN compares False with everything, so it
+    is refused explicitly), or a bound below budget + margin."""
     faults = []
     for label, bound in bounds.items():
+        budget = budgets.get(label)
         if label not in budgets:
             faults.append(label + ": no declared budget")
-        elif bound < budgets[label] + _WATCHDOG_LAUNCH_MARGIN:
-            faults.append("{}: bound {}s below its budget {}s plus the {}s launch margin".format(
-                label, bound, budgets[label], _WATCHDOG_LAUNCH_MARGIN))
+        elif not _watchdog_finite_seconds(budget):
+            faults.append("%s: budget %r is not a finite positive number" % (label, budget))
+        elif not _watchdog_finite_seconds(bound):
+            faults.append("%s: bound %r is not a finite positive number" % (label, bound))
+        elif bound < budget + _WATCHDOG_LAUNCH_MARGIN:
+            faults.append("%s: bound %ss below its budget %ss plus the %ss launch margin" % (
+                label, bound, budget, _WATCHDOG_LAUNCH_MARGIN))
     return faults
+
+
+# The bounded waits a watchdog leg makes in series, read from the leg's OWN
+# source: the single source the leg runs and the regression floor derives the
+# leg's budget from (never a hand-copied number). Each fixture-process call
+# (run_bounded, run_status_owned, a completion launch()) is allowed the
+# deadline case's per-call budget at its own timeout: execution up to the
+# larger of that timeout and the tolerated execution bound, the guardian's
+# cleanup grace, then the receipt allowance. Each join/wait/select timeout,
+# each `time.monotonic() + N` deadline and each sleep counts its seconds. A
+# thunk, subject or thread target handed to a call runs inside that call's own
+# bound (or concurrently, under the join that bounds it), so it is not counted
+# again; a local helper counts at every call or reference; a loop over a
+# literal sequence multiplies its body; a branch on the leg's own arguments
+# counts only the branch taken, any other branch its larger arm. A wait whose
+# timeout the walk cannot evaluate is reported, so the floor fails closed.
+# Only the leg's own sleeps count: a helper's sleep runs in a forked subject or
+# a thread (the subjects that sleep until killed), bounded by the call or join
+# that owns it, and a polling sleep is bounded by its monotonic deadline.
+_WATCHDOG_FIXTURE_CALLS = ("run_bounded", "run_status_owned", "_run_fixture_process")
+_WATCHDOG_INNER_KEYWORDS = ("subject", "target", "thunk")
+_WATCHDOG_NESTED_LEGS = ("_watchdog_deadline_case", "_watchdog_completion_case",
+                         "_watchdog_safety_case", "_watchdog_overlap_case")
+
+
+def _watchdog_leg_waits(case, *args):
+    """[(line, what, seconds)] for every bounded wait leg `case(*args)` makes in
+    series, and [(line, what)] for every wait whose timeout cannot be evaluated."""
+    import ast
+    import inspect
+    import math
+    import _opf_emit
+    tree = ast.parse(inspect.getsource(case)).body[0]
+    first = case.__code__.co_firstlineno - 1
+    bindings = dict(zip([a.arg for a in tree.args.args], args))
+    run_default = inspect.signature(_opf_emit.run_bounded).parameters["timeout_s"].default
+    namespace = sys.modules[case.__module__].__dict__
+    helpers, assigned = dict(), dict()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node is not tree:
+            helpers.setdefault(node.name, node)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned.setdefault(target.id, []).append(node.value)
+    waits, unresolved = [], []
+
+    def plain(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    def known(node):
+        """The truth of a test on the leg's own arguments, or None when undecidable."""
+        if isinstance(node, ast.BoolOp):
+            values = [known(v) for v in node.values]
+            decisive = isinstance(node.op, ast.Or)
+            if decisive in values:
+                return decisive
+            return None if None in values else not decisive
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            value = known(node.operand)
+            return None if value is None else not value
+        if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                and isinstance(node.left, ast.Name) and node.left.id in bindings):
+            try:
+                other = ast.literal_eval(node.comparators[0])
+            except ValueError:
+                return None
+            value, op = bindings[node.left.id], node.ops[0]
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                return (value == other) == isinstance(op, ast.Eq)
+            if isinstance(op, (ast.In, ast.NotIn)):
+                return (value in other) == isinstance(op, ast.In)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "startswith" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in bindings and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)):
+            return bindings[node.func.value.id].startswith(node.args[0].value)
+        return None
+
+    def number(node, depth=0):
+        """The seconds an expression evaluates to, or None."""
+        if depth > 8:
+            return None
+        if isinstance(node, ast.Constant):
+            return plain(node.value)
+        if isinstance(node, ast.Name):
+            if node.id in assigned:
+                values = [number(v, depth + 1) for v in assigned[node.id]]
+                return None if None in values else max(values)
+            return plain(namespace.get(node.id))
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module = _opf_emit if node.value.id in ("emit", "_opf_emit") else None
+            return plain(getattr(module, node.attr, None)) if module else None
+        if isinstance(node, ast.IfExp):
+            taken = known(node.test)
+            if taken is not None:
+                return number(node.body if taken else node.orelse, depth + 1)
+            values = [number(node.body, depth + 1), number(node.orelse, depth + 1)]
+            return None if None in values else max(values)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub,
+                                                                ast.Mult, ast.Pow)):
+            left, right = number(node.left, depth + 1), number(node.right, depth + 1)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            return left * right if isinstance(node.op, ast.Mult) else left ** right
+        return None
+
+    def name_of(func):
+        return func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+
+    def keyword(call, name):
+        return next((item.value for item in call.keywords if item.arg == name), None)
+
+    def fixture_allowance(seconds):
+        try:
+            seconds = float(seconds)
+        except OverflowError:
+            return 0  # refused before fork (SETUP-ERROR:BadTimeout), never waited for
+        if not math.isfinite(seconds) or seconds <= 0:
+            return 0
+        return _deadline_case_budget(seconds)
+
+    def forked_child(test):
+        return (isinstance(test, ast.Compare) and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq) and isinstance(test.left, ast.Name)
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == 0
+                and any(isinstance(v, ast.Call) and name_of(v.func) == "fork"
+                        for v in assigned.get(test.left.id, ())))
+
+    def record(node, what, seconds, scale):
+        waits.append((first + node.lineno, what, seconds * scale))
+
+    def isolated(nodes, scale, stack):
+        before = len(waits), len(unresolved)
+        for node in nodes:
+            visit(node, scale, stack)
+        taken = waits[before[0]:], unresolved[before[1]:]
+        del waits[before[0]:], unresolved[before[1]:]
+        return taken
+
+    def visit(node, scale, stack):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return  # counted where it is called or referenced
+        if isinstance(node, ast.If) and forked_child(node.test):
+            for item in node.orelse:  # the forked child's code runs until the leg kills it
+                visit(item, scale, stack)
+            return
+        if isinstance(node, ast.If):
+            taken = known(node.test)
+            if taken is not None:
+                for item in node.body if taken else node.orelse:
+                    visit(item, scale, stack)
+                return
+            visit(node.test, scale, stack)
+            arms = [isolated(node.body, scale, stack), isolated(node.orelse, scale, stack)]
+            larger = max(arms, key=lambda pair: sum(w[2] for w in pair[0]))
+            waits.extend(larger[0])
+            unresolved.extend(arms[0][1] + arms[1][1])
+            return
+        if isinstance(node, ast.For):
+            visit(node.iter, scale, stack)
+            times = None
+            if isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
+                times = len(node.iter.elts)
+            elif (isinstance(node.iter, ast.Call) and name_of(node.iter.func) == "range"
+                  and len(node.iter.args) == 1):
+                times = number(node.iter.args[0])
+            inner = isolated(node.body, scale * (times or 1), stack)
+            waits.extend(inner[0])
+            unresolved.extend(inner[1])
+            if times is None and inner[0]:
+                unresolved.append((first + node.lineno, "waits in a loop over a non-literal sequence"))
+            for item in node.orelse:
+                visit(item, scale, stack)
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            helper = helpers.get(node.id)
+            if helper is not None and helper not in stack:
+                for item in helper.body:
+                    visit(item, scale, stack + (helper,))
+            return
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+                and isinstance(node.left, ast.Call) and name_of(node.left.func) == "monotonic"):
+            seconds = number(node.right)
+            if seconds is None:
+                unresolved.append((first + node.lineno, "monotonic() deadline"))
+            elif seconds > 0:
+                record(node, "monotonic() + %s" % seconds, seconds, scale)
+            return
+        if isinstance(node, ast.Call):
+            visit_call(node, scale, stack)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, scale, stack)
+
+    def visit_call(node, scale, stack):
+        called = name_of(node.func)
+        if isinstance(node.func, ast.Attribute):
+            visit(node.func.value, scale, stack)
+        if called in _WATCHDOG_FIXTURE_CALLS or (called == "launch" and "launch" in helpers):
+            if called == "launch":
+                value = keyword(node, "timeout") or ast.Name("_COMPLETION_LAUNCH_TIMEOUT", ast.Load())
+            elif called == "run_bounded":
+                value = keyword(node, "timeout_s") or (
+                    node.args[1] if len(node.args) > 1 else ast.Constant(run_default))
+            else:
+                value = keyword(node, "timeout")
+            seconds = None if value is None else number(value)
+            if seconds is None:
+                unresolved.append((first + node.lineno, called + " timeout"))
+            else:
+                record(node, "%s(timeout=%s)" % (called, seconds), fixture_allowance(seconds), scale)
+            return  # its thunk or code runs inside this call's own bound
+        if called in _WATCHDOG_NESTED_LEGS:
+            try:
+                nested = [ast.literal_eval(item) for item in node.args]
+            except ValueError:
+                unresolved.append((first + node.lineno, called + " with a non-literal mode"))
+                return
+            inner, missing = _watchdog_leg_waits(namespace[called], *nested)
+            record(node, "%s(%s)" % (called, ", ".join(map(repr, nested))),
+                   sum(w[2] for w in inner), scale)
+            unresolved.extend(missing)
+            return
+        timed = None
+        if called in ("join", "wait") and (node.args or keyword(node, "timeout")):
+            timed = node.args[0] if node.args else keyword(node, "timeout")
+        elif called == "select" and len(node.args) == 4:
+            timed = node.args[3]
+        elif called == "sleep" and len(node.args) == 1 and not stack:
+            timed = node.args[0]  # a helper's sleep runs in a forked subject or thread
+        if timed is not None:
+            seconds = number(timed)
+            if seconds is not None:
+                record(node, "%s(%s)" % (called, seconds), seconds, scale)
+            elif called != "join":  # str.join over a sequence is not a wait
+                unresolved.append((first + node.lineno, called + " timeout"))
+        for item in node.args:
+            visit(item, scale, stack)
+        for item in node.keywords:
+            if item.arg not in _WATCHDOG_INNER_KEYWORDS:
+                visit(item.value, scale, stack)
+
+    for node in tree.body:
+        visit(node, 1, ())
+    return waits, unresolved
+
+
+def _watchdog_leg_budget(case, *args, extra=0):
+    """A leg's budget: the sum of its own sequential waits plus any declared
+    patched-path extra, or None (refused by the floor) when a wait could not be
+    evaluated."""
+    waits, unresolved = _watchdog_leg_waits(case, *args)
+    return None if unresolved else sum(w[2] for w in waits) + extra
 
 
 def _watchdog_deadline_case(mode):
@@ -11183,23 +11456,37 @@ def _watchdog_regression_self_test():
         # doubled grace) and the swallowed-send transient census.
         ("deadline-flips", _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
          + deadline_budget + 2 * _opf_emit._FIXTURE_CLEANUP_GRACE + deadline_budget)])
-    # The remaining completion modes' inner waits are hang guards on events that
-    # occur within milliseconds; their passing path stays inside the default.
+    # The committed budgets stay a floor (a bound only ever rises): the
+    # remaining completion modes' prior default, and every family's prior rule.
     completion_default = 40 - _WATCHDOG_LAUNCH_MARGIN
-    budgets = dict((mode, deadline_budget) for mode in deadline_modes)
-    # overlap: B's run_bounded (15 s) plus its cleanup grace, after A's
-    # millisecond barrier handshakes, stays inside the unchanged 30 s budget.
-    budgets.update(("overlap-" + mode, 30) for mode in overlap_modes)
-    # safety: liveness-permission and missing-reap each run one deadline case;
-    # the other modes run_bounded at most 1 s plus the same grace and allowance.
-    budgets.update((mode, deadline_budget) for mode in safety_modes)
-    budgets.update((label + "-" + disposition, 2 * nested_launches[label] * 5)
-                   for label in launcher_labels for disposition in launcher_dispositions)
-    budgets.update(("completion-" + mode,
-                    max(completion_default,
-                        completion_launches.get(mode, 0) * _COMPLETION_LAUNCH_TIMEOUT
-                        + completion_extra.get(mode, 0)))
-                   for mode in completion_modes)
+    prior = dict((mode, deadline_budget) for mode in deadline_modes)
+    prior.update(("overlap-" + mode, 30) for mode in overlap_modes)
+    prior.update((mode, deadline_budget) for mode in safety_modes)
+    prior.update((label + "-" + disposition, 2 * nested_launches[label] * 5)
+                 for label in launcher_labels for disposition in launcher_dispositions)
+    prior.update(("completion-" + mode,
+                  max(completion_default,
+                      completion_launches.get(mode, 0) * _COMPLETION_LAUNCH_TIMEOUT
+                      + completion_extra.get(mode, 0)))
+                 for mode in completion_modes)
+    # Every leg's budget derives from its OWN sequential waits, read from the
+    # leg's source (_watchdog_leg_waits): the same code the leg runs. Patched
+    # paths the walk cannot see add their own extra: a launcher case runs its
+    # nested runner twice with every launch patched to one 5 s exit-37 launch.
+    families = [(mode, _watchdog_deadline_case, (mode,), 0) for mode in deadline_modes]
+    families.extend(("overlap-" + mode, _watchdog_overlap_case, (mode,), 0)
+                    for mode in overlap_modes)
+    families.extend((mode, _watchdog_safety_case, (mode,), 0) for mode in safety_modes)
+    families.extend((label + "-" + disposition, _watchdog_launcher_case, (label, disposition),
+                     2 * nested_launches[label] * 5)
+                    for label in launcher_labels for disposition in launcher_dispositions)
+    families.extend(("completion-" + mode, _watchdog_completion_case, (mode,),
+                     completion_extra.get(mode, 0) if mode == "deadline-flips" else 0)
+                    for mode in completion_modes)
+    budgets = dict()
+    for label, case, case_args, extra in families:
+        derived = _watchdog_leg_budget(case, *case_args, extra=extra)
+        budgets[label] = None if derived is None else max(derived, prior[label])
     budgets["blocked-isolation"] = 31 * 180  # the isolation matrix's full budget
 
     def bound(label):
@@ -11243,8 +11530,25 @@ def _watchdog_regression_self_test():
     flat.update(("completion-" + mode, 40) for mode in completion_modes)
     refused = " ".join(_watchdog_bound_faults(flat, budgets))
     flip_missed = [label for label in deadline_modes + ("completion-premature-exit",
-                                                        "completion-deadline-flips")
+                                                        "completion-deadline-flips",
+                                                        "completion-nested-keep")
                    if label + ": bound" not in refused]
+    # The scheduling-delay reproduction: nested-keep's three sequential
+    # run_bounded(timeout_s=30) calls each delayed 14 s, inside its own
+    # allowance (42 s in all), fit the derived bound and overrun the old 40 s.
+    keep = [w for w in _watchdog_leg_waits(_watchdog_completion_case, "nested-keep")[0]
+            if w[1].startswith("run_bounded")]
+    delayed = 14 * len(keep)
+    if not (len(keep) == 3 and all(14 < w[2] for w in keep)
+            and delayed <= live["completion-nested-keep"] - _WATCHDOG_LAUNCH_MARGIN
+            and delayed > 40):
+        flip_missed.append("completion-nested-keep (scheduling-delay reproduction)")
+    # The floor fails closed on a non-finite, non-positive or non-numeric
+    # bound or budget (a NaN compares False with every threshold).
+    for bad in (float("nan"), float("inf"), -1, 0, True, "60", None):
+        if (not _watchdog_bound_faults(dict(probe=bad), dict(probe=10))
+                or not _watchdog_bound_faults(dict(probe=10 ** 6), dict(probe=bad))):
+            flip_missed.append("non-finite floor input %r" % (bad,))
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
