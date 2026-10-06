@@ -22502,7 +22502,11 @@ _UNIT_LINE_CAP = 4096
 # and anything else fails closed. Every unit NOT listed here was measured to write NOTHING
 # but its boundary line. A unit whose legitimate diagnostics change fails closed by name
 # until its rows are re-declared here, reviewed: that is the fail-closed direction (secfcl),
-# never a widened pattern.
+# never a widened pattern. The match is exact PER LINE, and the rows form a SET: how often and
+# in what order a declared row or a boundary line appears is not checked (merge train 2 QA r5,
+# claude MINOR; no CPython fault message equals a row, and the tail check still requires the
+# stream to END at the leader's exact boundary line), so a row printed from two sites is
+# declared once.
 _UNIT_STDERR_ALLOWED = {
     # opf-absorb: its changelog-drafter legs print the draft banner, the undeclared-done
     # note, the NOT APPLICABLE refusal and the named parse refusal to stderr on a
@@ -22540,7 +22544,6 @@ _UNIT_STDERR_ALLOWED = {
         b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+2060 outside any allowance); refusing rather than emitting or silently altering owner text",
         b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+FEFF outside any allowance); refusing rather than emitting or silently altering owner text",
         b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: bidirectional control character U+202E outside any allowance); refusing rather than emitting or silently altering owner text",
-        b'opf render: give exactly one of --check / --write',
         b'opf render: give exactly one of --check / --write',
         b'opf render: --root requires a directory argument',
         b"opf render: unrecognized argument '--bogus'",
@@ -22910,11 +22913,14 @@ def _unit_internal_watchdog(label, budget):
     return release
 
 
-# How many garbage-collection passes the record handler may make before one frees nothing
-# (merge train 2 QA r4, codex MEDIUM: a finalizer may CREATE new cyclic cleanup work -- an
-# Outer.__del__ that builds a cyclic Inner -- which the r3 single collection left for the ending
-# os._exit to skip, its cleanup silently lost); a run of passes that NEVER settles inside this
-# bound fails closed: cleanup work still appearing then cannot be shown complete.
+# How many garbage-collection passes the record handler may make before one SETTLES: frees
+# nothing AND leaves no more objects tracked than before it (merge train 2 QA r4, codex MEDIUM: a
+# finalizer may CREATE new cyclic cleanup work -- an Outer.__del__ that builds a cyclic Inner --
+# which the r3 single collection left for the ending os._exit to skip, its cleanup silently
+# lost; QA r5, codex MEDIUM: a pass that frees nothing is not enough, since a finalizer that
+# RESURRECTS its own object, which a pass then does not count as freed, can still create that
+# new work); a run of passes that NEVER settles inside this bound fails closed: cleanup work
+# still appearing then cannot be shown complete.
 _UNIT_GC_PASS_BOUND = 10
 
 # The reporting machinery a cleanup fault is reported through (merge train 2 QA r3, claude MINORs
@@ -22966,10 +22972,13 @@ def _cmd_self_test_unit(label):
     hook that raises writes no `Traceback` header and used to pass). The record handler makes the
     record TRULY LAST (merge train 2 QA r3, codex MEDIUM: a cyclic-garbage finalizer that ran in
     interpreter finalization, after the record, and ended the child with os._exit(0) passed): it
-    collects the cyclic garbage FIRST -- repeatedly, until a pass frees nothing, within
-    _UNIT_GC_PASS_BOUND passes, past which it fails closed (merge train 2 QA r4, codex MEDIUM: a
-    collected finalizer may create new cyclic cleanup work, which one collection left for the
-    os._exit to skip) -- so pending finalizers run before the record, flushes the
+    collects the cyclic garbage FIRST -- repeatedly, until a pass frees nothing and leaves no
+    more objects tracked than before it, within _UNIT_GC_PASS_BOUND passes, past which it fails
+    closed (merge train 2 QA r4, codex MEDIUM: a collected finalizer may create new cyclic
+    cleanup work, which one collection left for the os._exit to skip; QA r5, codex MEDIUM: a
+    finalizer that resurrects its object while creating that work makes a pass free nothing,
+    so a pass that frees nothing alone does not settle) -- so pending finalizers run before
+    the record, flushes the
     streams, writes the record and then ends the process ITSELF with os._exit(code), so no
     interpreter finalization runs after it (an object still reachable then is never finalized,
     so its finalizer neither runs nor faults). It is checked to be the FIRST exit handler
@@ -23014,19 +23023,23 @@ def _cmd_self_test_unit(label):
             return   # the unit never settled: no record, and the parent fails closed
         code = settled[0]
         found = _unit_restore_reporting(reporting)
-        # Collect REPEATEDLY until a pass frees nothing (merge train 2 QA r4, codex MEDIUM: a
-        # collected finalizer may create NEW cyclic cleanup work, which a single collection left
-        # for the os._exit below to skip); exceeding _UNIT_GC_PASS_BOUND fails closed.
+        # Collect REPEATEDLY until a pass SETTLES: frees nothing and leaves no more objects
+        # tracked than before it (merge train 2 QA r4, codex MEDIUM: a collected finalizer may
+        # create NEW cyclic cleanup work, which a single collection left for the os._exit below
+        # to skip; QA r5, codex MEDIUM: a finalizer that resurrects its own object frees nothing
+        # in that pass, so the count of freed objects alone missed the new work it created);
+        # exceeding _UNIT_GC_PASS_BOUND fails closed.
         gc_settled = False
         for _ in range(_UNIT_GC_PASS_BOUND):
-            if gc.collect() == 0:
+            tracked = len(gc.get_objects())
+            if gc.collect() == 0 and len(gc.get_objects()) <= tracked:
                 gc_settled = True
                 break
         if not gc_settled:
             cleanup_faults.append(
-                "garbage collection still freed objects after {} passes, so cleanup work its "
-                "finalizers keep creating cannot be shown complete (merge train 2 QA r4, codex "
-                "MEDIUM)".format(_UNIT_GC_PASS_BOUND))
+                "garbage collection still freed or created objects after {} passes, so cleanup "
+                "work its finalizers keep creating cannot be shown complete (merge train 2 QA "
+                "r4 and r5, codex MEDIUM)".format(_UNIT_GC_PASS_BOUND))
         found += _unit_restore_reporting(reporting)
         if found:
             cleanup_faults.append("cleanup code replaced the reporting machinery ({})".format(
@@ -23382,11 +23395,20 @@ def _run_unit_subprocess(label, bound, argv=None):
     THE UNIT RUNS, before it returns, its own reviewed, pinned code may redirect its error
     stream (units capture fixture output with contextlib.redirect_stderr), and a fault reported
     into that redirect is the unit's own to judge -- the guards begin when the unit returns;
-    (2) in cleanup, a THREAD's uncaught exception reaches threading.excepthook with no audit
-    event before it, so a thread fault reported through a stream or hook that cleanup code
-    replaced and then put back before the record handler ran is not seen (a replacement still
-    in place there fails closed by name); (3) an object still reachable at the record is never
-    finalized (the os._exit ends the child), so its finalizer neither runs nor faults.
+    (2) in cleanup, a fault reported through a path that raises no audit event, into a stream or
+    hook that cleanup code replaced and then put back before the record handler ran, is not
+    seen (a replacement still in place there fails closed by name). Two such paths exist: a
+    THREAD's uncaught exception reaches threading.excepthook with no audit event before it; and
+    while cleanup code has DELETED sys.unraisablehook, CPython reports an unraisable fault -- an
+    exit handler's exception, a finalizer's -- by writing it to sys.stderr with no audit event,
+    so cleanup code that deletes that hook, replaces sys.stderr and restores both before the
+    record hides such a fault (merge train 2 QA r5, codex MEDIUM, reproduced: an exit handler's
+    exception in that window passed; with sys.stderr left in place it reaches the captured
+    stream and fails closed); (3) an object still reachable at the record is never
+    finalized (the os._exit ends the child), so its finalizer neither runs nor faults; and the
+    repeated collection settles on a pass that frees nothing and leaves no more objects tracked
+    than before it, so a finalizer in that pass that creates new cyclic garbage while
+    releasing at least as many other tracked objects is not collected again.
     Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
     design); copied output past _UNIT_OUTPUT_CAP is truncated with a note (the error-stream
@@ -23764,7 +23786,9 @@ def _unit_bound_self_test():
     whose own finalizer faults, (40) a finalizer chain no collection pass inside
     _UNIT_GC_PASS_BOUND ends, and (41) an undeclared benign stderr line, each fail closed, while
     a unit writing exactly its declared _UNIT_STDERR_ALLOWED row still passes (merge train 2 QA
-    r4, codex MAJOR and MEDIUM). Returns 0 clean, 1 on a failure."""
+    r4, codex MAJOR and MEDIUM). The r5 leg: (42) a finalizer that resurrects its own object
+    while creating new cyclic cleanup work whose finalizer faults fails closed (merge train 2
+    QA r5, codex MEDIUM). Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -23805,7 +23829,7 @@ def _unit_bound_self_test():
         begun = time.monotonic()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = _run_unit_subprocess(label, bound,
-                                        argv=[sys.executable, "-I", "-c", script])
+                                        argv=[sys.executable, "-I", "-B", "-c", script])
         return code, time.monotonic() - begun, out.getvalue(), err.getvalue()
 
     # (1) the hung unit: killed AT the bound, its failure named, its whole group gone.
@@ -23948,7 +23972,7 @@ def _unit_bound_self_test():
         try:
             with open(named_path, "wb") as named_file:
                 direct = subprocess.Popen(
-                    [sys.executable, "-I", "-c", (
+                    [sys.executable, "-I", "-B", "-c", (
                         "import sys, time\n"
                         "sys.path.insert(0, " + repr(here) + ")\n"
                         "import opf\n"
@@ -24163,7 +24187,7 @@ def _unit_bound_self_test():
         "rc = arm.wait(timeout=20)\n"
         "print('WRAPPER-ALIVE', rc, flush=True)\n")
     probe = subprocess.run(
-        [sys.executable, "-I", "-c", wrapper_source], stdin=subprocess.DEVNULL,
+        [sys.executable, "-I", "-B", "-c", wrapper_source], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, timeout=30.0)
     if probe.returncode != 0 or b"WRAPPER-ALIVE -9" not in probe.stdout:
         faults.append("an expiring watchdog armed inside a launcher's group did not confine its "
@@ -24190,7 +24214,7 @@ def _unit_bound_self_test():
             # The driver makes its box under `hold` (QA33 claude MINOR 3): a SIGKILLed driver runs
             # no removal, so its box would otherwise stay in the caller's TMPDIR; here `hold`'s own
             # cleanup takes it once the unit is gone.
-            driver = subprocess.Popen([sys.executable, "-I", "-c", driver_source],
+            driver = subprocess.Popen([sys.executable, "-I", "-B", "-c", driver_source],
                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, start_new_session=True,
                                       env=dict(os.environ, TMPDIR=hold))
@@ -24343,7 +24367,7 @@ def _unit_bound_self_test():
     # job-control pipeline head), the watchdog kills only the unit -- never a pipeline sibling
     # sharing that group.
     leader = subprocess.Popen(
-        [sys.executable, "-I", "-c", (
+        [sys.executable, "-I", "-B", "-c", (
             "import sys, time\n"
             "sys.path.insert(0, " + repr(here) + ")\n"
             "import opf\n"
@@ -24354,7 +24378,7 @@ def _unit_bound_self_test():
     sibling = None
     try:
         sibling = subprocess.Popen(
-            [sys.executable, "-I", "-c", "import time\ntime.sleep(6)\n"],
+            [sys.executable, "-I", "-B", "-c", "import time\ntime.sleep(6)\n"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             preexec_fn=lambda: os.setpgid(0, leader.pid))
         try:
@@ -24485,7 +24509,7 @@ def _unit_bound_self_test():
             env = dict(os.environ)
             env["OPF_SELF_TEST_RESULT"] = record_path
             blocked = subprocess.Popen(
-                [sys.executable, "-I", "-c", (
+                [sys.executable, "-I", "-B", "-c", (
                     "import sys, time\n"
                     "sys.path.insert(0, " + repr(here) + ")\n"
                     "import opf\n"
@@ -24935,10 +24959,47 @@ def _unit_bound_self_test():
             "                    self.make(self.depth - 1)\n"
             "        Link(depth)\n"
             "    atexit.register(make_link, " + str(_UNIT_GC_PASS_BOUND + 2) + ")\n"))
-    if code != EXIT_MALFORMED or "still freed objects after" not in err_text:
+    if code != EXIT_MALFORMED or "still freed or created objects after" not in err_text:
         faults.append("a finalizer chain outlasting the collection bound was not the named "
                       "fail-closed exit 2 (code {}, stderr tail {!r}; merge train 2 QA r4, "
                       "codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (42) merge train 2 QA r5, codex MEDIUM: a pass that frees nothing is not quiescence. An
+    # Outer.__del__ that RESURRECTS its object (so the pass does not count it as freed) while
+    # building a cyclic Inner made the first pass return 0, and the r4 loop stopped there,
+    # leaving the Inner's faulting cleanup for os._exit to skip. A pass now settles only if it
+    # also leaves no more objects tracked than before it. Automatic collection is disabled so
+    # the Outer is still pending when the record handler runs.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-resurrecting-finalizer", 30.0, child_entry(
+            "synthetic-resurrecting-finalizer",
+            "    import gc\n"
+            "    held = []\n"
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.remove = os.remove\n"
+            "        def __del__(self):\n"
+            "            self.remove('/nonexistent-opf-selftest-r5-resurrect')\n"
+            "    class Outer:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.held = held\n"
+            "            self.inner = Inner\n"
+            "        def __del__(self):\n"
+            "            self.held.append(self)\n"
+            "            self.inner()\n"
+            "    def setup():\n"
+            "        gc.collect()\n"
+            "        gc.disable()\n"
+            "        Outer()\n"
+            "    atexit.register(setup)\n"))
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("a resurrecting finalizer's newly created cyclic cleanup work whose "
+                      "finalizer faults still passed (code {}, stderr tail {!r}): a collection "
+                      "pass settles only if it frees nothing and tracks no more objects than "
+                      "before it (merge train 2 QA r5, codex MEDIUM)".format(
+                          code, err_text[-240:]))
 
     # (41) the declared-allowlist contract, both ways (merge train 2 QA r4, codex MAJOR): a unit
     # writing EXACTLY its declared row still passes (no over-rejection; the parent-side table is
@@ -25010,7 +25071,8 @@ def _unit_bound_self_test():
           "undeclared line on a passing unit's error stream, a collected finalizer's newly "
           "created cyclic cleanup work whose finalizer faults, and a finalizer chain outlasting "
           "the bounded repeated collection each fail closed, while a unit writing exactly its "
-          "declared stderr line still passes)")
+          "declared stderr line still passes; and the r5 leg holds: a resurrecting finalizer's "
+          "newly created cyclic cleanup work whose finalizer faults fails closed)")
     return EXIT_OK
 
 
