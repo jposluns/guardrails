@@ -108,7 +108,9 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      apply, rm, mv, read-tree, checkout-index and worktree; round 13 adds sparse-checkout, bisect,
      submodule other than its status and summary forms, update-index, merge-recursive,
      merge-resolve, merge-octopus, merge-subtree, merge-index, merge-one-file, filter-branch,
-     rerere and quiltimport) DENIES whenever it acts in a bound
+     rerere and quiltimport; round 21 inverts the list: every public git 2.53 command outside
+     the reviewed GIT_NO_WORKTREE_WRITE set, which names a reason per member) DENIES whenever it
+     acts in a bound
      product (a product root at or above the session cwd, an absolute spelling or a resolved
      operand, git -C and --work-tree values included), whatever its pathspec spelling, because git
      expands a glob ('../*') or pathspec magic (:(top), :/docs) itself; a dry run of git rm, mv
@@ -260,12 +262,11 @@ per-platform residual coverage carry the same list):
     directory-plus-basename joins of cp, mv and ln and, for rm, rmdir, mv and chmod, a directory
     operand holding a protected path of a BOUND root. So a copy of a directory's whole contents
     under a name no operand carries (cp -r src/. docs, cp -rT src/docs docs), a git subcommand
-    outside GIT_WORKTREE_SUBCOMMANDS that still writes the work tree or the index (the index
-    writers git add, git stage and git commit -a, which record the work tree's own content; git
-    merge-file, which writes only the file its first operand names; and git mergetool, difftool
-    --dir-diff, svn, p4, cvsimport, archimport and cvsexportcommit, documented to write a work
-    tree but not confirmed by a probe here; each is judged by the exact path check alone, or by
-    the coarse rule where it runs code, as the git work-tree rule's subcommand list directs), a
+    outside GIT_WORKTREE_SUBCOMMANDS that still writes the index (the index writers git add, git
+    stage and git commit -a, which record the work tree's own content, are in the round-21
+    GIT_NO_WORKTREE_WRITE set and judged by the exact path check alone; svn, p4, cvsimport,
+    archimport and cvsexportcommit, documented to write a work tree, are not installed with git
+    2.53 here, so they are outside GIT_PUBLIC_SUBCOMMANDS and never plain), a
     not-plain command, run from a repository whose top holds the pack own tree and binding no
     product, whose git command word or work-tree subcommand no literal word spells (a variable,
     substitution, alias or function supplies it: g=git; $g checkout -- .), and a
@@ -660,12 +661,8 @@ GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--lite
 # git checkout or git merge on the work tree, and split without --rejoin still deletes and
 # recreates $GIT_DIR/subtree-cache/<pid>, writes commit objects and, with -b, updates a branch, so
 # every git subtree form denies in a bound product (git subtree -h included: disclosed).
-GIT_WORKTREE_SUBCOMMANDS = frozenset((
-    "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull", "rebase",
-    "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree", "checkout-index", "worktree",
-    "sparse-checkout", "bisect", "submodule", "update-index", "merge-recursive", "merge-resolve",
-    "merge-octopus", "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
-    "quiltimport", "subtree"))
+# Round 21 derives the set by exclusion (GIT_WORKTREE_SUBCOMMANDS, after GIT_PUBLIC_SUBCOMMANDS
+# below): every public command outside the reviewed GIT_NO_WORKTREE_WRITE set.
 # The read forms of git submodule (round 13): the first word after any -q or --quiet is exactly one
 # of these. Every other form (the bare command and --cached included) is a work-tree rewrite.
 GIT_SUBMODULE_READ = frozenset(("status", "summary"))
@@ -718,6 +715,129 @@ GIT_PUBLIC_SUBCOMMANDS = frozenset((
     "unpack-objects", "update-index", "update-ref", "update-server-info", "upload-archive",
     "upload-pack", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged",
     "worktree", "write-tree"))
+# Round 21 (CLASSIFY BY EXCLUSION): a hand-kept writer list missed subtree (round 20) and then
+# merge-recursive-ours and merge-recursive-theirs, so the classification is inverted. Every public
+# git 2.53 command (GIT_PUBLIC_SUBCOMMANDS, read from git --list-cmds=main) is a work-tree writer
+# unless it is in GIT_NO_WORKTREE_WRITE, the set REVIEWED as never writing a work-tree file (an
+# index, object, ref or configuration write inside the git directory is not a work-tree write; a
+# file an output option names, and the file a GIT_GENERATED_WRITERS member constructs, is judged
+# by the output rule, _git_output_reason, which denies it in a bound product and wherever it lands
+# in a product root or the pack own tree). A name that could not be classified with evidence is
+# left out, so it denies (over-refusal only). Each member names
+# its reason; the hook, editor, pager and remote push-to-checkout behaviour that configuration
+# selects is the disclosed configuration residual.
+GIT_NO_WORKTREE_WRITE = frozenset((
+    "add",  # writes the index and objects from the work tree's own content
+    "annotate",  # reads history and prints
+    "archive",  # writes standard output; its -o or --output file is the output rule's
+    "backfill",  # fetches missing blobs into the object store
+    "blame",  # reads history and prints
+    "bugreport",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "bundle",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "branch",  # writes refs and configuration (refuses to force the checked-out branch)
+    "cat-file",  # reads objects and prints
+    "check-attr",  # reads attributes and prints
+    "check-ignore",  # reads ignore rules and prints
+    "check-mailmap",  # reads the mailmap and prints
+    "check-ref-format",  # checks a name and prints
+    "clone",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "cherry",  # reads history and prints
+    "column",  # formats standard input to standard output
+    "commit",  # writes objects, refs and the index (commit -a and a pathspec commit)
+    "commit-graph",  # writes the object directory; --object-dir is the output rule's
+    "commit-tree",  # writes one commit object
+    "count-objects",  # reads the object store and prints
+    "describe",  # reads refs and prints (--dirty refreshes index stat data only)
+    "diagnose",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "diff",  # prints; its --output file is the output rule's
+    "diff-files",  # prints; its --output file is the output rule's
+    "diff-index",  # prints; its --output file is the output rule's
+    "diff-pairs",  # reads standard input and prints; --output is the output rule's
+    "diff-tree",  # prints; its --output file is the output rule's
+    "fast-export",  # writes standard output; --export-marks is the output rule's
+    "fetch",  # writes objects, refs and FETCH_HEAD inside the git directory
+    "fetch-pack",  # writes objects and prints refs
+    "fmt-merge-msg",  # reads standard input or a named file and prints
+    "for-each-ref",  # reads refs and prints
+    "format-patch",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "fsck",  # reads the object store (--lost-found writes inside the git directory)
+    "fsck-objects",  # the fsck alias
+    "gc",  # repacks and prunes inside the git directory
+    "get-tar-commit-id",  # reads standard input and prints
+    "grep",  # reads and prints; its pager option is the command-naming rule's
+    "hash-object",  # reads the named file, writes objects (-w)
+    "help",  # prints; its viewer options are the help rule's
+    "imap-send",  # sends standard input to an IMAP folder
+    "index-pack",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "last-modified",  # reads history and prints
+    "log",  # prints; its --output file is the output rule's
+    "ls-files",  # reads the index and prints
+    "ls-remote",  # reads remote refs and prints
+    "ls-tree",  # reads a tree and prints
+    "mailsplit",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "merge-base",  # reads history and prints a commit
+    "merge-tree",  # prints, or writes tree objects (--write-tree); never the index or work tree
+    "mktag",  # writes one tag object
+    "mktree",  # writes one tree object
+    "multi-pack-index",  # writes the object directory; --object-dir is the output rule's
+    "name-rev",  # reads refs and prints
+    "notes",  # writes notes refs and objects (notes merge works inside the git directory)
+    "pack-objects",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "pack-redundant",  # reads packs and prints
+    "pack-refs",  # writes packed-refs
+    "patch-id",  # reads standard input and prints
+    "pickaxe",  # the blame alias (git 2.53 git pickaxe -h prints blame usage)
+    "prune",  # removes unreachable objects
+    "prune-packed",  # removes loose objects already packed
+    "push",  # updates remote refs; a receiving repository's push-to-checkout is its configuration
+    "range-diff",  # prints; its --output file is the output rule's
+    "reflog",  # reads or expires reflogs inside the git directory
+    "refs",  # migrates or verifies the ref store
+    "remote",  # writes configuration and refs (remote update fetches)
+    "repack",  # writes packs; --expire-to and --filter-to are the output rule's
+    "replace",  # writes replace refs and objects
+    "replay",  # writes objects and prints or updates refs; documented not to touch the work tree
+    "repo",  # reads repository information and prints
+    "request-pull",  # reads history and prints
+    "rev-list",  # reads history and prints
+    "rev-parse",  # reads names and prints
+    "send-pack",  # the push transport: updates remote refs
+    "shortlog",  # reads history and prints
+    "show",  # prints; its --output file is the output rule's
+    "show-branch",  # reads refs and prints
+    "show-index",  # reads a pack index on standard input and prints
+    "show-ref",  # reads refs and prints
+    "stage",  # the add alias: writes the index and objects
+    "status",  # reads the work tree and prints (refreshes index stat data only)
+    "stripspace",  # filters standard input to standard output
+    "symbolic-ref",  # writes a symbolic ref (HEAD moves; the work tree is untouched)
+    "tag",  # writes tag refs and objects
+    "unpack-file",  # # writes only the file the output rule computes (GIT_GENERATED_WRITERS)
+    "unpack-objects",  # writes loose objects from a pack on standard input
+    "update-ref",  # writes one ref
+    "update-server-info",  # writes info/refs and objects/info/packs inside the git directory
+    "upload-archive",  # serves an archive on standard output
+    "upload-pack",  # serves objects on standard output
+    "var",  # prints a git variable
+    "verify-commit",  # checks a signature and prints
+    "verify-pack",  # reads a pack and prints
+    "verify-tag",  # checks a signature and prints
+    "version",  # prints the version
+    "whatchanged",  # prints; its --output file is the output rule's
+    "write-tree"))  # writes tree objects from the index
+# The git subcommands that rewrite the working tree, or may and are not proved not to (round 21):
+# every public git 2.53 command outside GIT_NO_WORKTREE_WRITE. Besides the names earlier rounds
+# listed (checkout, restore, reset, clean, stash, switch, merge, pull, rebase, cherry-pick, revert,
+# am, apply, rm, mv, read-tree, checkout-index, worktree, sparse-checkout, bisect, submodule,
+# update-index, merge-recursive, merge-resolve, merge-octopus, merge-subtree, merge-index,
+# merge-one-file, filter-branch, rerere, quiltimport and subtree) this now holds merge-ours,
+# merge-recursive-ours, merge-recursive-theirs and merge-file; the writers of a file an operand
+# names that no output rule computes (init, init-db, interpret-trailers --in-place, mailinfo,
+# credential-store) and fast-import (an input stream may name a marks file); the commands that run a configured or named program (config, credential,
+# credential-cache, daemon, difftool, for-each-repo, hook, instaweb, maintenance, mergetool,
+# remote-ext); and the server and transport helpers not proved here (http-backend, http-fetch,
+# http-push, receive-pack, remote-fd, remote-ftp, remote-ftps, remote-http, remote-https, shell).
+GIT_WORKTREE_SUBCOMMANDS = GIT_PUBLIC_SUBCOMMANDS - GIT_NO_WORKTREE_WRITE
 # The git global options that take their value as the NEXT word (git 2.53 git.c), skipped when the
 # not-plain read looks for the subcommand word after a git word (_git_worktree_words).
 GIT_SEPARATE_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace",

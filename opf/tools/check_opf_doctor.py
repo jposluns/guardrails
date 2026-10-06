@@ -2797,21 +2797,78 @@ def _claude_hook_self_test():
                 deny("bash-r15-pack-repo-" + label + "-denied",
                      payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
                      via=pack_hook)
-            # One not-plain vector per work-tree subcommand (a literal list, pinned equal to the
-            # hook's own set), so removing any one name from the not-plain read fails its vector.
-            worktree_names = (
-                "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull",
-                "rebase", "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree",
-                "checkout-index", "worktree", "sparse-checkout", "bisect", "submodule",
-                "update-index", "merge-recursive", "merge-resolve", "merge-octopus",
-                "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
-                "quiltimport", "subtree")
-            expect("bash-r15-worktree-name-list-matches-hook", sorted(worktree_names),
-                   sorted(hook_mod.GIT_WORKTREE_SUBCOMMANDS))
-            for name in worktree_names:
+            # ROUND 21 (QA round 18): the work-tree writers are classified by EXCLUSION. Every
+            # public git 2.53 command outside the hook's reviewed GIT_NO_WORKTREE_WRITE set is a
+            # writer, so the witnesses are behavioural, not a second hand list: every name the
+            # partition denies gets a bound deny vector and a not-plain pack-repository deny
+            # vector, every no-write member gets a bound allow vector for its usage-only form
+            # (git <name> -h; git help -a), and every merge-* name the installed git lists, apart from the
+            # reviewed queries merge-base and merge-tree, must sit on the deny side. On the pin
+            # ee28f930 the merge-recursive-ours and merge-recursive-theirs vectors (and the other
+            # names round 21 moves to the deny side) ALLOWED.
+            no_write = getattr(hook_mod, "GIT_NO_WORKTREE_WRITE", frozenset())
+            public = hook_mod.GIT_PUBLIC_SUBCOMMANDS
+            denied_names = sorted(public - no_write)
+            expect("bash-r21-no-write-set-inside-public", sorted(no_write - public), [])
+            expect("bash-r21-worktree-set-is-public-minus-no-write",
+                   sorted(hook_mod.GIT_WORKTREE_SUBCOMMANDS), denied_names)
+            for name in sorted(no_write):
+                if ('    "%s",  # ' % (name,)) not in hook_text and (
+                        '    "%s"))  # ' % (name,)) not in hook_text:
+                    failures.append("claude-hook bash-r21-no-write-" + name + "-carries-no-reason")
+            try:
+                listed = subprocess.run(["git", "--list-cmds=main"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, timeout=60).stdout.decode(
+                                            "utf-8", "replace").split()
+            except (OSError, subprocess.TimeoutExpired):
+                listed = []
+            installed = sorted(n for n in listed if "--" not in n)
+            merge_names = sorted(set(n for n in installed + sorted(public)
+                                     if n.startswith("merge-"))
+                                 - set(("merge-base", "merge-tree")))
+            for name in ("merge-recursive-ours", "merge-recursive-theirs", "merge-ours",
+                         "merge-file"):
+                expect("bash-r21-merge-helper-" + name + "-listed", name in merge_names, True)
+            for name in merge_names:
+                expect("bash-r21-merge-helper-" + name + "-on-deny-side", name in no_write, False)
+            for name in installed:
+                if name in no_write:
+                    continue
+                deny("bash-r21-installed-" + name + "-bound-denied",
+                     payload("Bash", dict(command="git " + name), src_dir),
+                     "product root")
+            for name in sorted(set(denied_names) | set(merge_names)):
+                deny("bash-r21-" + name + "-bound-denied",
+                     payload("Bash", dict(command="git " + name + " x"), src_dir),
+                     "product root")
                 deny("bash-r15-pack-repo-nonplain-" + name + "-denied",
                      payload("Bash", dict(command="git " + name + "; echo -n"), pack_docs),
                      "holds the protected path", via=pack_hook)
+            # git help -h is a viewer option word to the help rule, so help reads with -a.
+            read_forms = dict(help="git help -a")
+            for name in sorted(no_write):
+                allow("bash-r21-no-write-" + name + "-usage-allowed",
+                      payload("Bash", dict(command=read_forms.get(name, "git " + name + " -h")),
+                              src_dir))
+            for label, cmd in (("merge-base", "git merge-base HEAD main"),
+                               ("merge-tree", "git merge-tree --write-tree HEAD main"),
+                               ("status", "git status"), ("log", "git log -n 3"),
+                               ("add", "git add notes.txt"), ("commit", "git commit -m x"),
+                               ("push", "git push origin main"), ("fetch", "git fetch origin")):
+                allow("bash-r21-no-write-" + label + "-read-form-allowed",
+                      payload("Bash", dict(command=cmd), src_dir))
+            # The two reviewer reproductions (QA round 18), bound and from the synthetic pack
+            # repository's docs directory: each ALLOWED on ee28f930 and rewrote the view or the
+            # pack file when run.
+            for helper in ("merge-recursive-ours", "merge-recursive-theirs"):
+                cmd = "git " + helper + " 1111111 -- 1111111 2222222"
+                deny("bash-r21-repro-" + helper + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "rewrites the working tree")
+                deny("bash-r21-repro-" + helper + "-bound-subdir-denied",
+                     payload("Bash", dict(command=cmd), src_dir), "rewrites the working tree")
+                deny("bash-r21-repro-" + helper + "-pack-repo-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
             for label, cmd in (("status-pipe-grep-n", "git status | grep -n x"),
                                ("log-n-then-echo-dry-run", "git log -n 3; echo --dry-run"),
                                ("plain-rm-dry-run", "git rm -n x"),
