@@ -2907,6 +2907,18 @@ def _claude_hook_self_test():
                 allow("bash-r22-" + label + "-allowed",
                       payload("Bash", dict(command=cmd), cwd or src_dir),
                       via=pack_hook if cwd else None)
+            # ROUND 24 (QA round 21): in a GIT_OUTPUT_WRITERS subcommand an abbreviation of an
+            # output option that is also a prefix of a GIT_OUTPUT_SHADOWS name stays an output
+            # option (git 2.53 reads git gc --expi=x and git repack --exp=x as --expire-to=x and
+            # writes there); the shadow exclusion above holds only outside GIT_OUTPUT_WRITERS.
+            # Run against a hook whose _git_output_option drops that scoping (no `scoped or`),
+            # each vector below ALLOWED.
+            for label, cmd, cwd in (
+                    ("gc-expi-bound", "git gc --expi=old", root),
+                    ("repack-exp-bound", "git repack -a -d --exp=old", root),
+                    ("gc-expi-C-outside", "git -C ../product gc --expi=docs", elsewhere)):
+                deny("bash-r24-git-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "constructs")
             # The two reviewer reproductions (QA round 18), bound and from the synthetic pack
             # repository's docs directory: each ALLOWED on ee28f930 and rewrote the view or the
             # pack file when run.

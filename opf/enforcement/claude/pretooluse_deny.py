@@ -383,8 +383,9 @@ per-platform residual coverage carry the same list):
     of the exact git 2.53 options in GIT_OUTPUT_SHADOWS (--index, --filter, --expire) are
     excluded outside GIT_OUTPUT_WRITERS; no further per-subcommand or global exemption is made,
     since one would widen what the output check must prove. Spell such an option in full (git
-    branch --omit-empty is no output option word) or run the command from outside every product
-    root.
+    branch --omit-empty is no output option word and is allowed); running it from outside every
+    product root is no workaround, since the plain git branch --o still denies there (its option
+    '--o' carries no value).
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
