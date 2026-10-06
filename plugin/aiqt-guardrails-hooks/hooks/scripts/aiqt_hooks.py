@@ -8019,9 +8019,17 @@ def gensrc_guard(data):
 
 # --- the orchestrator-integrity suite ----------------------------------------------------------
 # One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
-# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: with no
-# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
-# gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
+# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: BY DEFAULT, with no
+# .aiqt/orchestration.local.json or .aiqt/orchestration.json in scope it is inert (the gensrc.json
+# precedent), with two disclosed exceptions, both in orch_truncation_guard. First, that guard's scope is
+# not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
+# toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope malformed-payload and
+# unwalkable-cwd denies apply before that scope in every session, registry or not. Second, in the opt-in
+# registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
+# _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
+# checks with no registry on that chain or at a git-resolved toplevel is DENIED. No other suite component
+# reads that variable, so strict mode changes no other component's outcome. The backlog guards
+# additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
 # stop path fails OPEN on a guard's own error (which can never wedge a session) but DENIES on a backlog
 # cannot-evaluate (ignorance refuses the wind-down); the schedule path fails CLOSED on
@@ -9900,7 +9908,8 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call remains out of scope (the harness returns its output directly).
+    and wait); every other foreground call in registry scope remains out of scope (the harness returns its
+    output directly; in registry-required mode a cwd with no registry is denied before this point).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
@@ -10286,8 +10295,10 @@ def _orch_bg_poll_loop(command):
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
-    is stranded while the session goes dark waiting on it. Registry-gated exactly like orch_truncation_guard
-    (inert with no orchestration registry present) but NOT lease-gated: a bounded worker building a
+    is stranded while the session goes dark waiting on it. Registry-gated like orch_truncation_guard's
+    DEFAULT mode (inert with no orchestration registry present; it never reads AIQT_ORCH_REQUIRE_REGISTRY,
+    so it stays inert there in registry-required mode too, where the truncation guard denies instead) but
+    NOT lease-gated: a bounded worker building a
     fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
     registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
     classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
@@ -10300,7 +10311,7 @@ def orch_untracked_wait_loop(data):
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
-        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is
+        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is by default
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
@@ -11339,7 +11350,8 @@ def write_scope_guard(data):
     an un-armed session with a genuinely-absent floor leaves the frozen layer inert, so the frozen denial is
     not unconditionally always-on. Slice confinement is fail-open on a missing declaration; the principled
     fail-open is genuine ABSENCE (of a declaration or floor: no confinement in effect, the same inert
-    boundary gensrc and the orchestration suite use). A cannot-evaluate FAULT is not absence: a resolution
+    boundary gensrc and, by default, the orchestration suite use; its truncation guard denies an absent
+    registry in the opt-in registry-required mode). A cannot-evaluate FAULT is not absence: a resolution
     or probe ERROR (an unresolvable session root, a root or target canonicalization fault, a containment
     fault, or a nested-repo probe fault) on a covered write DENIES whether or not the session is armed, and
     never allows an unverified write; and once armed every cannot-evaluate resolves to DENY. Out-of-scope is a DENY, never an ASK:
