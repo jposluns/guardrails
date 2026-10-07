@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""PostToolUse, PostToolUseFailure and Stop hook (rerun-pass-check): a rerun pass is not conclusive verification.
+r"""Tool-call, prompt and Stop hook (rerun-pass-check): a rerun pass is not conclusive verification.
 
 WHAT IT DOES
     A check that fails and then passes on a rerun with no deliberate change in between is an unresolved
@@ -47,18 +47,32 @@ WHAT IT DOES
        not rerun CI"), clears the outstanding reruns.
        A loop cap bounds the refusals: at most BLOCK_CAP in a row, then the stop is allowed with a one-line
        warning that says the same as the refusal: it asserts no CI rerun either, and names a local rerun only as
-       a check seen to pass after a recorded failure. The reruns stay outstanding. The count lives in the state
-       file and does not rely on the platform's stop_hook_active field: the cap holds whether that field is
-       absent, false or true, and a Stop without it is not read as a new turn, so the count goes on from the
-       stored value. This hook receives no event that marks a prompt the user submitted, so the count is reset
-       to 0 only by a final message that names a disclosure word (which also clears the outstanding reruns) or
-       by a Stop whose stop_hook_active field is explicitly false (the platform's own statement that this stop
-       does not continue a stop-hook refusal), and a later turn is refused again only after one of those. A
-       tool call does not reset it (a model that ignores a refusal runs tool calls inside the same
+       a check seen to pass after a recorded failure. The reruns stay outstanding. The count is kept in the
+       state file, so the cap holds when the platform's stop_hook_active field is absent or true: a Stop
+       without the field is not read as a new turn, and the count goes on from the stored value. An explicit
+       false is trusted as the platform's statement that this stop does not continue a stop-hook refusal (a
+       new turn) and resets the count, so the cap does not hold against a host that sends false on a Stop that
+       does continue a refusal: each such Stop is refused again. The count is reset to 0 only by a signal of a
+       new turn: a UserPromptSubmit event (a prompt the user submitted), a Stop whose stop_hook_active field is
+       explicitly false, or a final message that names a disclosure word (which also clears the outstanding
+       reruns). A Stop processes and saves each of these before any other check, so an explicit false on a
+       stop that the hook lets pass (a final message that presents no pass as conclusive) still resets the
+       count. A tool call does not reset it (a model that ignores a refusal runs tool calls inside the same
        continuation), and neither does an allowed stop (another Stop hook may still refuse that same stop, and
        two hooks that each reset on their own allowed stop could refuse in turn without bound). So without
-       that field, after BLOCK_CAP refusals each later conclusive stop is allowed with the warning until a
-       disclosure (a missed refusal).
+       UserPromptSubmit registered and without that field, after BLOCK_CAP refusals each later conclusive stop
+       is allowed with the warning until a disclosure (a missed refusal).
+       UNKNOWN COUNT. A state file that cannot be read or is malformed holds a count the hook cannot know, and
+       so does a missing one: the first use of a session cannot be told from a state file that was lost or
+       deleted, and reading either as a count of 0 would let a lost file restart the cap without a new turn.
+       So a failed or missing load is an unknown count (blocks null in the state the next tool call writes
+       back), never a fresh 0, and a conclusive stop with outstanding reruns and an unknown count is allowed
+       with a warning (refusal count unknown) until one of the reset signals above sets the count to 0. A turn
+       the user starts with a prompt fires UserPromptSubmit before any tool call, so with that event
+       registered, or with stop_hook_active explicitly false on the Stop, the first use is refused as usual;
+       with neither, every refusal is replaced by that warning until a disclosure (a missed refusal), the
+       price of never restarting the cap on a lost file. A state file written by an earlier revision keeps its
+       count.
 
     A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, any shell
     command outside the grammar that did not fail (also a possible CI rerun, see 3), and any other shell command
@@ -109,7 +123,8 @@ WHAT IT DOES
     integer exit code field (exit_code, exitCode, returncode or returnCode); any other PostToolUse call is a
     pass, also one with no such field or with an exit code in another form ("1", 1.0).
 
-    Events: PostToolUse and PostToolUseFailure (matcher Bash|Write|Edit|MultiEdit|NotebookEdit), and Stop.
+    Events: PostToolUse and PostToolUseFailure (matcher Bash|Write|Edit|MultiEdit|NotebookEdit),
+    UserPromptSubmit (no matcher; it resets the refusal count and gives no output), and Stop.
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext note (after a tool
     call), a top-level decision "block" object with a reason, or a top-level systemMessage warning (Stop).
     Exit status: 0, except the floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE
@@ -120,11 +135,17 @@ WHAT IT DOES
 
 FAILURE DIRECTION
     After a tool call the safe direction is to inform: a rerun the hook recognizes is noted even when its state
-    cannot be saved. At Stop the safe direction is not to hold the session on a guess: with no readable state,
-    no final message in the payload (last_assistant_message), or a refusal count that cannot be saved, the
-    stop is allowed with a warning, whether or not the payload carries stop_hook_active; only a Stop whose
-    stop_hook_active field is explicitly false (read as a new turn, count 0) still refuses once when the count
-    cannot be saved. A state file longer than STATE_MAX_BYTES, or with a negative
+    cannot be saved. At Stop the safe direction is not to hold the session on a guess, and a stop let pass
+    where a refusal could be due says why in a warning, whether or not the payload carries stop_hook_active.
+    With a state file that cannot be read or is malformed, a final message that presents a pass as conclusive
+    without a disclosure word, or a payload with no final message (no last_assistant_message string), is
+    allowed with a warning that the state could not be read; any other final message is allowed silently,
+    since no refusal could be due. While reruns are outstanding, a payload with no final message is allowed
+    with a warning that says so, and a conclusive stop with an unknown refusal count (UNKNOWN COUNT in 4) or
+    one that cannot be saved is allowed with a warning; only a Stop whose stop_hook_active field is explicitly
+    false (read as a new turn, count 0) still refuses once when the count cannot be saved. With no state
+    location at all (no session key in the payload, or no absolute state directory) nothing is ever kept, so
+    every stop is allowed silently. A state file longer than STATE_MAX_BYTES, or with a negative
     counter or a non-text flag, is malformed and read as no state (it is never parsed from a cut prefix). A
     well-formed state file without the current STATE_VERSION (written by an earlier revision of the hook) is
     discarded and read as no earlier runs, so no flag it holds arms a refusal; one of the current STATE_VERSION
@@ -134,15 +155,17 @@ FAILURE DIRECTION
     exit 0 is an interpreter older than Python 3.14 that can start the hook: the guard at the top of this file
     reads no input, writes one line beginning `error: rerun-pass-check.py requires Python 3.14 or newer` to
     stderr and exits 1, which every event this hook uses treats as a non-blocking error: after a tool call
-    (PostToolUse, PostToolUseFailure) the call has already run, no note is added and no run is recorded, and
-    at Stop the stop goes ahead unchecked. It does not exit 2: on a Stop exit 2 blocks the stop, and the guard
-    runs before BLOCK_CAP is counted, so this hook's own block cap would never run (any limit the host itself
-    applies is outside this hook). An older interpreter that cannot start the hook never reaches the guard and
-    fails with Python's own error first: one that predates the -I option exits 2, which after a tool call
-    blocks nothing (the call has already run) and at Stop blocks every stop, with this hook's own block cap
-    never running; one that accepts -I but cannot compile this file exits 1, a non-blocking error, with the
-    same effect as the guard; .preview/README.md (Installing a hook, step 4) describes those cases. A worker
-    process (AIQT_HOOKS_WORKER=1, or a legacy spelling) is skipped.
+    (PostToolUse, PostToolUseFailure) the call has already run, no note is added and no run is recorded, on
+    UserPromptSubmit the prompt goes ahead and the count is not reset, and at Stop the stop goes ahead
+    unchecked. It does not exit 2: on a Stop exit 2 blocks the stop, and the guard runs before BLOCK_CAP is
+    counted, so this hook's own block cap would never run (any limit the host itself applies is outside this
+    hook), and on UserPromptSubmit exit 2 blocks the prompt. An older interpreter that cannot start the hook
+    never reaches the guard and fails with Python's own error first: one that predates the -I option exits 2,
+    which after a tool call blocks nothing (the call has already run), on UserPromptSubmit blocks every
+    prompt, and at Stop blocks every stop, with this hook's own block cap never running; one that accepts -I
+    but cannot compile this file exits 1, a non-blocking error, with the same effect as the guard;
+    .preview/README.md (Installing a hook, step 4) describes those cases. A worker process
+    (AIQT_HOOKS_WORKER=1, or a legacy spelling) is skipped.
 
 RESIDUAL COVERAGE
     It recognizes only the listed CI rerun and check commands run through the shell tool. A rerun through a web
@@ -202,9 +225,11 @@ RESIDUAL COVERAGE
     (one longer than MAX_KEY JSON characters is keyed by its SHA-256, so the state stays under STATE_MAX_BYTES) and
     MAX_FLAGS outstanding reruns. The hook fails open on its own failure (warn-only by design: an advisory hook must
     not block on its own failure): an internal error exits 0 with no output, an unreadable state file is read as no
-    earlier runs (so a local rerun across it is missed) and allows the stop, though the current call's own CI rerun
-    or possible CI rerun note is still given, and a note or refusal that cannot be written to stdout is dropped, so
-    each can miss a note or a refusal.
+    earlier runs (so a local rerun across it is missed) with an unknown refusal count, and allows a conclusive stop
+    with a warning, though the current call's own CI rerun or possible CI rerun note is still given, and a note or
+    refusal that cannot be written to stdout is dropped, so each can miss a note or a refusal. A state file lost or
+    deleted during a session is read as an unknown count too (UNKNOWN COUNT in 4), so until a reset signal a
+    conclusive stop is allowed with a warning in place of a refusal (a missed refusal).
 
 Self-test: python3 -I -S -B rerun-pass-check.py --self-test
 """
@@ -325,39 +350,47 @@ def new_state():
     return dict(version=STATE_VERSION, change=0, checks=dict(), flags=[], blocks=0)
 
 
+def unknown_state():
+    """A fresh state whose refusal count is unknown (blocks None): UNKNOWN COUNT in the module docstring."""
+    return dict(new_state(), blocks=None)
+
+
 def load_state(path):
-    """(state, readable): an absent file, or one without STATE_VERSION, is a fresh state; an unreadable or
-    malformed one (also one of STATE_VERSION holding a flag without CI_FLAG or LOCAL_FLAG) is (fresh, False).
-    The file is trusted: a hand-edited state of STATE_VERSION with flags of those prefixes arms a refusal."""
+    """(state, readable): an absent file is (unknown_state(), True), since first use cannot be told from a lost
+    file; one without STATE_VERSION is a fresh state that keeps its refusal count; an unreadable or malformed one
+    (also one of STATE_VERSION holding a flag without CI_FLAG or LOCAL_FLAG) is (unknown_state(), False), never a
+    fresh count of 0. The file is trusted: a hand-edited state of STATE_VERSION with flags of those prefixes arms
+    a refusal."""
     if path is None:
-        return new_state(), False
+        return unknown_state(), False
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
-        return new_state(), True
+        return unknown_state(), True
     except OSError:
-        return new_state(), False
+        return unknown_state(), False
     try:
         with os.fdopen(fd, "rb") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                return new_state(), False
+                return unknown_state(), False
             data = fh.read(STATE_MAX_BYTES + 1)
             if len(data) > STATE_MAX_BYTES:
-                return new_state(), False  # oversized: never parse a cut prefix
+                return unknown_state(), False  # oversized: never parse a cut prefix
             obj = json.loads(data)
         ok = (isinstance(obj, dict) and type(obj.get("change")) is int and obj["change"] >= 0
               and isinstance(obj.get("checks"), dict) and isinstance(obj.get("flags"), list)
-              and all(isinstance(f, str) for f in obj["flags"]) and type(obj.get("blocks")) is int
-              and obj["blocks"] >= 0)
+              and all(isinstance(f, str) for f in obj["flags"]) and "blocks" in obj
+              and (obj["blocks"] is None or type(obj["blocks"]) is int and obj["blocks"] >= 0))
         if not ok:
-            return new_state(), False
+            return unknown_state(), False
         if not (type(obj.get("version")) is int and obj["version"] == STATE_VERSION):
-            return new_state(), True  # written by an earlier revision: discarded, read as no earlier runs
+            # written by an earlier revision: discarded, read as no earlier runs, with its refusal count kept
+            return dict(new_state(), blocks=obj["blocks"]), True
         if not all(f.startswith((CI_FLAG, LOCAL_FLAG)) for f in obj["flags"]):
-            return new_state(), False  # a flag this version never keeps: malformed
+            return unknown_state(), False  # a flag this version never keeps: malformed
         return obj, True
     except Exception:
-        return new_state(), False
+        return unknown_state(), False
 
 
 def save_state(path, state):
@@ -763,24 +796,44 @@ def after_tool(payload, state, event):
     return None
 
 
+UNREAD = ("rerun-pass-check: turn end allowed unchecked; this hook's state file could not be read, so it cannot "
+          "tell whether this session ran a command that names a CI rerun and was not reported as failed, or saw a "
+          "check pass on a rerun after a recorded failure")
+NO_MESSAGE = ("rerun-pass-check: turn end allowed unchecked; the payload carries no final message "
+              "(last_assistant_message), and this session ran a command that names a CI rerun and was not reported "
+              "as failed, or saw a check pass on a rerun after a recorded failure")
+
+
 def at_stop(payload, state, readable, path):
-    if not readable or not state["flags"]:
-        return None
+    """The Stop output, or None. A reset signal (a disclosure word, or stop_hook_active explicitly false) is
+    processed and saved before any return that lets the stop pass, and a stop let pass where a refusal could be
+    due gets a warning (FAILURE DIRECTION)."""
     msg = payload.get("last_assistant_message")
-    if not isinstance(msg, str) or not msg.strip():
+    msg = msg if isinstance(msg, str) else None
+    new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (see 4 in the docstring)
+    if msg is not None and DISCLOSED_RE.search(msg):
+        if state["flags"] or state["blocks"] != 0:
+            state["flags"], state["blocks"] = [], 0
+            save_state(path, state)
         return None
-    if DISCLOSED_RE.search(msg):
-        state["flags"] = []
+    if new_turn and state["blocks"] != 0:
         state["blocks"] = 0
         save_state(path, state)
+    claim = msg is not None and conclusive(msg)
+    if not readable:
+        return dict(systemMessage=UNREAD) if path is not None and (msg is None or claim) else None
+    if not state["flags"]:
         return None
-    if not conclusive(msg):
+    if msg is None:
+        return dict(systemMessage=NO_MESSAGE)
+    if not claim:
         return None
-    new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (see 4 in the docstring)
-    blocks = 0 if new_turn else state["blocks"]
+    blocks = state["blocks"]
     allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
                "session ran a command that names a CI rerun and was not reported as failed, or saw a check pass on a "
                "rerun after a recorded failure")
+    if blocks is None:  # a lost or unreadable count is never read as 0 (UNKNOWN COUNT in the docstring)
+        return dict(systemMessage=allowed + " (refusal count unknown)")
     if blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + " (loop cap)")
     state["blocks"] = blocks + 1
@@ -799,8 +852,14 @@ def decide(payload, env):
     if event in ("PostToolUse", "PostToolUseFailure"):
         state, readable = load_state(path)
         what = after_tool(payload, state, event)
-        save_state(path, state)  # a failed save still notes below
+        save_state(path, state)  # a failed save still notes below; a failed load is saved as an unknown count
         return note(event, what) if what else None
+    if event == "UserPromptSubmit":  # a prompt the user submitted starts a new turn: the count restarts
+        state, readable = load_state(path)
+        if state["blocks"] != 0:
+            state["blocks"] = 0
+            save_state(path, state)
+        return None
     if event == "Stop":
         state, readable = load_state(path)
         return at_stop(payload, state, readable and path is not None, path)
@@ -918,6 +977,9 @@ def _self_test():
             return decide(dict(hook_event_name="PostToolUse", session_id="s", tool_name="Edit",
                                tool_input=dict(file_path="/x")), self.env)
 
+        def prompt(self):
+            return decide(dict(hook_event_name="UserPromptSubmit", session_id="s", prompt="go on"), self.env)
+
         def stop(self, msg, active=False):  # active None: the payload carries no stop_hook_active field
             payload = dict(hook_event_name="Stop", session_id="s", last_assistant_message=msg)
             if active is not None:
@@ -983,7 +1045,9 @@ def _self_test():
             self.assertIsNone(self.bash("pytest"))
             self.bash("tox", ok=False)
             self.bash("tox")
-            self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="s"), self.env))
+            # Round 21: a stop with reruns outstanding and no final message in the payload is allowed with a warning.
+            self.assertEqual(decide(dict(hook_event_name="Stop", session_id="s"), self.env),
+                             dict(systemMessage=NO_MESSAGE))
             self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="other",
                                           last_assistant_message="All tests pass."), self.env))
             self.assertIsNone(decide(dict(hook_event_name="SessionStart", session_id="s"), self.env))
@@ -998,7 +1062,7 @@ def _self_test():
             path = state_path(dict(session_id="s"), self.env)
             with open(path, "w", encoding="ascii") as fh:
                 fh.write("\x7bbroken")
-            self.assertIsNone(self.stop("All checks pass."))
+            self.assertEqual(self.stop("All checks pass."), dict(systemMessage=UNREAD))  # round 21: it warns
 
         def test_10_classifiers(self):
             for c in ("pytest", "python3 -m pytest -x", "python3 -B -m unittest", "make -C d check",
@@ -1036,7 +1100,7 @@ def _self_test():
                     json.dump(seed, fh)
                 self.assertFalse(load_state(path)[1], bad)
                 for _ in range(5):
-                    self.assertIsNone(self.stop("All tests pass.", active=True), bad)
+                    self.assertEqual(self.stop("All tests pass.", active=True), dict(systemMessage=UNREAD), bad)
 
         def test_15_redirection_env_quotes_and_negation(self):
             self.assertFalse(read_only("echo 'TIMEOUT=30' > settings.py"))
@@ -1071,7 +1135,7 @@ def _self_test():
             with open(path, "ab") as fh:  # one byte more: never parsed from the cut prefix
                 fh.write(b"X")
             self.assertFalse(load_state(path)[1])
-            self.assertIsNone(self.stop("All checks pass."))
+            self.assertEqual(self.stop("All checks pass."), dict(systemMessage=UNREAD))
 
         def test_17_comments_and_shell_keywords(self):
             self.assertIsNone(self.bash("echo ok # ; gh run rerun 123"))
@@ -1673,8 +1737,10 @@ def _self_test():
                                 (["local rerun: pytest -q", "CI rerun command: gh run rerun 7"], True)):
                 self.assertTrue(save_state(path, dict(new_state(), flags=flags)))
                 self.assertEqual(load_state(path), (dict(new_state(), flags=flags), True) if kept else
-                                 (new_state(), False), flags)
-                self.assertEqual(self.stop("All tests pass.") is None, not kept, flags)
+                                 (unknown_state(), False), flags)
+                out = self.stop("All tests pass.")  # round 21: a malformed state warns at a conclusive stop
+                self.assertEqual(out.get("decision") if kept else out, "block" if kept else dict(systemMessage=UNREAD),
+                                 flags)
 
         def test_46_the_check_key_keeps_quoting(self):
             # Round 12 (codex MEDIUM): pytest 'a  b' and pytest 'a b' pass different arguments. A stub pytest exits 1
@@ -1844,6 +1910,7 @@ def _self_test():
             allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
                        "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
                        "pass on a rerun after a recorded failure")
+            self.prompt()  # round 21: a missing state file is an unknown count until a new turn
             self.bash("gh run rerun 7")
             outs = [self.stop("All tests pass.", active=None) for _ in range(BLOCK_CAP + 3)]
             refusals = [o for o in outs if o.get("decision") == "block"]
@@ -1870,7 +1937,105 @@ def _self_test():
                                      dict(state), True, None)["decision"], "block")
             doc = " ".join(__doc__.split())
             self.assertNotIn("per continuous stop_hook_active run", doc)
-            self.assertIn("does not rely on the platform's stop_hook_active field", doc)
+            # Round 21 (claude MEDIUM): an explicit false resets the count, so the cap does not hold whatever the field.
+            self.assertNotIn("does not rely on the platform's stop_hook_active field", doc)
+            self.assertNotIn("absent, false or true", doc)
+            self.assertIn("so the cap holds when the platform's stop_hook_active field is absent or true", doc)
+            self.assertIn("the cap does not hold against a host that sends false on a Stop that does continue a "
+                          "refusal", doc)
+            readme = os.path.join(os.path.dirname(here), "README.md")
+            if os.path.exists(readme):
+                with open(readme, encoding="utf-8") as fh:
+                    text = " ".join(fh.read().split())
+                self.assertNotIn("absent, false or true", text)
+                self.assertNotIn("does not rely on the `stop_hook_active` input field", text)
+
+        def test_50_a_lost_state_is_an_unknown_count_not_zero(self):
+            # Round 21 (codex MAJOR): a malformed or deleted state was rewritten with a count of 0 at the next tool
+            # call, so the cap restarted with no new turn: five rounds of a lost state gave five refusals in a row.
+            path = state_path(dict(session_id="s"), self.env)
+            allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
+                       "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
+                       "pass on a rerun after a recorded failure")
+            self.prompt()
+            self.bash("gh run rerun 7")
+            outs = []
+            for n in range(5):
+                if n % 2:
+                    os.unlink(path)
+                else:
+                    with open(path, "w", encoding="ascii") as fh:
+                        fh.write("\x7bbad")
+                self.bash("gh run rerun 7")
+                self.assertIsNone(load_state(path)[0]["blocks"], n)  # saved back as an unknown count
+                outs.append(self.stop("All tests pass.", active=None))
+            self.assertEqual(outs, [dict(systemMessage=allowed + " (refusal count unknown)")] * 5)
+            self.assertEqual(self.stop("All tests pass.", active=True), dict(systemMessage=allowed
+                                                                              + " (refusal count unknown)"))
+            self.assertEqual(load_state(os.path.join(self.tmp, "absent.json")), (unknown_state(), True))
+            for reset in (self.prompt, lambda: self.stop("Still investigating.", active=False)):
+                os.unlink(path)
+                self.bash("gh run rerun 7")
+                reset()  # an accepted new-turn signal sets the count to 0
+                self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+
+        def test_51_an_explicit_false_resets_before_the_early_returns(self):
+            # Round 21 (codex MEDIUM): an explicit false on a stop that presents no pass as conclusive was discarded,
+            # so the count stayed at the cap.
+            self.prompt()
+            self.bash("gh run rerun 7")
+            for _ in range(BLOCK_CAP):
+                self.assertEqual(self.stop("All tests pass.", active=None)["decision"], "block")
+            self.assertIn("(loop cap)", self.stop("All tests pass.", active=None)["systemMessage"])
+            self.assertIsNone(self.stop("Still investigating.", active=False))
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+            for _ in range(BLOCK_CAP):
+                self.stop("All tests pass.", active=None)
+            self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="s", stop_hook_active=False,
+                                          last_assistant_message=""), self.env))  # a blank message: no claim
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+
+        def test_52_every_stop_let_pass_where_a_refusal_could_be_due_says_why(self):
+            # Round 21 (codex MEDIUM): the docstring promised a warning for no readable state and for no final message,
+            # but both were silent.
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            for active in (None, True):
+                payload = dict(hook_event_name="Stop", session_id="s")
+                if active is not None:
+                    payload["stop_hook_active"] = active
+                self.assertEqual(decide(payload, self.env), dict(systemMessage=NO_MESSAGE), active)
+                self.assertEqual(decide(dict(payload, last_assistant_message=7), self.env),
+                                 dict(systemMessage=NO_MESSAGE), active)
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("\x7bbad")
+            for active in (None, True, False):
+                self.assertEqual(self.stop("All tests pass.", active=active), dict(systemMessage=UNREAD), active)
+                self.assertIsNone(self.stop("Still investigating.", active=active), active)
+                with open(path, "w", encoding="ascii") as fh:
+                    fh.write("\x7bbad")
+            self.assertEqual(decide(dict(hook_event_name="Stop", session_id="s"), self.env), dict(systemMessage=UNREAD))
+            self.assertIsNone(self.stop("It was flaky; all tests pass.", active=None))  # a disclosure repairs the state
+            self.assertEqual(load_state(path), (new_state(), True))
+            self.env = dict()  # no state location: nothing is ever kept, so every stop is silent
+            self.assertIsNone(self.stop("All tests pass.", active=None))
+            self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="s"), self.env))
+
+        def test_53_a_prompt_the_user_submits_resets_the_count(self):
+            # Round 21 (claude MINOR): without the field a new human turn never reset the count.
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            for _ in range(BLOCK_CAP):
+                self.stop("All tests pass.", active=None)
+            self.assertIn("(loop cap)", self.stop("All tests pass.", active=None)["systemMessage"])
+            self.assertIsNone(self.prompt())
+            self.assertEqual(load_state(path)[0]["blocks"], 0)
+            self.assertEqual(load_state(path)[0]["flags"], ["CI rerun command: gh run rerun 7"])  # still outstanding
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+            doc = " ".join(__doc__.split())
+            self.assertIn("UserPromptSubmit (no matcher; it resets the refusal count and gives no output)", doc)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
@@ -1880,6 +2045,8 @@ def _self_test():
             return p.returncode, p.stdout, p.stderr
 
         def test_11_process_contract(self):
+            prompt = json.dumps(dict(hook_event_name="UserPromptSubmit", session_id="p", prompt="go")).encode()
+            self.assertEqual(self.run_hook(prompt, self.env), (0, b"", b""))
             call = json.dumps(dict(hook_event_name="PostToolUse", session_id="p", tool_name="Bash",
                                    tool_input=dict(command="gh run rerun 5"))).encode()
             rc, out, err = self.run_hook(call, self.env)

@@ -73,9 +73,10 @@ the authority, and the summary further down this page only points to it.
   record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
   compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
   with a warning, so a turn end is never held until an entry is recorded. The count is kept in its state
-  file and does not rely on the `stop_hook_active` input field, so the cap holds whether that field is
-  absent, false or true; it restarts only at the next prompt you submit (`UserPromptSubmit`), a new
-  compaction, or a turn end whose `stop_hook_active` is explicitly false. If the hook's state location
+  file, so the cap holds when the `stop_hook_active` input field is absent or true; it restarts only at
+  the next prompt you submit (`UserPromptSubmit`), a new compaction, or a turn end whose
+  `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the cap does not hold
+  against a host that sends false on a turn end that continues a refusal). If the hook's state location
   cannot be examined, it keeps reminding but says that no entry can clear the reminder, and it does not
   refuse the turn end. It detects a compaction by the platform's own markers: the `SessionStart` input field
   `source` with the value `compact`, and the `PreCompact` event, both described in the
@@ -87,10 +88,14 @@ the authority, and the summary further down this page only points to it.
   a check whose words hold an expansion, such as `$LINENO` or `tests/test_*.py`, is never compared), it
   adds a note to the assistant's context; at turn end it refuses, at most twice in a row, a final
   message that calls a pass conclusive without naming the earlier failure. The count is kept in its
-  state file and does not rely on the `stop_hook_active` input field, so the cap holds whether that
-  field is absent, false or true; it restarts only at a final message that names a disclosure word or
-  a turn end whose `stop_hook_active` is explicitly false. Events: `PostToolUse` and
-  `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`), and `Stop`. Its shell reading
+  state file, so the cap holds when the `stop_hook_active` input field is absent or true; it restarts
+  only at the next prompt you submit (`UserPromptSubmit`), a final message that names a disclosure word,
+  or a turn end whose `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the
+  cap does not hold against a host that sends false on a turn end that continues a refusal). A state
+  file that is missing, unreadable or malformed gives an unknown count, never 0, so until one of those
+  restarts the turn end is allowed with a warning instead of refused. Events: `PostToolUse` and
+  `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and
+  `Stop`. Its shell reading
   is exact only for a small closed grammar (listed in its docstring) and for commands of at most 8192
   characters. Inside it, a CI rerun is missed only when its words come into existence when the command
   runs, or bash runs `gh` under another name (an expansion that has a value, a tilde expansion such as
@@ -131,10 +136,10 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `5225b4fca9afabfba1fa377a9feb898056b40647b7f0ad0bc326a1f8fe0251f1` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `dacdbd4a893849ca9de9b9cdedbc3f830deb3d3cf28b948ce2e779cfc896d703` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `c76807ff75e410544a767a5782cbd24d5d83d86a5d6b5020e731428f9c0f9c64` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `0f382fa6deff87ebdd9fb125d88a67fcdc060b5231e399fbc4f978a622486f78` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
@@ -227,7 +232,7 @@ fails and report it; do not work around a failed check.
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
-     `PostToolUseFailure`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
+     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
      added and every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap
      would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
      the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
@@ -246,7 +251,7 @@ fails and report it; do not work around a failed check.
    `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
-   `Bash|Write|Edit|MultiEdit|NotebookEdit`) and `Stop`.
+   `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
 
    ```json
    {
@@ -266,7 +271,8 @@ fails and report it; do not work around a failed check.
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
        ],
        "UserPromptSubmit": [
-         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "Stop": [
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] },
@@ -400,7 +406,8 @@ section of its opening docstring. Read that section before relying on a hook; in
   folder or a session id it reminds once and then forgets. Its turn-end refusal is capped, so a model that
   ignores it is allowed to stop after three refusals with a warning. Without `UserPromptSubmit` registered
   and without a `stop_hook_active` field in the input, the count stays at the cap, so every later turn end
-  until the next compaction is allowed with the warning (a missed refusal).
+  until the next compaction is allowed with the warning (a missed refusal); a state file that cannot be
+  parsed gives an unknown count with the same effect from its first turn end.
 - **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
   through the shell tool, with the same words, each as written with its quoting (a word quoted another way
   is a different check, and so is an operator spelled another way, such as a newline in place of `;`
@@ -428,12 +435,15 @@ section of its opening docstring. Read that section before relying on a hook; in
   the failure is recorded; it does not record or investigate the failure itself. It fails open on its own
   failure, by design for an advisory hook: an internal error or an unwritable stdout gives no note and no
   refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed and
-  the stop is allowed, but the current call's own CI rerun or possible CI rerun note is still given. A
-  state file written by an earlier revision of the hook is read the same way, so none of its flags arms a
-  refusal. The state file is trusted: a hand-edited state of the current revision whose flags are of the
-  kinds it keeps still arms a refusal. It receives no event for a prompt you submit, so without a
-  `stop_hook_active` field in the input, once it has refused twice in a row every later conclusive turn
-  end is allowed with the warning until a final message names a disclosure word (a missed refusal).
+  the stop is allowed with a warning, but the current call's own CI rerun or possible CI rerun note is
+  still given. A state file written by an earlier revision of the hook is read as no earlier runs too, so
+  none of its flags arms a refusal. The state file is trusted: a hand-edited state of the current revision
+  whose flags are of the kinds it keeps still arms a refusal. A state file that is missing (first use
+  cannot be told from a lost file), unreadable or malformed gives an unknown count, so until a prompt you
+  submit, a disclosure word or an explicit `stop_hook_active` false, a conclusive turn end is allowed with
+  a warning instead of refused. Without `UserPromptSubmit` registered and without a `stop_hook_active`
+  field in the input, once it has refused twice in a row every later conclusive turn end is allowed with
+  the warning until a final message names a disclosure word (a missed refusal).
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

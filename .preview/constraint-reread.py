@@ -24,12 +24,14 @@ WHAT IT DOES
     floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE DIRECTION).
 
 LOOP CAP
-    The refusal count lives in the state file and does not rely on the platform's stop_hook_active field: the
-    cap holds whether that field is absent, false or true. A Stop without the field is not read as a new turn,
-    so the count goes on from the stored value. The count is reset to 0 only by a signal of a new turn that the
-    hook receives: a UserPromptSubmit event (a prompt the user submitted), a new compaction (which records a
-    fresh state), or a Stop whose stop_hook_active field is explicitly false (the platform's own statement that
-    this stop does not continue a stop-hook refusal). An allowed stop does not reset it: another Stop hook may
+    The refusal count is kept in the state file, so the cap holds when the platform's stop_hook_active field is
+    absent or true: a Stop without the field is not read as a new turn, so the count goes on from the stored
+    value. An explicit false is trusted as the platform's statement that this stop does not continue a
+    stop-hook refusal (a new turn) and resets the count, so the cap does not hold against a host that sends
+    false on a Stop that does continue a refusal: each such Stop is refused again. The count is reset to 0 only
+    by a signal of a new turn that the hook receives: a UserPromptSubmit event (a prompt the user submitted), a
+    new compaction (which records a fresh state), or a Stop whose stop_hook_active field is explicitly false.
+    An allowed stop does not reset it: another Stop hook may
     still refuse that same stop, and two hooks that each reset on their own allowed stop could refuse in turn
     without bound. So after BLOCK_CAP refusals each later Stop is allowed with the warning until one of those
     signals arrives.
@@ -79,7 +81,10 @@ FAILURE DIRECTION
     count that cannot be saved allows the stop with a warning rather than refusing, whether or not the
     payload carries stop_hook_active; only a Stop whose stop_hook_active field is explicitly false (read as a
     new turn, count 0) still refuses once with an unsaveable count, and a later Stop without the field or
-    with it true is then allowed. Any error in the hook itself, an unreadable payload, or an unrecognized
+    with it true is then allowed. An unknown count persists: a Stop does not repair the state (the hook cannot
+    tell how many refusals the lost count held), so every Stop is allowed with the warning until a
+    UserPromptSubmit event, a Stop with stop_hook_active explicitly false, or a new compaction writes a
+    well-formed state. Any error in the hook itself, an unreadable payload, or an unrecognized
     event exits 0 with no output (fail open). The one exception to exit 0 is an interpreter older than
     Python 3.14 that can start the hook: the guard at the top of this file reads no input, writes one line beginning
     `error: constraint-reread.py requires Python 3.14 or newer` to stderr and exits 1, which every event this
@@ -110,7 +115,10 @@ RESIDUAL COVERAGE
     ignores the refusal is held for at most BLOCK_CAP refusals and then allowed with a warning; the next
     prompt the user submits, a new compaction, or a Stop with stop_hook_active explicitly false starts the
     count again. Without UserPromptSubmit registered and without that field, the count stays at the cap, so
-    every later Stop until the next compaction is allowed with the warning (a missed refusal). An entry
+    every later Stop until the next compaction is allowed with the warning (a missed refusal), and a state file
+    that cannot be parsed (an unknown count) has the same effect from its first Stop. An explicit false is
+    trusted as a new turn, so a host that sends it on a Stop that continues a refusal is refused at every such
+    Stop (the cap does not hold). An entry
     beyond the first RECORD_MAX_BYTES of the record is not seen (the reminder stays on). The host clock is
     trusted: a wrong clock dates the compaction wrongly.
 
@@ -530,6 +538,10 @@ def _self_test():
             os.utime(self.spath(), (mtime, mtime))
             self.assertIn("refusal count unknown", self.call("Stop", 5)["systemMessage"])
             self.assertIn("refusal count unknown", self.call("Stop", 6, stop_hook_active=True)["systemMessage"])
+            # Round 21 (claude MINOR): the unknown count persists over Stops until a new-turn signal.
+            for s in range(8, 11):
+                self.assertIn("refusal count unknown", self.call("Stop", s).get("systemMessage"))
+            self.assertEqual(load_state(self.spath())[0], "bad")
             self.assertIn("(refusal 1 of", self.call("Stop", 7, stop_hook_active=False)["reason"])
             self.assertEqual(load_state(self.spath())[2], 1)  # the refusal wrote a well-formed state
             d = os.path.dirname(self.spath())
@@ -694,7 +706,15 @@ def _self_test():
             doc = " ".join(__doc__.split())  # round 20: the docstring describes the cap as it works
             self.assertNotIn("Exit status: always 0", doc)
             self.assertNotIn("per continuous stop_hook_active run", doc)
-            self.assertIn("does not rely on the platform's stop_hook_active field", doc)
+            # Round 21 (claude MEDIUM): an explicit false resets the count, so the cap does not hold whatever the field.
+            self.assertNotIn("does not rely on the platform's stop_hook_active field", doc)
+            self.assertNotIn("absent, false or true", doc)
+            self.assertIn("so the cap holds when the platform's stop_hook_active field is absent or true", doc)
+            self.assertIn("the cap does not hold against a host that sends false on a Stop that does continue a "
+                          "refusal", doc)
+            # Round 21 (claude MINOR): an unknown count persists until a new-turn signal, and both sections say so.
+            self.assertIn("An unknown count persists: a Stop does not repair the state", doc)
+            self.assertIn("a state file that cannot be parsed (an unknown count) has the same effect", doc)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
