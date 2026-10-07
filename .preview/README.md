@@ -96,10 +96,10 @@ the authority, and the summary further down this page only points to it.
   condition can hide a `gh` call the server refused, with or without `pipefail` set, and so can a pipe
   under default bash options, so `gh run rerun 7 2>&1 | tail -5` exits 0 and is kept as certain (a false
   refusal); with `pipefail` set, that pipe exits nonzero and gets only the uncertain note. The note for a
-  CI rerun call that succeeds says only that the call was not reported as failed and asserts neither a
-  rerun nor an earlier failure; the refusal asks the assistant to state any earlier failure, and neither
-  it nor the warning given when a refusal is capped asserts a CI rerun (each says only that a command
-  naming one was not reported as failed). An uncertain
+  CI rerun call that is not reported as failed says only that and asserts neither a rerun nor an earlier
+  failure; the refusal asks the assistant to state any earlier failure, and neither it nor the warning
+  given when a refusal is capped asserts a CI rerun (of CI, each says only that a command naming a CI
+  rerun was not reported as failed). An uncertain
   rerun gets a note and is never kept, so it never brings a refusal: every command outside the grammar
   (including `echo "$(date)"`, a here-document, and any longer command), a possible CI rerun by
   construction because the hook could not parse it, even when it fails; and a CI rerun call that fails,
@@ -127,7 +127,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `80268024296a380f6ba47c4acf95626bba2c65cc9a67719cbb905ca6ccb65aca` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `116bf1ffe1f90238a22acd9ae6a6c584c652f94988db3ebe55ddc510c5ecff2d` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
