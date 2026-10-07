@@ -72,12 +72,12 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b` | [ungated-record.py](ungated-record.py) |
+| `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
+| `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
+| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
+| `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -120,7 +120,8 @@ fails and report it; do not work around a failed check.
    If it prints anything other than `<file>: OK`, delete the downloaded file and stop. A mismatch means
    the file is not the one this page describes.
 
-3. Run the hook's own self-test and require it to pass:
+3. Check that `python3 --version` reports at least Python 3.14, which the hooks require; if it does not,
+   stop. Then run the hook's own self-test and require it to pass:
 
    ```sh
    python3 -I -S -B ~/.claude/hooks/<file> --self-test
@@ -155,15 +156,23 @@ fails and report it; do not work around a failed check.
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
-     check that `python3` with `python3 --version` before step 3. On an older interpreter each hook reads
-     no input, writes one `error: <file> requires Python 3.14 or newer` line to standard error, and
-     exits. Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
+     Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
+     `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
+     start the hook, each hook reads no input, writes one line beginning
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
+     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
-     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
-     stops before its loop guard runs). If you see that line, upgrade Python or remove the hook's entry.
+     every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap would
+     never run, since the hook stops before its loop guard runs). An interpreter that cannot start the
+     hook fails before its guard runs, with Python's own error instead of that line: an interpreter that
+     predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates f-strings
+     cannot compile the three clock hooks, which use them, and exits 1. Exit 1 is a non-blocking error
+     on every event, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop`
+     blocks the stop, and the hook's own block cap never runs. If you see any of these errors, upgrade
+     Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 

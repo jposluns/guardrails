@@ -20,7 +20,9 @@ suffix), so it proves NOTHING and authorizes NOTHING on its own. The doctor's ch
 limit rather than implying proof.
 
 Exit convention: 0 clean/NA, 1 finding, 2 malformed input or read error, or an interpreter older than
-Python 3.14 (refused before anything runs). Total absence of all pin/adoption
+Python 3.14 that can start this file (refused before anything runs). One that cannot start it fails with
+Python's own error first, and that exit is Python's: 1 for a compile failure, which reads as a finding, or
+2 for an interpreter predating -I when run with it. Total absence of all pin/adoption
 state is NA ("not adopted"); PARTIAL state (a pin without history, history without a pin absent a terminal
 un-adopt row, a missing referenced preimage, anything unreadable) is exit 2 MALFORMED, never NA.
 """

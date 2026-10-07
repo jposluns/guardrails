@@ -1043,18 +1043,22 @@ Build the primitives every later step relies on.
   treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
   contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
   operation." The specification defines no format for the declaration and does not define the
-  three failing cases, so the cases below other than no class are this prompt's reading, yours to
-  confirm with the maintainer. Every command of yours that reads, grades or writes a store, `opf
-  init` and the step 13 and step 14 checks included, runs this check before it resolves, reads or
-  writes any store, and on cannot-evaluate it stops with exit 2 and performs no store operation.
+  three failing cases, so the cases below other than no class and an absent file are this prompt's
+  reading, yours to confirm with the maintainer. Every command of yours that reads, grades or writes
+  a store, `opf init` and the step 13 and step 14 checks included, runs this check before it
+  resolves, reads or writes any store, and on cannot-evaluate it stops with exit 2 and performs no
+  store operation.
   The check gives each declaration one of these outcomes:
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed: section 16.1 requires the declaration to carry the release identity, the class, the
-    `spec_version` and the generations, and an absent file carries none of them. The specification
-    does not yet name the absent case, so this is the prompt's reading. Cannot-evaluate.
+    malformed, as a later revision of section 16.1 states: "A declaration that is absent, or that
+    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+    generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate
+    and MUST NOT authorize any store operation"; section 16.1 at the pinned commit does not yet name
+    the absent case.
+    Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
