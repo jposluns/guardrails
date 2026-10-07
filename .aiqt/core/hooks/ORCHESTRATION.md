@@ -18,7 +18,10 @@ Where a registry is looked up (two scopes):
 - Every component except the truncation guard (the stop guard, the scheduled-yield and
   TeammateIdle bindings, the unattended-ask blocker, the resume audit and barrier, the dispatch
   ledger, the prompt stamp, and the untracked wait-loop guard) looks only at the git-resolved
-  toplevel of the session cwd. With no git toplevel, or no registry there, each of them is inert.
+  toplevel of the session cwd. With no git toplevel, or where the registry loader reads the registry
+  there as absent, each of them is inert. A toplevel the loader cannot examine (a regular file, a
+  directory this process cannot search, or one holding a regular file named `.aiqt`) reads as bad,
+  not absent.
 - The truncation guard looks at the UNION of two places: every directory on the cwd's physical
   ancestor chain (a no-follow, descriptor-anchored walk that needs no git) and, where git resolves
   a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
@@ -70,8 +73,8 @@ the doctor and the resume audit report and arm from it):
   Bash call from the repository root is reported: by every `tools/orch_doctor.py` run, whose scope
   report differs by mode (printed with no registry at the root, a finding with one when the guard
   denies), and by the resume audit (the SessionStart hook and `tools/orch_doctor.py --resume-audit`,
-  which write the same resume barrier). With no registry at the repository root the resume audit stays
-  silent and the doctor exits 2, in both modes, so every other component
+  which write the same resume barrier). Where the registry loader reads the repository root's registry
+  as absent, the resume audit stays silent and the doctor exits 2, in both modes, so every other component
   stays inert on an absent registry in both modes. With a registry present, the audit also arms the
   barrier (and SessionStart warns) when the truncation guard would deny a Bash call from the
   repository root: in BOTH modes when git resolves the root but the walk cannot be carried out there
@@ -80,18 +83,29 @@ the doctor and the resume audit report and arm from it):
   The audit finds its root only through git, and returns silently in both modes before it reads the
   registry wherever it finds none: a session cwd that is missing, empty or not a string (no git call is
   made), or a session cwd for which git resolves no root, for any reason (an unreadable or broken git
-  config, a dangling gitfile, a dubious-ownership refusal, no git binary, or a session cwd this process
-  cannot enter), or prints one that is empty or not absolute. The truncation guard denies a Bash call
-  with no string cwd in every mode, before its scope check. For a Bash call from a string cwd where git
-  resolves nothing, whether the guard's scope check denies it depends only on its own ancestor walk of
+  config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout, or a session cwd
+  this process cannot enter), or where git exits 0 but prints output that cannot be decoded (a root
+  path that is not valid UTF-8, for example), is empty, or is not absolute. The truncation guard denies
+  a Bash call whose cwd is missing, empty or not a string in every mode, before its scope check. For a
+  Bash call from a non-empty string cwd where git resolves nothing, whether the guard's scope check denies it depends only on its own ancestor walk of
   that cwd and the mode, because its git leg resolves nothing either; its other checks still read the
   call itself (in scope, a foreground bare `&` is denied): with a regular registry on the walk the scope
   check does not deny a plain command in either mode, while a walk it cannot carry out denies in both.
   Git can still resolve a root this process cannot enter (through `core.worktree`, from a session cwd
   inside the repository's git directory). Where that root exists but this process cannot search it, or
   it is not a directory, the registry loader's `lstat` faults, the loader reports the registry bad, and
-  the audit arms the barrier in both modes; where that root does not exist, the loader reports the
-  registry absent and the audit stays silent in both modes. The barrier does not record the
+  the audit warns and arms the barrier in both modes (as it does for a regular file named `.aiqt` at
+  any root); where that root does not exist, the loader reports the registry absent and the audit stays
+  silent in both modes. Arming is best-effort, as is clearing: where the SessionStart audit cannot write
+  the barrier file (its state directory cannot be created, or the file cannot be opened or written, for
+  example `XDG_STATE_HOME` naming a regular file), it ignores the error so that SessionStart is never
+  wedged. The barrier file is then neither written nor cleared (one an earlier run wrote keeps its
+  state, armed or clear), so the PreToolUse barrier does not surface this run's findings; the session
+  still sees the SessionStart warning naming them (where the state directory cannot be read either, as
+  with that regular file, the warning also names the forced-exit log as unreadable). The PreToolUse barrier reads the barrier file only
+  where the registry loader reads the registry ok, so for a registry it reads bad an armed barrier
+  surfaces nothing there until the registry reads ok. `tools/orch_doctor.py --resume-audit` does not
+  ignore that error: its run ends with the error. The barrier does not record the
   mode, so the two writers agree only when they run with the same value: a doctor run without the
   variable can clear a barrier a registry-required SessionStart armed for a scope deny. Clearing it does
   not allow any Bash call: the barrier only warns, and the guard still denies on its own scope check.

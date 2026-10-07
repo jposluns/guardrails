@@ -1847,13 +1847,23 @@ def _main_isolated(report_path=None):
         # ROUND 12, WHERE THE RESUME AUDIT STAYS SILENT AND WHERE IT ARMS FOR A ROOT IT CANNOT ENTER: (a) where
         # _orch_root returns None the audit returns before it reads the registry, silent in both modes,
         # though the cwd's walk holds a registry (an unparsable one, so a read would warn), while the
-        # guard's scope check from that cwd finds it and allows a plain command; a cwd that is not a string
-        # is just as silent (red when the None branch reads a registry). (b) git resolves a core.worktree
-        # toplevel from the repository's git directory: one that exists without search permission (mode
-        # 0o000; a root run is not bound by it, so there the seam supplies the kernel's EACCES for an lstat
-        # under it) and a regular file each fault the loader's lstat, so the audit arms the barrier in both
-        # modes (red when that fault reads as absent); one that does not exist reads as absent and the
-        # audit stays silent in both modes (red when the audit's absent return is dropped).
+        # guard's scope check from that cwd finds it and allows a plain command. A session cwd that is
+        # missing, None, empty or not a string is just as silent and calls no git: for those calls the git
+        # seam counts its calls and hands back that registry's directory, so a branch that calls git for
+        # such a cwd (a fallback to the process cwd, for example) reads the registry and warns (red).
+        # (b) git resolves a core.worktree toplevel from the repository's git directory: one that exists
+        # without search permission (mode 0o000; a root run is not bound by it, so there the seam supplies
+        # the kernel's EACCES for an lstat under it, matched on the path as created and on its real path,
+        # since git prints the real path) and a regular file each fault the loader's lstat, so the audit
+        # warns in both modes (red when that fault reads as absent) and writes a barrier file this row reads
+        # back: active, its findings non-empty and each named in the warning (red when the barrier is
+        # written inactive or its write fails); one that does not exist reads as absent, so the audit stays
+        # silent and writes no barrier in both modes (red when the audit's absent return is dropped). The
+        # barrier is removed before each call, so one an earlier call wrote cannot satisfy the row.
+        # (c) Arming is best-effort: with XDG_STATE_HOME naming a regular file the barrier cannot be written,
+        # yet the audit for the regular-file toplevel still warns, naming every finding the writable run
+        # named, plus the forced-exit cannot-evaluate finding for the state directory it cannot read, and no
+        # barrier file exists (red when the write error propagates or the warning drops a finding).
         _r12_nr = tmp / "r12-noroot"
         (_r12_nr / ".aiqt").mkdir(parents=True)
         (_r12_nr / ".aiqt" / "orchestration.json").write_text("not json", encoding="utf-8")
@@ -1870,15 +1880,55 @@ def _main_isolated(report_path=None):
                            check=True, capture_output=True, timeout=30)
             _r12_wt[_r12_kind] = (str(_r12_repo / ".git"), str(_r12_top))
         _r12_noenter = _r12_wt["noenter"][1]
+        _r12_noenter_under = tuple({_r12_noenter + os.sep, os.path.realpath(_r12_noenter) + os.sep})
+        _r12_xdg_file = tmp / "r12-xdg-file"
+        _r12_xdg_file.write_text("x", encoding="utf-8")
         _r12_lstat = aiqt_hooks.os.lstat
 
         def _r12_lstat_seam(path, *a, **k):
-            if isinstance(path, str) and path.startswith(_r12_noenter + os.sep):
+            if isinstance(path, str) and path.startswith(_r12_noenter_under):
                 raise PermissionError(13, "Permission denied", path)
             return _r12_lstat(path, *a, **k)
+
+        def _r12_barrier_path(root):
+            return os.path.join(aiqt_hooks._orch_state_dir_for_root(root), "resume-barrier.json")
+
+        def _r12_audit(cwd):
+            # (root resolved to the configured toplevel, verdict, warning text, barrier read back) for one
+            # SessionStart run with no barrier file beforehand.
+            root = aiqt_hooks._orch_root(dict(cwd=cwd))
+            if root is not None:
+                try:
+                    os.unlink(_r12_barrier_path(root))
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+            try:
+                res = aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart", cwd=cwd))
+            except OSError as exc:
+                return root, "raised " + type(exc).__name__, "", None
+            msg = (res[1] or {}).get("systemMessage", "")
+            if root is None:
+                return root, _verdict(res), msg, None
+            try:
+                with open(_r12_barrier_path(root), "r", encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except (FileNotFoundError, NotADirectoryError):
+                return root, _verdict(res), msg, None
+            except (OSError, ValueError) as exc:
+                return root, _verdict(res), msg, "unreadable " + type(exc).__name__
+            found = rec.get("findings") if isinstance(rec, dict) else None
+            return root, _verdict(res), msg, (
+                rec.get("active") if isinstance(rec, dict) else "not an object",
+                isinstance(found, list) and bool(found) and all(isinstance(f, str) and f in msg for f in found))
+
+        def _r12_findings(msg):
+            # the findings text of a resume-audit warning, or a marker no warning carries
+            head, sep, rest = msg.partition("observed reality: ")
+            return rest.partition(". Correct the record")[0] if sep and rest else "\x00no findings"
         _r12_toplevel = aiqt_hooks._recovery_toplevel
         _r12_old = os.environ.get(_doc_env)
-        _r12_none, _r12_wt_rows = [], []
+        _r12_xdg_old = os.environ.get("XDG_STATE_HOME")
+        _r12_none, _r12_wt_rows, _r12_unwritable = [], [], []
         try:
             os.chmod(_r12_noenter, 0o000)
             if os.geteuid() == 0:
@@ -1889,24 +1939,46 @@ def _main_isolated(report_path=None):
                 else:
                     os.environ[_doc_env] = _r12_val
                 aiqt_hooks._recovery_toplevel = lambda _cwd: None
-                _r12_none.append((
+                _r12_entry = (
                     aiqt_hooks._orch_root(dict(cwd=str(_r12_nr))),
                     _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart",
                                                                cwd=str(_r12_nr)))),
                     aiqt_hooks._orch_truncation_scope(str(_r12_nr)),
                     _verdict(aiqt_hooks.orch_truncation_guard(dict(
-                        nocwd, cwd=str(_r12_nr), tool_input=dict(command="printf ok")))),
-                    _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart")))))
+                        nocwd, cwd=str(_r12_nr), tool_input=dict(command="printf ok")))))
+                _r12_calls = []
+                aiqt_hooks._recovery_toplevel = lambda _cwd: _r12_calls.append(_cwd) or str(_r12_nr)
+                _r12_entry += (tuple(
+                    (aiqt_hooks._orch_root(_r12_ev), _verdict(aiqt_hooks.orch_resume_audit(_r12_ev)))
+                    for _r12_ev in (dict(hook_event_name="SessionStart"),
+                                    dict(hook_event_name="SessionStart", cwd=None),
+                                    dict(hook_event_name="SessionStart", cwd=""),
+                                    dict(hook_event_name="SessionStart", cwd=7),
+                                    dict(hook_event_name="SessionStart", cwd=[str(_r12_nr)]))),
+                    len(_r12_calls))
+                _r12_none.append(_r12_entry)
                 aiqt_hooks._recovery_toplevel = _r12_toplevel
-                _r12_row = []
+                _r12_row, _r12_msgs = [], dict()
                 for _r12_kind in ("noenter", "file", "missing"):
                     _r12_cwd, _r12_top = _r12_wt[_r12_kind]
-                    _r12_root = aiqt_hooks._orch_root(dict(cwd=_r12_cwd))
+                    _r12_root, _r12_v, _r12_msgs[_r12_kind], _r12_bar = _r12_audit(_r12_cwd)
                     _r12_row.append((
                         _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
-                        _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart",
-                                                                   cwd=_r12_cwd)))))
+                        _r12_v, _r12_bar))
                 _r12_wt_rows.append(tuple(_r12_row))
+                os.environ["XDG_STATE_HOME"] = str(_r12_xdg_file)
+                try:
+                    _r12_cwd, _r12_top = _r12_wt["file"]
+                    _r12_root, _r12_v, _r12_msg, _r12_bar = _r12_audit(_r12_cwd)
+                    _r12_unwritable.append((
+                        _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
+                        _r12_v, _r12_findings(_r12_msgs["file"]) in _r12_msg,
+                        "pending forced-exit.jsonl present but unreadable" in _r12_msg, _r12_bar))
+                finally:
+                    if _r12_xdg_old is None:
+                        os.environ.pop("XDG_STATE_HOME", None)
+                    else:
+                        os.environ["XDG_STATE_HOME"] = _r12_xdg_old
         finally:
             aiqt_hooks._recovery_toplevel = _r12_toplevel
             aiqt_hooks.os.lstat = _r12_lstat
@@ -1916,9 +1988,11 @@ def _main_isolated(report_path=None):
             else:
                 os.environ[_doc_env] = _r12_old
         check("resume-audit/no-root-silent-every-mode-with-registry-on-walk", tuple(_r12_none),
-              ((None, "allow", ("found", None), "allow", "allow"),) * 2)
+              ((None, "allow", ("found", None), "allow", ((None, "allow"),) * 5, 0),) * 2)
         check("resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent", tuple(_r12_wt_rows),
-              (((True, "warn"), (True, "warn"), (True, "allow")),) * 2)
+              (((True, "warn", (True, True)), (True, "warn", (True, True)), (True, "allow", None)),) * 2)
+        check("resume-audit/barrier-unwritable-still-warns-writes-nothing", tuple(_r12_unwritable),
+              ((True, "warn", True, True, None),) * 2)
         # ROUND 8, SEARCH PERMISSION DECIDES A .aiqt DIRECTORY'S PROBE (the documented attribute): mode
         # 0o100 (search only, no read) confirms the registry inside it; 0o600 (read and write, no search)
         # and 0o000 cannot be evaluated. A root run is not bound by these modes, so there the seam supplies
@@ -2941,7 +3015,8 @@ def _main_isolated(report_path=None):
           "run_in_background, or command, and on any stdin the dispatcher cannot parse; the ledger "
           "records launches "
           "and completions; the resume "
-          "audit arms and clears the mutation barrier on real record state; the prompt stamp "
+          "audit arms and clears the mutation barrier on real record state (best-effort: a barrier it "
+          "cannot write is left unchanged while the warning still surfaces); the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
           "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
           "register gates external/foreign-lease evidence at audit cadence, holding on an unreadable "

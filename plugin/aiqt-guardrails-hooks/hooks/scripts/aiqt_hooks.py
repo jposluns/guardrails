@@ -11083,10 +11083,16 @@ def _orch_pending_artefact_findings(root):
 def orch_resume_audit(data):
     """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
-    clears it. Registry-scoped; silent with no registry. With a registry present it also arms on the
-    truncation guard's deny at its scope check for a Bash call from the root (_orch_resume_audit_findings),
-    so it is mode-sensitive: a root git resolves but the walk cannot carry out (one this process can enter
-    but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
+    clears it. Arming and clearing are best-effort: where the barrier file cannot be written (its state
+    directory cannot be created, or the file cannot be opened or written, for example XDG_STATE_HOME naming
+    a regular file), the OSError is swallowed so SessionStart never wedges, the barrier file is neither
+    written nor cleared (one an earlier run wrote keeps its state, armed or clear), and an audit with
+    findings still returns its warning naming them (where the state directory cannot be read either, as
+    with that regular file, the forced-exit probe adds its cannot-evaluate finding). Registry-scoped: silent where _orch_registry reads the
+    root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
+    present it also arms on the truncation guard's deny at its scope check for a Bash call from the root
+    (_orch_resume_audit_findings), so it is mode-sensitive: a root git resolves but the walk cannot carry
+    out (one this process can enter but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
     symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None
     (`if root is None: return _allow()`), this audit returns before it reads the registry, so it stays
     silent in both modes. _orch_root returns None for a session cwd that is missing, empty or not a string,
@@ -11094,14 +11100,15 @@ def orch_resume_audit(data):
     unreadable or broken config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout,
     or a cwd this process cannot enter), or its output cannot be decoded, is empty, or is not an absolute
     path. The truncation guard denies a Bash call whose cwd is missing, empty or not a string in every
-    mode, before its scope check. For a Bash call from a string cwd where git still resolves nothing,
+    mode, before its scope check. For a Bash call from a non-empty string cwd where git resolves nothing,
     whether its scope check denies depends only on its own ancestor walk of that cwd and the mode (its git
     leg resolves nothing either); its other checks still read the call's tool_name, tool_input and command.
     Git can still resolve a toplevel this process cannot enter (core.worktree read from a session cwd
     inside the repository's git directory). Where that toplevel exists without search permission for this
     process, or is not a directory, _orch_registry's lstat of a registry path under it raises an OSError
-    other than FileNotFoundError and returns bad, so this audit arms the barrier in both modes; where that
-    toplevel does not exist, the lstat raises FileNotFoundError for each registry name, _orch_registry
+    other than FileNotFoundError and returns bad, so this audit warns and (best-effort) arms the barrier in
+    both modes, as it does for a regular file named .aiqt at any root; where that toplevel does not
+    exist, the lstat raises FileNotFoundError for each registry name, _orch_registry
     returns absent (`if status == "absent": return _allow()`), and this audit stays silent in both modes."""
     root = _orch_root(data)
     if root is None:
