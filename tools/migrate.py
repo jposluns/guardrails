@@ -795,11 +795,15 @@ def _fd_pair_census():
 
     Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
     an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
-    closed and re-created at the same number reads as unchanged, and so does the same file closed and
-    reopened at the same number with the same access mode. The census looks no further: the offset
-    (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines change under a kept
-    descriptor that is read, written or given F_SETFL, so comparing them would report a kept
-    descriptor as a leak. A descriptor gained at a number that was free before is always seen.
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
 
     Only EBADF reads as closed (the listing's own descriptor is gone by the time it is read); any other
     listing, fstat or flag failure raises FdCensusError naming the listing or the descriptor. A listing
@@ -1457,12 +1461,16 @@ def self_test():
 
             _c_kept = os.open(str(_c_a), os.O_RDONLY)
             try:
+                os.fchmod(_c_kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                            # permission bits whatever umask created the file
                 _c_ok, _c_detail = _fd_leak_check(lambda: os.fchmod(_c_kept, 0o600))
+                _c_changed = stat.S_IMODE(os.fstat(_c_kept).st_mode) == 0o600
             finally:
                 os.close(_c_kept)
-            if _c_ok is not True:
+            if not _c_changed or _c_ok is not True:
                 failures.append("a chmod of a kept descriptor changes no identity and must not read as a leak "
-                                "(leak-free: {}, census {})".format(_c_ok, _c_detail))
+                                "(mode changed from 0644 to 0600: {}, leak-free: {}, census {})".format(
+                                    _c_changed, _c_ok, _c_detail))
             checked += 1
 
             _c_real_listdir, _c_real_fstat, _c_real_fcntl = os.listdir, os.fstat, fcntl.fcntl

@@ -5704,11 +5704,15 @@ def _st_open_fds():
 
     Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
     an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
-    closed and re-created at the same number reads as unchanged, and so does the same file closed and
-    reopened at the same number with the same access mode. The census looks no further: the offset
-    (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines change under a kept
-    descriptor that is read, written or given F_SETFL, so comparing them would report a kept
-    descriptor as a leak. A descriptor gained at a number that was free before is always seen.
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
 
     Only EBADF reads as closed (the listing's own transient descriptor is gone when it is read); any
     other listing, fstat or flag failure fails the check naming the listing or the descriptor, never
@@ -5742,8 +5746,9 @@ def _st_fds_gained(baseline):
     """How many descriptors are open now that were not in `baseline` (a _st_open_fds census), or None
     when a baseline pair is gone: a baseline number closed and reopened on another file, or with
     another access mode, does not balance a count. Within the coverage boundary _st_open_fds states
-    (an anonymous-inode descriptor re-created, or the same file reopened with the same access mode,
-    at the same number) the pair reads as kept, so such a reuse is not seen."""
+    (an anonymous-inode descriptor re-created, the same file reopened with the same access mode, or
+    a new file that took a deleted file's freed inode number opened with the same access mode, at
+    the same number) the pair reads as kept, so such a reuse is not seen."""
     now = _st_open_fds()
     if not baseline <= now:
         return None
@@ -5780,8 +5785,12 @@ def _t_fd_census_pairs(d, env):
                 os.close(value)
     kept = os.open(path_a, os.O_RDONLY)
     try:
+        os.fchmod(kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                 # permission bits whatever umask created the file
         baseline = _st_open_fds()
         os.fchmod(kept, 0o600)
+        assert stat.S_IMODE(os.fstat(kept).st_mode) == 0o600, \
+            "the chmod of a kept descriptor must change its mode from 0644 to 0600"
         assert _st_open_fds() == baseline, "a chmod of a kept descriptor must not change the census"
     finally:
         os.close(kept)

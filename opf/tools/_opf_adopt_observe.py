@@ -1421,11 +1421,16 @@ def _cancellation_self_test():
         # another access mode, between two censuses is a new pair.
         # Coverage boundary: an anonymous-inode descriptor (eventfd, signalfd,
         # timerfd, epoll and the like share one inode) re-created at the same
-        # number, and the same file reopened at the same number with the same
-        # access mode, read as unchanged. The offset (os.lseek(fd, 0,
-        # SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines are not
-        # compared: they change under a kept descriptor that is read, written
-        # or given F_SETFL, so a kept descriptor would read as a leak. Only
+        # number, the same file reopened at the same number with the same
+        # access mode, and a deleted file closed at a number with a new file
+        # of the same type opened there with the same access mode after
+        # taking the deleted file's freed inode number on the same device
+        # (st_ino names a file only while it exists, and a filesystem may give
+        # a freed number to the next file it creates), read as unchanged. The
+        # offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and
+        # flags lines are not compared: they change under a kept descriptor
+        # that is read, written or given F_SETFL, so a kept descriptor would
+        # read as a leak. Only
         # EBADF reads as closed (the listing's own descriptor); any other read
         # failure refuses naming the descriptor.
         try:
@@ -1473,8 +1478,13 @@ def _cancellation_self_test():
                                                 else "another access mode"))
                     os.close(held.pop())
                 held.append(os.open(paths[0], os.O_RDONLY))
+                # An explicit starting mode: the chmod below then changes the
+                # permission bits whatever umask created the file.
+                os.fchmod(held[0], 0o644)
                 before = descriptors()
                 os.fchmod(held[0], 0o600)
+                if stat.S_IMODE(os.fstat(held[0]).st_mode) != 0o600:
+                    raise AssertionError("the chmod of a kept descriptor left its mode unchanged")
                 if descriptors() != before:
                     raise AssertionError("descriptor census read a chmod of a kept descriptor as a change")
                 real_listdir, real_fstat, real_fcntl = os.listdir, os.fstat, fcntl.fcntl
