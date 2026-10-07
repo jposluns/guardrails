@@ -22252,50 +22252,6 @@ _UNIT_OUTER_BOUNDS = {
     "opf-unit-bound": 3600.0,
 }
 
-# The per-suite bytecode cache (merge train 2 round 17: the subprocess unit runner roughly doubled
-# the suite's wall time on CI). Every unit child is its own `python3 -I -B opf.py --self-test-unit
-# <label>` interpreter, so without a cache each child re-compiles every sibling helper module it
-# imports (measured on the fix host: about 0.49 s of helper compilation per child launch, against a
-# 0.015 s bare `python3 -I -B -c pass` start; the script itself, run as __main__, is never read
-# from a cache and still compiles in the child). run_self_tests_isolated pre-compiles the sibling
-# tree ONCE into a throwaway pycache-prefix directory, and each unit child reads it through
-# `-X pycache_prefix=...`; `-B` stays on the child command (it suppresses WRITING bytecode, never
-# reading a valid cache), so a child still writes no bytecode anywhere. This reuses IMPORTS only
-# where the isolation guarantee allows: the cache is built by this parent from the very sources the
-# children run, BEFORE any unit starts, is never written after that (every child runs -B), and
-# bytecode validation (source mtime and size) rejects a stale entry, so import SEMANTICS are
-# unchanged -- a unit can no more reach another unit's state through the read-only cache than
-# through the shared source files themselves, and a same-user process rewriting the cache mid-suite
-# is sabotage, outside D-385-ACCIDENTAL-UNIT, exactly like rewriting the sources. The build runs in
-# the parent before the first unit's bound starts, like the parent's own imports and its HOME
-# tempdir; it derives NO bound and scans NO source for one (the QA27 ruling bars pre-bound bound
-# DERIVATIONS, not the interpreter's ordinary compilation of the files the suite reads anyway). On
-# ANY failure to build the cache the suite simply runs uncached, exactly as before: the cache can
-# only remove re-compilation, never decide a verdict. Measured effect on the same host: a unit
-# child's launch drops from about 0.74 s to 0.47 s (median of 5), against one roughly 0.9 s
-# compileall per suite; the suite's remaining wall time is the units' own test work.
-_UNIT_PYCACHE_PREFIX = [None]
-
-
-def _unit_bytecode_cache(prefix):
-    """Pre-compile this script's sibling tree into `prefix` (a pycache-prefix directory for the
-    unit children's `-X pycache_prefix=...`). Returns True when the whole tree compiled; False (the
-    cache is then left unused) on any failure, so a source a unit deliberately ships broken, an
-    unreadable file or a full disk degrades to the uncached behaviour, never to a different
-    verdict."""
-    import compileall
-    saved = sys.pycache_prefix
-    try:
-        sys.pycache_prefix = prefix
-        ok = compileall.compile_dir(str(Path(__file__).resolve().parent), maxlevels=4,
-                                    quiet=2, force=False)
-    except Exception:
-        return False
-    finally:
-        sys.pycache_prefix = saved
-    return bool(ok)
-
-
 # Test-only flip (QA26): True removes the outer deadline (the runner's wait gets no timeout: the
 # bounded-wait audit's disclosed variable-timeout residual, deliberate here), so the bound stops
 # being enforced. _unit_bound_self_test proves the committed value is False and that flipping it True
@@ -23510,12 +23466,8 @@ def _unit_run_in_box(label, bound, argv, box):
     env = _unit_scrubbed_env()
     env["OPF_SELF_TEST_RESULT"] = result_path
     if argv is None:
-        argv = [sys.executable, "-I", "-B"]
-        if _UNIT_PYCACHE_PREFIX[0] is not None:
-            # Reading the suite's pre-built bytecode cache only (-B keeps the child from WRITING
-            # bytecode anywhere, exactly as before; see _unit_bytecode_cache).
-            argv += ["-X", "pycache_prefix=" + _UNIT_PYCACHE_PREFIX[0]]
-        argv += [str(Path(__file__).resolve()), "--self-test-unit", label]
+        argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                "--self-test-unit", label]
     fsize = _UNIT_FSIZE_LIMIT
     hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
     if hard != resource.RLIM_INFINITY:
@@ -25247,35 +25199,26 @@ def run_self_tests_isolated(labels=None):
     if labels is None:
         labels = [label for label, _fn in _self_tests()]
     worst = EXIT_OK
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="opf-selftest-pyc-") as pyc_prefix:
-        # The one-time bytecode pre-compile the unit children read (round 17): built before the
-        # first unit's bound starts, read-only to every child, and on any build failure the suite
-        # runs uncached, exactly as before (_unit_bytecode_cache).
-        _UNIT_PYCACHE_PREFIX[0] = pyc_prefix if _unit_bytecode_cache(pyc_prefix) else None
-        try:
-            for label in labels:
-                _unit_deliver(sys.stdout, "== opf self-test: {} ==\n".format(label).encode("utf-8"), 30.0)
-                bound = _UNIT_OUTER_BOUNDS.get(label)
-                if type(bound) is not float:
-                    _unit_deliver(sys.stderr, "opf self-test: {} has no _UNIT_OUTER_BOUNDS row of its own; a "
-                                  "unit without a hard outer budget is refused, not run (fail closed)\n"
-                                  .format(label).encode("utf-8", "replace"), 10.0)
-                    code = EXIT_MALFORMED
-                else:
-                    try:
-                        code = _run_unit_subprocess(label, bound)
-                    except Exception as exc:
-                        _unit_deliver(sys.stderr, "opf self-test: {} runner failed ({}: {}); failing "
-                                      "closed\n".format(label, type(exc).__name__, exc)
-                                      .encode("utf-8", "replace"), 10.0)
-                        code = EXIT_MALFORMED
-                if code == EXIT_MALFORMED:
-                    worst = EXIT_MALFORMED
-                elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
-                    worst = EXIT_FINDING
-        finally:
-            _UNIT_PYCACHE_PREFIX[0] = None
+    for label in labels:
+        _unit_deliver(sys.stdout, "== opf self-test: {} ==\n".format(label).encode("utf-8"), 30.0)
+        bound = _UNIT_OUTER_BOUNDS.get(label)
+        if type(bound) is not float:
+            _unit_deliver(sys.stderr, "opf self-test: {} has no _UNIT_OUTER_BOUNDS row of its own; a "
+                          "unit without a hard outer budget is refused, not run (fail closed)\n"
+                          .format(label).encode("utf-8", "replace"), 10.0)
+            code = EXIT_MALFORMED
+        else:
+            try:
+                code = _run_unit_subprocess(label, bound)
+            except Exception as exc:
+                _unit_deliver(sys.stderr, "opf self-test: {} runner failed ({}: {}); failing "
+                              "closed\n".format(label, type(exc).__name__, exc)
+                              .encode("utf-8", "replace"), 10.0)
+                code = EXIT_MALFORMED
+        if code == EXIT_MALFORMED:
+            worst = EXIT_MALFORMED
+        elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
+            worst = EXIT_FINDING
     return worst
 
 
