@@ -2122,6 +2122,12 @@ def _watchdog_completion_case(mode):
         # keeps a libffi mapping descriptor open for the process's life) so the
         # descriptor parity below measures ONLY what a cancelled launch leaks.
         emit._fixture_preload()
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+        finally:
+            os.close(held_fd)
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -2263,6 +2269,7 @@ def _watchdog_completion_case(mode):
                     return "SWEPT"
                 stat = os.fstat(spare)
                 return "LEAKED" if (stat.st_dev, stat.st_ino) == identity else "SWEPT"
+            assert _st_census_eio_raises(probe, spare), "the probe read an EIO descriptor as swept"
 
             real_listdir = os.listdir
 
@@ -3207,6 +3214,12 @@ def _watchdog_completion_case(mode):
 
         emit._fixture_preload()
         assert no_children(), "children live before the close-cancel probe"
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+        finally:
+            os.close(held_fd)
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -14652,6 +14665,11 @@ def _cli_self_test():
                         _wl_seen["wfd"] = fd
                     return fd
 
+                def _wl_leaked(fd):
+                    """The worksheet leak verdict: whether fd is still open. Only EBADF reads as closed; any
+                    other read error raises naming fd, never read as closed."""
+                    return _st_census_open(fd)
+
                 def _wl_close(fd):
                     _wl_real_close(fd)
                     if fd == _wl_seen.get("pfd") and "fired" not in _wl_seen:
@@ -14680,9 +14698,18 @@ def _cli_self_test():
                     if _wl_out != "valueerror":
                         failures.append("adopt --inputs with a failing parent close: expected the "
                                         "fail-closed ValueError, got {}".format(_wl_out))
-                    if _st_census_open(_wl_seen["wfd"]):   # EBADF only reads as closed; others raise
+                    if _wl_leaked(_wl_seen["wfd"]):
                         failures.append("adopt --inputs leaked the worksheet fd (fd {} still open "
                                         "after the parent close failed)".format(_wl_seen["wfd"]))
+                # The worksheet leak verdict fails closed: an EIO census read of a held descriptor raises
+                # naming it, never reads as closed.
+                _wl_held = _wl_real_open(os.devnull, os.O_RDONLY)
+                try:
+                    if not _st_census_eio_raises(lambda: _wl_leaked(_wl_held), _wl_held):
+                        failures.append("adopt --inputs worksheet leak check: an EIO census read of a held "
+                                        "descriptor read as closed")
+                finally:
+                    _wl_real_close(_wl_held)
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner
@@ -14808,6 +14835,32 @@ def _st_census_open(fd, fstat=None):
             return False
         raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
     return True
+
+
+def _st_census_eio_raises(scan, fd):
+    """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails EIO: it must raise
+    RuntimeError naming fd (read as closed, a leak would pass). os.fstat fails for fd only during the call. An
+    independent fstat must still see fd open afterwards, else the check proves nothing. The caller owns fd."""
+    import errno
+    real_fstat = os.fstat
+
+    def failing(number, *args, **kwargs):
+        if number == fd:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(number, *args, **kwargs)
+    os.fstat = failing
+    try:
+        scan()
+        named = False
+    except RuntimeError as exc:
+        named = "descriptor {}:".format(fd) in str(exc)
+    finally:
+        os.fstat = real_fstat
+    try:
+        real_fstat(fd)
+    except OSError:
+        return False
+    return named
 
 
 def _retained_close_offpath_self_test():

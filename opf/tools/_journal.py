@@ -2792,7 +2792,11 @@ def self_test():
         return 2
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    helper_failures, checks = _st_descriptor_helper_checks()
+    try:
+        helper_failures, checks = _st_descriptor_helper_checks()
+    except _StCensusError as exc:                 # a census that cannot read a descriptor: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     if failures or helper_failures:
         print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs and {} of {} descriptor-helper checks "
               "failed)".format(len(failures), runs, len(helper_failures), checks))

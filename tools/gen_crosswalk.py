@@ -647,8 +647,9 @@ def _fdopen_vectors(base):
     import errno
     import importlib.util
     import inspect
+    import _close_selftest
     base.mkdir()
-    real_open, real_fdopen = os.open, os.fdopen
+    real_open, real_fdopen, real_fstat = os.open, os.fdopen, os.fstat
     sent = MemoryError("injected fdopen failure")
 
     def early(fd, *args, **kwargs):
@@ -683,7 +684,8 @@ def _fdopen_vectors(base):
                 except OSError as exc:
                     if exc.errno == errno.EBADF:          # only EBADF reads as closed; any other error raises
                         continue
-                    raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+                    raise _close_selftest._StCensusError(
+                        "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
             if any(name.endswith(".tmp") for name in os.listdir(dfd)):
@@ -744,6 +746,36 @@ def _fdopen_vectors(base):
                 if problems != expected:
                     failures.append("fdopen flip {} {} under {}: expected {}, got {}".format(
                         label, mode, fault_label, expected or "green", problems or "green"))
+    # CENSUS: a recorded descriptor left open whose census fstat fails EIO must raise naming it (read as
+    # closed, the leak would pass). An independent fstat must still see it open, else the vector proves nothing.
+    kept = []
+
+    def leave_open(dfd):
+        kept.append(os.open(os.devnull, os.O_RDONLY))
+        raise sent
+
+    def unreadable(fd, *args, **kwargs):
+        if fd in kept:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(fd, *args, **kwargs)
+    os.fstat = unreadable
+    try:
+        run(leave_open, early)
+        got = "returned (the unreadable descriptor read as closed)"
+    except _close_selftest._StCensusError as exc:
+        got = "named" if kept and "descriptor {}:".format(kept[0]) in str(exc) else repr(exc)
+    finally:
+        os.fstat = real_fstat
+    runs += 1
+    for fd in kept:
+        try:
+            real_fstat(fd)
+        except OSError:
+            got = "the injected descriptor {} was not open".format(fd)
+        else:
+            os.close(fd)
+    if got != "named":
+        failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
     return failures, runs
 
 
@@ -1065,12 +1097,17 @@ def self_test():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
-        # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or closed
-        # twice, each green and red under its flip.
-        fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
-        failures.extend(fdopen_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+            # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or
+            # closed twice, each green and red under its flip.
+            fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
+            failures.extend(fdopen_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+            return 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

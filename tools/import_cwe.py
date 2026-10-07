@@ -690,8 +690,12 @@ def self_test():
     # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import _close_selftest
-    _close_failures, _close_runs = _close_selftest._st_close_check(
-        globals(), _close_selftest._st_helper_vectors(globals()))
+    try:
+        _close_failures, _close_runs = _close_selftest._st_close_check(
+            globals(), _close_selftest._st_helper_vectors(globals()))
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        raise SystemExit(2)
     if _close_failures:
         raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
     print("  ok: {} #378 close-vector runs".format(_close_runs))

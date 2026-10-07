@@ -1169,6 +1169,39 @@ import sys
 '''
 
 
+def _close_census_eio(harness):
+    """The copy's descriptor census fails closed: a held /dev/null descriptor is listed by
+    harness._st_fd_table; with its fstat failing EIO the table must raise harness._StCensusError naming it,
+    never omit it as closed. An independent fstat must still see it open afterwards, else the check proves
+    nothing."""
+    import errno
+    fd = os.open(os.devnull, os.O_RDONLY)
+    real_fstat = os.fstat
+
+    def failing(number, *args, **kwargs):
+        if number == fd:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(number, *args, **kwargs)
+    try:
+        listed = fd in harness._st_fd_table()
+        os.fstat = failing
+        try:
+            harness._st_fd_table()
+            got = "omitted"
+        except harness._StCensusError as exc:
+            got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
+        finally:
+            os.fstat = real_fstat
+        try:
+            real_fstat(fd)
+            still_open = True
+        except OSError:
+            still_open = False
+    finally:
+        os.close(fd)
+    return listed and still_open and got == "raised"
+
+
 def _close_harness_in_step(journal, copy):
     """#378: tools/_close_selftest.py is a copy of the close-vector harness at the end of
     opf/tools/_journal.py; from class _StSentinel through _st_watch_drop_check (where the copy ends and
@@ -2276,7 +2309,11 @@ def _self_test_isolated(red_on_revert):
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
             print("PASS " + case_id)
-        close_failures, close_runs = _close_vectors(parent / "close")
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(parent / "close")
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            raise CannotEvaluate(str(exc)) from exc
         for failure in close_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("close-vectors", not close_failures)
@@ -2284,6 +2321,8 @@ def _self_test_isolated(red_on_revert):
         journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
         copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
         check("close-harness-in-step", _close_harness_in_step(journal, copy))
+        import _close_selftest
+        check("close-harness-census-eio", _close_census_eio(_close_selftest))
         require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
         check("close-harness-drift-red",
               not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
