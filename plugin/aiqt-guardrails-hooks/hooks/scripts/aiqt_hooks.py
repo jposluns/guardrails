@@ -8160,11 +8160,13 @@ def _orch_dirfd_has_registry(dirfd):
     is SEARCH (execute) on it, not read: the O_PATH open needs none, and each registry name is examined by
     a no-follow stat relative to it, which needs search permission only. So, where _ORCH_O_WALK is O_PATH, a
     `.aiqt` of mode 0o100 evaluates normally for its owner (no read bit needed; a process that is not the
-    owner has no search bit there either, so for it the stat faults and the value is
-    _ORCH_REG_CANNOT_EVALUATE), and one of mode 0o600 or 0o000 (no search bit, so the stat faults with
-    EACCES) is _ORCH_REG_CANNOT_EVALUATE for a process those modes bind. Where O_PATH is unavailable the
-    O_RDONLY fallback open of `.aiqt` also needs read permission, so there a mode 0o100 `.aiqt` is
-    _ORCH_REG_CANNOT_EVALUATE too (an over-deny, never an allow). That value is TRUTHY,
+    owner and that the mode bits bind has no search bit there either, so for it the stat faults and the
+    value is _ORCH_REG_CANNOT_EVALUATE, while a process the mode bits do not bind, such as root or one
+    holding CAP_DAC_READ_SEARCH or CAP_DAC_OVERRIDE, evaluates it normally), and one of mode 0o600 or 0o000
+    (no search bit, so the stat faults with EACCES) is _ORCH_REG_CANNOT_EVALUATE for a process those modes
+    bind. Where O_PATH is unavailable the O_RDONLY fallback open of `.aiqt` also needs read permission, so
+    there a mode 0o100 `.aiqt` is _ORCH_REG_CANNOT_EVALUATE too for a process the mode bits bind, its owner
+    included (an over-deny, never an allow). That value is TRUTHY,
     so every boolean caller reads it as PRESENT in the deny-safe direction it always had (it must never
     read as absent - that would silently disarm an orchestrated tree), while the truncation guard's
     registry-required mode denies it rather than counting a discovery fault as a registry."""
@@ -9969,8 +9971,8 @@ def _orch_registry_required():
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
     there a git failure alone denies; a registry entry the discovery probe cannot confirm
     (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
-    lacks search (execute) permission on, such as mode 0o600 or 0o000 (mode 0o100 evaluates normally for
-    its owner where O_PATH exists; the O_RDONLY fallback also needs read permission there), or a
+    lacks search (execute) permission on, such as mode 0o600 or 0o000 for a process those modes bind (mode
+    0o100 evaluates normally for its owner where O_PATH exists; the O_RDONLY fallback also needs read permission there), or a
     first present registry name that is not a regular file or cannot be stat'ed) is not a registry
     either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
     surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
@@ -10024,8 +10026,10 @@ def orch_truncation_guard(data):
     leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
     evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
     toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
-    file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000,
-    while mode 0o100 evaluates normally; a first present registry name that is not a regular file or
+    file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000 for a
+    process those modes bind, while mode 0o100 evaluates normally for its owner where O_PATH exists and for
+    a process the mode bits do not bind, and cannot be evaluated by any other process (see
+    _orch_dirfd_has_registry); a first present registry name that is not a regular file or
     whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
     toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
     with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
@@ -11078,8 +11082,11 @@ def orch_resume_audit(data):
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
     clears it. Registry-scoped; silent with no registry. With a registry present it also arms on the
     truncation guard's deny at its scope check for a Bash call from the root (_orch_resume_audit_findings),
-    so it is mode-sensitive: a root the walk cannot carry out arms it in EVERY mode, and an absent or
-    unconfirmable registry scope (a symlinked registry, for example) arms it in registry-required mode."""
+    so it is mode-sensitive: a root git resolves but the walk cannot carry out (one this process can enter
+    but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
+    symlinked registry, for example) arms it in registry-required mode. A root git cannot resolve (one this
+    process cannot enter, for example) returns before any finding is built, so this audit stays silent
+    there and only the guard's own scope deny remains."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -11090,7 +11097,8 @@ def orch_resume_audit(data):
     if status == "bad":
         _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
     # The same finding list tools/orch_doctor.py --resume-audit writes (round 8: one barrier truth), so a
-    # SessionStart never clears a barrier the doctor armed for a scope deny that still holds.
+    # SessionStart run in the same mode never clears a barrier the doctor armed for a scope deny that still
+    # holds; the barrier does not record the mode, so a run in the other mode can (_orch_resume_audit_findings).
     findings = _orch_resume_audit_findings(status, reg, root)
     try:
         os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
@@ -11103,8 +11111,8 @@ def orch_resume_audit(data):
         _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
                           "observed reality: {}. Correct the record, or for a truncation guard finding "
-                          "the condition it names (a directory's permissions, or the registry's file "
-                          "type), then re-run "
+                          "the condition it names (for example a directory's permissions, or the "
+                          "registry's file type), then re-run "
                           "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
                           "acknowledgement alone does not clear it.".format("; ".join(findings)))
     return _allow()
