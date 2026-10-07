@@ -991,13 +991,27 @@ residue = "A self-test control catches nothing real."
 
 
 def _build_hooks(base):
-    """Add a hooks source tree (manifest + stub script) to an existing conformant install under base
-    and generate its plugin surface via gen_hooks.build_desired, so C5 has both a source and a matching
-    surface to compare. The manifest cites seci001, a real corpus-id in the conformant fixture."""
+    """Add a hooks source tree to an existing conformant install under base and generate its plugin
+    surface via gen_hooks.build_desired, so C5 has both a source and a matching surface to compare.
+    The fixture holds every source gen_hooks declares in GENSRC_OUTPUTS (derived, not a hand list, so
+    a new source file cannot be missed): the manifest and dispatcher are stubs, and every other source
+    (the launcher) is copied from this repository. The manifest cites seci001, a real corpus-id in the
+    conformant fixture."""
     hooks_src = base / ".aiqt" / "core" / "hooks"
-    (hooks_src / "scripts").mkdir(parents=True)
-    (hooks_src / "scripts" / gen_hooks.SCRIPT_NAME).write_text(_HOOKS_SCRIPT, encoding="utf-8")
-    (hooks_src / "manifest.toml").write_text(_HOOKS_MANIFEST, encoding="utf-8")
+    stubs = {(hooks_src / "manifest.toml"): _HOOKS_MANIFEST,
+             (hooks_src / "scripts" / gen_hooks.SCRIPT_NAME): _HOOKS_SCRIPT}
+    repo = Path(__file__).resolve().parent.parent
+    sources = sorted({rel for entry in gen_hooks.GENSRC_OUTPUTS for rel in entry["sources"]})
+    for rel in sources:
+        target = base / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target in stubs:
+            target.write_text(stubs.pop(target), encoding="utf-8")
+        else:
+            target.write_bytes((repo / rel).read_bytes())
+    if stubs:
+        raise ValueError("gen_hooks.GENSRC_OUTPUTS no longer declares the stubbed source(s) {}".format(
+            sorted(str(path.relative_to(base)) for path in stubs)))
     for rel, content in gen_hooks.build_desired(base, hooks_src).items():
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)

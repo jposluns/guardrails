@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "787018e3621ad0207873140d36755a5013d67ecab8a5c46bff95c83506505370"
+tree-sha256 = "e122270e7527374b2faa0e1d71dd8693a6b518642001fbdfd36bde166ae9e001"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3351,8 +3351,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 166686
-sha256 = "c1263894815b442739481f842b0bf1275e4a6c3a2f81a74b71ac565faf932a24"
+bytes = 166836
+sha256 = "7ad5722cd4064df96a2b307923353ef4dd9884b872260cd95d246f8bb08a8a81"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3446,8 +3446,8 @@ sha256 = "049a29bfad79e5f02b0839d7d75d925414a9bbf356d5cffeef804c38add50ca4"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 68517
-sha256 = "4e6ef62e253a3efb70229f8f7c3094b5ab3bd70479cab924e94ebaa6ac2728a8"
+bytes = 69268
+sha256 = "8160aa02bd95585fcfc6e106ae27402272a0d26c8f1fcbc8f72d2eae3be91d0b"
 
 [[sources]]
 path = "tools/doctor.py"

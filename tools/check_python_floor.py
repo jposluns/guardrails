@@ -2307,13 +2307,14 @@ def _self_test_cases(base):
                                ("launcher/acquire-syntax-error-mode-rule", "syntax-error")):
         check(check_id, _acquire_case(scenario, "blocking") + _acquire_case(scenario, "fail_open"),
               [(2, "", True)] * 3 + [(0, True, True)] * 3)
+    # One call site for both branches: the manifest's exact set requires this id on every run, and
+    # the source scan refuses a second call site with the same id.
     if getattr(os, "geteuid", None) is None or os.geteuid() == 0:
-        check("launcher/acquire-unreadable-mode-rule", "skipped (as root the open succeeds)",
-              "skipped (as root the open succeeds)")
+        unreadable_got = unreadable_want = "skipped (as root the open succeeds)"
     else:
-        check("launcher/acquire-unreadable-mode-rule",
-              _acquire_case("unreadable", "blocking") + _acquire_case("unreadable", "fail_open"),
-              [(2, "", True)] * 3 + [(0, True, True)] * 3)
+        unreadable_got = _acquire_case("unreadable", "blocking") + _acquire_case("unreadable", "fail_open")
+        unreadable_want = [(2, "", True)] * 3 + [(0, True, True)] * 3
+    check("launcher/acquire-unreadable-mode-rule", unreadable_got, unreadable_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
