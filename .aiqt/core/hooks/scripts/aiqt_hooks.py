@@ -11093,7 +11093,11 @@ def _orch_barrier_write(path, obj):
     armed or clear, or its absence, is left byte-identical; the caller decides what the error means. A
     process killed between the create and the replace (a hook timeout, for example) leaves its temporary
     file beside the barrier, and nothing removes it. A directory at the barrier path cannot be replaced:
-    the replace raises IsADirectoryError and the directory stays until someone removes it."""
+    the replace raises IsADirectoryError and the directory stays until someone removes it. What it writes
+    always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
+    first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
+    before any file is created."""
+    obj = _orch_barrier_fit(obj)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
     created = False
@@ -11200,31 +11204,82 @@ def _orch_barrier_well_formed(barrier):
     return "ts" not in barrier or isinstance(barrier["ts"], str)
 
 
-_ORCH_BARRIER_MAX_BYTES = 64 * 1024  # the audit's barrier is a few hundred bytes; a larger one reads as armed
+_ORCH_BARRIER_MAX_BYTES = 64 * 1024  # _orch_barrier_write never stores more (_orch_barrier_fit); a larger file reads as armed
+_ORCH_BARRIER_FINDING_CHARS = 4000  # a stored finding is cut here, so the first one always fits the bound
+
+
+def _orch_barrier_rest(count):
+    return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes); run 'python3 "
+            "tools/orch_doctor.py --resume-audit' to list them all".format(count, _ORCH_BARRIER_MAX_BYTES))
+
+
+def _orch_barrier_fit(obj):
+    """The object _orch_barrier_write stores, so that its JSON (json.dumps, ASCII) never exceeds
+    _ORCH_BARRIER_MAX_BYTES, the bound _orch_barrier_read refuses past. An object that already fits is
+    returned unchanged. Otherwise, for a dict whose "findings" is a list of strings, a copy keeps the
+    leading findings (each cut to _ORCH_BARRIER_FINDING_CHARS characters, marked " (cut)") that fit
+    together with one last line counting the findings not stored (_orch_barrier_rest), so the barrier
+    stays armed, well-formed and readable and its warned flag can be recorded. Anything else that does
+    not fit (another shape, or other keys too large on their own) raises ValueError."""
+    if len(json.dumps(obj)) <= _ORCH_BARRIER_MAX_BYTES:
+        return obj
+    found = obj.get("findings") if isinstance(obj, dict) else None
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    cut = [f if len(f) <= _ORCH_BARRIER_FINDING_CHARS else f[:_ORCH_BARRIER_FINDING_CHARS] + " (cut)"
+           for f in found]
+    # With k findings the list encodes as the empty object's size plus each finding's encoding plus two
+    # bytes (", ") per separator; the rest line is reserved at its largest (no finding stored).
+    size = len(json.dumps(dict(obj, findings=[]))) + len(json.dumps(_orch_barrier_rest(len(found))))
+    kept = []
+    for f in cut:
+        size += len(json.dumps(f)) + 2
+        if size > _ORCH_BARRIER_MAX_BYTES:
+            break
+        kept.append(f)
+    rest = len(found) - len(kept)
+    fitted = dict(obj, findings=kept + ([_orch_barrier_rest(rest)] if rest else []))
+    if len(json.dumps(fitted)) > _ORCH_BARRIER_MAX_BYTES:
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    return fitted
 _ORCH_BARRIER_DIRECTORY = "not a regular file: a directory"
 
 
-def _orch_barrier_nonregular(path):
+def _orch_barrier_nonregular(path, opened=None):
     """The detail for a barrier path that opened as something other than a regular file:
     _ORCH_BARRIER_DIRECTORY only where os.lstat shows the entry itself is a directory (no audit can
-    replace that), otherwise "not a regular file" (a FIFO, a socket, a device, or a symlink to any of
-    these or to a directory, which the writer's os.replace does replace, leaving the target intact)."""
+    replace that) and, where the caller passes the fstat result of the opened descriptor (opened), that
+    directory has the opened file's st_dev and st_ino (an entry swapped between the open and the lstat is
+    never named a directory); otherwise "not a regular file" (a FIFO, a device, or a symlink to either or
+    to a directory, which the writer's os.replace does replace, leaving the target intact). A UNIX socket
+    never reaches here: its open fails with ENXIO, which _orch_barrier_read reads as ('bad', 'OSError')."""
     try:
-        return _ORCH_BARRIER_DIRECTORY if stat.S_ISDIR(os.lstat(path).st_mode) else "not a regular file"
+        st = os.lstat(path)
     except OSError:
         return "not a regular file"
+    if stat.S_ISDIR(st.st_mode) and (opened is None
+                                     or (st.st_dev, st.st_ino) == (opened.st_dev, opened.st_ino)):
+        return _ORCH_BARRIER_DIRECTORY
+    return "not a regular file"
 
 
 def _orch_barrier_read(path):
-    """Read the resume barrier without blocking: ('absent', None), ('ok', the parsed JSON value) or
-    ('bad', detail). The open is os.open(O_RDONLY | O_NONBLOCK | O_CLOEXEC), so a FIFO with no writer
-    opens at once instead of waiting for one. It follows a symlink: a symlink to a regular file reads as
-    that file (the writer's os.replace later replaces the link, not its target). A FileNotFoundError or
-    NotADirectoryError from the open (a missing file, a dangling symlink, a state directory path through
-    a regular file) is absent. The opened descriptor is fstat'ed and anything not a regular file is bad
-    without a read (_orch_barrier_nonregular names it). The read stops after _ORCH_BARRIER_MAX_BYTES + 1
-    bytes and a longer file is bad. The descriptor is closed on every path. Any other exception (an
-    OSError, a decode or JSON error, a RecursionError from deep nesting) is bad, named by its type."""
+    """Read the resume barrier without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None), ('ok', the parsed JSON value) or ('bad', detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting
+    for one. It follows a symlink: a symlink to a regular file reads as that file (the writer's os.replace
+    later replaces the link, not its target). A FileNotFoundError or NotADirectoryError from the open (a
+    missing file, a dangling symlink, a state directory path through a regular file) is absent. A UNIX
+    socket fails the open with ENXIO and is ('bad', 'OSError'). The opened descriptor is fstat'ed and
+    anything not a regular file is bad without a read (_orch_barrier_nonregular names it). The read asks
+    for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all (65537: the 65536-byte bound plus one byte that
+    detects a longer file) and a longer file is bad. The descriptor is closed exactly once on every path
+    and never retried; a close that fails is bad, named by its type, so a close error never escapes to
+    the dispatcher (which would fail closed). Any other exception (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting) is bad, named by its type. Not bounded here: the path lookup of the
+    os.open (and of the os.lstat in _orch_barrier_nonregular) can stall on a hung mount for any file
+    type, a regular file on a stalled filesystem can stall the read, and what opening a device node does
+    is up to its driver; the hook timeout (10 seconds in hooks.json) bounds each such stall."""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except (FileNotFoundError, NotADirectoryError):
@@ -11233,20 +11288,29 @@ def _orch_barrier_read(path):
         return ("bad", _orch_barrier_nonregular(path))  # a platform whose open refuses a directory
     except Exception as exc:
         return ("bad", type(exc).__name__)
-    chunks, total = [], 0
+    chunks, total, early, close_error = [], 0, None, None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return ("bad", _orch_barrier_nonregular(path))
-        while total <= _ORCH_BARRIER_MAX_BYTES:
-            chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            early = ("bad", _orch_barrier_nonregular(path, opened))
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
     except Exception as exc:
-        return ("bad", type(exc).__name__)
+        early = ("bad", type(exc).__name__)
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            close_error = ("bad", type(exc).__name__)
+    if early is not None:
+        return early
+    if close_error is not None:
+        return close_error
     if total > _ORCH_BARRIER_MAX_BYTES:
         return ("bad", "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
     try:
@@ -11261,21 +11325,25 @@ def orch_resume_barrier(data):
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
     never obstructed. The barrier is read by _orch_barrier_read: a non-blocking open (a FIFO with no
     writer does not wait for one), an fstat that refuses anything not a regular file before any read (so
-    a FIFO or a device such as /dev/zero is never read), and a read bounded at _ORCH_BARRIER_MAX_BYTES.
+    a FIFO or a device such as /dev/zero is never read), and a read of at most _ORCH_BARRIER_MAX_BYTES + 1
+    bytes (65537: the bound plus one byte that detects a longer file); a close error is a bad result too.
     A barrier file that is absent (its open raises FileNotFoundError
     or NotADirectoryError, a dangling symlink included) reads as clear; a symlink to a regular file reads
     as that file. A barrier is well-formed only when it is a JSON object whose keys are "active"
     (required, a boolean), "findings" (required, never defaulted, a list of strings), and optionally
     "warned" (a boolean) and "ts" (a string), and no other key. One that exists but is not a regular file
-    (a FIFO, a socket, a device such as /dev/zero, a directory, or a symlink to any of these), is larger
-    than the bound, cannot be read or parsed for any reason (an OSError, a decode or JSON error, a
+    (a FIFO, a device such as /dev/zero, a directory, or a symlink to any of these; a UNIX socket, whose
+    open fails with ENXIO, reads as OSError), is larger than the bound, cannot be read, closed or parsed
+    for any reason (an OSError, a decode or JSON error, a
     RecursionError from deep nesting, or any other exception the parse raises), or is not well-formed (a
     truncated or partial write by an earlier writer, for example), reads as ARMED: every mutation outside
     the allowlist surfaces a note naming the file as unreadable or malformed with the reason (there is no
     readable "warned" flag to record, so it is not once per arming), and in BAKE that note blocks
-    nothing, and a mutation on the allowlist is allowed after the same read. A regular file on a
-    filesystem that stalls (a hung network mount) can still stall the read, as any file read can, until
-    the hook timeout. It clears where 'python3
+    nothing, and a mutation on the allowlist is allowed after the same read. Not bounded by the reader:
+    path lookup on a hung mount can stall its os.open (and the lstat naming a non-regular file, and the
+    os.path.realpath calls below) for any file type, a regular file on a stalled filesystem can stall the
+    read, and opening a device node does whatever its driver does; the hook timeout (10 seconds) bounds
+    each such stall. It clears where 'python3
     tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
     (_orch_barrier_write, whose os.replace replaces a FIFO, a socket, a device node or a symlink at the
     path and leaves a symlink's target intact), or where the user corrects or removes it (the state

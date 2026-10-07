@@ -111,17 +111,25 @@ the doctor and the resume audit report and arm from it):
   reads an absent barrier file (a dangling symlink included) as clear, and a symlink to a regular file
   as that file. It reads the barrier with a non-blocking open (a FIFO with no writer does not wait for
   one), an `fstat` that refuses anything not a regular file before any read (so a FIFO or a device such
-  as `/dev/zero` is never read), and a read bounded at 64 KiB. A barrier is well-formed only when it is
+  as `/dev/zero` is never read), and a read of at most 65537 bytes (the 65536-byte bound plus one byte
+  that detects a longer file); a close error is read as a bad barrier, never passed to the dispatcher.
+  Every writer stores at most 65536 bytes: a finding list too long for the bound is stored as its first
+  findings (each cut to 4000 characters) plus one line counting the rest, so a written barrier always
+  reads back armed and well-formed and its warned flag can be recorded. A barrier is well-formed only when it is
   a JSON object whose keys are exactly a boolean `active` and a list of string `findings` (both
   required; a missing `findings` is malformed, never read as an empty list), plus an optional boolean
-  `warned` and an optional string `ts`. One that exists but is not a regular file (a FIFO, a socket, a
-  device, a directory, or a symlink to any of these), is larger than the bound, cannot be read or
-  parsed for any reason (including a `RecursionError` from deeply nested JSON), or is not well-formed,
+  `warned` and an optional string `ts`. One that exists but is not a regular file (a FIFO, a device, a
+  directory, or a symlink to any of these; a UNIX socket fails its open with `ENXIO` and reads as
+  `OSError`), is larger than the bound, cannot be read, closed or parsed for any reason (including a
+  `RecursionError` from deeply nested JSON), or is not well-formed,
   reads as armed: each mutation outside the allowlist then surfaces a note naming the file as
   unreadable or malformed with the reason (not once per arming, since there is no readable `warned`
   flag to record), during the bake that note blocks nothing, and a mutation on the allowlist is allowed
-  after the same read. A regular file on a filesystem that stalls (a hung network mount) can still
-  stall the read until the hook timeout, as any file read can. It clears when
+  after the same read. The reader does not bound everything: path lookup on a hung mount can stall the
+  open (and the `lstat` and `realpath` calls) for any file type, a regular file on a stalled filesystem
+  can stall the read, and opening a device node does whatever its driver does; the 10-second hook
+  timeout bounds each such stall. A directory is named only where the `lstat` of the path and the
+  `fstat` of what was opened agree on device and inode. It clears when
   `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file (the rename
   replaces a FIFO, a device node or a symlink at the path and leaves a symlink's target intact), or
   when the user corrects or removes it (the state directory is on the allowlist); where the state

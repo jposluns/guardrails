@@ -2653,96 +2653,83 @@ def _main_isolated(report_path=None):
         # over the bound (a clear barrier padded with spaces) and a symlink to a directory each read as
         # armed: a mutation outside the allowlist surfaces the note naming the file and the reason, never
         # the remove-the-directory note, and a repair write in the state directory is allowed with no
-        # note. Each call runs under a 5-second interval timer whose handler raises a BaseException the
-        # handler's own except clauses cannot swallow, so a regression fails its row ("timed out")
-        # instead of hanging the suite. The /dev/zero rows first run the reader alone in a child capped at
-        # its own size plus 64 MiB (an in-process cap did not stop the host's OOM killer), and call the
-        # handler in this process only when that child shows the reader refuses /dev/zero without reading
-        # it; otherwise the row records the child's result and fails, so a regression that reads without
-        # a bound never reads /dev/zero in this process (red on the round-15
-        # reader, which blocks on the FIFO open, reads /dev/zero until MemoryError, reads the padded file
-        # as clear and gives a symlink to a directory the remove-the-directory note). A symlink to a
-        # regular armed barrier reads as that barrier (the symlink policy): the first mutation surfaces
-        # its findings, and the warned-flag write replaces the link with a regular file and leaves the
-        # target's bytes unchanged.
-        import signal as _r16_signal
+        # note. ROUND 17: every row runs the COMPLETE handler, both the outside and the repair call, and
+        # computes its assertions inside a child capped at its own size plus 64 MiB (RLIMIT_AS) with a
+        # 30-second timeout; this process only creates the file and parses the child's one JSON line, so a
+        # handler that bypasses the reader (the round-15 shape, which opens and reads the barrier itself)
+        # fails its row in the child (a timeout on the FIFO rows, a MemoryError on /dev/zero) and never
+        # reads the file in this process. On 36d79720 (round 14, where _orch_barrier_read does not exist)
+        # the check is red: both FIFO rows time out in the child, the /dev/zero and directory rows warn
+        # without the not-a-regular-file reason, and the padded file reads as clear.
+        _r16_hooks = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+        _r16_tools = os.path.dirname(os.path.abspath(__file__))
+        _r16_child_src = (
+            "import json, os, resource, sys\n"
+            "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])\n"
+            "import aiqt_hooks, selftest_orch_hooks as t\n"
+            "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+            "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
+            "soft = vm + (64 << 20) if hard == resource.RLIM_INFINITY else min(vm + (64 << 20), hard)\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
+            "bar, reason = sys.argv[3], sys.argv[4]\n"
+            "def note(res):\n"
+            "    return res[1].get('systemMessage', '') if isinstance(res[1], dict) else ''\n"
+            "res = aiqt_hooks.orch_resume_barrier(json.loads(sys.argv[5]))\n"
+            "row = [t._verdict(res), bar in note(res) and reason in note(res)\n"
+            "       and 'remove the directory' not in note(res)]\n"
+            "res = aiqt_hooks.orch_resume_barrier(json.loads(sys.argv[6]))\n"
+            "print(json.dumps(row + [[t._verdict(res), note(res)]]))\n")
 
-        class _R16Timeout(BaseException):
-            pass
-
-        def _r16_alarm(signum, frame):
-            raise _R16Timeout()
-
-        def _r16_probe():
-            # The reader alone, in a child capped at its own size plus 64 MiB with a 30-second timeout.
+        def _r16_child(reason):
+            calls = [json.dumps(r.payload("PreToolUse", "Write", dict(file_path=fp, content="x")))
+                     for fp in (str(r.root / "src.py"), str(rsd / "r16-repair.json"))]
             try:
-                p = subprocess.run(
-                    [sys.executable, "-I", "-B", "-c",
-                     "import os, resource, sys; sys.path.insert(0, sys.argv[1]); import aiqt_hooks; "
-                     "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE'); "
-                     "resource.setrlimit(resource.RLIMIT_AS, (vm + (64 << 20), resource.RLIM_INFINITY)); "
-                     "print(aiqt_hooks._orch_barrier_read(sys.argv[2]))",
-                     os.path.dirname(os.path.abspath(aiqt_hooks.__file__)), str(_r14_bar)],
-                    capture_output=True, text=True, timeout=30)
+                p = subprocess.run([sys.executable, "-I", "-B", "-c", _r16_child_src, _r16_hooks, _r16_tools,
+                                    str(_r14_bar), reason] + calls, capture_output=True, text=True, timeout=30)
             except subprocess.TimeoutExpired:
-                return "probe timed out"
-            return p.stdout.strip() or "probe exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
-
-        def _r16_call(file_path, probe):
-            seen = _r16_probe() if probe else None
-            if probe and seen != repr(("bad", "not a regular file")):
-                return ("probe: " + seen, "")  # never read it in this process
-            prev = _r16_signal.signal(_r16_signal.SIGALRM, _r16_alarm)
+                return ("child timed out", False, ("child timed out", ""))
             try:
-                _r16_signal.setitimer(_r16_signal.ITIMER_REAL, 5)
-                try:
-                    res = aiqt_hooks.orch_resume_barrier(r.payload(
-                        "PreToolUse", "Write", dict(file_path=file_path, content="x")))
-                finally:
-                    _r16_signal.setitimer(_r16_signal.ITIMER_REAL, 0)
-            except _R16Timeout:
-                return ("timed out", "")
-            except Exception as exc:
-                return ("raised " + type(exc).__name__, "")
-            finally:
-                _r16_signal.signal(_r16_signal.SIGALRM, prev)
-            return (_verdict(res), _r14_msg(res))
+                verdict, ok, fix = json.loads(p.stdout)
+                return (verdict, ok, tuple(fix))
+            except (ValueError, TypeError):
+                return ("child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:]), False, ("", ""))
         _r16_target = rsd / "r16-target"
-        _r16_pad = json.dumps(dict(active=False, findings=[])) + " " * aiqt_hooks._ORCH_BARRIER_MAX_BYTES
+        _r16_bound = getattr(aiqt_hooks, "_ORCH_BARRIER_MAX_BYTES", 64 * 1024)  # a base without it still runs
+        _r16_pad = json.dumps(dict(active=False, findings=[])) + " " * _r16_bound
         _r16_cases = (
-            ("fifo", lambda: os.mkfifo(str(_r14_bar)), "(not a regular file)", False),
+            ("fifo", lambda: os.mkfifo(str(_r14_bar)), "(not a regular file)"),
             ("symlink-to-fifo", lambda: (os.mkfifo(str(_r16_target)), _r14_bar.symlink_to(_r16_target)),
-             "(not a regular file)", False),
-            ("symlink-to-dev-zero", lambda: _r14_bar.symlink_to("/dev/zero"), "(not a regular file)", True),
+             "(not a regular file)"),
+            ("symlink-to-dev-zero", lambda: _r14_bar.symlink_to("/dev/zero"), "(not a regular file)"),
             ("oversized", lambda: _r14_bar.write_text(_r16_pad, encoding="utf-8"),
-             "(larger than the {}-byte bound)".format(aiqt_hooks._ORCH_BARRIER_MAX_BYTES), False),
+             "(larger than the {}-byte bound)".format(_r16_bound)),
             ("symlink-to-directory", lambda: (_r16_target.mkdir(), _r14_bar.symlink_to(_r16_target)),
-             "(not a regular file)", False))
+             "(not a regular file)"))
         _r16_rows = []
-        for _r16_name, _r16_make, _r16_reason, _r16_cap in _r16_cases:
+        for _r16_name, _r16_make, _r16_reason in _r16_cases:
             if os.path.lexists(str(_r14_bar)):
                 os.unlink(str(_r14_bar))
             _r16_make()
             try:
-                _r16_out = _r16_call(str(r.root / "src.py"), _r16_cap)
-                _r16_fix = _r16_call(str(rsd / "r16-repair.json"), _r16_cap)
+                _r16_rows.append((_r16_name,) + _r16_child(_r16_reason))
             finally:
                 os.unlink(str(_r14_bar))
                 if _r16_target.is_dir() and not _r16_target.is_symlink():
                     _r16_target.rmdir()
                 elif os.path.lexists(str(_r16_target)):
                     os.unlink(str(_r16_target))
-            _r16_rows.append((_r16_name, _r16_out[0], str(_r14_bar) in _r16_out[1]
-                              and _r16_reason in _r16_out[1] and "remove the directory" not in _r16_out[1],
-                              _r16_fix))
         check("barrier/non-regular-or-oversized-reads-armed-promptly-repair-allowed", tuple(_r16_rows),
-              tuple((n, "warn", True, ("allow", "")) for n, _m, _s, _c in _r16_cases))
+              tuple((n, "warn", True, ("allow", "")) for n, _m, _s in _r16_cases))
+        # A symlink to a regular armed barrier reads as that barrier: the first mutation surfaces its
+        # findings, and the warned-flag write replaces the link with a regular file and leaves the target's
+        # bytes unchanged. This row passes on the round-15 base as well: it pins the kept symlink policy and
+        # does not discriminate any round-16 or round-17 change.
         _r16_armed = json.dumps(dict(active=True, findings=["r16 finding"], warned=False))
         _r16_target.write_text(_r16_armed, encoding="utf-8")
         _r14_bar.symlink_to(_r16_target)
         try:
-            _r16_out = _r16_call(str(r.root / "src.py"), False)
-            _r16_link = (_r16_out[0], "r16 finding" in _r16_out[1], _r14_bar.is_symlink(),
+            _r16_out = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r16_link = (_verdict(_r16_out), "r16 finding" in _r14_msg(_r16_out), _r14_bar.is_symlink(),
                          _r14_bar.is_file() and json.loads(_r14_bar.read_text(encoding="utf-8")).get("warned"),
                          _r16_target.read_text(encoding="utf-8") == _r16_armed)
         finally:
@@ -2750,6 +2737,98 @@ def _main_isolated(report_path=None):
             os.unlink(str(_r16_target))
         check("barrier/symlink-to-regular-reads-as-target-warned-write-replaces-link", _r16_link,
               ("warn", True, False, True, True))
+        # ROUND 17, A CLOSE ERROR STAYS A READER RESULT: with os.close wrapped so that closing the
+        # barrier's own descriptor really closes it and then raises EIO, an outside write and a repair write
+        # run through the dispatcher (aiqt_hooks.main) exit 0: the outside write warns, naming the file and
+        # OSError, and the repair write is allowed with no output (red when the close error escapes the
+        # reader, where the dispatcher fails the PreToolUse call closed with exit 2).
+        import contextlib as _r17_ctx
+        import errno as _r17_errno
+        import io as _r17_io
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        _r17_st = os.stat(str(_r14_bar))
+        _r17_real_close = os.close
+
+        def _r17_close(fd):
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                st = None
+            _r17_real_close(fd)
+            if st is not None and (st.st_dev, st.st_ino) == (_r17_st.st_dev, _r17_st.st_ino):
+                raise OSError(_r17_errno.EIO, "injected close EIO")
+
+        def _r17_main(file_path):
+            out, err, stdin = _r17_io.StringIO(), _r17_io.StringIO(), sys.stdin
+            sys.stdin = _r17_io.StringIO(json.dumps(r.payload(
+                "PreToolUse", "Write", dict(file_path=file_path, content="x"))))
+            os.close = _r17_close
+            try:
+                with _r17_ctx.redirect_stdout(out), _r17_ctx.redirect_stderr(err):
+                    code = aiqt_hooks.main(["orch_resume_barrier"])
+            finally:
+                os.close = _r17_real_close
+                sys.stdin = stdin
+            note = json.loads(out.getvalue()).get("systemMessage", "") if out.getvalue().strip() else ""
+            return (code, bool(note), str(_r14_bar) in note and "(OSError)" in note, err.getvalue())
+        check("barrier/close-error-is-a-reader-result-never-exit-2",
+              (_r17_main(str(r.root / "src.py")), _r17_main(str(rsd / "r17-repair.json")),
+               _r14_bar.read_text(encoding="utf-8") == _r14_seed),
+              ((0, True, True, ""), (0, False, False, ""), True))
+        # ROUND 17, A DIRECTORY IS NAMED ONLY WHERE THE LSTAT MATCHES WHAT WAS OPENED: given the fstat of
+        # what the reader opened, _orch_barrier_nonregular names a directory only where the lstat of the
+        # path has the same st_dev and st_ino (red when it trusts the lstat alone, or takes no fstat).
+        _r17_da, _r17_db = rsd / "r17-dir-a", rsd / "r17-dir-b"
+        _r17_da.mkdir()
+        _r17_db.mkdir()
+        try:
+            _r17_dir = tuple(aiqt_hooks._orch_barrier_nonregular(str(_r17_da), *st) for st in (
+                (os.stat(str(_r17_da)),), (os.stat(str(_r17_db)),), ()))
+        except (TypeError, AttributeError) as exc:
+            _r17_dir = "raised " + type(exc).__name__
+        finally:
+            _r17_da.rmdir()
+            _r17_db.rmdir()
+        check("barrier/directory-named-only-where-lstat-matches-opened", _r17_dir,
+              ("not a regular file: a directory", "not a regular file", "not a regular file: a directory"))
+        # ROUND 17, A WRITTEN BARRIER ALWAYS FITS THE READER'S BOUND: 400 findings of about 230 bytes (the
+        # 92458-byte shape a forced-exit log produced) are stored as their first findings plus one line
+        # counting the rest, within the bound; the file reads ok, well-formed and armed; the first mutation
+        # surfaces the first finding and records warned, so the next mutation is silent; a single
+        # 100000-character finding is stored cut to 4000 characters; and an object whose other keys alone
+        # exceed the bound raises ValueError and leaves the previous barrier byte-identical (red when the
+        # writer stores the full list, which reads back as larger than the bound).
+        _r17_many = ["forced exit {:04d}: {}".format(i, "x" * 210) for i in range(400)]
+        _r17_rows = []
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=_r17_many, ts="r17",
+                                                           warned=False))
+        _r17_raw = _r14_bar.read_bytes()  # a regular file this check just wrote
+        _r17_bar = json.loads(_r17_raw.decode("utf-8"))
+        _r17_kept = _r17_bar["findings"][:-1]
+        _r17_rows.append((len(_r17_raw) <= _r16_bound, aiqt_hooks._orch_barrier_well_formed(_r17_bar)
+                          and _r17_bar["active"], 0 < len(_r17_kept) < 400,
+                          _r17_kept == _r17_many[:len(_r17_kept)],
+                          _r17_bar["findings"][-1].startswith(
+                              "{} more finding(s) not stored".format(400 - len(_r17_kept)))))
+        _r17_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        _r17_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        _r17_rows.append((_verdict(_r17_first), "forced exit 0000" in _r14_msg(_r17_first),
+                          json.loads(_r14_bar.read_text(encoding="utf-8")).get("warned"), _verdict(_r17_again)))
+        _r17_big = "y" * 100000
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=[_r17_big], warned=False))
+        _r17_rows.append(json.loads(_r14_bar.read_text(encoding="utf-8")).get("findings")
+                         == [_r17_big[:4000] + " (cut)"])
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        try:
+            aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=[], ts="z" * 70000))
+            _r17_raised = "returned"
+        except ValueError as exc:
+            _r17_raised = type(exc).__name__
+        _r17_rows.append((_r17_raised,) + _r14_left())
+        _r14_bar.unlink()
+        check("barrier/written-barrier-fits-bound-first-findings-plus-count", tuple(_r17_rows),
+              ((True, True, True, True, True), ("warn", True, True, "allow"), True,
+               ("ValueError", True, [])))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",

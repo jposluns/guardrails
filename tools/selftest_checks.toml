@@ -399,6 +399,9 @@ expected-check-ids = [
   "barrier/state-dir-not-a-directory-reads-absent",
   "barrier/non-regular-or-oversized-reads-armed-promptly-repair-allowed",
   "barrier/symlink-to-regular-reads-as-target-warned-write-replaces-link",
+  "barrier/close-error-is-a-reader-result-never-exit-2",
+  "barrier/directory-named-only-where-lstat-matches-opened",
+  "barrier/written-barrier-fits-bound-first-findings-plus-count",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",
