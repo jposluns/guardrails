@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "37ce831984cdd036e4bde99224e4538b906d883be8ccc4a9a82e8433976d3f98"
+tree-sha256 = "2c554f1f3b78dbc53c7f273a34aa9739f6d55ad7d4fa5afafbd798a9370bd951"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2561,8 +2561,8 @@ sha256 = "3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 206319
-sha256 = "2a98f475bb4a2a87ddd054c959dcb785fec8fdf4bddf55479c9747412f0366c1"
+bytes = 208868
+sha256 = "ff8e11f81dcee9cce57b3344b0c52a026f8691a802558f497374317ff1d14b59"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2896,8 +2896,8 @@ sha256 = "24ceeb7ec41b00c9796160a7733fae3dd197770e69f6ae834fc70bd5c979bd15"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 334320
-sha256 = "59d24a7d6a66592d620a8198c1f18c4b02877ed7566817d9c5a6f07e5749dc87"
+bytes = 341777
+sha256 = "5ac9c49d37127b55d4b1659b370ab31503e6e2ce5f33fcd0d761c7112a0243d5"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
