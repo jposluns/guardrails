@@ -1187,6 +1187,26 @@ def _self_test():
                            "passes silently", "also one moved away and put back after another call saved"):
                 self.assertTrue(phrase in doc, phrase)
 
+        def test_32_a_call_that_saved_can_save_again_through_the_same_lock(self):
+            # Round 26 fix for QA round 25 (claude MINOR 3): no call of this hook saves twice through one lock
+            # (each _decide path saves at most once), so no call-level test reaches StateLock.saved; this drives
+            # save_state twice through one lock directly. Without saved() recording the call's own save, the
+            # second save would read as another call's and write nothing.
+            if fcntl is None:
+                self.skipTest("SKIPPED, no flock on this platform")
+            self.compact()
+            lock = lock_state(self.spath())
+            self.assertIsNotNone(lock)
+            try:
+                self.assertTrue(save_state(self.spath(), at(0), 1, lock))
+                self.assertTrue(save_state(self.spath(), at(0), 2, lock))
+                self.assertEqual(load_state(self.spath()), ("ok", at(0), 2))
+                self.assertTrue(save_state(self.spath(), at(100), 0))  # another save, made without the lock
+                self.assertFalse(save_state(self.spath(), at(0), 3, lock))
+                self.assertEqual(load_state(self.spath()), ("ok", at(100), 0))
+            finally:
+                unlock_state(lock)
+
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
             base.update(env)

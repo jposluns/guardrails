@@ -143,7 +143,7 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `59a17c25b70b363433f6e4ea2c573c555aa1b8a0593e10614a93bbdaefe8a1b7` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
@@ -418,10 +418,13 @@ section of its opening docstring. Read that section before relying on a hook; in
   a lock file beside the state file, and a call saves only while that lock file and the state file are the
   ones it locked and loaded. A call that cannot take the lock within two seconds saves nothing, and a turn
   end it would refuse is allowed with a warning that names the lock. A call whose lock file is deleted or
-  replaced while it holds it (also one moved away and put back), or whose state file another call saved
-  meanwhile, saves nothing, and a turn end it would refuse is allowed with a warning that the refusal count
-  cannot be saved (a deletion, replacement or save that lands in the few system calls between its last check
-  and its write can still let one stale save through). While the lock cannot be taken at all (a lock path
+  replaced while it holds it (also one moved away and put back after another call saved), or whose state
+  file another call saved meanwhile, saves nothing, and a turn end it would refuse is allowed with a warning
+  that the refusal count cannot be saved (a deletion, replacement or save that lands in the few system calls
+  between its last check and its write can still let one stale save through, and so can a save whose state
+  file matches the loaded one in device, inode, size, modification time and change time, all five fields it
+  compares, as when an inode number is reused within the filesystem's timestamp granularity). While the lock
+  cannot be taken at all (a lock path
   that is a symbolic link or not a regular file, a lock file it cannot open, a filesystem that refuses
   `flock`, a platform without it), it keeps no state: a compaction is reminded once and then forgotten, and
   with no compaction saved before then every turn end passes silently (a missed reminder and a missed
@@ -467,10 +470,13 @@ section of its opening docstring. Read that section before relying on a hook; in
   saves only while that lock file and the state file are the ones it locked and loaded. A run that cannot
   take the lock within two seconds saves nothing, and a turn end it would refuse is allowed with a warning
   that names the lock. A run whose lock file is deleted or replaced while it holds it (also one moved away
-  and put back), or whose state file another run saved meanwhile, saves nothing, and a turn end it would
-  refuse is allowed with a warning that the refusal count cannot be saved (a deletion, replacement or save
-  that lands in the few system calls between its last check and its write can still let one stale save
-  through). While the lock cannot be taken at all (a lock path that is a symbolic link or not a regular
+  and put back after another run saved), or whose state file another run saved meanwhile, saves nothing, and
+  a turn end it would refuse is allowed with a warning that the refusal count cannot be saved (a deletion,
+  replacement or save that lands in the few system calls between its last check and its write can still
+  let one stale save through, and so can a save whose state file matches the loaded one in device, inode,
+  size, modification time and change time, all five fields it compares, as when an inode number is reused
+  within the filesystem's timestamp granularity). While the lock cannot be taken at all (a lock path that is
+  a symbolic link or not a regular
   file, a lock file it cannot open, a filesystem that refuses `flock`, a platform without it), it keeps no
   state: it only notes after each tool call, and with no state saved before then every turn end passes
   silently (a missed refusal); the outstanding reruns of a state saved before then still bring a warning. A
