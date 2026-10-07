@@ -154,8 +154,9 @@ judged as such references (within the hook's disclosed lexical residuals: a vari
 an interpreter's own language, an R7 payload string judged whole): the single writer allowance is the
 whole allowance surface; a malformed payload, a mis-wired hook event and a
 missing target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable
-adoption plan fails closed for every write under its root. Every vector fails without the hook, so the leg proves
-the shipped file, not a model of it.
+adoption plan fails closed for every write under its root. The suite fails without the hook (a missing,
+inert or allow-everything hook makes the deny vectors red), so the leg proves the shipped file, not a model
+of it; an allow vector alone (read-tool-allowed) also passes against an inert hook.
 """
 import sys
 
@@ -2191,9 +2192,12 @@ def _claude_hook_self_test():
     views/evidence protection). The shipped hook opf/enforcement/claude/pretooluse_deny.py is launched as
     a CHILD exactly as the registration launches it (this interpreter, -I, the JSON payload on stdin,
     the doc-confirmed PreToolUse contract: deny = exit 0 plus a hookSpecificOutput permissionDecision
-    "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so every
-    vector FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision and
-    reds the suite. The matrix pins the round-2 security fixes BEHAVIORALLY (each vector flips when its
+    "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so the
+    SUITE FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision on
+    the deny vectors and reds the suite (an allow vector such as read-tool-allowed passes against an
+    inert hook too; it pins over-refusal, not the hook's presence). Its two git --list-cmds=main
+    probes run under the fixture git environment (the scrubbed allowlist with HOME at the suite's
+    temporary directory), so no git launch reads the operator's global, XDG or system config. The matrix pins the round-2 security fixes BEHAVIORALLY (each vector flips when its
     fix alone is reverted): the allowance surface is a single plain sanctioned-writer invocation, so
     every other referencing command denies, environment-assignment-prefixed git included; the writer is
     realpath-bound (a same-named opf.py elsewhere denies) and verb-bound (record/render only); every
@@ -2342,6 +2346,15 @@ def _claude_hook_self_test():
     RUN_ID = "adopt-20260101T000000Z-0123456789abcdef"
     try:
         with tempfile.TemporaryDirectory(prefix="opf-claude-hook-selftest-") as basestr:
+            # The fixture git environment for every git launch in this suite: the module
+            # _scrubbed_env allowlist (every ambient GIT_ variable dropped, global and system config
+            # at os.devnull, no XDG_CONFIG_HOME) with HOME at this temporary directory, so no probe
+            # reads the operator's git configuration.
+            def git_fixture_env():
+                env = _scrubbed_env()
+                env["HOME"] = basestr
+                return env
+
             root = os.path.join(basestr, "product")
             machine = os.path.join(root, _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
             evidence = os.path.join(root, _opf_store.WORKING_DIRNAME, "imported", "adoption", RUN_ID)
@@ -3866,7 +3879,8 @@ def _claude_hook_self_test():
                     failures.append("claude-hook bash-r21-no-write-" + name + "-carries-no-reason")
             try:
                 listed = subprocess.run(["git", "--list-cmds=main"], stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, timeout=60).stdout.decode(
+                                        stderr=subprocess.DEVNULL, env=git_fixture_env(),
+                                        timeout=60).stdout.decode(
                                             "utf-8", "replace").split()
             except (OSError, subprocess.TimeoutExpired):
                 listed = []
@@ -4002,7 +4016,7 @@ def _claude_hook_self_test():
             git_bin = shutil.which("git")
             if git_bin:
                 listed = subprocess.run([git_bin, "--list-cmds=main"], stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, env=_scrubbed_env(),
+                                        stderr=subprocess.DEVNULL, env=git_fixture_env(),
                                         timeout=_GIT_TIMEOUT_S)
                 helpers.update(n for n in listed.stdout.decode("utf-8", "replace").split()
                                if "--" in n)
@@ -4043,8 +4057,7 @@ def _claude_hook_self_test():
                 fh.write("committed\n")
             with open(os.path.join(wsub, "s.txt"), "w", encoding="utf-8") as fh:
                 fh.write("s\n")
-            wenv = _scrubbed_env()
-            wenv["HOME"] = basestr
+            wenv = git_fixture_env()
 
             expect("bash-r19-witness-git-present", bool(git_bin), True)
 
