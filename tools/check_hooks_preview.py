@@ -43,9 +43,11 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       cannot-evaluate (exit 2). An empty listing is valid only when no hook file is present.
   (d) LAUNCH. When preview-launch.py is present, one deny payload per PreToolUse hook file present
       (a payload the hook's own documented contract denies) is sent on stdin through the launcher,
-      which must exit 0 and print the hook's PreToolUse deny object; a launcher that dispatched to
-      another file, or to nothing, prints no deny object and is a finding. The probes run in the leg
-      (a) environment plus the store root the two store-rooted hooks need.
+      which must exit 0 and print the hook's PreToolUse deny object: stdout parsed as one JSON
+      object whose hookSpecificOutput carries hookEventName PreToolUse and permissionDecision
+      deny. A launcher that dispatched to another file, or to nothing, or printed a bare
+      substring or another event's object, is a finding. The probes run in the leg (a)
+      environment plus the store root the two store-rooted hooks need.
   (c) LINK. Each table row's third cell must be exactly the relative Markdown link `[<file>](<file>)`,
       where <file> is the row's own file name, so the link resolves to the file beside README.md. A
       different target or link text, an absolute URL, a path with a `/`, a bare name that is not a link,
@@ -109,8 +111,11 @@ HOOK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.py$")
 # The launcher every README registration runs; when present, leg (a) routes each other hook's
 # self-test through it and leg (d) proves its dispatch with one deny payload per PreToolUse hook.
 LAUNCHER_NAME = "preview-launch.py"
-# The deny object every PreToolUse preview hook prints (json.dumps with default separators).
-DENY_NEEDLE = '"permissionDecision": "deny"'
+# The deny object every PreToolUse preview hook prints: one JSON object whose hookSpecificOutput
+# names the PreToolUse event and the deny decision. Leg (d) parses stdout as JSON and checks
+# those fields (_deny_object), so a bare substring, another event's object, or non-JSON text
+# never passes.
+DENY_EVENT = "PreToolUse"
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # sha256sum text-mode line: 64 lowercase hex, exactly two spaces, a name without whitespace. The name is
 # parsed even when it carries a `/` so leg (b) can report a path entry as a finding (not a parse failure).
@@ -419,11 +424,28 @@ def _deny_probes(work):
     )
 
 
+def _deny_object(stdout_text):
+    """True only when stdout is one JSON object whose hookSpecificOutput carries
+    hookEventName == DENY_EVENT and permissionDecision == "deny" (the documented PreToolUse
+    deny shape); non-JSON text, a bare substring of the shape, trailing text, or another event
+    name is not a deny object."""
+    try:
+        payload = json.loads(stdout_text)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    specific = payload.get("hookSpecificOutput")
+    return (isinstance(specific, dict) and specific.get("hookEventName") == DENY_EVENT
+            and specific.get("permissionDecision") == "deny")
+
+
 def leg_launch(pdir, hooks, findings, unverifiable):
     """(d) The launcher's dispatch really runs each PreToolUse hook at this interpreter: one deny
     payload per hook file present, sent on stdin through the launcher, must exit 0 and print the
-    hook's deny object. Inert when the launcher is absent; a probed hook file that is absent is
-    already a leg (b) finding."""
+    hook's PreToolUse deny object (_deny_object: stdout parsed as JSON, the event name and the
+    decision both checked). Inert when the launcher is absent; a probed hook file that is absent
+    is already a leg (b) finding."""
     if LAUNCHER_NAME not in hooks:
         return
     launcher = str((pdir / LAUNCHER_NAME).resolve())
@@ -453,9 +475,10 @@ def leg_launch(pdir, hooks, findings, unverifiable):
                 unverifiable.append("{}/{}: the deny probe could not be launched: {}".format(
                     PREVIEW_DIR, name, exc))
                 continue
-            if res.returncode != 0 or DENY_NEEDLE not in res.stdout.decode("utf-8", "replace"):
+            if res.returncode != 0 or not _deny_object(res.stdout.decode("utf-8", "replace")):
                 detail = _tail(res.stdout) + _tail(res.stderr)
-                findings.append("{}/{}: the deny probe through {} exited {} without the deny object "
+                findings.append("{}/{}: the deny probe through {} exited {} without a parsed "
+                                "PreToolUse deny object "
                                 "(d):\n      {}".format(PREVIEW_DIR, name, LAUNCHER_NAME,
                                                         res.returncode,
                                                         "\n      ".join(detail) or "(no output)"))
@@ -545,6 +568,18 @@ _STUB_LAUNCH = (b"import sys\n"
                 b"sys.stdin.read()\n"
                 b"sys.stdout.write('{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", "
                 b"\"permissionDecision\": \"deny\", \"permissionDecisionReason\": \"stub\"}}\\n')\n")
+# Exits 0 but prints only the deny substring, not a JSON deny object: leg (d) must refuse it.
+_STUB_LAUNCH_SUBSTRING = (b"import sys\n"
+                          b"if sys.argv[-1] == '--self-test':\n    sys.exit(0)\n"
+                          b"sys.stdin.read()\n"
+                          b"sys.stdout.write('\"permissionDecision\": \"deny\"\\n')\n")
+# Exits 0 and prints a well-formed object that names the wrong event: leg (d) must refuse it.
+_STUB_LAUNCH_WRONG_EVENT = (b"import sys\n"
+                            b"if sys.argv[-1] == '--self-test':\n    sys.exit(0)\n"
+                            b"sys.stdin.read()\n"
+                            b"sys.stdout.write('{\"hookSpecificOutput\": {\"hookEventName\": "
+                            b"\"PostToolUse\", \"permissionDecision\": \"deny\", "
+                            b"\"permissionDecisionReason\": \"stub\"}}\\n')\n")
 # Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
 # was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
@@ -805,7 +840,23 @@ def self_test_main():
             base / "launch-ok", {"preview-launch.py": _STUB_LAUNCH, "unbounded-wait.py": _STUB_OK}))
         case("launcher dispatch not proven", 1, _build(
             base / "launch-silent", {"preview-launch.py": _STUB_OK, "unbounded-wait.py": _STUB_OK}),
-            needle="without the deny object")
+            needle="without a parsed PreToolUse deny object")
+        # (d) exit 0 with text that is not the PreToolUse deny object: a bare substring of the
+        # shape, and a well-formed object naming another event, are each a finding.
+        case("launcher deny probe with a bare substring", 1, _build(
+            base / "launch-substring", {"preview-launch.py": _STUB_LAUNCH_SUBSTRING,
+                                         "unbounded-wait.py": _STUB_OK}),
+            needle="without a parsed PreToolUse deny object")
+        case("launcher deny probe with the wrong event", 1, _build(
+            base / "launch-wrong-event", {"preview-launch.py": _STUB_LAUNCH_WRONG_EVENT,
+                                           "unbounded-wait.py": _STUB_OK}),
+            needle="without a parsed PreToolUse deny object")
+        # 23. (a) a non-launcher hook's self-test runs THROUGH the launcher (the registered
+        #     path): a hook whose direct --self-test fails passes only via the launcher's routed
+        #     answer, so reverting the routing to direct runs turns this case red.
+        case("self-test routed through the launcher", 0, _build(
+            base / "route-selftest", {"preview-launch.py": _STUB_LAUNCH,
+                                       "clock-inject.py": _STUB_FAIL}))
 
         r = _build(base / "readme-break", ok)
         text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
@@ -829,8 +880,9 @@ def self_test_main():
           "alien and extra entries, path entries in SHA256SUMS, malformed inputs, a table row without a "
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "
           "file, a mismatched text or target, an absolute URL, a path with a slash, a bare name, an "
-          "angle-bracketed link, and a missing link; d: a launcher that answers the deny probe and one "
-          "that does not) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
+          "angle-bracketed link, and a missing link; d: a launcher that answers the deny probe, one that "
+          "does not, a bare deny substring, a wrong-event object, and a hook self-test that "
+          "passes only through the launcher) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 
 

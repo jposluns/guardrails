@@ -109,10 +109,11 @@ Legs, in order:
                  guarded-surfaces lists it, when it is present, or when its registration file
                  (REGISTRATIONS: the plugin hooks.json, and the `exec python3` lines of the preview
                  README) is present and names a registration; an undeclared entry adds nothing. A
-                 declared launcher must be present and listed, stay inside the OLD-GRAMMAR ALLOWLIST
-                 (old_grammar_findings: only the node types, call and unpacking shapes, decorator and
-                 __future__ forms that Python 3.4, the first to accept -I, compiles; anything else is
-                 rejected by name), and carry the FLOOR_FAIL_OPEN_MODES literal of the hook it runs,
+                 declared launcher must be present and listed, stay inside the LAUNCHER-SUBSET
+                 ALLOWLIST (launcher_subset_findings: a CLOSED, MINIMAL list of the node types and
+                 forms the launchers need, each compiled identically by Python 3.4, the first to
+                 accept -I; anything else, newer or merely unlisted, is rejected by name), and
+                 carry the FLOOR_FAIL_OPEN_MODES literal of the hook it runs,
                  which must be present, or, for the multi-hook preview launcher, the literal LAUNCHERS
                  pins (fail-open exactly the modes whose every registration is a non-PreToolUse
                  event), with every other mode of its PREVIEW_HOOKS literal probed in a child below
@@ -149,10 +150,13 @@ proxy for a real older interpreter, faithful only for a guard that reads sys.ver
 the guard leg pins the one canonical form. Each file is compiled whole before its guard runs, so an
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
 dynamic leg sees a compile failure only on the interpreter running it. For the hooks the launcher
-leg narrows this: each registration runs a launcher held by old_grammar_findings to an explicit
-ALLOWLIST of the Python 3.4 grammar (only the node types, call and unpacking shapes, decorator and
-__future__ forms its Python.asdl and Grammar/Grammar compile; any other construct, today's or a
-later grammar's, is rejected by name), which refuses below the floor before the hook file is
+leg narrows this: each registration runs a launcher held by launcher_subset_findings to the
+LAUNCHER SUBSET, a CLOSED, MINIMAL allowlist of the Python 3.4 grammar (its source: the
+Parser/Python.asdl and Grammar/Grammar files of CPython 3.4): only the node types and forms the
+launchers need, each a form the 3.4 grammar has held unchanged since Python 3.0, with every
+3.4-incompatible form of a listed node enumerated and refused (_subset_node and _subset_token);
+any other construct, today's or a later grammar's, is rejected by name, so the check never
+chases new grammar. The launcher refuses below the floor before the hook file is
 compiled. Every other guarded entrypoint keeps the residual (a SyntaxError exits 1, which a CI step
 still reads as a failure). The launcher cannot close one case: an interpreter that predates -I
 (Python 2, or Python 3 before 3.4) rejects that option before it reads any file and exits 2 on
@@ -161,8 +165,8 @@ fail-closed outcome, not a silent pass), and on TeammateIdle that exit 2 keeps t
 (orch_teammate_idle is a registered handler). The allowlist is a static check of the launcher's
 syntax against the Python 3.4 grammar, never a run on a real Python 3.4 (ast.parse feature_version
 is best-effort below its documented lowest supported version and is kept only as a belt, never the
-guarantee); what remains is an allowlist mistake, or a construct 3.4 parses with a different
-meaning.
+guarantee); what remains is a listed node type carrying a 3.4-incompatible form the per-form
+checks missed, or a construct 3.4 parses with a different meaning.
 The launcher leg reads the preview README's registrations only from its `exec python3` lines: a
 registration worded another way, in a tree whose preview launcher is neither present nor listed, is
 not seen. It checks that each registration names the launcher, not that its mode names the right
@@ -222,6 +226,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import importlib.util
 import io
+import itertools
 import json
 import os
 import re
@@ -413,8 +418,9 @@ REGISTRATIONS = (("plugin/aiqt-guardrails-hooks/hooks/hooks.json",
                   "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py"),
                  (".preview/README.md", ".preview/preview-launch.py"))
 OLD_GRAMMAR = (3, 4)
-# What that grammar accepts is enforced by the OLD-GRAMMAR ALLOWLIST block (old_grammar_findings,
-# below), never by ast.parse(feature_version=...) alone, which is only best-effort.
+# What a launcher may use of that grammar is enforced by the LAUNCHER-SUBSET ALLOWLIST block
+# (launcher_subset_findings, below), never by ast.parse(feature_version=...) alone, which is
+# only best-effort.
 README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
 SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.py\b")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
@@ -1206,179 +1212,131 @@ def dynamic_findings(root, surfaces, floor, nonblocking=()):
     return findings
 
 
-# BEGIN OLD-GRAMMAR ALLOWLIST. tools/check_python_floor.py and .preview/preview-launch.py carry this
-# block byte-identical (the floor gate's self-test launcher/allowlist-parity holds the two equal; the
-# preview launcher is self-contained, so it cannot import the gate's copy). The block itself stays
-# inside the allowlist it enforces, and assumes a module-level `import ast` in its host file.
-OLD_GRAMMAR_VERSION = (3, 4)
-# Node types the Python 3.4 compiler accepts, in today's AST spelling (Num, Str, Bytes, NameConstant
-# and Ellipsis are Constant now; Index and ExtSlice fold into the subscript value). Source: the
-# Parser/Python.asdl and Grammar/Grammar files of CPython 3.4. Every other node name (MatMult 3.5,
-# the Async nodes and Await 3.5, JoinedStr and FormattedValue 3.6, AnnAssign 3.6, NamedExpr 3.8,
-# the Match nodes 3.10, TryStar 3.11, TypeAlias and the type-parameter nodes 3.12, TemplateStr and
-# Interpolation 3.14, and whatever comes later) is rejected by this allowlist without being named.
-OLD_GRAMMAR_NODES = frozenset((
-    "Module", "FunctionDef", "ClassDef", "Return", "Delete", "Assign", "AugAssign", "For", "While",
-    "If", "With", "Raise", "Try", "Assert", "Import", "ImportFrom", "Global", "Nonlocal", "Expr",
-    "Pass", "Break", "Continue", "BoolOp", "BinOp", "UnaryOp", "Lambda", "IfExp", "Dict", "Set",
-    "ListComp", "SetComp", "DictComp", "GeneratorExp", "Yield", "YieldFrom", "Compare", "Call",
-    "Constant", "Attribute", "Subscript", "Starred", "Name", "List", "Tuple", "Slice", "Load",
-    "Store", "Del", "And", "Or", "Add", "Sub", "Mult", "Div", "Mod", "Pow", "LShift", "RShift",
-    "BitOr", "BitXor", "BitAnd", "FloorDiv", "Invert", "Not", "UAdd", "USub", "Eq", "NotEq", "Lt",
-    "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn", "comprehension", "ExceptHandler", "arguments",
-    "arg", "keyword", "alias", "withitem"))
-# The __future__ names Python 3.4 ships (its Lib/__future__.py); generator_stop is 3.5 and
-# annotations is 3.7, so importing either is a SyntaxError there.
-OLD_GRAMMAR_FUTURES = frozenset((
-    "nested_scopes", "generators", "division", "absolute_import", "with_statement", "print_function",
-    "unicode_literals", "barry_as_FLUFL"))
+# BEGIN LAUNCHER-SUBSET ALLOWLIST. tools/check_python_floor.py and .preview/preview-launch.py carry
+# this block byte-identical (the floor gate's self-test launcher/allowlist-parity holds the two
+# equal; the preview launcher is self-contained, so it cannot import the gate's copy). The block
+# itself stays inside the subset it enforces (list(map(...)) and list(filter(...)) stand in for
+# loops), and assumes module-level `import ast`, `import io`, `import itertools`, `import tokenize`
+# and `import warnings` in its host file.
+SUBSET_VERSION = (3, 4)
+# The CLOSED, MINIMAL subset of node types a launcher may use, in today's AST spelling. Source: the
+# Parser/Python.asdl and Grammar/Grammar files of CPython 3.4 (3.4 is the launcher floor: the first
+# Python that accepts -I). Every name listed here is a statement, expression, operator or context
+# form the Python 3.4 grammar already holds in the same source spelling with the same meaning (each
+# has been in the grammar unchanged since Python 3.0), and _subset_node below refuses by form every
+# spelling of a listed node that a modern parser accepts and Python 3.4 does not (enumerated there).
+# Every node name outside this tuple is refused by name, whether it is newer than 3.4 (JoinedStr,
+# NamedExpr, AnnAssign, Match, TryStar, the Async nodes, ...) or merely not needed by a launcher
+# (For, While, With, Lambda, ClassDef, the comprehensions, Starred, Dict, Set, IfExp, Delete,
+# AugAssign, ImportFrom, Yield, Global, Nonlocal, Assert, Break, Continue, ...).
+SUBSET_NODES = (
+    "Add", "And", "Assign", "Attribute", "BinOp", "BitOr", "BoolOp", "Call", "Compare", "Constant",
+    "Eq", "ExceptHandler", "Expr", "FunctionDef", "Gt", "GtE", "If", "Import", "In", "Is", "IsNot",
+    "List", "Load", "Lt", "LtE", "Mod", "Module", "Name", "Not", "NotEq", "NotIn", "Or", "Pass",
+    "Raise", "Return", "Slice", "Store", "Subscript", "Try", "Tuple", "UnaryOp", "alias", "arg",
+    "arguments", "keyword")
+# The only modules a launcher may import: one per statement, unaliased, each in the Python 3.4
+# standard library.
+SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokenize", "warnings")
 
 
-def _old_grammar_calls(found, where, rel, node, args, keywords):
-    # A Python 3.4 call (and class statement) takes at most one iterable * (the last positional
-    # argument) and at most one mapping ** (the last keyword); PEP 448 (3.5) lifted that.
-    stars = [index for index, value in enumerate(args) if isinstance(value, ast.Starred)]
-    if len(stars) > 1 or (stars and stars[0] != len(args) - 1):
-        found.append("%s:%d: a %s with a * argument before another argument is newer than "
-                     "Python %d.%d" % ((rel, node.lineno, where) + OLD_GRAMMAR_VERSION))
-    doubles = [index for index, value in enumerate(keywords) if value.arg is None]
-    if len(doubles) > 1 or (doubles and doubles[0] != len(keywords) - 1):
-        found.append("%s:%d: a %s with ** before another keyword is newer than Python %d.%d"
-                     % ((rel, node.lineno, where) + OLD_GRAMMAR_VERSION))
+def _subset_node(found, rel, node):
+    """One finding per construct of node outside the launcher subset. The residual of the closed
+    list, a LISTED node type carrying a form Python 3.4 does not compile, is enumerated and refused
+    here: a Constant from an f- or t-string or with a numeric underscore (_subset_token; the value
+    types here are 3.0 forms), every PEP 448 call shape (Starred and dict unpacking are refused by
+    name above, a ** keyword by arg None here), every decorator, annotation, default and non-plain
+    parameter on FunctionDef/arguments/arg (so no 3.9 decorator grammar and no 3.8 parameter forms
+    are reachable), try else/finally (so no continue-through-finally grammar change is reachable),
+    a non-Load list or tuple context (no unpacking targets), a bare except, a bare or chained
+    raise, and any import outside SUBSET_IMPORTS. A 3.14 identifier is never a Python 3.4 keyword
+    (3.14's keyword list adds to 3.4's and removes nothing), so every Name is safe."""
+    name = type(node).__name__
+    line = getattr(node, "lineno", 0)
+    if name not in SUBSET_NODES:
+        found.append("%s:%d: a %s node is outside the launcher subset of the Python %d.%d grammar"
+                     % ((rel, line, name) + SUBSET_VERSION))
+        return
+    if name == "Constant" and not (node.value is None or type(node.value) in (bool, int, str)):
+        found.append("%s:%d: only a str, int, bool or None constant is in the launcher subset"
+                     % (rel, line))
+    if name == "FunctionDef" and (node.decorator_list or node.returns
+                                  or getattr(node, "type_params", None)):
+        found.append("%s:%d: a decorated, annotated or type-parameterized function is outside "
+                     "the launcher subset" % (rel, line))
+    if name == "arguments" and (getattr(node, "posonlyargs", None) or node.vararg
+                                or node.kwonlyargs or node.kw_defaults or node.kwarg
+                                or node.defaults):
+        found.append("%s:%d: only plain positional parameters (no *, **, defaults, keyword-only "
+                     "or positional-only parameters) are in the launcher subset" % (rel, line))
+    if name == "arg" and node.annotation is not None:
+        found.append("%s:%d: an annotated parameter is outside the launcher subset" % (rel, line))
+    if name == "keyword" and node.arg is None:
+        found.append("%s:%d: ** argument unpacking is outside the launcher subset" % (rel, line))
+    if name == "Assign" and (len(node.targets) != 1
+                             or type(node.targets[0]).__name__ not in ("Attribute", "Name",
+                                                                       "Subscript")):
+        found.append("%s:%d: only an assignment to one name, attribute or subscript is in the "
+                     "launcher subset" % (rel, line))
+    if name == "Try" and (node.finalbody or node.orelse or not node.handlers):
+        found.append("%s:%d: only plain try/except (no else, no finally) is in the launcher "
+                     "subset" % (rel, line))
+    if name == "ExceptHandler" and node.type is None:
+        found.append("%s:%d: a bare except clause is outside the launcher subset" % (rel, line))
+    if name == "Raise" and (node.exc is None or node.cause is not None):
+        found.append("%s:%d: only `raise <exception>` (no bare raise, no `from`) is in the "
+                     "launcher subset" % (rel, line))
+    if name == "Import" and (len(node.names) != 1 or node.names[0].asname is not None
+                             or node.names[0].name not in SUBSET_IMPORTS):
+        found.append("%s:%d: only `import <module>`, one unaliased module per statement, of %s "
+                     "is in the launcher subset" % (rel, line, ", ".join(SUBSET_IMPORTS)))
+    if name in ("List", "Tuple") and type(node.ctx).__name__ != "Load":
+        found.append("%s:%d: a list or tuple outside a load context (an unpacking target) is "
+                     "outside the launcher subset" % (rel, line))
 
 
-def _old_grammar_finally(found, rel, statements):
-    # `continue` lexically in a finally body is a SyntaxError before Python 3.8 unless a loop the
-    # body itself opens holds it, so a For or While is not entered; a nested def or class cannot
-    # hold a loose `continue` (the modern parse refused it already).
-    for node in statements:
-        if isinstance(node, ast.Continue):
-            found.append("%s:%d: continue inside finally is newer than Python %d.%d"
-                         % ((rel, node.lineno) + OLD_GRAMMAR_VERSION))
-        elif isinstance(node, (ast.If, ast.With, ast.Try)):
-            for field in ("body", "orelse", "finalbody"):
-                _old_grammar_finally(found, rel, getattr(node, field, None) or [])
-            for handler in getattr(node, "handlers", None) or []:
-                _old_grammar_finally(found, rel, handler.body)
+def _subset_token(found, rel, token):
+    """The newer spellings the AST cannot show on a listed node: an f- or t-string opener (a
+    placeholder-free one can parse to a plain Constant) and a numeric underscore (PEP 515, 3.6)
+    both read back as a Constant the walk accepts."""
+    kind = tokenize.tok_name[token.type]
+    if kind in ("FSTRING_START", "TSTRING_START") \
+            or (token.type == tokenize.NUMBER and "_" in token.string):
+        found.append("%s:%d: %r is newer than Python %d.%d"
+                     % ((rel, token.start[0], token.string) + SUBSET_VERSION))
 
 
-def _old_grammar_decorator(node):
-    # The Python 3.4 decorator grammar: a dotted name, optionally called once; PEP 614 (3.9)
-    # lifted that.
-    if isinstance(node, ast.Call):
-        node = node.func
-    while isinstance(node, ast.Attribute):
-        node = node.value
-    return isinstance(node, ast.Name)
-
-
-def old_grammar_findings(rel, text):
-    """Each construct in text outside the Python 3.4 grammar (the launcher floor: 3.4 is the first
-    Python that accepts -I), as "rel:line: message" strings; [] accepts. This is an ALLOWLIST, not
-    a list of known-newer constructs: the AST walk accepts only the node types, call and unpacking
-    shapes, decorator forms and __future__ names that Python 3.4 compiles and rejects every other
-    node by name, and a token scan rejects the few newer forms the AST cannot show (a numeric
-    underscore, an f- or t-string opener, `with` followed by `(`, and a trailing comma closing a
-    bracket group that holds a * or ** token). Two disclosed over-rejections, both failing closed:
-    every `with (` is refused (Python 3.4 reads `with (a, b):` as one tuple context manager, so no
-    parenthesised form is safe to pass), and every `,)` closing a group holding a * token is
-    refused (`f(a * b,)` is 3.4-legal but indistinguishable here from `f(*b,)`).
+def launcher_subset_findings(rel, text):
+    """Each construct in text outside the LAUNCHER SUBSET (SUBSET_NODES with the per-form checks of
+    _subset_node and the token scan of _subset_token), as "rel:line: message" strings; [] accepts.
+    This is a CLOSED ALLOWLIST, never a list of known-newer constructs: only the listed node types
+    and forms pass, so a construct this check has never heard of is refused by name.
     ast.parse(feature_version=...) is only best-effort below its documented lowest supported
     version, so it is kept as a belt, never as the guarantee. Raises SyntaxError,
     tokenize.TokenError or ValueError when text does not parse under THIS interpreter."""
-    import io
-    import tokenize
-    import warnings
     found = []
     tree = ast.parse(text)
     tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    saved_filters = warnings.filters[:]
+    warnings.simplefilter("ignore")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            ast.parse(text, feature_version=OLD_GRAMMAR_VERSION)
+        ast.parse(text, feature_version=SUBSET_VERSION)
     except SyntaxError as exc:
         found.append("%s:%s: does not compile under the Python %d.%d grammar: %s"
-                     % ((rel, exc.lineno) + OLD_GRAMMAR_VERSION + (exc.msg,)))
-    parents = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-    for node in ast.walk(tree):
-        line = getattr(node, "lineno", 0)
-        name = type(node).__name__
-        if name not in OLD_GRAMMAR_NODES:
-            found.append("%s:%d: %s is newer than Python %d.%d"
-                         % ((rel, line, name) + OLD_GRAMMAR_VERSION))
-            continue
-        if isinstance(node, ast.Call):
-            _old_grammar_calls(found, "call", rel, node, node.args, node.keywords)
-        elif isinstance(node, ast.ClassDef):
-            _old_grammar_calls(found, "class statement", rel, node, node.bases, node.keywords)
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            if getattr(node, "type_params", None):
-                found.append("%s:%d: a type parameter list is newer than Python %d.%d"
-                             % ((rel, line) + OLD_GRAMMAR_VERSION))
-            for decorator in node.decorator_list:
-                if not _old_grammar_decorator(decorator):
-                    found.append("%s:%d: a decorator beyond a dotted name or one call on it is "
-                                 "newer than Python %d.%d" % ((rel, line) + OLD_GRAMMAR_VERSION))
-        if isinstance(node, ast.arguments) and getattr(node, "posonlyargs", None):
-            found.append("%s:%d: a positional-only parameter is newer than Python %d.%d"
-                         % ((rel, getattr(parents.get(node), "lineno", 0)) + OLD_GRAMMAR_VERSION))
-        if isinstance(node, ast.Dict) and any(key is None for key in node.keys):
-            found.append("%s:%d: dict unpacking is newer than Python %d.%d"
-                         % ((rel, line) + OLD_GRAMMAR_VERSION))
-        if isinstance(node, ast.Starred) and not isinstance(node.ctx, ast.Store):
-            parent = parents.get(node)
-            in_call = isinstance(parent, ast.Call) and any(value is node for value in parent.args)
-            in_class = isinstance(parent, ast.ClassDef) \
-                and any(value is node for value in parent.bases)
-            if not (in_call or in_class):
-                found.append("%s:%d: a * expression outside an assignment target or call argument "
-                             "is newer than Python %d.%d" % ((rel, line) + OLD_GRAMMAR_VERSION))
-        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
-            for entry in node.names:
-                if entry.name not in OLD_GRAMMAR_FUTURES:
-                    found.append("%s:%d: from __future__ import %s is newer than Python %d.%d"
-                                 % ((rel, line, entry.name) + OLD_GRAMMAR_VERSION))
-        if isinstance(node, ast.Try):
-            _old_grammar_finally(found, rel, node.finalbody)
-    group_stars = []
-    previous = None
-    for token in tokens:
-        kind = tokenize.tok_name[token.type]
-        if kind in ("FSTRING_START", "TSTRING_START") \
-                or (token.type == tokenize.NUMBER and "_" in token.string):
-            found.append("%s:%d: %r is newer than Python %d.%d"
-                         % ((rel, token.start[0], token.string) + OLD_GRAMMAR_VERSION))
-        if kind in ("COMMENT", "NL", "NEWLINE", "INDENT", "DEDENT"):
-            continue
-        if token.type == tokenize.OP:
-            if token.string == "(" and previous is not None \
-                    and previous.type == tokenize.NAME and previous.string == "with":
-                found.append("%s:%d: `with (` is refused (Python %d.%d reads `with (a, b):` as one "
-                             "tuple context manager)" % ((rel, token.start[0]) + OLD_GRAMMAR_VERSION))
-            if token.string in ("(", "[", "{"):
-                group_stars.append(False)
-            elif token.string in ("*", "**") and group_stars:
-                group_stars[-1] = True
-            elif token.string in (")", "]", "}") and group_stars:
-                if group_stars.pop() and token.string == ")" and previous is not None \
-                        and previous.type == tokenize.OP and previous.string == ",":
-                    found.append("%s:%d: a trailing comma closing a group that holds * or ** is "
-                                 "newer than Python %d.%d (no trailing comma after *args or **kw)"
-                                 % ((rel, token.start[0]) + OLD_GRAMMAR_VERSION))
-        previous = token
+                     % ((rel, exc.lineno) + SUBSET_VERSION + (exc.msg,)))
+    warnings.filters = saved_filters
+    list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel), list(ast.walk(tree))))
+    list(map(_subset_token, itertools.repeat(found), itertools.repeat(rel), tokens))
     return found
-# END OLD-GRAMMAR ALLOWLIST
+# END LAUNCHER-SUBSET ALLOWLIST
 
 
 def old_syntax_findings(rel, text):
-    """Each construct in text outside the Python 3.4 grammar: a launcher must compile on every
-    Python 3 that accepts -I. The allowlist above judges it; a text this interpreter cannot parse
-    is cannot-evaluate."""
+    """Each construct in text outside the LAUNCHER SUBSET of the Python 3.4 grammar: a launcher
+    must compile on every Python 3 that accepts -I. The allowlist above judges it; a text this
+    interpreter cannot parse is cannot-evaluate."""
     try:
-        return old_grammar_findings(rel, text)
+        return launcher_subset_findings(rel, text)
     except (SyntaxError, tokenize.TokenError, ValueError) as exc:
         raise CannotEvaluate("{}: cannot tokenize or parse: {}".format(rel, exc))
 
@@ -1444,7 +1402,8 @@ def launcher_findings(root, surfaces, floor):
     declared when guarded-surfaces lists it, when it is present in the tree, or when its registration
     file (REGISTRATIONS) is present and names at least one hook registration; an entry with none of the
     three adds nothing, so a tree that registers no hook is not held to these launchers. A declared
-    launcher must be present and listed in guarded-surfaces, stay inside the OLD-GRAMMAR ALLOWLIST
+    launcher must be present and listed in guarded-surfaces, stay inside the LAUNCHER-SUBSET
+    ALLOWLIST
     (old_syntax_findings), and carry the FLOOR_FAIL_OPEN_MODES literal of the hook it runs (LAUNCHERS),
     which must be present, or the pinned literal when LAUNCHERS maps it to a modes tuple, with every
     other mode of its DISPATCH_NAME literal probed below the floor (dispatch_probe_findings); its
@@ -2245,22 +2204,23 @@ def _self_test_cases(base):
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
         "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
 
-    # The launchers: each real launcher stays inside the OLD-GRAMMAR ALLOWLIST, and run with a patched
+    # The launchers: each real launcher stays inside the LAUNCHER-SUBSET ALLOWLIST, and run with a
+    # patched
     # version below the floor and every PreToolUse mode it refuses with the blocking exit 2.
     check("launcher/real-launchers-old-grammar", [rel for rel in LAUNCHERS
                                                   if old_syntax_findings(rel, _read_text(ROOT / rel))], [])
     # The two block copies are byte-identical, and the floor they encode is the leg's own.
     def _allowlist_block(text, rel):
-        begin = text.find("# BEGIN OLD-GRAMMAR ALLOWLIST")
-        end = text.find("# END OLD-GRAMMAR ALLOWLIST")
+        begin = text.find("# BEGIN LAUNCHER-SUBSET ALLOWLIST")
+        end = text.find("# END LAUNCHER-SUBSET ALLOWLIST")
         if begin < 0 or end < 0:
-            raise CannotEvaluate("{}: no OLD-GRAMMAR ALLOWLIST block".format(rel))
+            raise CannotEvaluate("{}: no LAUNCHER-SUBSET ALLOWLIST block".format(rel))
         return text[begin:end]
 
     check("launcher/allowlist-parity", (
         _allowlist_block(_read_text(ROOT / ".preview/preview-launch.py"), ".preview/preview-launch.py")
         == _allowlist_block(_read_text(Path(__file__).resolve()), "check_python_floor.py"),
-        OLD_GRAMMAR == OLD_GRAMMAR_VERSION), (True, True))
+        OLD_GRAMMAR == SUBSET_VERSION), (True, True))
     old = OLD_GRAMMAR + (0,)
     preview_deny_modes = ("future_stamp_write", "record_remove_check", "unbounded_wait",
                           "ungated_record")
@@ -2282,21 +2242,108 @@ def _self_test_cases(base):
         mode = preview_deny_modes[0] if isinstance(LAUNCHERS[rel], tuple) else "absolute_paths"
         results.append(_child(sibling_runner, [str(spot), mode], (), base)[0])
     check("launcher/real-launchers-missing-sibling-blocks", results, [2, 2, 2])
-    # Each newer construct is a finding (most pass ast.parse(feature_version=OLD_GRAMMAR) itself and
-    # are caught only by the allowlist walk and token scan); the 3.4-legal forms are not, a plain
-    # decorator included.
+    # REQUIRED acquisition behavior (each real launcher, deterministic): the sibling hook is
+    # acquired ONCE (open without following a symbolic link, fstat, read, compile) and ONLY the
+    # acquired content runs, and every acquisition failure (missing, a symbolic link, a directory,
+    # an unreadable file, a syntax error) is routed through the mode rule: exit 2 with empty stdout
+    # for a blocking mode, warn and exit 0 for a fail-open mode, never an unhandled exception's
+    # exit 1. The removal race is deterministic: the child wraps os.open to unlink the sibling
+    # right after the launcher's own open of it, and the acquired content still runs.
+    race_runner = ("import os, runpy, sys\n"
+                   "path, sibling = sys.argv[1], sys.argv[2]\n"
+                   "sys.argv = [path] + sys.argv[3:]\n"
+                   "real_open = os.open\n"
+                   "def tracked(target, flags, dir_fd=None, **kwargs):\n"
+                   "    fd = real_open(target, flags, dir_fd=dir_fd, **kwargs)\n"
+                   "    if os.path.basename(str(target)) == os.path.basename(sibling) \\\n"
+                   "            and os.path.lexists(sibling):\n"
+                   "        os.unlink(sibling)\n"
+                   "    return fd\n"
+                   "os.open = tracked\n"
+                   "runpy.run_path(path, run_name='__main__')\n")
+    hook_ran = "import sys\nsys.stdout.write(\"HOOK_RAN\\n\")\n"
+
+    def _acquire_case(scenario, mode_kind):
+        got = []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            if mode_kind == "fail_open":
+                mode = "clock_inject" if multi else "orch_stop_guard"
+            else:
+                mode = "unbounded_wait" if multi else "absolute_paths"
+            sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+            spot = Path(tempfile.mkdtemp(prefix="acquire-", dir=base))
+            (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+            target = spot / sibling
+            if scenario in ("ok", "race"):
+                target.write_text(hook_ran, encoding="utf-8")
+            elif scenario == "symlink":
+                (spot / "real-target.py").write_text(hook_ran, encoding="utf-8")
+                os.symlink("real-target.py", target)
+            elif scenario == "directory":
+                target.mkdir()
+            elif scenario == "unreadable":
+                target.write_text(hook_ran, encoding="utf-8")
+                os.chmod(target, 0)
+            elif scenario == "syntax-error":
+                target.write_text("def broken(:\n", encoding="utf-8")
+            runner = race_runner if scenario == "race" else sibling_runner
+            extra = [str(target)] if scenario == "race" else []
+            rc, out, err = _child(runner, [str(spot / Path(rel).name), *extra, mode], (), spot)
+            if scenario in ("ok", "race"):
+                got.append((rc, "HOOK_RAN" in out))
+            elif mode_kind == "fail_open":
+                got.append((rc, "systemMessage" in out, "cannot acquire" in err))
+            else:
+                got.append((rc, out, "cannot acquire" in err))
+        return got
+
+    check("launcher/acquire-and-run",
+          _acquire_case("ok", "blocking") + _acquire_case("ok", "fail_open"), [(0, True)] * 6)
+    check("launcher/acquire-removal-race-runs", _acquire_case("race", "blocking"), [(0, True)] * 3)
+    for check_id, scenario in (("launcher/acquire-missing-mode-rule", "missing"),
+                               ("launcher/acquire-symlink-mode-rule", "symlink"),
+                               ("launcher/acquire-directory-mode-rule", "directory"),
+                               ("launcher/acquire-syntax-error-mode-rule", "syntax-error")):
+        check(check_id, _acquire_case(scenario, "blocking") + _acquire_case(scenario, "fail_open"),
+              [(2, "", True)] * 3 + [(0, True, True)] * 3)
+    if getattr(os, "geteuid", None) is None or os.geteuid() == 0:
+        check("launcher/acquire-unreadable-mode-rule", "skipped (as root the open succeeds)",
+              "skipped (as root the open succeeds)")
+    else:
+        check("launcher/acquire-unreadable-mode-rule",
+              _acquire_case("unreadable", "blocking") + _acquire_case("unreadable", "fail_open"),
+              [(2, "", True)] * 3 + [(0, True, True)] * 3)
+    # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
+    # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
+    # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
+    # comprehensions, classes): the subset is CLOSED, so the two disclosed round-2 escapes, a
+    # parenthesized decorator and a loop-else continue reached through a skipped loop node inside
+    # finally, are refused by name with every other decorator and loop, and the disclosed lambda
+    # trailing-comma forms with every other lambda. The subset forms themselves are not findings.
     check("launcher/newer-syntax-findings", [bool(old_syntax_findings("x.py", text)) for text in (
         "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n",
         "x = [*()]\n", "x = {**{}}\n", "f(*a, *b)\n", "f(*a, b)\n", "dict(**a, b=1)\n",
-        "from __future__ import generator_stop\n", "from __future__ import annotations\n",
-        "def f(*args,):\n    pass\n", "def f(**kw,):\n    pass\n",
-        "for i in x:\n    try:\n        pass\n    finally:\n        continue\n",
-        "def f():\n    return 1, *a\n", "for x in *a, *a:\n    pass\n",
-        "with (a, b):\n    pass\n", "x[*a]\n", "c = a @ b\n", "def f(a, /, b):\n    pass\n",
-        "async def f():\n    pass\n",
-        "x = 1000\n", "@dec\ndef f():\n    pass\n", "def g():\n    yield from x\n",
-        "a, *b = c\n", "f(b=1, *a)\n", "def f(*, a):\n    pass\n")],
-        [True] * 21 + [False] * 6)
+        "from __future__ import annotations\n", "from __future__ import generator_stop\n",
+        "for i in x:\n    pass\n", "while x:\n    pass\n", "with open(x) as f:\n    pass\n",
+        "try:\n    pass\nfinally:\n    pass\n", "try:\n    pass\nexcept:\n    pass\n",
+        "try:\n    pass\nexcept OSError:\n    pass\nelse:\n    pass\n",
+        "x = lambda a: a\n", "x = lambda *a,: 0\n", "x = lambda **a,: 0\n",
+        "@dec\ndef f():\n    pass\n", "@(dec)\ndef f():\n    pass\n",
+        "for i in a:\n    try:\n        pass\n    finally:\n        for j in b:\n"
+        "            pass\n        else:\n            continue\n",
+        "def f(a=1):\n    pass\n", "def f(*, a):\n    pass\n", "def f(a, /, b):\n    pass\n",
+        "def f(*args):\n    pass\n", "def f() -> int:\n    pass\n", "def f(a: int):\n    pass\n",
+        "x = [i for i in y]\n", "a, b = c\n", "a, *b = c\n", "del x\n", "x += 1\n",
+        "x = a if b else c\n", "class C:\n    pass\n", "def g():\n    yield from x\n",
+        "x = 1.5\n", "x = b'ab'\n", "import shutil\n", "import os as o\n", "import os, sys\n",
+        "async def f():\n    pass\n", "c = a @ b\n", "x[*a]\n", "raise\n",
+        "x = 1000\n", "def f(a, b):\n    return a % (b,)\n",
+        "try:\n    x = 1\nexcept (OSError, ValueError) as exc:\n    raise SystemExit(2)\n",
+        "import sys\n\nif tuple(sys.version_info[:2]) < (3, 14):\n    raise SystemExit(2)\n",
+        "sys.argv[0] = \"x\"\nsys.argv = [\"x\"] + sys.argv[2:]\n",
+        "if __name__ == \"__main__\":\n    pass\n")],
+        [True] * 46 + [False] * 6)
     # The leg's scope is what the tree under check declares. A tree with no registration file and no
     # launcher adds nothing (fixture/clean-tree-passes, whose .preview/README.md names no registration);
     # a declared launcher whose registration file, launcher or hook is missing is a finding.
