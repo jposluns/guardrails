@@ -154,6 +154,8 @@ run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checks
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
+run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
+run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
@@ -187,6 +189,8 @@ run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
+run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

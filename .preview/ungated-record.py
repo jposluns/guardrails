@@ -73,7 +73,16 @@ THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that
     joins a gate and its record with `;` and forgets the record then runs on failure; nothing here resists a
     caller that sets out to hide a record. So every internal error, every input the walk cannot follow, and
-    every malformed payload fails OPEN: no output, exit 0. The hook also stays silent for a verification worker
+    every malformed payload fails OPEN: no output, exit 0.
+    The one exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top
+    of this file reads no input, writes one line beginning
+    `error: ungated-record.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
+    a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
+    interpreter that cannot start the hook never reaches the guard and fails with Python's own error first. For
+    this hook that is only one that predates the -I option, and it exits 2, which still denies every Bash call:
+    this file uses no syntax newer than Python 3.4, so any interpreter that accepts -I reaches the guard.
+    .preview/README.md (Installing a hook, step 4) describes those cases.
+    The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a payload carrying agent_id (a subagent's call), for a tool_name other
     than Bash, for an event other than PreToolUse, for a bad argv, and for a stdin that is absent, unreadable,
@@ -130,11 +139,19 @@ Self-test: python3 -I -S -B ungated-record.py --self-test
     byte-identity check reports SKIPPED, never a pass.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: ungated-record.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import re
 import select
-import sys
 import time
 
 HOOK_ID = "ungated-record"

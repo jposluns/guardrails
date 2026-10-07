@@ -12,13 +12,21 @@ a blocking STALE verdict only when --max-lag is configured.
 Exit: 0 rooted (and fresh when configured); 1 ORPHANED or STALE; 2 usage/cannot-evaluate.
 Stdlib only; offline against the local object database.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_branch_root.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import contextlib
 import io
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from collections import namedtuple
 from pathlib import Path

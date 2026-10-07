@@ -35,13 +35,21 @@ the backstop, but this generator does not detect that class and discloses it her
 Exit convention (matches the repo's gates): 0 clean; 1 drift; 2 malformed/unreadable input or any
 cannot-evaluate.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_renderers.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import codecs
 import hashlib
 import io
 import os
 import stat
-import sys
 import tokenize
 from pathlib import Path
 

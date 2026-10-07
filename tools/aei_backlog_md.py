@@ -28,11 +28,19 @@ file; it accepts no item list from its caller.
   aei_backlog_md.py --backlog PATH --aei     emit the AEI v1 JSON on stdout
   aei_backlog_md.py --self-test              grammar and fail-closed vectors
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: aei_backlog_md.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import hashlib
 import json
 import re
-import sys
 
 ITEM_RE = re.compile(r"^-\s+(?P<id>[A-Za-z][A-Za-z0-9_.-]*)\s+"
                      r"\[(?P<tok>x|X| |\.|o|O|BLOCKED)\]\s+(?P<rest>.+?)\s*$")

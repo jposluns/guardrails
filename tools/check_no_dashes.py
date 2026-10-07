@@ -7,8 +7,16 @@ manifests under .aiqt/standards/ are scanned (the manifest titles are public
 crosswalk text); this Python file is not, so it may name the characters in its
 own source without flagging itself.
 """
-import os
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_no_dashes.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

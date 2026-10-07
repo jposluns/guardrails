@@ -35,16 +35,27 @@ Exit convention: 0 clean; 1 a well-formed disagreement (digest, size, set, TREE,
 artifact, managed-block, order-consistency drift); 2 malformed/unreadable input, an assertion or
 schema violation, a minimum-class violation, a filesystem-semantics violation, or any cannot-evaluate.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_manifest.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import os
 import stat
-import sys
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_manifest.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_manifest.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402

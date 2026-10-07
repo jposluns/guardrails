@@ -140,6 +140,23 @@ when the snapshot removal fails (no rm), and a missing dirname stops the hook be
 CI residual is held as behaviour and text: a staged tamper the hook refuses, committed with --no-verify,
 passes the CI recipe, and the shipped files say so; git cherry-pick records the same tamper with the stub
 installed and no hook run, and the shipped files name the operations git commits without the hook.
+A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
+(OPF-ENFORCE-PACK slice (b)): the shipped opf/enforcement/claude/pretooluse_deny.py is launched as a
+child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
+and the deny matrix is asserted END TO END: a direct Write/Edit/NotebookEdit into the store tree, the
+adoption archive, a plan-frozen old file, a declared view, a traversal-relative and a symlinked
+spelling each DENY with a structured decision; a pristine sanctioned-writer invocation (an opf
+record call included), a known read-only tool, an unrelated write and the still-writerless
+imported-series leaves each ALLOW; every other Bash command or unknown-tool payload that the hook SEES
+referencing or resolving to a protected token DENIES, read-only spellings (grep, git diff) included,
+and a Bash word's option-glued and delimiter-embedded spellings (ls -ITODO.md, dd of=/abs/x) are
+judged as such references (within the hook's disclosed lexical residuals: a variable, a substitution,
+an interpreter's own language, an R7 payload string judged whole): the single writer allowance is the
+whole allowance surface; a malformed payload, a mis-wired hook event and a
+missing target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable
+adoption plan fails closed for every write under its root. The suite fails without the hook (a missing,
+inert or allow-everything hook makes the deny vectors red), so the leg proves the shipped file, not a model
+of it; an allow vector alone (read-tool-allowed) also passes against an inert hook.
 """
 import sys
 
@@ -218,6 +235,13 @@ def _run_doctor(root, capture, extra=()):
           "(a signal death or an abnormal exit); it is not a 0/1/2 integrity verdict".format(root, rc),
           file=sys.stderr)
     return EXIT_ERROR
+
+
+def _self_test_legs():
+    """Runs the doctor suite, then the enforcement-pack Claude deny-hook suite (git-independent, so it
+    runs even where the doctor suite SKIPs); the WORSE status of the two is the verdict (2 over 1 over
+    0), so neither leg can mask the other."""
+    return max(_self_test(), _claude_hook_self_test())
 
 
 def _self_test():
@@ -1201,6 +1225,16 @@ def _self_test_isolated():
         def _hookspath(root):
             return _git_out(root, "config", "--get", "core.hooksPath")
 
+        def _entry(path):
+            # Whether any directory entry is at path, a dangling symlink included (exists() follows the
+            # link and reads a dangling one as absent). Only a missing entry reads as absent; any other
+            # lstat error propagates as a harness error, never passing as absence.
+            try:
+                os.lstat(str(path))
+            except FileNotFoundError:
+                return False
+            return True
+
         def _stub(root):
             # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
             path = root / ".git" / "hooks" / "pre-commit"
@@ -1880,9 +1914,25 @@ def _self_test_isolated():
             linked = _fixture("linked repo")
             linked_wt = base / "linked wt"
             _git(linked, home, "worktree", "add", "-q", "-b", "side", str(linked_wt))
+            linked_wt_cfg = _git_out(linked_wt, "rev-parse", "--path-format=absolute", "--git-path",
+                                     "config.worktree")
+            linked_cfg_before = (linked / ".git" / "config").read_bytes()
             expect("linked-install", (_install(linked_wt), _stub_ok(linked), _hookspath(linked_wt),
-                                      (linked / ".git" / "config.worktree").exists()),
-                   (EXIT_OK, True, None, False))
+                                      _entry(linked / ".git" / "config.worktree"),
+                                      linked_wt_cfg is None or _entry(linked_wt_cfg),
+                                      (linked / ".git" / "config").read_bytes() == linked_cfg_before),
+                   (EXIT_OK, True, None, False, False, True))
+            # The absence probe above must be able to fail: a dangling symlink planted at the worktree's
+            # config.worktree path (when nothing is there already) reads as present. The plant is removed
+            # before the worktree is used again.
+            planted = linked_wt_cfg is not None and not _entry(linked_wt_cfg)
+            if planted:
+                os.symlink(linked_wt_cfg + ".missing", linked_wt_cfg)
+            try:
+                expect("linked-install-probe-live", linked_wt_cfg is not None and _entry(linked_wt_cfg), True)
+            finally:
+                if planted:
+                    os.unlink(linked_wt_cfg)
             (linked_wt / "README.md").write_text("readme\n", encoding="utf-8")
             _git(linked_wt, home, "add", "README.md")
             expect("linked-commit-clean-passes", _committed(linked_wt), (EXIT_OK, True))
@@ -2139,6 +2189,2137 @@ def _self_test_isolated():
     return rc
 
 
+def _claude_hook_self_test():
+    """The enforcement-pack Claude Code deny-hook leg (OPF-ENFORCE-PACK slice (b); spec 14.1: a verified
+    deny hook, the frozen plan-enumerated old files, the adoption-archive denial, and store/counters/
+    views/evidence protection). The shipped hook opf/enforcement/claude/pretooluse_deny.py is launched as
+    a CHILD exactly as the registration launches it (this interpreter, -I, the JSON payload on stdin,
+    the doc-confirmed PreToolUse contract: deny = exit 0 plus a hookSpecificOutput permissionDecision
+    "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so the
+    SUITE FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision on
+    the deny vectors and reds the suite (an allow vector such as read-tool-allowed passes against an
+    inert hook too; it pins over-refusal, not the hook's presence). Its two git --list-cmds=main
+    probes run under the fixture git environment (the scrubbed allowlist with HOME at the suite's
+    temporary directory), so no git launch reads the operator's global, XDG or system config. The matrix pins the round-2 security fixes BEHAVIORALLY (each vector flips when its
+    fix alone is reverted): the allowance surface is a single plain sanctioned-writer invocation, so
+    every other referencing command denies, environment-assignment-prefixed git included; the writer is
+    realpath-bound (a same-named opf.py elsewhere denies) and verb-bound (record/render only); every
+    scan budget (absolute-path discovery, R7 payload strings) denies when exceeded instead of
+    truncating; a manifest or plan that parses but fails validation denies (wrong standard, wrong
+    format, empty source path, migrate rows frozen, ambiguous two-manifest store, truly oversized
+    valid-prefix plan), never an empty roster; tilde targets expand before classification; an unknown
+    tool denies when a payload string RESOLVES to a protected path, not only on a textual token; and a
+    symlink-then-dotdot spelling is classified after full resolution. The round-3 fixes are pinned the
+    same way: a quoted operand beside redirection, sequencing or dollar-quoting binds its roster and
+    denies (the loose dequote of every command), an unreadable quote structure denies cannot-evaluate,
+    a resolved command word landing on a protected path denies, a dangling run-directory,
+    imported-home or store-tree symlink denies (an unresolved ancestor is never an absent roster), the
+    frozen and view rosters match through a symlinked directory (realpath beside each entry), a
+    control-character payload string that resolves to a protected path denies, the pack's own hook and
+    writer files and the per-product registration are protected (R8) while a plain pristine pack-tool
+    launch stays allowed, the envelope byte cap and the crash backstop each exit 2, Edit and
+    NotebookEdit are pinned through their own explicit mappings, the python3 launcher is verb-bound,
+    and the boundary-anchored discovery budget no longer counts prose slashes. The round-4 fixes
+    are pinned the same way: the loose lexer keeps the shell's own word boundaries (braces and
+    control characters are literal pathname characters; an expandable brace pattern is refused,
+    literal brace operands stay words), an escaped operand under the product root denies by the
+    coarse rule, root discovery
+    realpaths each spelled location before climbing, the file-tool rosters bind above the session
+    cwd too (a view or frozen file behind a symlink pointing outside the product denies by its
+    real path), a symlinked store tree fails closed, the registration is protected at its real
+    path, the reserved imports store home denies, TodoWrite takes R7's scan, and a malformed
+    unknown-tool envelope (a null tool_input, no session cwd, an empty tool_name) fails closed.
+    The round-6 change inverts the Bash rule (D-DISCARD-SOUND-RULE): instead of soundly lexing
+    every exotic shell form, the hook decides PROVABLY PLAIN first (plain words, simple whole-word
+    quotes, no substitution, no parameter or arithmetic expansion, no eval, no line continuation, no
+    ANSI-C or locale quoting, no unquoted here-document, no interpreter with inline code; a QUOTED
+    here-document fed to a non-interpreter stays plain data). A plain command keeps the exact path
+    check; every other command denies when the session cwd or any literal path word lies inside a
+    product root and allows otherwise. The three round-6 bypass reproductions (an unquoted
+    here-document substitution, a commented parenthesis truncating a command substitution, and a
+    line continuation before ANSI-C quoting) each deny as not provably plain from a product cwd, and
+    each FAILS on the predecessor pin. Skill and SlashCommand now take R7 (claude n2), and the
+    provably-plain word-resolution budget cliff is disclosed (claude n1). The round-7 change
+    replaces the hook's own provably-plain lexer with ONE strict classifier, the shared
+    plain-command specification decided on the raw string before any lexing (printable ASCII only,
+    no metacharacter outside single quotes, a bare command word off an explicit wrapper and
+    interpreter deny list); the specification's vector table is carried as rows over the hook's
+    own classifier, the four codex prefix reproductions (a leading redirection, command -p, env -i,
+    exec -a before an inline-code interpreter) and a git alias override each deny from a product
+    cwd and each FAIL on the predecessor pin, and the coarse double-quote escape decoder is pinned
+    by a vector that fails when that decoding is disabled. The round-8 change judges the spellings
+    a word carries inside itself (an option-glued value, the text after a delimiter), resolves
+    relative operands against every directory the command names, judges the inherited git
+    environment, and makes the coarse pass deny on the .working token anywhere; each round-8
+    reproduction FAILS on the predecessor pin, and one discriminating vector per coarse, git and
+    forbidden-character behaviour fails under a mutant removing that behaviour alone. The round-10
+    change keeps every directory-plus-basename join in the container check (no dedupe against the
+    candidates) and reads git only through a small allowlisted global-option grammar (an unlisted
+    global option is not plain); each round-10 reproduction FAILS on the predecessor pin. The
+    round-11 change follows the shared specification's 2026-10-06 revision (a command-word
+    allowlist, bare or under /usr/bin, /bin, /usr/local/bin or /usr/sbin, and no dollar sign,
+    backquote, square bracket or backslash inside single quotes; the revised vector rows are
+    carried), so a wrapper, an unlisted remover and a dashed git builtin are not plain; reads the
+    container verbs and the cp, mv and ln joins on the command word alone; and denies, in a bound
+    product, every git subcommand that rewrites the working tree or the index whatever its
+    pathspec (a single-quoted glob from a subdirectory included), exempting only dry runs read
+    through a strict grammar, while every other git subcommand allows; one vector per subcommand,
+    per container verb and per dry-run grammar branch pins the rule, the round-11 reproductions
+    FAIL on the predecessor pin, and a file-tool payload carrying an unevaluated path-like field
+    denies. The round-14 change denies, in a bound product, a cp, mv, ln or install carrying any
+    backup option (a backup renames an existing destination to that destination plus a suffix no
+    word spells), joins an ln operand basename into the cwd, treats git submodule status and
+    summary as plain read forms, and reads a not-plain command git work-tree subcommand over every
+    literal word after a git word; its pack-repository vectors run against a synthetic pack
+    repository holding a copy of the hook, so they no longer depend on the checkout .git entry.
+    The round-15 change exempts no dry run and no submodule read form in that not-plain read (its
+    literal words carry no command boundary, so git rm -rf .; echo -n read the later -n as a dry
+    run); separator vectors (;, &&, ||, |, a newline) followed by an unrelated -n, --dry-run or
+    status word deny, one not-plain vector per work-tree subcommand (a literal list pinned equal
+    to the hook's set) fails when that one name is removed, and git help forms that only print
+    allow in a bound product while its viewer options deny.
+    git-independent (the hook reads only the live tree; nothing is committed), offline,
+    hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
+    assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
+    cannot be launched)."""
+    import importlib.util
+    import json
+    import shutil
+    import tempfile
+
+    import _opf_store  # noqa: E402  the store-tree / machine-store name constants
+
+    hook = Path(__file__).resolve().parent.parent / "enforcement" / "claude" / "pretooluse_deny.py"
+    if not hook.is_file():
+        print("check_opf_doctor claude-hook self-test: cannot evaluate: the shipped deny hook is "
+              "missing at " + str(hook), file=sys.stderr)
+        return EXIT_ERROR
+    failures = []
+
+    def expect(label, got, want):
+        if got != want:
+            failures.append("claude-hook " + label + ": got " + repr(got) + ", expected " + repr(want))
+
+    def run_hook(payload=None, raw=None, env=None, via=None):
+        """One hook child. Returns (exit status, decision, reason, stderr text): decision is None for a
+        silent allow (no stdout), the permissionDecision string for a structured decision, or the label
+        "malformed-output" for stdout that is not the documented decision shape. `env` overlays the
+        child environment (the tilde vectors pin expanduser against a fixture HOME); `via` launches
+        another copy of the hook (the round-14 synthetic pack repository) instead of the shipped one."""
+        data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        # The hook judges the git variables of its own environment (round 8), so every child runs
+        # with the ambient GIT_* variables scrubbed (a git-hook or CI context must not change a
+        # verdict); `env` then overlays the vector's own variables.
+        child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+        if env is not None:
+            child_env.update(env)
+        try:
+            proc = subprocess.run([sys.executable, "-I", str(via or hook)], input=data, env=child_env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError("could not run the deny hook " + str(hook) + " (" + repr(exc) + ")")
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        err = proc.stderr.decode("utf-8", "replace")
+        if not out:
+            return proc.returncode, None, "", err
+        decision, reason = "malformed-output", ""
+        try:
+            spec = json.loads(out).get("hookSpecificOutput")
+            if isinstance(spec, dict) and spec.get("hookEventName") == "PreToolUse":
+                decision = spec.get("permissionDecision")
+                reason = spec.get("permissionDecisionReason") or ""
+        except ValueError:
+            pass
+        return proc.returncode, decision, reason, err
+
+    def payload(tool, tool_input, cwd):
+        return dict(hook_event_name="PreToolUse", tool_name=tool, tool_input=tool_input, cwd=cwd)
+
+    def deny(label, p, needle, env=None, via=None):
+        rc, decision, reason, _err = run_hook(p, env=env, via=via)
+        expect(label, (rc, decision), (0, "deny"))
+        if decision == "deny" and needle not in reason:
+            failures.append("claude-hook " + label + ": the deny reason does not name " + repr(needle)
+                            + " (got " + repr(reason) + ")")
+
+    def allow(label, p, env=None, via=None):
+        rc, decision, _reason, _err = run_hook(p, env=env, via=via)
+        expect(label, (rc, decision), (0, None))
+
+    RUN_ID = "adopt-20260101T000000Z-0123456789abcdef"
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-claude-hook-selftest-") as basestr:
+            # The fixture git environment for every git launch in this suite: the module
+            # _scrubbed_env allowlist (every ambient GIT_ variable dropped, global and system config
+            # at os.devnull, no XDG_CONFIG_HOME) with HOME at this temporary directory, so no probe
+            # reads the operator's git configuration.
+            def git_fixture_env():
+                env = _scrubbed_env()
+                env["HOME"] = basestr
+                return env
+
+            root = os.path.join(basestr, "product")
+            machine = os.path.join(root, _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            evidence = os.path.join(root, _opf_store.WORKING_DIRNAME, "imported", "adoption", RUN_ID)
+            archive = os.path.join(root, _opf_store.WORKING_DIRNAME, "archive", "adoption", RUN_ID)
+            for d in (machine, evidence, archive, os.path.join(root, "docs")):
+                os.makedirs(d)
+            manifest_text = ('[opf]\nstandard = "opf"\n\n'
+                             '[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
+                             'target = "TODO.md"\n\n[views.version]\nkind = "deterministic"\n'
+                             'sources = ["worklog"]\ntarget = "VERSION"\n\n'
+                             '[views.status]\nkind = "deterministic"\nsources = ["worklog"]\n'
+                             'target = "docs/STATUS.md"\n')
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            with open(os.path.join(machine, "counters.toml"), "w", encoding="utf-8") as fh:
+                fh.write("schema = 1\n")
+            plan_text = ('format = "opf.adoption.plan/v2"\n\n[[sources]]\npath = "LEGACY.md"\n'
+                         'digest = "sha256:' + "0" * 64 + '"\ndisposition = "retire"\n'
+                         'occupying = false\n')
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write(plan_text)
+            for rel in ("LEGACY.md", "TODO.md", "VERSION", os.path.join("docs", "STATUS.md")):
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+                    fh.write("fixture\n")
+
+            counters = os.path.join(machine, "counters.toml")
+            # R1: a direct Write into the store (counters) denies, naming the sanctioned writer.
+            deny("write-store-denied", payload("Write", dict(file_path=counters, content="x"), root),
+                 "sanctioned writer")
+            # R2: a write under the adoption archive denies with the archive sentence.
+            deny("write-archive-denied",
+                 payload("Write", dict(file_path=os.path.join(archive, "x.md"), content="x"), root),
+                 "archive/adoption")
+            # R1 evidence home: a write under .working/imported/ denies as evidence.
+            deny("write-evidence-denied",
+                 payload("Write", dict(file_path=os.path.join(evidence, "extra.toml"), content="x"),
+                         root), "evidence")
+            # R3: an Edit of the plan-frozen old file denies, naming the freeze.
+            deny("edit-frozen-denied",
+                 payload("Edit", dict(file_path=os.path.join(root, "LEGACY.md"), old_string="a",
+                                      new_string="b"), root), "frozen")
+            # R4: a Write of the declared view denies, naming opf render.
+            deny("write-view-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
+                 "opf render")
+            # R1 via MultiEdit: the needle is R1's own sentence, so a MultiEdit dropped from
+            # FILE_TOOL_TARGET (falling to R7's different reason) reds this vector.
+            deny("multiedit-store-denied",
+                 payload("MultiEdit", dict(file_path=counters,
+                                           edits=[dict(old_string="a", new_string="b")]), root),
+                 "direct edits under")
+            # R1 via NotebookEdit's own target field, and via Edit's: the needle is R1's own
+            # sentence, which R7's fallback reason never carries, so an Edit or NotebookEdit
+            # mapping removed from FILE_TOOL_TARGET (or renamed) reds its vector.
+            deny("notebook-store-denied",
+                 payload("NotebookEdit", dict(notebook_path=os.path.join(
+                     machine, "backlog_item.index.toml")), root), "direct edits under")
+            deny("edit-store-denied",
+                 payload("Edit", dict(file_path=counters, old_string="a", new_string="b"), root),
+                 "direct edits under")
+            # R1 via a traversal-relative spelling resolved against the session cwd.
+            deny("relative-traversal-denied",
+                 payload("Write", dict(file_path="sub/../.working/toml/counters.toml", content="x"),
+                         root), "sanctioned writer")
+            # R1 via a symlink: the realpath candidate resolves into the store.
+            os.symlink(counters, os.path.join(root, "alias.md"))
+            deny("symlink-store-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "alias.md"), content="x"), root),
+                 "sanctioned writer")
+            # R1 via a symlink FOLLOWED BY `..`: the filesystem resolves the link before `..` climbs
+            # out of its destination, so the hook must realpath the ORIGINAL spelling (a lexical
+            # collapse first would judge <root>/counters.toml, a different and unprotected file).
+            os.makedirs(os.path.join(machine, "inner"))
+            os.symlink(os.path.join(machine, "inner"), os.path.join(root, "jump"))
+            deny("symlink-dotdot-store-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "jump", "..", "counters.toml"),
+                                       content="x"), root), "sanctioned writer")
+            # R6: a missing target field fails closed as a structured deny.
+            deny("missing-target-denied", payload("Write", dict(), root), "failing closed")
+            # R6: a control character in a target and a relative target with no session cwd each
+            # fail closed (neither can be honestly classified).
+            deny("control-char-target-denied",
+                 payload("Write", dict(file_path="docs/bad\u0001name.md", content="x"), root),
+                 "failing closed")
+            deny("relative-target-no-cwd-denied",
+                 payload("Write", dict(file_path="x.md", content="x"), None), "failing closed")
+            # R1 via a tilde spelling: ~ expands against the hook child's HOME BEFORE classification
+            # (the launched tool expands it too), so a frozen path under the fixture HOME denies even
+            # with the session cwd outside the product tree.
+            deny("tilde-frozen-denied",
+                 payload("Write", dict(file_path=os.path.join("~", "LEGACY.md"), content="x"),
+                         basestr), "frozen", env=dict(HOME=root))
+            # An unrelated write under the same root allows silently.
+            allow("write-unrelated-allowed",
+                  payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                        content="x"), root))
+            # A known read-only tool allows silently even over a store path (match-all
+            # registration), while a tool the hook cannot prove read-only (an MCP write tool, another
+            # shell) is denied on a protected payload reference (R7) and allowed when reference-free.
+            allow("read-tool-allowed", payload("Read", dict(file_path=counters), root))
+            deny("mcp-write-store-denied",
+                 payload("mcp__filesystem__write_file", dict(path=counters, content="x"), root),
+                 "R7")
+            deny("powershell-store-denied",
+                 payload("PowerShell",
+                         dict(command="Set-Content .working/toml/counters.toml x"), root), "R7")
+            deny("mcp-frozen-abs-outside-root-denied",
+                 payload("mcp__filesystem__write_file",
+                         dict(path=os.path.join(root, "LEGACY.md")), basestr), "R7")
+            # R7's string-scan budget DENIES when exceeded: the padded edit list used to exhaust the
+            # traversal before it reached `path`, and a truncated scan was judged as complete.
+            deny("mcp-string-budget-denied",
+                 payload("mcp__filesystem__edit_file",
+                         dict(path=counters, edits=[dict(oldText="a", newText="b")] * 1100), root),
+                 "budget")
+            # R7's path pass: a payload string with NO textual protected token still denies when it
+            # RESOLVES (cwd-joined, as a file-tool target would) to a declared view.
+            deny("mcp-relative-resolves-to-view-denied",
+                 payload("mcp__filesystem__write_file", dict(path="STATUS.md", content="x"),
+                         os.path.join(root, "docs")), "R7")
+            allow("mcp-unrelated-allowed",
+                  payload("mcp__filesystem__write_file",
+                          dict(path=os.path.join(root, "docs", "notes.md"), content="x"), root))
+            # The imported-series leaves stay writer-less and EXEMPT until the import writer ships
+            # (spec 14.1: enforcement must not force an operation the writer cannot perform).
+            allow("imported-leaf-allowed",
+                  payload("Write", dict(file_path=os.path.join(machine, "worklog.imported.toml"),
+                                        content="x"), root))
+            allow("imported-index-allowed",
+                  payload("Write", dict(file_path=os.path.join(
+                      machine, "backlog_item.imported.index.toml"), content="x"), root))
+            # ... but ONLY directly inside the machine store: a same-named leaf at the store top
+            # level or at any deeper path is ordinary store content and denies.
+            deny("imported-leaf-top-level-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, ".working", "evil.imported.index.toml"), content="x"), root),
+                 "sanctioned writer")
+            deny("imported-leaf-deep-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     machine, "a", "b", "worklog.imported.toml"), content="x"), root),
+                 "sanctioned writer")
+            # A1: the sanctioned writer allows on the CLI's REAL syntax, protected mention
+            # included, with the mention inside QUOTED argument data (the quote-aware pristine scan;
+            # the exact record create and render --write invocations here run 0 against the CLI).
+            # The python3 launcher form is REALPATH-BOUND: it allows only when the launched script
+            # resolves to THE repository's own opf/tools/opf.py (relative against the session cwd,
+            # or absolute), never by its basename.
+            writer = Path(__file__).resolve().parent / "opf.py"
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            allow("bash-opf-record-create-real-allowed",
+                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py record create "
+                                               "--type backlog_item "
+                                               "--title 'Repair .working (counter)' "
+                                               "--actor maintainer --root " + root),
+                          str(repo_root)))
+            allow("bash-opf-writer-abs-render-allowed",
+                  payload("Bash", dict(command="python3 -I '" + str(writer)
+                                               + "' render --write --root ."), root))
+            allow("bash-opf-render-write-real-allowed",
+                  payload("Bash", dict(command="opf render --write --root '" + basestr
+                                               + "/product .working (x)'"), root))
+            # Only the record and render verbs are the writer: any other opf verb that references a
+            # protected token denies (over-refusal, disclosed).
+            deny("bash-opf-other-verb-denied",
+                 payload("Bash", dict(command="opf doctor --root .working/.."), root),
+                 "lexical hook")
+            # The writer identity is its RESOLVED path, never a filename: a same-named opf.py
+            # outside the repository is not the writer, and a non-allowlisted interpreter flag is
+            # not a plain invocation.
+            with open(os.path.join(basestr, "opf.py"), "w", encoding="utf-8") as fh:
+                fh.write("x = 1\n")
+            deny("bash-opf-impersonator-denied",
+                 payload("Bash", dict(command="python3 -I " + os.path.join(basestr, "opf.py")
+                                              + " record .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-opf-unlisted-pyflag-denied",
+                 payload("Bash", dict(command="python3 -O '" + str(writer)
+                                              + "' record --root .working/.."), root),
+                 "lexical hook")
+            # A leading VAR=value assignment is never the writer: environment assignments change
+            # what a program does (GIT_EXTERNAL_DIFF / GIT_CONFIG_* make git diff run an arbitrary
+            # writer), so an assignment-bearing command that references a protected token denies.
+            deny("bash-env-git-external-diff-denied",
+                 payload("Bash", dict(command="GIT_EXTERNAL_DIFF='sed -i s/1/2/' git diff "
+                                              ".working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-env-git-config-frozen-denied",
+                 payload("Bash", dict(command="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external "
+                                              "GIT_CONFIG_VALUE_0=true git diff LEGACY.md"), root),
+                 "lexical hook")
+            # ... but the pristine scan still bars a second command or a live expansion riding on an
+            # opf spelling: an unquoted metacharacter or a dollar inside double quotes takes the deny.
+            deny("bash-opf-semicolon-denied",
+                 payload("Bash", dict(command="opf record create --title x; rm -rf .working"), root),
+                 "lexical hook")
+            deny("bash-opf-dollar-quoted-denied",
+                 payload("Bash", dict(command='opf record create --title "a $(rm .working/x)"'),
+                         root), "lexical hook")
+            # The read-only-word and read-only-git allowances are REMOVED (the allowance machinery
+            # is attack surface): every referencing non-writer command denies, read-only forms
+            # included, as disclosed over-refusal.
+            deny("bash-grep-store-denied",
+                 payload("Bash", dict(command="grep -n x .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-git-add-view-denied", payload("Bash", dict(command="git add TODO.md"), root),
+                 "TODO.md")
+            deny("bash-git-diff-path-denied",
+                 payload("Bash", dict(command="git diff .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-git-diff-output-denied",
+                 payload("Bash", dict(command="git diff --no-index "
+                                              "--output=.working/toml/counters.toml /dev/null x"),
+                         root), "lexical hook")
+            deny("bash-git-log-output-frozen-denied",
+                 payload("Bash", dict(command="git log -1 --output=LEGACY.md"), root), "LEGACY.md")
+            deny("bash-git-grep-pager-view-denied",
+                 payload("Bash", dict(command="git grep --open-files-in-pager=rm -e x -- TODO.md"),
+                         root), "lexical hook")
+            deny("bash-file-magic-store-denied",
+                 payload("Bash", dict(command="file -C -m .working/toml/counters.toml"), root),
+                 "lexical hook")
+            # R5: visible Bash writes and unproven references deny.
+            deny("bash-sed-store-denied",
+                 payload("Bash", dict(command="sed -i s/a/b/ .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-redirect-store-denied",
+                 payload("Bash", dict(command="echo x > .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-touch-frozen-denied", payload("Bash", dict(command="touch LEGACY.md"), root),
+                 "LEGACY.md")
+            deny("bash-view-append-denied", payload("Bash", dict(command="echo x >> TODO.md"), root),
+                 "product root")
+            # The brief's write-capable command words each take the deny on a protected mention.
+            deny("bash-tee-store-denied",
+                 payload("Bash", dict(command="tee .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-cp-frozen-denied", payload("Bash", dict(command="cp x LEGACY.md"), root),
+                 "LEGACY.md")
+            deny("bash-truncate-view-denied",
+                 payload("Bash", dict(command="touch TODO.md"), root), "TODO.md")
+            deny("bash-dd-store-denied",
+                 payload("Bash", dict(command="dd if=/dev/zero of=.working/toml/counters.toml"),
+                         root), "lexical hook")
+            # The token scan also covers the DEQUOTED tokens of a pristine command, so a
+            # quote-split spelling of a view still references it.
+            deny("bash-quote-split-view-denied",
+                 payload("Bash", dict(command="touch VER''SION"), root), "VERSION")
+            # BOTH absolute-path discovery budgets DENY when exceeded: the raw-text match count
+            # (identical filler paths used to evict the protected operand from a truncated scan;
+            # these collapse in the deduplicated operand set, so only the raw bound catches them)
+            # and the deduplicated operand set (quoted spaced operands the raw regex cannot see;
+            # distinct, so only the operand bound catches them). Boundary anchoring keeps prose
+            # slashes (and/or) from consuming either budget: a reference-free command stays
+            # allowed even spelling MORE of them than the budget.
+            deny("bash-abs-path-budget-denied",
+                 payload("Bash", dict(command="printf %s" + (" /dev/null" * 513) + " "
+                                              + os.path.join(root, "VERSION")), basestr),
+                 "budget")
+            deny("bash-operand-budget-denied",
+                 payload("Bash", dict(command="printf %s "
+                                              + " ".join("'/ pad/" + str(i) + "'"
+                                                         for i in range(513))), basestr),
+                 "budget")
+            allow("bash-prose-slashes-allowed",
+                  payload("Bash", dict(command="echo" + (" and/or" * 600)), basestr))
+            # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
+            # does not trip the view, while the view's own spellings still deny.
+            allow("bash-version-word-boundary-allowed",
+                  payload("Bash", dict(command="grep -rn PYTHON_VERSION src"), root))
+            allow("bash-version-dunder-allowed",
+                  payload("Bash", dict(command="grep -rn __VERSION__ src"), root))
+            deny("bash-touch-version-denied", payload("Bash", dict(command="touch VERSION"), root),
+                 "VERSION")
+            # An ABSOLUTE frozen spelling is judged even when the session cwd sits OUTSIDE every
+            # product root (the rosters bind through the absolute paths spelled in the command).
+            deny("bash-abs-frozen-outside-root-denied",
+                 payload("Bash", dict(command="tee " + os.path.join(root, "LEGACY.md")), basestr),
+                 "LEGACY.md")
+            allow("bash-abs-unprotected-outside-root-allowed",
+                  payload("Bash", dict(command="tee " + os.path.join(basestr, "notes.txt")),
+                          basestr))
+            # A QUOTED absolute operand with spaces binds its WHOLE product root (the raw-text
+            # discovery alone would bind only the space-free prefix and miss the roster).
+            spaced_root = os.path.join(basestr, "with space")
+            spaced_machine = os.path.join(spaced_root, ".working", "toml")
+            os.makedirs(spaced_machine)
+            with open(os.path.join(spaced_machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "opf"\n\n[views.version]\nkind = "deterministic"\n'
+                         'sources = ["worklog"]\ntarget = "VERSION"\n')
+            with open(os.path.join(spaced_root, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture\n")
+            deny("bash-quoted-spaced-root-view-denied",
+                 payload("Bash", dict(command="truncate -s 0 '"
+                                              + os.path.join(spaced_root, "VERSION") + "'"),
+                         basestr), "VERSION")
+            # A session cwd INSIDE the store makes every relative spelling land in the store, so a
+            # non-allowance command denies there even with no textual `.working` token.
+            deny("bash-cwd-inside-store-denied",
+                 payload("Bash", dict(command="sed -i s/1/2/ counters.toml"), machine),
+                 "store tree")
+            deny("bash-cwd-inside-store-ls-denied",
+                 payload("Bash", dict(command="ls counters.toml"), machine), "store tree")
+            deny("bash-git-checkout-frozen-denied",
+                 payload("Bash", dict(command="git checkout -- LEGACY.md"), root), "LEGACY.md")
+            # A Bash command with no protected reference allows.
+            allow("bash-free-allowed", payload("Bash", dict(command="echo hello"), root))
+            # A quoted protected operand binds its roster and denies even when the command is NOT
+            # pristine: redirection, sequencing or dollar-quoting rides beside it (the loose
+            # dequote reads the whole operand; the raw-text scan alone saw only the space-free
+            # prefix of a spaced root).
+            spaced_view = os.path.join(spaced_root, "VERSION")
+            deny("bash-redirect-quoted-spaced-root-denied",
+                 payload("Bash", dict(command="printf overwritten > '" + spaced_view + "'"),
+                         basestr), "VERSION")
+            deny("bash-sequenced-quoted-spaced-root-denied",
+                 payload("Bash", dict(command="truncate -s 0 '" + spaced_view + "'; true"),
+                         basestr), "VERSION")
+            deny("bash-dollarquote-spaced-root-denied",
+                 payload("Bash", dict(command="printf x > $'" + spaced_view + "'"), basestr),
+                 "VERSION")
+            # A command whose quote structure cannot be read to the end denies cannot-evaluate
+            # (the shell could run it differently than the hook read it), while word-start
+            # comments, here-document bodies and decodable dollar-quotes carrying prose
+            # apostrophes stay readable and reference-free commands stay allowed.
+            deny("bash-unterminated-quote-denied",
+                 payload("Bash", dict(command="echo 'abc"), root), "lexical hook")
+            deny("bash-undecodable-dollarquote-denied",
+                 payload("Bash", dict(command="echo $'a\\qb'"), root), "lexical hook")
+            allow("bash-comment-apostrophe-allowed",
+                  payload("Bash", dict(command="echo ok # don't worry"), basestr))
+            allow("bash-heredoc-apostrophe-allowed",
+                  payload("Bash", dict(command="cat > notes.txt <<EOF" + chr(10)
+                                               + "Don't worry, it's prose" + chr(10) + "EOF"
+                                               + chr(10)), basestr))
+            allow("bash-dollarquote-free-allowed",
+                  payload("Bash", dict(command="printf $'a\\tb'"), basestr))
+            # A word of the command that RESOLVES to a protected path denies even with no textual
+            # token in the command (the word-resolution pass judges each dequoted word the way a
+            # file-tool target is judged).
+            deny("bash-word-resolves-view-denied",
+                 payload("Bash", dict(command="touch STATUS.md"),
+                         os.path.join(root, "docs")), "resolves")
+            # R8: the hook, the writer and their siblings cannot be rewritten through the gated
+            # tools, a bound product root's settings registration cannot either, and a plain
+            # pristine launch of a pack tool stays allowed (only its SCRIPT operand is exempt).
+            deny("edit-hook-file-denied",
+                 payload("Edit", dict(file_path=str(hook), old_string="a", new_string="b"),
+                         basestr), "R8")
+            deny("write-writer-sibling-denied",
+                 payload("Write", dict(file_path=str(Path(__file__).resolve().parent
+                                                     / "_opf_store.py"), content="x"), basestr),
+                 "R8")
+            deny("mcp-writer-denied",
+                 payload("mcp__filesystem__write_file", dict(path=str(writer), content="x"),
+                         basestr), "R8")
+            deny("bash-overwrite-hook-denied",
+                 payload("Bash", dict(command="cp notes.txt " + str(hook)), basestr), "R8")
+            allow("bash-run-pack-tool-allowed",
+                  payload("Bash", dict(command="python3 -I -B " + str(writer)
+                                               + " doctor --root ."), basestr))
+            deny("write-registration-denied",
+                 payload("Write", dict(file_path=os.path.join(root, ".claude", "settings.json"),
+                                       content="x"), root), "registration")
+            allow("write-claude-other-allowed",
+                  payload("Write", dict(file_path=os.path.join(root, ".claude", "notes.json"),
+                                        content="x"), root))
+            # Explicit file-tool mappings: a RELATIVE Edit or NotebookEdit target with no session
+            # cwd fails closed through the file-tool rule itself, naming the target (R7's own
+            # no-cwd deny names no target), pinning each mapping on its own.
+            deny("edit-relative-no-cwd-denied",
+                 payload("Edit", dict(file_path="notes.md", old_string="a", new_string="b"),
+                         None), "target 'notes.md' is relative")
+            deny("notebook-relative-no-cwd-denied",
+                 payload("NotebookEdit", dict(notebook_path="notes.ipynb"), None),
+                 "target 'notes.ipynb' is relative")
+            # A payload string carrying a control character still RESOLVES (a newline-bearing
+            # symlink alias reaches the store like any other path), so R7 judges it, never skips;
+            # and R7's store-resolve branch holds on its own through a directory symlink with no
+            # textual token and no frozen or view match.
+            ctl_alias = os.path.join(root, "alias" + chr(10) + ".md")
+            os.symlink(counters, ctl_alias)
+            deny("mcp-controlchar-alias-resolves-denied",
+                 payload("mcp__filesystem__write_file", dict(path=ctl_alias, content="x"),
+                         basestr), "R7")
+            os.symlink(machine, os.path.join(basestr, "lnk"))
+            deny("mcp-symlink-resolves-store-denied",
+                 payload("mcp__filesystem__write_file",
+                         dict(path=os.path.join(basestr, "lnk", "fresh.toml"), content="x"),
+                         basestr), "R7")
+            # The python3 launcher form takes ONLY the writer verbs: another verb with a protected
+            # mention denies (nothing else pins the verb bound on the python3 launcher form).
+            deny("bash-python-writer-other-verb-denied",
+                 payload("Bash", dict(command="python3 -I -B opf/tools/opf.py doctor --root "
+                                              ".working/.."), root), "store tree")
+
+            # ROUND 4: the loose lexer keeps the SHELL'S own word boundaries. Braces and control
+            # characters are literal pathname characters (the shell keeps them in a word), so a
+            # braced product root and a carriage-return symlink alias both stay whole, bind and
+            # deny; a brace pattern the shell would EXPAND denies cannot-evaluate (the expansion
+            # could spell a protected path the lexer cannot see), while a literal brace operand
+            # (find's empty-brace operand, a quoted awk program, a parameter expansion) stays a
+            # word and reference-free commands stay allowed.
+            # (named so its brace-truncated raw-text prefix is NOT another fixture root:
+            # the vector must fail through the braced WORD alone)
+            braced_root = os.path.join(basestr, "prodbr" + chr(123) + "x" + chr(125))
+            braced_machine = os.path.join(braced_root, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(braced_machine)
+            with open(os.path.join(braced_machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "VERSION"' + chr(10))
+            with open(os.path.join(braced_root, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            deny("bash-braced-root-view-denied",
+                 payload("Bash", dict(command="printf overwritten > "
+                                              + os.path.join(braced_root, "VERSION")), basestr),
+                 "VERSION")
+            cr_alias = os.path.join(root, "a" + chr(13) + "b")
+            os.symlink(counters, cr_alias)
+            deny("bash-cr-alias-resolves-denied",
+                 payload("Bash", dict(command="printf x > " + cr_alias), basestr), "store tree")
+            deny("bash-brace-expansion-denied",
+                 payload("Bash", dict(command="printf x > " + os.path.join(
+                     root, chr(123) + "v,w" + chr(125) + ".txt")), basestr),
+                 "product root")
+            deny("bash-brace-range-denied",
+                 payload("Bash", dict(command="echo " + chr(123) + "1..3" + chr(125)), root),
+                 "product root")
+            allow("bash-braces-literal-allowed",
+                  payload("Bash", dict(command="find . -name tmp -exec grep -l x " + chr(123)
+                                               + chr(125) + " " + chr(92) + ";"), basestr))
+            allow("bash-awk-program-allowed",
+                  payload("Bash", dict(command="awk " + chr(39) + chr(123) + "print $1, $2"
+                                               + chr(125) + chr(39) + " notes.txt"), basestr))
+            allow("bash-param-brace-allowed",
+                  payload("Bash", dict(command="echo $" + chr(123) + "HOME" + chr(125)),
+                          basestr))
+            # Not provably plain, so each takes the coarse rule: a literal word under the product
+            # root denies whatever its escapes decode to (these pin the coarse denial of an
+            # escaped operand, NOT the decoders; the coarse pass does not decode dollar-quotes at
+            # all, and the double-quote decoder is pinned by its own discriminating vector below).
+            tab_alias = os.path.join(root, "a" + chr(9) + "b")
+            os.symlink(counters, tab_alias)
+            deny("bash-dollarquote-tab-alias-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/a" + chr(92)
+                                              + "tb" + chr(39)), basestr), "store tree")
+            deny("bash-dollarquote-hex-view-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
+                                              + "x53ION" + chr(39)), basestr), "store tree")
+            deny("bash-dollarquote-octal-view-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
+                                              + "123ION" + chr(39)), basestr), "store tree")
+            dq_alias = os.path.join(root, "a" + chr(34) + "b")
+            os.symlink(counters, dq_alias)
+            deny("bash-dq-escaped-quote-alias-denied",
+                 payload("Bash", dict(command="printf x > " + chr(34) + root + "/a" + chr(92)
+                                              + chr(34) + "b" + chr(34)), basestr), "store tree")
+            # Root discovery resolves each spelled location as the KERNEL would (realpath of the
+            # original spelling, links before dot-dot) before climbing: a link/../VERSION
+            # spelling binds the jumped-into product and denies, the unprotected twin allows.
+            root7 = os.path.join(basestr, "product7")
+            machine7 = os.path.join(root7, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(machine7)
+            os.makedirs(os.path.join(root7, "sub"))
+            with open(os.path.join(machine7, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "VERSION"' + chr(10))
+            with open(os.path.join(root7, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            os.symlink(os.path.join(root7, "sub"), os.path.join(basestr, "jump7"))
+            deny("bash-symlink-dotdot-root-discovery-denied",
+                 payload("Bash", dict(command="touch "
+                                              + os.path.join(basestr, "jump7", "..", "VERSION")),
+                         basestr), "VERSION")
+            allow("bash-symlink-dotdot-unprotected-allowed",
+                  payload("Bash", dict(command="touch "
+                                               + os.path.join(basestr, "jump7", "..",
+                                                              "notes.txt")), basestr))
+            # A view or frozen file whose symlinked directory points OUTSIDE the product root
+            # denies by its REAL path while the session cwd binds the product (the file tools
+            # bind rosters above the target AND above the cwd, lexical and realpathed).
+            root5 = os.path.join(basestr, "product5")
+            machine5 = os.path.join(root5, _opf_store.WORKING_DIRNAME, "toml")
+            evidence5 = os.path.join(root5, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                     RUN_ID)
+            shared5 = os.path.join(basestr, "shared5")
+            shared5old = os.path.join(basestr, "shared5old")
+            for d in (machine5, evidence5, shared5, shared5old):
+                os.makedirs(d)
+            with open(os.path.join(machine5, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "docs/VERSION"' + chr(10))
+            with open(os.path.join(evidence5, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write('format = "opf.adoption.plan/v2"' + chr(10) + '[[sources]]' + chr(10)
+                         + 'path = "old/LEGACY.md"' + chr(10) + 'digest = "sha256:' + "0" * 64
+                         + '"' + chr(10) + 'disposition = "retire"' + chr(10)
+                         + 'occupying = false' + chr(10))
+            with open(os.path.join(shared5, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            with open(os.path.join(shared5old, "LEGACY.md"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            os.symlink(shared5, os.path.join(root5, "docs"))
+            os.symlink(shared5old, os.path.join(root5, "old"))
+            deny("write-view-real-outside-root-denied",
+                 payload("Write", dict(file_path=os.path.join(shared5, "VERSION"), content="x"),
+                         root5), "opf render")
+            deny("edit-frozen-real-outside-root-denied",
+                 payload("Edit", dict(file_path=os.path.join(shared5old, "LEGACY.md"),
+                                      old_string="a", new_string="b"), root5), "frozen")
+            # A symlinked store tree is a layout the writer refuses (O_NOFOLLOW), so the hook
+            # refuses to bind it and fails closed, by the link and by the real tree behind it.
+            root6 = os.path.join(basestr, "product6")
+            qstore6 = os.path.join(basestr, "qstore6")
+            os.makedirs(root6)
+            os.makedirs(os.path.join(qstore6, "toml"))
+            os.symlink(qstore6, os.path.join(root6, _opf_store.WORKING_DIRNAME))
+            deny("symlinked-working-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root6, "notes.md"), content="x"),
+                         root6), "failing closed")
+            deny("symlinked-working-real-store-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(qstore6, "toml", "counters.toml"),
+                                       content="x"), root6), "failing closed")
+            # The registration is protected at its REAL path too (a symlinked settings file is
+            # rewritable through its target), and the reserved `imports` name (spec 4.4) denies
+            # like the other control homes: a leaf under .working/imports/ is store content,
+            # never the machine-store imported-series exemption.
+            os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+            os.symlink(os.path.join(root, "config.json"),
+                       os.path.join(root, ".claude", "settings.local.json"))
+            deny("write-registration-realpath-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "config.json"), content="x"),
+                         root), "registration")
+            deny("write-imports-reserved-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, ".working", "imports", "worklog.imported.toml"), content="x"), root),
+                 "sanctioned writer")
+            # TodoWrite is no longer read-only-listed: a todo naming a protected path takes R7's
+            # deny (disclosed over-refusal); a free todo list stays allowed.
+            deny("todowrite-store-reference-denied",
+                 payload("TodoWrite", dict(todos=[dict(
+                     content="edit .working/toml/counters.toml", status="pending",
+                     activeForm="editing")]), root), "R7")
+            allow("todowrite-free-allowed",
+                  payload("TodoWrite", dict(todos=[dict(content="write the release notes",
+                                                        status="pending", activeForm="writing")]),
+                          root))
+            # A malformed unknown-tool envelope fails closed: a null tool_input and a missing
+            # session cwd each take a structured deny (absence of references is never permission).
+            deny("mcp-null-toolinput-denied",
+                 payload("mcp__filesystem__write_file", None, root), "failing closed")
+            deny("mcp-no-cwd-denied",
+                 payload("mcp__filesystem__write_file", dict(path="VERSION", content="x"), None),
+                 "failing closed")
+            # A single-quoted literal newline keeps a writer spelling non-pristine too (the
+            # quoted-span control-character bar covers BOTH quote kinds), so the protected
+            # mention denies instead of riding A1.
+            deny("bash-sq-newline-title-denied",
+                 payload("Bash", dict(command="opf record create --title " + chr(39) + "a"
+                                              + chr(10) + ".working" + chr(39)), root),
+                 "store tree")
+
+            # Envelope fail-closed: a malformed payload and a mis-wired event each exit 2 (blocking
+            # error) with a located stderr message and NO structured decision.
+            rc, decision, _reason, err = run_hook(raw=b"this is not json")
+            expect("malformed-payload-exit", (rc, decision), (2, None))
+            if "cannot evaluate" not in err:
+                failures.append("claude-hook malformed-payload-stderr: no located cannot-evaluate "
+                                "message (got " + repr(err) + ")")
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PostToolUse", tool_name="Write",
+                     tool_input=dict(file_path=counters), cwd=root))
+            expect("mis-wired-event-exit", (rc, decision), (2, None))
+            # The envelope byte cap is pinned by a just-over-cap payload that would ALLOW if it
+            # were parsed (a Read call), so a lifted cap flips this vector to exit 0; a payload
+            # with no tool_name exits 2; and a nesting depth that overruns the parser's recursion
+            # reaches the crash backstop, which must exit 2, never a silent allow.
+            pad = "a" * (64 * 1024 * 1024)
+            rc, decision, _reason, _err = run_hook(raw=json.dumps(
+                dict(hook_event_name="PreToolUse", tool_name="Read",
+                     tool_input=dict(pad=pad), cwd="/")).encode("utf-8"))
+            expect("oversize-payload-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PreToolUse", tool_input=dict(), cwd="/"))
+            expect("no-tool-name-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PreToolUse", tool_name="", tool_input=None, cwd="/"))
+            expect("empty-tool-name-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(raw=b"[" * 200000)
+            expect("deep-nesting-backstop-exit", (rc, decision), (2, None))
+            # Malformed tool_input shapes take a structured deny, never a silent allow.
+            deny("write-null-toolinput-denied", payload("Write", None, root), "failing closed")
+            deny("bash-no-command-denied", payload("Bash", dict(), root), "failing closed")
+            # A control character inside a quoted span keeps a command non-pristine, so a writer
+            # spelling whose double-quoted title carries a literal newline still denies on its
+            # protected mention (disclosed over-refusal; a scan that admitted control characters
+            # into double quotes would let this ride the A1 allowance instead).
+            deny("bash-dq-newline-title-denied",
+                 payload("Bash", dict(command="opf record create --title " + chr(34) + "a"
+                                              + chr(10) + ".working" + chr(34)), root),
+                 "store tree")
+
+            # R6 roster fail-closed: once the adoption plan is unparseable, EVERY write under that
+            # root denies (the frozen roster cannot be computed), while A1 stays open for repair.
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write("this is not valid toml [[[\n")
+            deny("unreadable-plan-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                       content="x"), root), "failing closed")
+            deny("unreadable-plan-bash-fails-closed",
+                 payload("Bash", dict(command="touch docs/notes.md LEGACY.md"), root),
+                 "failing closed")
+            allow("unreadable-plan-opf-still-allowed",
+                  payload("Bash", dict(command="opf render --write --root ."), root))
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write(plan_text)
+            # R6 manifest fail-closed: an unparseable machine-store manifest denies writes under the
+            # root the same way.
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write("this is not valid toml [[[\n")
+            deny("unreadable-manifest-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                       content="x"), root), "failing closed")
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+
+            # R6 over every malformed, non-regular or unreadable roster shape the brief names: each
+            # one DENIES (cannot-evaluate), never an EMPTY protection set, and a FIFO yields a prompt
+            # structured deny (the roster opens O_NONBLOCK behind a regular-file check), never a
+            # stall. The probe target is the plan-frozen LEGACY.md: with the roster silently dropped
+            # it would be writable, so each vector fails without the fail-closed read.
+            plan_path = os.path.join(evidence, "plan.toml")
+            frozen_write = payload("Write", dict(file_path=os.path.join(root, "LEGACY.md"),
+                                                 content="x"), root)
+
+            def mutate_plan(label, build):
+                os.remove(plan_path)
+                build()
+                deny(label, frozen_write, "failing closed")
+                os.remove(plan_path)
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(plan_text)
+
+            mutate_plan("dangling-plan-symlink-fails-closed",
+                        lambda: os.symlink(os.path.join(evidence, "nowhere.toml"), plan_path))
+            if hasattr(os, "mkfifo"):
+                mutate_plan("fifo-plan-fails-closed", lambda: os.mkfifo(plan_path))
+
+            def write_plan(text):
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+
+            mutate_plan("plan-nonint-disposition-fails-closed",
+                        lambda: write_plan(plan_text.replace('"retire"', "42")))
+            mutate_plan("plan-cased-disposition-fails-closed",
+                        lambda: write_plan(plan_text.replace('"retire"', '"Retire"')))
+            mutate_plan("plan-missing-sources-fails-closed",
+                        lambda: write_plan(plan_text.replace("[[sources]]", "[[source]]")))
+            mutate_plan("plan-empty-source-path-fails-closed",
+                        lambda: write_plan(plan_text.replace('"LEGACY.md"', '""')))
+
+            unrelated_write = payload("Write", dict(
+                file_path=os.path.join(root, "docs", "notes.md"), content="x"), root)
+
+            def mutate_plan_unrelated(label, build):
+                """Like mutate_plan, but probes an UNRELATED write: these plans still carry the
+                frozen row (or a valid prefix), so only an R6 denial of the WHOLE root proves the
+                checked validation ran (the frozen probe would deny through the row anyway)."""
+                os.remove(plan_path)
+                build()
+                deny(label, unrelated_write, "failing closed")
+                os.remove(plan_path)
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(plan_text)
+
+            # The oversized plan carries a VALID format and sources prefix before its padding, so
+            # this vector pins the size bound ITSELF (an all-comment file would fail the format
+            # check first and mask a lifted bound).
+            mutate_plan_unrelated("oversized-plan-fails-closed",
+                                  lambda: write_plan(plan_text + "#" * (1024 * 1024 + 1) + "\n"))
+            mutate_plan_unrelated("plan-wrong-format-fails-closed",
+                                  lambda: write_plan(plan_text.replace("plan/v2", "plan/v9")))
+            # A migrate disposition freezes in place exactly like retire.
+            os.remove(plan_path)
+            write_plan(plan_text.replace('"LEGACY.md"', '"OLD.md"').replace('"retire"',
+                                                                            '"migrate"'))
+            deny("migrate-disposed-frozen-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "OLD.md"), content="x"), root),
+                 "frozen")
+            os.remove(plan_path)
+            write_plan(plan_text)
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                # A run directory whose mode forbids the search makes the plan entry unreadable
+                # (present but unprovable), which must deny, not read as an absent plan.
+                os.chmod(evidence, 0o600)
+                deny("unsearchable-run-dir-fails-closed", frozen_write, "failing closed")
+                os.chmod(evidence, 0o755)
+            # R6 manifest validation: a manifest that PARSES but does not declare the OPF
+            # standard ([opf] standard = "opf", spec 4.5) fails validation and denies every write
+            # under the root, never an empty view roster.
+            manifest_path = os.path.join(machine, "manifest.toml")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write("garbage = 1\n")
+            deny("invalid-manifest-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"),
+                         root), "failing closed")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "devprocess"\n')
+            deny("wrong-standard-manifest-fails-closed", unrelated_write, "failing closed")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            # R6 ambiguity: a SECOND machine-store manifest denies every write under the root.
+            second = os.path.join(root, _opf_store.WORKING_DIRNAME, "toml2")
+            os.makedirs(second)
+            with open(os.path.join(second, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "opf"\n')
+            deny("two-manifest-store-fails-closed", unrelated_write, "failing closed")
+            os.remove(os.path.join(second, "manifest.toml"))
+            os.rmdir(second)
+            os.remove(manifest_path)
+            os.symlink(os.path.join(machine, "nowhere.toml"), manifest_path)
+            deny("dangling-manifest-symlink-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
+                 "failing closed")
+            os.remove(manifest_path)
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            # An absent leaf under a real directory chain is absence, but a DANGLING INTERMEDIATE
+            # link is cannot-evaluate: a dangling run-directory symlink (its plan cannot be
+            # located), a dangling imported home and a dangling store tree each deny EVERY write
+            # under their root, never an absent (empty) roster.
+            dangling_run = os.path.join(root, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                        "adopt-20260101T000000Z-feedfeedfeedfeed")
+            os.symlink(os.path.join(basestr, "gone"), dangling_run)
+            deny("dangling-run-dir-fails-closed", unrelated_write, "failing closed")
+            os.remove(dangling_run)
+            root2 = os.path.join(basestr, "product2")
+            machine2 = os.path.join(root2, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(machine2)
+            with open(os.path.join(machine2, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10))
+            os.symlink(os.path.join(basestr, "gone"),
+                       os.path.join(root2, _opf_store.WORKING_DIRNAME, "imported"))
+            deny("dangling-imported-home-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root2, "notes.md"), content="x"),
+                         root2), "failing closed")
+            root3 = os.path.join(basestr, "product3")
+            os.makedirs(root3)
+            os.symlink(os.path.join(basestr, "gone"),
+                       os.path.join(root3, _opf_store.WORKING_DIRNAME))
+            deny("dangling-store-tree-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root3, "notes.md"), content="x"),
+                         root3), "failing closed")
+            # The frozen and view rosters match THROUGH a symlinked directory: a write through the
+            # REAL directory behind a symlinked roster component denies (each roster entry carries
+            # its realpath spelling beside its lexical one).
+            root4 = os.path.join(basestr, "product4")
+            machine4 = os.path.join(root4, _opf_store.WORKING_DIRNAME, "toml")
+            evidence4 = os.path.join(root4, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                     RUN_ID)
+            os.makedirs(machine4)
+            os.makedirs(evidence4)
+            os.makedirs(os.path.join(root4, "site_docs"))
+            with open(os.path.join(machine4, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.status]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10)
+                         + 'sources = ["worklog"]' + chr(10) + 'target = "docs/STATUS.md"'
+                         + chr(10))
+            with open(os.path.join(evidence4, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write('format = "opf.adoption.plan/v2"' + chr(10) + '[[sources]]' + chr(10)
+                         + 'path = "docs/OLD.md"' + chr(10) + 'digest = "sha256:' + "0" * 64
+                         + '"' + chr(10) + 'disposition = "retire"' + chr(10)
+                         + 'occupying = false' + chr(10))
+            for leaf in ("STATUS.md", "OLD.md"):
+                with open(os.path.join(root4, "site_docs", leaf), "w", encoding="utf-8") as fh:
+                    fh.write("fixture" + chr(10))
+            os.symlink(os.path.join(root4, "site_docs"), os.path.join(root4, "docs"))
+            deny("write-view-real-dir-denied",
+                 payload("Write", dict(file_path=os.path.join(root4, "site_docs", "STATUS.md"),
+                                       content="x"), root4), "opf render")
+            deny("edit-frozen-real-dir-denied",
+                 payload("Edit", dict(file_path=os.path.join(root4, "site_docs", "OLD.md"),
+                                      old_string="a", new_string="b"), root4), "frozen")
+            # ROUND 6 (QA round 6, D-DISCARD-SOUND-RULE): the hook decides PROVABLY PLAIN first and
+            # judges every other command coarsely (deny when the cwd or a literal path word lies in
+            # a product root, else allow). The three round-6 bypass reproductions each hid the
+            # protected path from the old sound scan; each now denies as not-provably-plain from a
+            # cwd inside the product, and each FAILS on the predecessor pin (where it allowed).
+            deny("bash-heredoc-unquoted-subst-denied",
+                 payload("Bash", dict(command="cat <<EOF" + chr(10) + "$(printf overwritten > .wor"
+                                              + chr(39) + chr(39) + "king/toml/counters.toml)"
+                                              + chr(10) + "EOF" + chr(10)), root), "product root")
+            deny("bash-commented-paren-subst-denied",
+                 payload("Bash", dict(command="echo " + chr(34) + "$(" + chr(35) + " )" + chr(10)
+                                              + "printf overwritten > .wor" + chr(39) + chr(39)
+                                              + "king/toml/counters.toml" + chr(10) + ")" + chr(34)),
+                         root), "product root")
+            deny("bash-linecont-ansic-denied",
+                 payload("Bash", dict(command="printf overwritten > $" + chr(92) + chr(10) + chr(39)
+                                              + ".wor" + chr(92) + "153ing/toml/counters.toml"
+                                              + chr(39)), root), "product root")
+            # A provably-plain command from inside a product that touches nothing protected still
+            # allows (the exact check); the same exotic forms from OUTSIDE every product allow too
+            # when no literal text of theirs reaches a product (round 8: the .working token
+            # anywhere, or a word or embedded spelling resolving into a product, still denies).
+            allow("bash-plain-unprotected-in-product-allowed",
+                  payload("Bash", dict(command="ls -la docs"), root))
+            allow("bash-exotic-outside-product-allowed",
+                  payload("Bash", dict(command="python3 -c " + chr(39) + "print(42)" + chr(39)),
+                          basestr))
+            allow("bash-substitution-outside-product-allowed",
+                  payload("Bash", dict(command="echo " + chr(34) + "$(date)" + chr(34)), basestr))
+            # A variable, an interpreter with inline code, an eval and the obsolete arithmetic
+            # form each make the command not provably plain, so from a product cwd each denies
+            # even with no protected token spelled literally (the recurring bypass class).
+            deny("bash-variable-in-product-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(123) + "HOME" + chr(125) + "/f"),
+                         root), "product root")
+            deny("bash-interp-inline-code-in-product-denied",
+                 payload("Bash", dict(command="python3 -c " + chr(39) + "open(1)" + chr(39)), root),
+                 "product root")
+            deny("bash-eval-in-product-denied",
+                 payload("Bash", dict(command="eval echo hi"), root), "product root")
+            deny("bash-obsolete-arith-in-product-denied",
+                 payload("Bash", dict(command="echo $[1 << 2]"), root), "product root")
+            # ROUND 7: a here-document of ANY kind (a quoted one fed to a non-interpreter included)
+            # carries an angle bracket and a newline, so it is not provably plain and denies from a
+            # product cwd (the disclosed over-refusal; it stays allowed outside every product).
+            deny("bash-quoted-heredoc-in-product-denied",
+                 payload("Bash", dict(command="cat > notes.txt <<" + chr(39) + "EOF" + chr(39)
+                                              + chr(10) + "a commit message" + chr(10) + "EOF"
+                                              + chr(10)), root), "product root")
+            # The coarse branch still protects the pack own tree (R8) even outside a product.
+            deny("bash-exotic-guard-pack-denied",
+                 payload("Bash", dict(command="sh -c " + chr(39) + "true" + chr(39) + " "
+                                              + str(hook)), basestr), "R8")
+            # ROUND 7 (QA round 7): ONE strict classifier, the shared plain-command specification,
+            # decides PROVABLY PLAIN on the raw string before any lexing. Its vector table is carried
+            # verbatim as rows (each asserts plain or not plain on the hook's own classifier), then
+            # the codex reproductions run end to end: a leading redirection and the command -p,
+            # env -i and exec -a prefixes each hid an interpreter from the old command-position
+            # tracking, so each was judged plain and ALLOWED on the predecessor pin; each now denies
+            # from a product cwd. A wrapper outside the deny list (eatmydata) and a git alias
+            # override running inline code (each plain by the lexical rules alone) take the coarse
+            # rule through the plain semantic check.
+            hook_spec = importlib.util.spec_from_file_location("_opf_claude_hook_classifier", hook)
+            hook_mod = importlib.util.module_from_spec(hook_spec)
+            hook_spec.loader.exec_module(hook_mod)
+            for cmd, want in (("git status", True),
+                              ("git commit -m " + chr(39) + "fix: a; b" + chr(39), True),
+                              ("ls -la docs/x.md", True),
+                              ("opf record --type finding", True),
+                              ("git log --output=f", True),
+                              ("git status; rm x", False),
+                              ("git $" + chr(39) + "re" + chr(92) + "x00set" + chr(39), False),
+                              ("git $" + chr(39) + "re" + chr(0) + "set" + chr(39), False),
+                              ("git commit -m " + chr(34) + "$(id)" + chr(34), False),
+                              ("python3 -c " + chr(39) + "print(1)" + chr(39), False),
+                              ("env GIT_DIR=x git log", False),
+                              ("GIT_DIR=x git log", False),
+                              ("git st*", False),
+                              ("git log " + chr(92) + chr(10), False),
+                              ("git log -" + chr(0x661), False),
+                              ("bash -c " + chr(39) + "x" + chr(39), False),
+                              ("xargs git reset", False),
+                              # The specification's 2026-10-06 revision: a command-word allowlist
+                              # (bare, or under /usr/bin, /bin, /usr/local/bin, /usr/sbin) and no
+                              # dollar sign, backquote, square bracket or backslash in single quotes.
+                              ("/usr/bin/python3.14 -c " + chr(39) + "x" + chr(39), False),
+                              ("python3.14 -c " + chr(39) + "x" + chr(39), False),
+                              ("awk -f p", False), ("sed -n p f", False),
+                              ("find . -delete", False), ("tar -xf a", False),
+                              ("sort -S 4K --compress-program=bash f", False),
+                              ("printf -v " + chr(39) + "a" + chr(91) + "$(x)" + chr(93) + chr(39)
+                               + " y", False),
+                              ("test -v " + chr(39) + "a" + chr(91) + "$(x)" + chr(93) + chr(39),
+                               False),
+                              ("./ls", False), ("/tmp/x/ls", False), ("nodejs -e x", False),
+                              ("/usr/lib/git-core/git-rm . -r -q", False),
+                              ("/usr/bin/ls docs", True), ("rm notes.txt", True)):
+                got = hook_mod._provably_plain(cmd) is not None
+                expect("spec-vector " + ascii(cmd), got, want)
+            for prefix in ("</dev/null", "command -p", "env -i", "exec -a harmless", "eatmydata"):
+                deny("bash-interp-prefix-" + prefix.split(" ")[0].strip("<").replace("/", "")
+                     + "-in-product-denied",
+                     payload("Bash", dict(command=prefix + " python3 -c " + chr(39) + "open("
+                                          + chr(34) + ".wor" + chr(34) + "+" + chr(34)
+                                          + "king/toml/counters.toml" + chr(34) + "," + chr(34)
+                                          + "w" + chr(34) + ")" + chr(39)), root),
+                     "product root")
+            deny("bash-git-alias-inline-code-in-product-denied",
+                 payload("Bash", dict(command="git -c " + chr(39) + "alias.x=!python3 -c "
+                                      + chr(34) + "open(1)" + chr(34) + chr(39) + " x"), root),
+                 "product root")
+            # The double-quote escape decoder of the coarse pass, pinned DISCRIMINATINGLY: the
+            # product root's own directory name carries a double quote, so only the decoded word
+            # (an escaped quote inside a double-quoted span) lies under it; a pass that keeps the
+            # backslash or ends the span early names a path under no product root and allows.
+            dq_root = os.path.join(basestr, "pq" + chr(34) + "r")
+            os.makedirs(os.path.join(dq_root, _opf_store.WORKING_DIRNAME))
+            deny("bash-dq-escaped-quote-root-denied",
+                 payload("Bash", dict(command="printf x > " + chr(34) + basestr + "/pq" + chr(92)
+                                      + chr(34) + "r/f" + chr(34)), basestr), "product root")
+            # ROUND 8 (QA round 8): an argument word can carry a protected path INSIDE itself, glued
+            # to a short-option run (sort -oTODO.md, -o/abs/TODO.md) or after a delimiter
+            # (of=alias, --target-directory=/abs/.working/x, a quoted command string's redirection
+            # target, tar -C/abs/root), a directory a word names can be the base another relative
+            # word resolves against (git -C dir), and the inherited git environment can redirect
+            # git's authority (GIT_WORK_TREE, GIT_DIR) or name a command (GIT_EXTERNAL_DIFF). Each
+            # vector below ALLOWED on the predecessor pin 4bd02ca5 and denies now.
+            elsewhere = os.path.join(basestr, "elsewhere")
+            os.makedirs(elsewhere)
+            alias = os.path.join(root, "alias")
+            os.symlink(counters, alias)
+            deny("bash-r8-glued-view-in-product-denied",
+                 payload("Bash", dict(command="ls -ITODO.md /dev/null"), root), "declared view")
+            deny("bash-r8-glued-frozen-in-product-denied",
+                 payload("Bash", dict(command="ls -ILEGACY.md /dev/null"), root), "plan-frozen")
+            deny("bash-r8-glued-abs-view-outside-denied",
+                 payload("Bash", dict(command="ls -I" + os.path.join(root, "TODO.md")
+                                      + " /dev/null"), elsewhere), "declared view")
+            deny("bash-r8-delimited-store-alias-in-product-denied",
+                 payload("Bash", dict(command="dd if=/dev/zero of=alias bs=1 count=1"), root),
+                 "store tree")
+            deny("bash-r8-coarse-target-dir-store-outside-denied",
+                 payload("Bash", dict(command="cp /dev/null --target-directory=" + machine
+                                      + "; true"), elsewhere), "store token")
+            deny("bash-r8-coarse-cmdstring-store-outside-denied",
+                 payload("Bash", dict(command="bash -c " + chr(39) + "echo x > " + counters
+                                      + chr(39)), elsewhere), "store token")
+            deny("bash-r8-coarse-glued-root-outside-denied",
+                 payload("Bash", dict(command="tar -xf /dev/null -C" + root), elsewhere),
+                 "product root")
+            deny("bash-r8-git-C-base-view-outside-denied",
+                 payload("Bash", dict(command="git -C " + basestr
+                                      + " diff --output=product/TODO.md"), elsewhere),
+                 "declared view")
+            deny("bash-r8-relative-climb-view-outside-denied",
+                 payload("Bash", dict(command="cp /dev/null ../product/TODO.md"), elsewhere),
+                 "declared view")
+            deny("bash-r8-ambient-work-tree-view-outside-denied",
+                 payload("Bash", dict(command="git checkout -- product/TODO.md"), elsewhere),
+                 "declared view", env=dict(GIT_WORK_TREE=basestr))
+            deny("bash-r8-ambient-git-dir-store-outside-denied",
+                 payload("Bash", dict(command="git status"), elsewhere), "store tree",
+                 env=dict(GIT_DIR=os.path.join(root, _opf_store.WORKING_DIRNAME, "g")))
+            deny("bash-r8-ambient-external-diff-in-product-denied",
+                 payload("Bash", dict(command="git diff"), root), "product root",
+                 env=dict(GIT_EXTERNAL_DIFF="helper"))
+            allow("bash-r8-ambient-noop-editor-in-product-allowed",
+                  payload("Bash", dict(command="git status"), root),
+                  env=dict(GIT_EDITOR="true", GIT_PAGER="cat"))
+            os.remove(alias)
+            # ROUND 8 (QA round 8, claude medium 3 and codex medium 1): one DISCRIMINATING vector
+            # per pinned behaviour, each denied only by that behaviour (each was verified to ALLOW
+            # under a mutant of the hook with that behaviour alone removed): the coarse cwd rule
+            # (no word of the command reaches the product), the git -c override, a code-running git
+            # subcommand, each command-naming git option, the leading-exclamation and the
+            # interpreter command-string checks, the square-bracket, tilde, hash and exclamation
+            # entries of the forbidden set, and the command-word allowlist's exact (case-sensitive)
+            # match (LS is not ls, so it is not plain).
+            for label, cmd in (
+                    ("coarse-cwd-only", "/bin/echo </dev/null"),
+                    ("git-config-override", "git -c core.pager=cat status"),
+                    ("git-code-subcommand", "git config alias.x status"),
+                    ("git-upload-pack-option", "git fetch --upload-pack=helper origin"),
+                    ("git-rebase-exec", "git rebase -x helper main"),
+                    ("git-clone-upload-pack", "git clone -u helper src dst"),
+                    ("bang-command-string", "git log " + chr(39) + "--pretty=!helper x" + chr(39)),
+                    ("interp-command-string", "git commit -m " + chr(39) + "sh -c helper" + chr(39)),
+                    ("forbidden-brackets", "cp /dev/null TODO.m" + chr(91) + "d" + chr(93)),
+                    ("forbidden-tilde", "cp /dev/null " + chr(126) + "/notes"),
+                    ("forbidden-hash", "ls docs " + chr(35) + "x"),
+                    ("forbidden-bang", "ls docs x" + chr(33)),
+                    ("allowlist-exact-case", "LS docs")):
+                deny("bash-r8-discriminating-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 9 (QA round 9): each vector below ALLOWED on the predecessor pin 7a7c8fde and
+            # denies now. (1) A product directory the session's own user owns but has made
+            # unsearchable hid its store from discovery (os.path.isdir read the permission error as
+            # absence), so a command that unlocks it and then writes was allowed; the store probe
+            # now keeps the error and fails closed. (2) A quoted tilde, which bash keeps literal,
+            # was expanded against HOME: the python3 writer launch blessed a planted `~` directory
+            # under the cwd, and a plain or coarse word through a `~` symlink was judged at HOME;
+            # A1 now resolves the script word literally and every other spelling is judged in both
+            # readings. (3) A directory operand reached a protected file inside it: the copy,
+            # install and move INTO a directory are judged at <directory>/<basename>, and a
+            # removing, moving or re-permissioning command (and git rm, mv, clean, checkout and
+            # restore) denies on a directory operand holding a protected path, the registration
+            # directory included. (4) An absolute GIT_TRACE* value is a file git writes.
+            r9_mode = os.stat(root).st_mode & 0o7777
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                os.chmod(root, 0)
+                try:
+                    deny("bash-r9-unsearchable-root-unlock-then-write-denied",
+                         payload("Bash", dict(command="chmod u+rwx " + root + "; printf x > "
+                                              + os.path.join(root, "TODO.md")), elsewhere),
+                         "not searchable")
+                    deny("write-r9-unsearchable-root-view-denied",
+                         payload("Write", dict(file_path=os.path.join(root, "TODO.md"),
+                                               content="x"), elsewhere), "not searchable")
+                finally:
+                    os.chmod(root, r9_mode)
+            allow("bash-r9-absent-directory-allowed",
+                  payload("Bash", dict(command="ls " + os.path.join(elsewhere, "missing", "x")),
+                          elsewhere))
+            repo_root = str(Path(__file__).resolve().parent.parent.parent)
+            planted = os.path.join(root, "~", "opf", "tools")
+            os.makedirs(planted)
+            with open(os.path.join(planted, "opf.py"), "w", encoding="utf-8") as fh:
+                fh.write("planted\n")
+            deny("bash-r9-a1-quoted-tilde-writer-denied",
+                 payload("Bash", dict(command="python3 " + chr(39) + "~/opf/tools/opf.py" + chr(39)
+                                      + " record task x"), root), "product root",
+                 env=dict(HOME=repo_root))
+            shutil.rmtree(os.path.join(root, "~"))
+            os.symlink("docs", os.path.join(root, "~"))
+            deny("bash-r9-plain-quoted-tilde-view-denied",
+                 payload("Bash", dict(command="cp /dev/null " + chr(39) + "~/STATUS.md" + chr(39)),
+                         root), "declared view", env=dict(HOME=elsewhere))
+            os.remove(os.path.join(root, "~"))
+            os.symlink(root, os.path.join(elsewhere, "~"))
+            deny("bash-r9-coarse-quoted-tilde-view-denied",
+                 payload("Bash", dict(command="printf x > " + chr(39) + "~/TODO.md" + chr(39)),
+                         elsewhere), "product root", env=dict(HOME=basestr))
+            os.remove(os.path.join(elsewhere, "~"))
+            stage = os.path.join(basestr, "stage")
+            os.makedirs(os.path.join(stage, "docs"))
+            for rel in ("STATUS.md", "notes.md", os.path.join("docs", "STATUS.md")):
+                with open(os.path.join(stage, rel), "w", encoding="utf-8") as fh:
+                    fh.write("staged\n")
+            staged = os.path.join(stage, "STATUS.md")
+            deny("bash-r9-cp-into-view-directory-denied",
+                 payload("Bash", dict(command="cp " + staged + " docs"), root), "declared view")
+            deny("bash-r9-cp-t-view-directory-denied",
+                 payload("Bash", dict(command="cp -t docs " + staged), root), "declared view")
+            deny("bash-r9-ln-into-view-directory-denied",
+                 payload("Bash", dict(command="ln " + staged + " docs/"), root),
+                 "declared view")
+            deny("bash-r9-mv-into-abs-view-directory-outside-denied",
+                 payload("Bash", dict(command="mv " + staged + " " + os.path.join(root, "docs")),
+                         elsewhere), "STATUS.md")
+            deny("bash-r9-cp-r-directory-over-views-denied",
+                 payload("Bash", dict(command="cp -r " + os.path.join(stage, "docs") + " ."),
+                         root), "holds the protected path")
+            deny("bash-r9-rm-r-view-directory-denied",
+                 payload("Bash", dict(command="rm -r docs"), root), "holds the protected path")
+            deny("bash-r9-git-rm-r-view-directory-denied",
+                 payload("Bash", dict(command="git rm -r docs"), root), "rewrites the working tree")
+            os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+            deny("bash-r9-rm-r-registration-directory-denied",
+                 payload("Bash", dict(command="rm -r .claude"), root), "holds the protected path")
+            allow("bash-r9-cp-free-name-into-directory-allowed",
+                  payload("Bash", dict(command="cp " + os.path.join(stage, "notes.md") + " docs"),
+                          root))
+            allow("bash-r9-ls-view-directory-allowed",
+                  payload("Bash", dict(command="ls docs"), root))
+            deny("bash-r9-ambient-git-trace-view-outside-denied",
+                 payload("Bash", dict(command="git status"), elsewhere), "declared view",
+                 env=dict(GIT_TRACE=os.path.join(root, "TODO.md")))
+            allow("bash-r9-ambient-git-trace-flag-allowed",
+                  payload("Bash", dict(command="git status"), elsewhere), env=dict(GIT_TRACE="1"))
+            # ROUND 10 (QA round 10, ruling D-RESCOPES-A): the container rule kept losing to
+            # spelling, so it no longer parses toward completeness. (1) A directory-plus-basename
+            # join is container-checked even when another word already resolves to it (one extra
+            # word spelling the joined directory, a cp backup suffix or a second operand, hid it).
+            # (2) git's subcommand is recognized only through a small allowlisted global-option
+            # grammar: an unlisted global option (--attr-source, --shallow-file) is NOT plain, so it
+            # takes the coarse rule and denies from a product cwd. (3) Round 11: a wrapper word
+            # (setarch) is off the command-word allowlist, and a pathspec magic word under a git
+            # work-tree subcommand denies through the git work-tree rule (bound product root).
+            # Each reproduction below ALLOWED on the predecessor pin dd48a8d5 and denies now.
+            os.makedirs(os.path.join(stage, ".claude"))
+            with open(os.path.join(stage, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            src_dir = os.path.join(root, "src")
+            os.makedirs(src_dir)
+            stage_docs = os.path.join(stage, "docs")
+            for label, cmd in (
+                    ("cp-suffix-long-over-views", "cp -r --suffix=docs " + stage_docs + " ."),
+                    ("cp-suffix-short-over-views", "cp -r -S docs " + stage_docs + " ."),
+                    ("cp-second-operand-over-views", "cp -r " + stage_docs + " docs ."),
+                    ("cp-suffix-over-registration", "cp -r -S .claude "
+                     + os.path.join(stage, ".claude") + " .")):
+                deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "holds the protected path")
+            for label, cmd, cwd in (
+                    ("git-attr-source-checkout", "git --attr-source HEAD checkout HEAD^ -- .", root),
+                    ("git-attr-source-clean", "git --attr-source HEAD clean -fdx", root),
+                    ("git-attr-source-rm", "git --attr-source HEAD rm -rq docs", root),
+                    ("git-shallow-file-clean", "git --shallow-file x clean -fdx", root),
+                    ("git-attr-source-config-override",
+                     "git --attr-source HEAD -c diff.external=rm diff", root),
+                    ("git-attr-source-status", "git --attr-source HEAD status", root),
+                    ("wrapper-rm-r-views", "setarch x86_64 rm -r docs", root),
+                    ("wrapper-git-clean-cwd", "setarch x86_64 git clean -fdx", root),
+                    ("wrapper-git-attr-source-clean",
+                     "setarch x86_64 git --attr-source HEAD clean -fdx", root),
+                    ("git-restore-top-magic", "git restore -s HEAD^ " + chr(39) + ":" + chr(40)
+                     + "top" + chr(41) + chr(39), src_dir),
+                    ("git-clean-top-magic", "git clean -fdx " + chr(39) + ":" + chr(40) + "top"
+                     + chr(41) + chr(39), src_dir),
+                    ("git-rm-slash-magic", "git rm -rq " + chr(39) + ":/docs" + chr(39), src_dir),
+                    ("git-rm-pathspec-from-file", "git rm --pathspec-from-file=list", src_dir)):
+                deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "product root")
+            # The grammar's own allowances (each denies under a mutant that drops the matching
+            # entry): a listed global flag, a separate and a glued value global before an allowed
+            # subcommand, and an unlisted global option in a session bound to no product root
+            # (never over-denied).
+            for label, cmd, cwd in (
+                    ("git-no-pager-log", "git --no-pager log", root),
+                    ("git-C-value-global-status", "git -C src status", root),
+                    ("git-work-tree-glued-status", "git --work-tree=. status", root),
+                    ("git-attr-source-unbound", "git --attr-source HEAD clean -fdx", elsewhere)):
+                allow("bash-r10-" + label + "-allowed", payload("Bash", dict(command=cmd), cwd))
+            # The container verbs (a literal list here, never the hook's constant, so a mutant
+            # shrinking the constant cannot shrink the test with it): rm, rmdir, mv and chmod lead a
+            # plain command and take the container rule, one vector each; every other remover,
+            # mover or re-permissioner is off the command-word allowlist (round 11) and denies as
+            # not plain from a product cwd. A directory holding the pack own tree is a container.
+            for verb in ("rm", "rmdir", "mv", "chmod"):
+                deny("bash-r10-container-verb-" + verb + "-denied",
+                     payload("Bash", dict(command=verb + " docs"), root),
+                     "holds the protected path")
+            for verb in ("unlink", "shred", "srm", "wipe", "trash", "trash-put", "chown", "chgrp",
+                         "setfacl", "chattr", "rename", "file-rename", "prename"):
+                deny("bash-r11-unlisted-remover-" + verb + "-denied",
+                     payload("Bash", dict(command=verb + " docs"), root), "product root")
+            deny("bash-r10-container-pack-tree-outside-denied",
+                 payload("Bash", dict(command="chmod -R u+w " + os.path.join(repo_root, "opf")),
+                         elsewhere), "holds the protected path")
+            # ROUND 11 (QA round 11; the git work-tree rule): in a bound product a git subcommand
+            # that rewrites the working tree or the index denies whatever its pathspec spelling (git
+            # expands a single-quoted glob such as '../*' itself), one vector per subcommand (a
+            # literal list here, never the hook's constant), each run from a directory holding
+            # nothing protected; a dashed git builtin is off the command-word allowlist; a dry run
+            # of git rm, mv or clean read through the strict dry-run grammar allows, and each
+            # grammar branch is pinned by a vector that a mutant dropping that branch flips; every
+            # other git subcommand allows; a read-only plain command whose argument word names a
+            # container program, git or an interpreter, or names a directory beside a joinable
+            # name, allows; and a file-tool payload carrying a path-like field the hook does not
+            # evaluate denies. On the predecessor pin ae34350a every -denied git, glob, dashed,
+            # rename and path-field vector below ALLOWED, the four dry-run grammar pins and the
+            # other unlisted removers denied by another rule, every -allowed dry-run, joinable,
+            # argument-word and pathspec-magic vector DENIED, and the git commit, add, push, fetch
+            # and show, git status and documented MultiEdit allowances already allowed (they pin
+            # against over-denial).
+            for sub in ("checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull",
+                        "rebase", "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree",
+                        "checkout-index", "worktree"):
+                deny("bash-r11-git-" + sub + "-free-dir-denied",
+                     payload("Bash", dict(command="git " + sub + " x"), src_dir),
+                     "rewrites the working tree")
+            # ROUND 13: the plain work-tree and index writers found since (a literal list here,
+            # never the hook's constant); on the predecessor pin 25993a15 each ALLOWED.
+            for sub in ("sparse-checkout", "update-index", "merge-recursive", "merge-resolve",
+                        "merge-octopus", "merge-subtree", "merge-index", "merge-one-file", "rerere",
+                        "quiltimport"):
+                deny("bash-r13-git-" + sub + "-free-dir-denied",
+                     payload("Bash", dict(command="git " + sub + " x"), src_dir),
+                     "rewrites the working tree")
+            deny("bash-r13-git-sparse-checkout-set-free-dir-denied",
+                 payload("Bash", dict(command="git sparse-checkout set --no-cone src/"), src_dir),
+                 "rewrites the working tree")
+            sq = chr(39)
+            for label, cmd, cwd in (
+                    ("git-rm-glob", "git rm -r -q " + sq + "../" + chr(42) + sq, src_dir),
+                    ("git-checkout-view-glob", "git checkout HEAD -- " + sq + "../d" + chr(42) + sq,
+                     src_dir),
+                    ("git-restore-view-glob", "git restore -s HEAD " + sq + "../d" + chr(42) + sq,
+                     src_dir),
+                    ("git-checkout-frozen-glob", "git checkout HEAD -- " + sq + "../L" + chr(42)
+                     + sq, src_dir),
+                    ("git-C-glob-unbound-cwd", "git -C " + src_dir + " rm -r -q " + sq + "../"
+                     + chr(42) + sq, elsewhere),
+                    ("git-clean-short-letter-outside-grammar", "git clean -e x -n", root),
+                    ("git-rm-negated-dry-run", "git rm --no-dry-run -n -r docs", root),
+                    ("git-rm-dry-run-after-dashdash", "git rm -r -- -n docs", root),
+                    ("git-rm-abbreviated-dry-run", "git rm --dry -r docs", root)):
+                deny("bash-r11-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "rewrites the working tree")
+            for label, cmd in (("rm", "/usr/lib/git-core/git-rm . -r -q"),
+                               ("checkout", "/usr/lib/git-core/git-checkout HEAD ."),
+                               ("mv", "/usr/lib/git-core/git-mv docs dox"),
+                               ("restore", "git-restore docs")):
+                deny("bash-r11-dashed-git-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            for label, cmd in (
+                    ("git-clean-dry-run", "git clean -n"),
+                    ("git-clean-dry-run-cluster", "git clean -nfdx"),
+                    ("git-clean-dry-run-long", "git clean --dry-run --force"),
+                    ("git-rm-dry-run", "git rm -n notes.txt"),
+                    ("git-rm-dry-run-dashdash", "git rm -n -- notes.txt"),
+                    ("git-mv-dry-run", "git mv -n notes.txt n2.txt"),
+                    ("git-commit", "git commit -m " + sq + "msg" + sq),
+                    ("git-add", "git add notes.txt"),
+                    ("git-add-top-magic", "git add " + sq + ":/docs" + sq),
+                    ("git-push", "git push"),
+                    ("git-fetch", "git fetch"),
+                    ("git-show", "git show HEAD"),
+                    ("git-log-joinable-dirs", "git log -- docs ."),
+                    ("ls-joinable-dirs", "ls docs ."),
+                    ("du-joinable-dirs", "du -sh docs ."),
+                    ("grep-container-word", "grep -rn mv docs"),
+                    ("cat-container-stem", "cat rm-old.txt docs"),
+                    ("ls-git-word", "ls git -la"),
+                    ("grep-git-word", "grep git -r src"),
+                    ("grep-interpreter-word", "grep -rn python src")):
+                allow("bash-r11-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            # Outside every bound product the pack own tree (R8) still bounds a git work-tree
+            # rewrite: from a subdirectory of the pack's own repository, the repository top above
+            # the cwd holds the pack tree (pinned where the checkout carries its .git entry).
+            pack_sub = os.path.join(repo_root, "docs")
+            if os.path.isdir(pack_sub) and os.path.lexists(os.path.join(repo_root, ".git")):
+                deny("bash-r11-git-checkout-pack-repo-top-denied",
+                     payload("Bash", dict(command="git checkout x"), pack_sub),
+                     "holds the protected path")
+                allow("bash-r11-git-status-pack-repo-allowed",
+                      payload("Bash", dict(command="git status"), pack_sub))
+                # ROUND 13: a git work-tree subcommand that runs code (bisect, submodule,
+                # filter-branch) is not plain, and the coarse rule applies the same repository-top
+                # check; the submodule read forms stay allowed. On the predecessor pin 25993a15
+                # each -denied vector here ALLOWED.
+                for label, cmd in (("bisect-start", "git bisect start"),
+                                   ("bisect-reset", "git bisect reset"),
+                                   ("submodule-update", "git submodule update --init"),
+                                   ("submodule-deinit", "git submodule deinit -f x"),
+                                   ("submodule-foreach", "git submodule foreach true"),
+                                   ("submodule-absorbgitdirs", "git submodule absorbgitdirs"),
+                                   ("submodule-quiet-update", "git submodule -q update"),
+                                   ("submodule-bare", "git submodule"),
+                                   ("filter-branch", "git filter-branch -f HEAD")):
+                    deny("bash-r13-git-" + label + "-pack-repo-top-denied",
+                         payload("Bash", dict(command=cmd), pack_sub), "holds the protected path")
+                for label, cmd in (("submodule-status", "git submodule status"),
+                                   ("submodule-quiet-summary", "git submodule --quiet summary")):
+                    allow("bash-r13-git-" + label + "-pack-repo-allowed",
+                          payload("Bash", dict(command=cmd), pack_sub))
+            # ROUND 14 (QA round 12): a cp, mv or ln (and install, which is not plain) carrying ANY
+            # backup option denies in a bound product with a named reason, since the backup renames
+            # an existing destination to that destination plus a suffix no word spells (cp
+            # --backup=simple --suffix=.md notes.txt docs/STATUS overwrites the view docs/STATUS.md;
+            # coreutils 9.7 confirmed for cp, mv and ln); ln with one operand links it into the cwd
+            # under its basename; git submodule status and summary are plain read forms inside a
+            # bound product. On the predecessor pin 7718fd29 every -denied backup and ln vector
+            # below ALLOWED (install denied by the coarse rule, unnamed), the two submodule
+            # read-form vectors the QA named DENIED, and the two cp -t vectors (pinning the
+            # round-9 joins the class review checked) already denied.
+            for label, cmd in (
+                    ("cp-backup-suffix", "cp --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("mv-backup-suffix", "mv --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("ln-backup-suffix", "ln -f --backup=simple --suffix=.md notes.txt docs/STATUS"),
+                    ("cp-short-b", "cp -b notes.txt n2.txt"),
+                    ("cp-short-S-separate", "cp -S .md notes.txt docs/STATUS"),
+                    ("cp-cluster-bS-glued", "cp -fbS.md notes.txt docs/STATUS"),
+                    ("cp-abbreviated-longs", "cp --back --suf=.md notes.txt docs/STATUS"),
+                    ("mv-suffix-separate", "mv --suffix .md notes.txt docs/STATUS"),
+                    ("ln-backup-numbered", "ln -s --backup=numbered notes.txt n2.txt"),
+                    ("cp-b-after-dashdash", "cp -t docs -- -b notes.txt"),
+                    ("install-backup-suffix", "install -b -S .md notes.txt docs/STATUS")):
+                deny("bash-r14-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "backup option")
+            deny("bash-r14-cp-backup-absolute-operand-denied",
+                 payload("Bash", dict(command="cp --backup=simple --suffix=.md notes.txt "
+                                      + os.path.join(root, "docs", "STATUS")), elsewhere),
+                 "backup option")
+            allow("bash-r14-cp-backup-unbound-allowed",
+                  payload("Bash", dict(command="cp --backup=simple --suffix=.md a b"), elsewhere))
+            allow("bash-r14-cp-plain-allowed",
+                  payload("Bash", dict(command="cp notes.txt n2.txt"), root))
+            for label, cmd in (("ln-single-operand", "ln -f notes/STATUS.md"),
+                               ("ln-s-single-operand", "ln -sf /elsewhere/STATUS.md")):
+                deny("bash-r14-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), os.path.join(root, "docs")),
+                     "declared view")
+            for label, cmd in (("cp-t-joined", "cp -t docs notes/STATUS.md"),
+                               ("cp-target-directory-glued",
+                                "cp --target-directory=docs notes/STATUS.md")):
+                deny("bash-r14-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "declared view")
+            for label, cmd in (("submodule-status", "git submodule status"),
+                               ("submodule-quiet-summary", "git submodule --quiet summary"),
+                               ("submodule-q-status-recursive", "git submodule -q status --recursive")):
+                allow("bash-r14-git-" + label + "-bound-allowed",
+                      payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("submodule-update", "git submodule update --init"),
+                               ("submodule-quiet-foreach", "git submodule --quiet foreach true")):
+                deny("bash-r14-git-" + label + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 15 (PD-427-GIT-SCOPE): git help forms that only print take the exact path
+            # check and allow in a bound product (each DENIED on the predecessor pin 23e6f3de);
+            # a viewer option (-w, --web, -i, --info), -m, a --no- viewer negation, an
+            # abbreviation and a short-option cluster keep git help not plain, so each denies.
+            for label, cmd in (("no-pager-help-a", "git --no-pager help -a"),
+                               ("help-all-verbose", "git help --all --verbose"),
+                               ("help-g", "git help -g"),
+                               ("help-guides", "git help --guides"),
+                               ("help-config", "git help --config"),
+                               ("help-c", "git help -c"),
+                               ("help-command-name", "git help log"),
+                               ("help-dashdash-name", "git help -- log")):
+                allow("bash-r15-git-" + label + "-bound-allowed",
+                      payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("help-w", "git help -w log"),
+                               ("help-web", "git help --web log"),
+                               ("help-i", "git help -i log"),
+                               ("help-info", "git help --info log"),
+                               ("help-m", "git help -m log"),
+                               ("help-no-man", "git help --no-man log"),
+                               ("help-abbreviated-web", "git help --we log"),
+                               ("help-cluster-aw", "git help -aw")):
+                deny("bash-r15-git-" + label + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 16 (QA round 14): cp --parents writes each source's WHOLE spelling under the
+            # directory (GNU coreutils 9.7: cp --parents /abs/src.txt docs writes
+            # docs/abs/src.txt), so an absolute source lands below it; and a git subcommand that
+            # writes a file whose name it constructs or an option names (git format-patch -1 HEAD
+            # writes 0001-<subject>.patch into the cwd) denies when that file lands in a product
+            # root, unless it writes to standard output or outside every product root. The direct
+            # Write control denies the same view. On the predecessor pin 268c1920 every -denied
+            # vector in this block but that control ALLOWED.
+            deny("write-r16-parents-view-control-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "STATUS.md"),
+                                       content="x"), root), "declared-view")
+            for label, cmd, where in (
+                    ("cp-parents-absolute", "cp --parents /docs//STATUS.md " + root, elsewhere),
+                    ("cp-parents-abbreviated", "cp --par /docs//STATUS.md " + root, elsewhere),
+                    ("cp-parents-target-directory",
+                     "cp --parents -t " + root + " /docs//STATUS.md", elsewhere),
+                    ("cp-parents-absolute-dot-segment",
+                     "cp --parents /docs/./STATUS.md " + root, elsewhere),
+                    ("cp-parents-absolute-climb", "cp --parents /../product/docs/STATUS.md .",
+                     elsewhere)):
+                deny("bash-r16-" + label + "-denied", payload("Bash", dict(command=cmd), where),
+                     "declared view")
+            # The join of a dot spelling under the directory is that directory, judged as a
+            # container (fail closed: the dot may be a recursive source), so a --parents command
+            # naming the product root as its destination denies by the container check.
+            deny("bash-r16-cp-parents-dot-destination-container-denied",
+                 payload("Bash", dict(command="cp --parents /docs//STATUS.md ."), root),
+                 "holds the protected path")
+            deny("bash-r16-cp-parents-not-plain-climb-denied",
+                 payload("Bash", dict(command="cp --parents /../product/docs/STATUS.md .; true"),
+                         elsewhere), "product root")
+            deny("bash-r16-cp-parents-past-word-budget-denied",
+                 payload("Bash", dict(command="cp --parents " + "a " * 520 + "."), root),
+                 "--parents")
+            allow("bash-r16-cp-parents-unprotected-allowed",
+                  payload("Bash", dict(command="cp --parents notes.txt " + elsewhere), root))
+            for label, cmd in (
+                    ("format-patch-cwd", "git format-patch -1 HEAD"),
+                    ("format-patch-o-docs", "git format-patch -1 -o docs"),
+                    ("format-patch-output-dir-abbreviated", "git format-patch -1 --output-dir=docs"),
+                    ("diff-output-glued", "git diff --output=out.patch"),
+                    ("log-output-separate", "git log --output out.txt"),
+                    ("show-output", "git show --output=out.txt HEAD"),
+                    ("range-diff-output", "git range-diff --output=out.txt a...b"),
+                    ("archive-o", "git archive -o out.tar HEAD"),
+                    ("bundle-create", "git bundle create out.bundle HEAD"),
+                    ("bundle-create-unknown-option", "git bundle create --zz out.bundle HEAD"),
+                    ("bugreport", "git bugreport"),
+                    ("diagnose", "git diagnose"),
+                    ("pack-objects-base-name", "git pack-objects pk"),
+                    ("index-pack", "git index-pack x.pack"),
+                    ("mailsplit-o-glued", "git mailsplit -omail box"),
+                    ("fast-export-marks", "git fast-export --export-marks=marks HEAD"),
+                    ("gc-expire-to", "git gc --expire-to=old"),
+                    ("commit-graph-object-dir", "git commit-graph write --object-dir objs"),
+                    ("clone-derived-name", "git clone https://example.invalid/r.git")):
+                deny("bash-r16-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "constructs")
+            deny("bash-r16-git-format-patch-o-product-from-outside-denied",
+                 payload("Bash", dict(command="git format-patch -1 -o "
+                                      + os.path.join(root, "docs")), elsewhere), "constructs")
+            # ROUND 17 (QA round 15): the round-16 --stdout and output-location exemptions were
+            # decided by option membership, and git 2.53 writes the patch file for format-patch -1
+            # HEAD --stdout --no-stdout and --subject-prefix --stdout (and the pack for
+            # pack-objects --stdout --no-stdout pack). In a bound product a constructing
+            # subcommand now denies whatever its options and an output option denies wherever its
+            # value points (disclosed over-refusal); a lone -- no longer ends the option scan (git
+            # fast-export --refspec -- --export-marks=mk HEAD writes mk). Only the exact three
+            # words git <subcommand> -h are exempt. On the pin 85a2cd7c every -denied vector in
+            # this block but the git clone -h x control ALLOWED, and every -h -allowed vector
+            # DENIED.
+            for label, cmd in (
+                    ("format-patch-stdout-negated", "git format-patch -1 HEAD --stdout --no-stdout"),
+                    ("format-patch-stdout-consumed",
+                     "git format-patch -1 HEAD --subject-prefix --stdout"),
+                    ("pack-objects-stdout-negated", "git pack-objects --stdout --no-stdout pack"),
+                    ("format-patch-stdout", "git format-patch -1 --stdout"),
+                    ("format-patch-o-outside", "git format-patch -1 -o " + elsewhere),
+                    ("bundle-create-outside",
+                     "git bundle create " + os.path.join(elsewhere, "x.bundle") + " HEAD"),
+                    ("bundle-create-stdout", "git bundle create - HEAD"),
+                    ("pack-objects-stdout", "git pack-objects --stdout"),
+                    ("log-output-outside", "git log --output=" + os.path.join(elsewhere, "x")),
+                    ("fast-export-marks-after-dashdash",
+                     "git fast-export --refspec -- --export-marks=mk HEAD"),
+                    ("clone-h-operand", "git clone -h x"),
+                    ("format-patch-h-stdout", "git format-patch -h --stdout")):
+                deny("bash-r17-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "constructs")
+            for label, cmd in (("clone-h", "git clone -h"),
+                               ("format-patch-h", "git format-patch -h"),
+                               ("bugreport-h", "git bugreport -h"),
+                               ("diagnose-h", "git diagnose -h")):
+                allow("bash-r17-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            for label, cmd in (
+                    ("archive-stdout", "git archive HEAD"),
+                    ("log-oneline", "git log --oneline"),
+                    ("diff-output-indicator", "git diff --output-indicator-new=x")):
+                allow("bash-r16-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            allow("bash-r16-git-format-patch-outside-allowed",
+                  payload("Bash", dict(command="git format-patch -1 HEAD"), elsewhere))
+            # ROUND 18 (QA round 16): git unpack-file writes a random .merge_file_XXXXXX into the
+            # work-tree top (git 2.53, observed in a scratch repository) and takes no output
+            # option, so it joins the constructing subcommands; and the command-naming git options
+            # are scoped by subcommand, so -O (an ordering file git diff, log and show read) allows
+            # while git grep -O, its glued and clustered forms and an abbreviated long option git
+            # accepts (git grep --open=cmd, git fetch --upload-p=cmd, both observed to run cmd)
+            # deny. On the pin 6812a358 the unpack-file, grep --open, grep -iOcmd and fetch
+            # --upload-p vectors ALLOWED and the three ordering-file vectors DENIED.
+            deny("bash-r18-git-unpack-file-denied",
+                 payload("Bash", dict(command="git unpack-file "
+                                      "6e86b48192b510d49b3484bc5f9079bd1c33c4ea"), root),
+                 "constructs")
+            allow("bash-r18-git-unpack-file-h-allowed",
+                  payload("Bash", dict(command="git unpack-file -h"), root))
+            for label, cmd in (("grep-O-separate", "git grep -O cmd x"),
+                               ("grep-O-glued", "git grep -Ocmd x"),
+                               ("grep-O-cluster", "git grep -iOcmd x"),
+                               ("grep-open-abbreviated", "git grep --open=cmd x"),
+                               ("fetch-upload-pack-abbreviated", "git fetch --upload-p=cmd r"),
+                               ("clone-upload-pack-abbreviated", "git clone --upl=cmd r"),
+                               ("ls-remote-hidden-exec", "git ls-remote --exec=cmd r"),
+                               ("push-receive-pack", "git push --receive-pack=cmd r")):
+                deny("bash-r18-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            for label, cmd in (("diff-O-orderfile", "git diff -O order.txt"),
+                               ("log-O-orderfile-glued", "git log -Oorder.txt --oneline"),
+                               ("show-O-orderfile", "git show -O order.txt HEAD"),
+                               ("grep-or", "git grep -e a --or -e b")):
+                allow("bash-r18-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            # The grep-scoped -O pinned by a mutant: a scratch copy of the hook (in its own pack
+            # layout, so its pack own tree holds no product) with only that scope entry removed
+            # ALLOWS git grep -O cmd x, so the vector above holds it.
+            o_entry = '    ("-O", frozenset(("grep",)))))'
+            hook_text = hook.read_text(encoding="utf-8")
+            expect("bash-r18-grep-O-mutant-site-count", hook_text.count(o_entry), 1)
+            mutant_dir = os.path.join(basestr, "mutant-grep-O", "opf", "enforcement", "claude")
+            os.makedirs(mutant_dir)
+            mutant_hook = os.path.join(mutant_dir, "pretooluse_deny.py")
+            with open(mutant_hook, "w", encoding="utf-8") as fh:
+                fh.write(hook_text.replace(",\n" + o_entry, "))"))
+            allow("bash-r18-grep-O-mutant-allows",
+                  payload("Bash", dict(command="git grep -O cmd x"), root), via=mutant_hook)
+            # ROUND 14: a synthetic pack repository (a .git entry, the hook copied to its
+            # opf/enforcement/claude/ and an opf/tools/ directory, bound to no product), so the
+            # unbound repository-top vectors run on every checkout. A not-plain command reads its
+            # git work-tree subcommand over every literal word after a git word: a global option
+            # outside the grammar and a second command no longer hide it, and a dashed builtin
+            # word counts. On the predecessor pin 7718fd29 every -denied vector here but the
+            # bare checkout ALLOWED.
+            pack_repo = os.path.join(basestr, "packrepo")
+            pack_hook = os.path.join(pack_repo, "opf", "enforcement", "claude", "pretooluse_deny.py")
+            for d in (os.path.join(pack_repo, ".git"), os.path.join(pack_repo, "opf", "tools"),
+                      os.path.join(pack_repo, "docs"), os.path.dirname(pack_hook)):
+                os.makedirs(d)
+            shutil.copyfile(str(hook), pack_hook)
+            pack_docs = os.path.join(pack_repo, "docs")
+            for label, cmd in (("c-override-checkout", "git -c core.abbrev=7 checkout -- ."),
+                               ("checkout-then-true", "git checkout -- .; true"),
+                               ("true-then-checkout", "true && git checkout -- ."),
+                               ("attr-source-reset", "git --attr-source HEAD reset --hard"),
+                               ("c-override-submodule-update", "git -c a.b=c submodule update"),
+                               ("dashed-checkout", "/usr/lib/git-core/git-checkout -- ."),
+                               ("bare-checkout", "git checkout -- .")):
+                deny("bash-r14-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("status-then-true", "git status; true"),
+                               ("c-override-log", "git -c core.abbrev=7 log")):
+                allow("bash-r14-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            # ROUND 15 (QA round 13): the not-plain read exempts no dry run and no submodule read
+            # form, because its literal words carry no command boundary: a later command's -n,
+            # --dry-run or status word read as the subcommand's own argument let git rm -rf .;
+            # echo -n delete the hook here. On the predecessor pin 23e6f3de every -denied vector
+            # in this block ALLOWED, the per-subcommand rm, mv and clean vectors included.
+            for label, cmd in (("rm-rf-semicolon-echo-n", "git rm -rf .; echo -n"),
+                               ("clean-fd-semicolon-echo-n", "git clean -fd; echo -n"),
+                               ("rm-rf-and-echo-n", "git rm -rf . && echo -n"),
+                               ("clean-fdx-or-echo-dry-run", "git clean -fdx || echo --dry-run"),
+                               ("mv-pipe-grep-n", "git mv a b | grep -n x"),
+                               ("rm-rf-newline-echo-n", "git rm -rf ." + chr(10) + "echo -n"),
+                               ("submodule-semicolon-status", "git submodule --quiet; status"),
+                               ("c-override-rm-dry-run", "git -c core.abbrev=7 rm -n x"),
+                               ("c-override-submodule-status", "git -c a.b=c submodule status")):
+                deny("bash-r15-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            # ROUND 21 (QA round 18): the work-tree writers are classified by EXCLUSION. Every
+            # public git 2.53 command outside the hook's reviewed GIT_NO_WORKTREE_WRITE set is a
+            # writer, so the witnesses are behavioural, not a second hand list: every name the
+            # partition denies gets a bound deny vector and a not-plain pack-repository deny
+            # vector, every no-write member gets a bound allow vector for its usage-only form
+            # (git <name> -h; git help -a), and every merge-* name the installed git lists, apart from the
+            # reviewed queries merge-base and merge-tree, must sit on the deny side. On the pin
+            # ee28f930 the merge-recursive-ours and merge-recursive-theirs vectors (and the other
+            # names round 21 moves to the deny side) ALLOWED.
+            no_write = getattr(hook_mod, "GIT_NO_WORKTREE_WRITE", frozenset())
+            public = hook_mod.GIT_PUBLIC_SUBCOMMANDS
+            denied_names = sorted(public - no_write)
+            expect("bash-r21-no-write-set-inside-public", sorted(no_write - public), [])
+            expect("bash-r21-worktree-set-is-public-minus-no-write",
+                   sorted(hook_mod.GIT_WORKTREE_SUBCOMMANDS), denied_names)
+            for name in sorted(no_write):
+                if ('    "%s",  # ' % (name,)) not in hook_text and (
+                        '    "%s"))  # ' % (name,)) not in hook_text:
+                    failures.append("claude-hook bash-r21-no-write-" + name + "-carries-no-reason")
+            try:
+                listed = subprocess.run(["git", "--list-cmds=main"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env=git_fixture_env(),
+                                        timeout=60).stdout.decode(
+                                            "utf-8", "replace").split()
+            except (OSError, subprocess.TimeoutExpired):
+                listed = []
+            installed = sorted(n for n in listed if "--" not in n)
+            merge_names = sorted(set(n for n in installed + sorted(public)
+                                     if n.startswith("merge-"))
+                                 - set(("merge-base", "merge-tree")))
+            for name in ("merge-recursive-ours", "merge-recursive-theirs", "merge-ours",
+                         "merge-file"):
+                expect("bash-r21-merge-helper-" + name + "-listed", name in merge_names, True)
+            for name in merge_names:
+                expect("bash-r21-merge-helper-" + name + "-on-deny-side", name in no_write, False)
+            for name in installed:
+                if name in no_write:
+                    continue
+                deny("bash-r21-installed-" + name + "-bound-denied",
+                     payload("Bash", dict(command="git " + name), src_dir),
+                     "product root")
+            for name in sorted(set(denied_names) | set(merge_names)):
+                deny("bash-r21-" + name + "-bound-denied",
+                     payload("Bash", dict(command="git " + name + " x"), src_dir),
+                     "product root")
+                deny("bash-r15-pack-repo-nonplain-" + name + "-denied",
+                     payload("Bash", dict(command="git " + name + "; echo -n"), pack_docs),
+                     "holds the protected path", via=pack_hook)
+            # git help -h is a viewer option word to the help rule, so help reads with -a.
+            read_forms = dict(help="git help -a")
+            for name in sorted(no_write):
+                allow("bash-r21-no-write-" + name + "-usage-allowed",
+                      payload("Bash", dict(command=read_forms.get(name, "git " + name + " -h")),
+                              src_dir))
+            for label, cmd in (("merge-base", "git merge-base HEAD main"),
+                               ("merge-tree", "git merge-tree --write-tree HEAD main"),
+                               ("status", "git status"), ("log", "git log -n 3"),
+                               ("add", "git add notes.txt"), ("commit", "git commit -m x"),
+                               ("push", "git push origin main"), ("fetch", "git fetch origin")):
+                allow("bash-r21-no-write-" + label + "-read-form-allowed",
+                      payload("Bash", dict(command=cmd), src_dir))
+            # ROUND 22 (QA round 19): an output option is a write in EVERY git subcommand. git
+            # blame, annotate and pickaxe inherit --output from the diff options (-h lists none),
+            # and git resolves its value from the repository top, so from a product subdirectory
+            # git blame --output=docs/./STATUS.md free truncated the declared view and from the
+            # synthetic pack repository's docs directory the same form truncated the hook. Every
+            # GIT_NO_WORKTREE_WRITE member gets a bound output-bearing deny vector (the ./ spelling
+            # from the src subdirectory), --output gets every abbreviation, and the hook-file case
+            # runs plain and not plain. Run against the pin 4136bd3a hook, 91 -denied vectors here
+            # ALLOWED and so detect the round-22 change: the 73 no-write vectors of the members
+            # outside GIT_OUTPUT_WRITERS other than help, the 12 blame abbreviation vectors and the
+            # 6 pack-hook vectors. The other 25 no-write vectors already denied on 4136bd3a and are
+            # retained regression coverage. 24 of them are GIT_OUTPUT_WRITERS members (archive,
+            # bugreport, bundle, clone, commit-graph, diagnose, diff, diff-files, diff-index,
+            # diff-pairs, diff-tree, fast-export, format-patch, gc, index-pack, log, mailsplit,
+            # multi-pack-index, pack-objects, range-diff, repack, show, unpack-file, whatchanged),
+            # which the round-16/17 output rule (_git_output_reason) already denied in a bound
+            # product by their output option word or constructed file name; the 25th is help, whose
+            # --output word is an option outside GIT_HELP_PRINT_OPTIONS, so git help is not plain
+            # and the coarse rule denies it from a product root. The allow vectors below allowed
+            # there too.
+            for name in sorted(no_write):
+                deny("bash-r22-no-write-" + name + "-output-bound-denied",
+                     payload("Bash", dict(command="git " + name + " --output=docs/./STATUS.md x"),
+                             src_dir), "product root")
+            for opt in ("--o", "--ou", "--out", "--outp", "--outpu", "--output"):
+                deny("bash-r22-blame-abbrev" + opt + "-bound-denied",
+                     payload("Bash", dict(command="git blame " + opt + "=docs/./STATUS.md free"),
+                             src_dir), "product root")
+                deny("bash-r22-blame-abbrev" + opt + "-separate-bound-denied",
+                     payload("Bash", dict(command="git blame " + opt + " docs//STATUS.md free"),
+                             src_dir), "product root")
+            hook_rel = "opf/enforcement/claude/./pretooluse_deny.py"
+            for name in ("blame", "annotate", "pickaxe"):
+                deny("bash-r22-" + name + "-output-pack-hook-denied",
+                     payload("Bash", dict(command="git " + name + " --output=" + hook_rel
+                                          + " free"), pack_docs), "pack own tree", via=pack_hook)
+                deny("bash-r22-" + name + "-outp-pack-hook-nonplain-denied",
+                     payload("Bash", dict(command="git " + name + " --outp=" + hook_rel
+                                          + " free; true"), pack_docs), "pack own tree",
+                     via=pack_hook)
+            for label, cmd, cwd in (
+                    ("blame-output-elsewhere", "git blame --output=" + os.path.join(
+                        elsewhere, "blame.txt") + " free", pack_docs),
+                    ("blame-plain", "git blame free", pack_docs),
+                    ("grep-index", "git grep --index x", None),
+                    ("fetch-filter", "git fetch --filter=blob:none origin", None),
+                    ("reflog-expire", "git reflog expire --expire=now --all", None)):
+                allow("bash-r22-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), cwd or src_dir),
+                      via=pack_hook if cwd else None)
+            # ROUND 24 (QA round 21): in a GIT_OUTPUT_WRITERS subcommand an abbreviation of an
+            # output option that is also a prefix of a GIT_OUTPUT_SHADOWS name stays an output
+            # option (git 2.53 reads git gc --expi=x and git repack --exp=x as --expire-to=x and
+            # writes there); the shadow exclusion above holds only outside GIT_OUTPUT_WRITERS.
+            # Run against a hook whose _git_output_option drops that scoping (no `scoped or`),
+            # each vector below ALLOWED.
+            for label, cmd, cwd in (
+                    ("gc-expi-bound", "git gc --expi=old", root),
+                    ("repack-exp-bound", "git repack -a -d --exp=old", root),
+                    ("gc-expi-C-outside", "git -C ../product gc --expi=docs", elsewhere)):
+                deny("bash-r24-git-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "constructs")
+            # The two reviewer reproductions (QA round 18), bound and from the synthetic pack
+            # repository's docs directory: each ALLOWED on ee28f930 and rewrote the view or the
+            # pack file when run.
+            for helper in ("merge-recursive-ours", "merge-recursive-theirs"):
+                cmd = "git " + helper + " 1111111 -- 1111111 2222222"
+                deny("bash-r21-repro-" + helper + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "rewrites the working tree")
+                deny("bash-r21-repro-" + helper + "-bound-subdir-denied",
+                     payload("Bash", dict(command=cmd), src_dir), "rewrites the working tree")
+                deny("bash-r21-repro-" + helper + "-pack-repo-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("status-pipe-grep-n", "git status | grep -n x"),
+                               ("log-n-then-echo-dry-run", "git log -n 3; echo --dry-run"),
+                               ("plain-rm-dry-run", "git rm -n x"),
+                               ("plain-clean-dry-run", "git clean -n"),
+                               ("plain-submodule-status", "git submodule status")):
+                allow("bash-r15-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            allow("bash-r14-c-override-checkout-unbound-allowed",
+                  payload("Bash", dict(command="git -c core.abbrev=7 checkout -- ."), elsewhere))
+            # ROUND 19 (QA round 17): a git subcommand that is an internal helper (a name carrying
+            # "--") or is not a public git 2.53 command runs code the hook cannot read, so it is
+            # never plain: it denies in a bound product and takes the unbound repository-top check
+            # in the synthetic pack repository. The helper list is literal (every "--" name git
+            # 2.53 ships in its exec path, plus the retired bisect--helper and rebase--helper),
+            # joined by every "--" name the installed git lists. On the pin 2b5a2c31 every bound
+            # helper vector, the unlisted vector and every pack-repository vector ALLOWED.
+            helpers = set(("checkout--worker", "credential-cache--daemon", "difftool--helper",
+                           "fsmonitor--daemon", "mergetool--lib", "sh-i18n--envsubst",
+                           "submodule--helper", "upload-archive--writer", "web--browse",
+                           "bisect--helper", "rebase--helper"))
+            git_bin = shutil.which("git")
+            if git_bin:
+                listed = subprocess.run([git_bin, "--list-cmds=main"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env=git_fixture_env(),
+                                        timeout=_GIT_TIMEOUT_S)
+                helpers.update(n for n in listed.stdout.decode("utf-8", "replace").split()
+                               if "--" in n)
+            for name in sorted(helpers):
+                cmd = "git " + name + " foreach x"
+                deny("bash-r19-git-" + name + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+                deny("bash-r19-pack-repo-" + name + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("unlisted", "git frobnicate x"),
+                               ("for-each-repo", "git for-each-repo --config=a.b reset --hard"),
+                               ("remote-ext", "git remote-ext r x")):
+                deny("bash-r19-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            for label, cmd in (("unlisted", "git -c a.b=c frobnicate x"),
+                               ("dashed-helper", "/usr/lib/git-core/git-submodule--helper foreach x"),
+                               ("helper-semicolon-true", "git -C . submodule--helper foreach x; true")):
+                deny("bash-r19-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("c-override-log", "git -c a.b=c log; true"),
+                               ("dir-override-status", "git -C . status | grep -n x")):
+                allow("bash-r19-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            # The witness: in a scratch product whose TODO.md is a declared view, git
+            # submodule--helper foreach 'git -C .. reset --hard' (QA round 17, git 2.53) rewrites
+            # the protected parent TODO.md when run, and the hook denies it.
+            wroot = os.path.join(basestr, "witness")
+            wsub = os.path.join(basestr, "witness-sub")
+            wmachine = os.path.join(wroot, _opf_store.WORKING_DIRNAME,
+                                    _opf_store.DEFAULT_MACHINE_SUBDIR)
+            os.makedirs(wmachine)
+            os.makedirs(wsub)
+            with open(os.path.join(wmachine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            with open(os.path.join(wroot, "TODO.md"), "w", encoding="utf-8") as fh:
+                fh.write("committed\n")
+            with open(os.path.join(wsub, "s.txt"), "w", encoding="utf-8") as fh:
+                fh.write("s\n")
+            wenv = git_fixture_env()
+
+            expect("bash-r19-witness-git-present", bool(git_bin), True)
+
+            def wgit(cwd, *args):
+                if not git_bin:
+                    return 127
+                return subprocess.run(
+                    ["git", "-C", cwd, "-c", "user.email=opf@example.invalid",
+                     "-c", "user.name=OPF Self Test", "-c", "commit.gpgsign=false",
+                     "-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always",
+                     "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+                    + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=wenv,
+                    timeout=_GIT_TIMEOUT_S).returncode
+            setup = [wgit(wsub, "init", "-q"), wgit(wsub, "add", "s.txt"),
+                     wgit(wsub, "commit", "-q", "-m", "s"), wgit(wroot, "init", "-q"),
+                     wgit(wroot, "add", "TODO.md"), wgit(wroot, "submodule", "add", "-q", wsub, "sub"),
+                     wgit(wroot, "commit", "-q", "-m", "c")]
+            expect("bash-r19-witness-setup", setup, [0] * 7)
+            with open(os.path.join(wroot, "TODO.md"), "w", encoding="utf-8") as fh:
+                fh.write("protected live bytes\n")
+            witness = "git submodule--helper foreach 'git -C .. reset --hard'"
+            deny("bash-r19-witness-helper-foreach-denied",
+                 payload("Bash", dict(command=witness), wroot), "product root")
+            expect("bash-r19-witness-helper-foreach-rewrites",
+                   (wgit(wroot, "submodule--helper", "foreach", "git -C .. reset --hard"),
+                    Path(wroot, "TODO.md").read_text(encoding="utf-8")), (0, "committed\n"))
+            # ROUND 19 (QA round 17): grep's option VALUES and the words after a lone -- are not
+            # option clusters, so a pattern carrying O allows while a real -O cluster denies. On the
+            # pin 2b5a2c31 the -eFOO, -e -O, -ieO and -- -O vectors DENIED.
+            for label, cmd in (("grep-e-attached", "git grep -eFOO notes.txt"),
+                               ("grep-e-separate", "git grep -e FOO notes.txt"),
+                               ("grep-e-dash-O", "git grep -e -O notes.txt"),
+                               ("grep-ie-attached-O", "git grep -ieO notes.txt"),
+                               ("grep-dashdash-O", "git grep -- -O"),
+                               ("grep-context-then-e", "git grep -C3 -eO notes.txt")):
+                allow("bash-r19-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("grep-iO", "git grep -iO x"),
+                               ("grep-iOcmd", "git grep -iOcmd x"),
+                               ("grep-e-then-O", "git grep -e x -O cmd notes.txt"),
+                               ("grep-and-iO", "git grep -e x --and -iO -e y")):
+                deny("bash-r19-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            # Each grep value or -- step pinned by a mutant (a scratch copy of the hook in its own
+            # pack layout with that step alone removed denies its vector above).
+            for label, site, flip, cmd in (
+                    ("separate-value", "skip = at == len(word) - 1", "skip = False",
+                     "git grep -e -O notes.txt"),
+                    ("attached-value", "if word[at] in GIT_GREP_VALUED_SHORT:", "if False:",
+                     "git grep -eFOO notes.txt"),
+                    ("dashdash", 'break\n        if not word.startswith("-") or word == "-":\n'
+                     '            continue\n        if word.startswith("--"):\n            found',
+                     'pass\n        if not word.startswith("-") or word == "-":\n'
+                     '            continue\n        if word.startswith("--"):\n            found',
+                     "git grep -- -O")):
+                expect("bash-r19-grep-" + label + "-mutant-site-count", hook_text.count(site), 1)
+                mdir = os.path.join(basestr, "mutant-grep-" + label, "opf", "enforcement", "claude")
+                os.makedirs(mdir)
+                mhook = os.path.join(mdir, "pretooluse_deny.py")
+                with open(mhook, "w", encoding="utf-8") as fh:
+                    fh.write(hook_text.replace(site, flip))
+                deny("bash-r19-grep-" + label + "-mutant-denies",
+                     payload("Bash", dict(command=cmd), root), "product root", via=mhook)
+            # ROUND 20 (round-19 fixer note): git subtree add, merge and pull, and split or push
+            # with --rejoin, write the work tree, and split without --rejoin still writes
+            # $GIT_DIR/subtree-cache, commit objects and (-b) a branch (git 2.53 git-subtree), so
+            # every subtree form denies in a bound product and, plain or not, takes the unbound
+            # repository-top check in the synthetic pack repository. On the pin a4df217b every
+            # plain bound vector and every pack-repository vector below ALLOWED, except that the
+            # dashed and -c bound vectors (not plain) already denied by the product-root rule and
+            # merge-semicolon-true already denied on its merge word.
+            for label, cmd in (("add", "git subtree add --prefix=vendor ../other main"),
+                               ("merge", "git subtree merge --prefix=vendor main"),
+                               ("pull", "git subtree pull --prefix=vendor ../other main"),
+                               ("split-rejoin", "git subtree split --prefix=docs --rejoin"),
+                               ("rejoin-first", "git subtree --rejoin split --prefix=docs"),
+                               ("push-rejoin", "git subtree push --prefix=docs ../o main --rejoin"),
+                               ("split", "git subtree split --prefix=docs"),
+                               ("split-branch", "git subtree split --prefix=docs -b side"),
+                               ("bare", "git subtree")):
+                deny("bash-r20-git-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), src_dir), "rewrites the working tree")
+            for label, cmd in (("dashed", "/usr/lib/git-core/git-subtree add --prefix=v r m"),
+                               ("c-override", "git -c core.abbrev=7 subtree add --prefix=v r m")):
+                deny("bash-r20-git-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            for label, cmd in (("add", "git subtree add --prefix=vendor ../other main"),
+                               ("split", "git subtree split --prefix=docs"),
+                               ("dir-override-pull", "git -C . subtree pull --prefix=v r m"),
+                               ("dashed-add", "/usr/lib/git-core/git-subtree add --prefix=v r m"),
+                               ("merge-semicolon-true", "git subtree merge --prefix=v m; true")):
+                deny("bash-r20-pack-repo-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            notes = os.path.join(root, "notes.txt")
+            deny("multiedit-r11-nested-path-field-denied",
+                 payload("MultiEdit", dict(file_path=notes, edits=[dict(
+                     file_path=os.path.join(root, "TODO.md"), old_string="x", new_string="y")]),
+                     root), "path-like field")
+            deny("write-r11-extra-path-field-denied",
+                 payload("Write", dict(file_path=notes, content="x",
+                                       path=os.path.join(root, "TODO.md")), root),
+                 "path-like field")
+            allow("multiedit-r11-documented-schema-allowed",
+                  payload("MultiEdit", dict(file_path=notes, edits=[dict(
+                      old_string="x", new_string="y", replace_all=False)]), root))
+            # Another user's unsearchable directory is absence, never cannot-evaluate (round 9),
+            # pinned where the host offers one (the superuser's home, typically mode 0700): a
+            # session that is not the superuser and cannot search it is never over-denied.
+            other = os.path.join(os.sep, "root")
+            try:
+                other_st = os.stat(other)
+            except OSError:
+                other_st = None
+            if (other_st is not None and hasattr(os, "geteuid") and os.geteuid() != 0
+                    and other_st.st_uid != os.geteuid() and not os.access(other, os.X_OK)):
+                allow("bash-r10-other-user-unsearchable-absence-allowed",
+                      payload("Bash", dict(command="ls " + os.path.join(other, "x")), elsewhere))
+            # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
+            # may run shell lines the platform does not route back through PreToolUse), so each
+            # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
+            deny("slashcommand-store-reference-denied",
+                 payload("SlashCommand", dict(command="/deploy .working/toml/counters.toml"), root),
+                 "R7")
+            deny("skill-store-reference-denied",
+                 payload("Skill", dict(command="edit .working/toml/counters.toml"), root), "R7")
+            allow("slashcommand-free-allowed",
+                  payload("SlashCommand", dict(command="/status"), root))
+            # The imported-series exemption holds ONLY directly inside THE machine store (its
+            # manifest declares the OPF standard): the same leaf in another first-level store
+            # directory, existing or not, denies.
+            os.makedirs(os.path.join(root, _opf_store.WORKING_DIRNAME, "other"))
+            deny("write-imported-leaf-other-dir-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, _opf_store.WORKING_DIRNAME, "other", "worklog.imported.toml"),
+                     content="x"), root), "direct edits under")
+            deny("write-imported-leaf-absent-dir-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, _opf_store.WORKING_DIRNAME, "fresh", "worklog.imported.toml"),
+                     content="x"), root), "direct edits under")
+    except OSError as exc:
+        print("check_opf_doctor claude-hook self-test: harness error: " + str(exc), file=sys.stderr)
+        return EXIT_ERROR
+    if failures:
+        for f in failures:
+            print("check_opf_doctor claude-hook self-test: FAIL: " + f, file=sys.stderr)
+        return EXIT_FINDING
+    print("check_opf_doctor claude-hook self-test: PASS (the shipped PreToolUse deny hook, launched "
+          "python -I on the doc-confirmed stdin/stdout contract, denies a direct store Write, an "
+          "adoption-archive write, an evidence-home write, a plan-frozen old-file Edit, a "
+          "declared-view Write, a MultiEdit and NotebookEdit store target, a traversal-relative, a "
+          "symlinked AND a symlink-then-dotdot spelling (realpath of the original spelling), a tilde "
+          "spelling expanded before classification, a control-character target, a relative target "
+          "with no session cwd, a missing target field, the visible Bash store/frozen/view "
+          "references boundary-matched over the raw string AND the dequoted tokens (PYTHON_VERSION "
+          "and __VERSION__ pass; VERSION and a quote-split VER''SION deny), every referencing "
+          "non-writer command including read-only words, git forms and assignment-prefixed git "
+          "(GIT_EXTERNAL_DIFF, GIT_CONFIG_*), a same-named opf.py outside the repository (the "
+          "writer is realpath-bound), a non-writer opf verb, a non-allowlisted interpreter flag, an "
+          "absolute frozen spelling with the session cwd outside every product root, a QUOTED "
+          "spaced product root bound whole, a relative spelling with the cwd inside the store, an "
+          "over-budget absolute-path scan and an over-budget R7 string scan (deny, never truncate), "
+          "and (R7) an MCP write tool or another shell whose payload names a protected token or "
+          "RESOLVES to one; allows ONLY the single plain sanctioned-writer invocations (opf "
+          "record/render as a bare word, and the repository's own opf/tools/opf.py under a bare "
+          "python3 with allowlisted flags, relative or absolute, under a broken roster too; an "
+          "unquoted metacharacter or a live double-quoted dollar still denies), known read-only "
+          "tools, reference-free commands and payloads, an unrelated write, and the "
+          "still-writerless imported-series leaves directly inside the machine store (top-level and "
+          "deeper same-named leaves deny); exits 2 blocking on a malformed payload and a mis-wired "
+          "event; and fails closed, never an empty roster, on an unparseable, dangling-symlink, "
+          "FIFO (prompt, O_NONBLOCK), out-of-vocabulary-disposition, sources-less, "
+          "empty-source-path, wrong-format, truly-oversized (valid prefix), migrate-row or "
+          "unsearchable adoption plan, and on an unparseable, dangling-symlink, undeclared- or "
+          "wrong-standard or ambiguous two-manifest machine store, and on a dangling "
+          "run-directory, imported-home or store-tree link (an unresolved ancestor is never an "
+          "absent roster), for every write under that root. ROUND 3: a quoted spaced-root operand "
+          "beside redirection, sequencing or dollar-quoting denies (every command is loose-"
+          "dequoted whole), an unreadable quote structure and an undecodable dollar-quote escape "
+          "deny cannot-evaluate while comment and here-document apostrophes stay readable, a "
+          "dequoted word resolving to a protected path denies with no textual token, the frozen "
+          "and view rosters match through a symlinked directory (realpath beside each entry), a "
+          "control-character alias string resolving into the store denies (R7 judges, never "
+          "skips), the pack's own hook and writer files and the per-product registration deny "
+          "(R8) while a plain pristine pack-tool launch and a non-registration .claude write stay "
+          "allowed, an over-cap envelope, a missing tool_name and a parser-overrun crash each "
+          "exit 2, a null tool_input and a command-less Bash payload take structured denies, a "
+          "double-quoted literal newline keeps a writer spelling non-pristine (denied on its "
+          "protected mention), the python3 launcher form is verb-bound, Edit and NotebookEdit "
+          "relative targets without a cwd deny through their own explicit mappings, and prose "
+          "slashes no longer consume the boundary-anchored discovery budget. ROUND 4: the loose "
+          "lexer keeps the shell's own word boundaries (braces and control characters are "
+          "literal pathname characters: a braced product root and a carriage-return symlink "
+          "alias both deny) and refuses a brace pattern the shell would expand while literal "
+          "brace operands (find's empty-brace operand, a quoted awk program, a parameter "
+          "expansion) stay allowed, each dollar-quote and double-quote escape decoder is pinned "
+          "by an escaped operand under the product root (coarse denial, not a decode pin), root "
+          "discovery realpaths each "
+          "spelled location before climbing (a link/../VERSION spelling binds the jumped-into "
+          "product), the file-tool rosters bind above the session cwd too (a view or frozen "
+          "file behind a directory symlink pointing OUTSIDE the product denies by its real "
+          "path), a symlinked store tree fails closed by the link and by the real tree behind "
+          "it, the registration denies at its real path, the reserved imports store home "
+          "denies, TodoWrite takes R7's scan (a protected mention in a todo denies, a free "
+          "todo list allows), an unknown tool with a null tool_input or no session cwd takes a "
+          "structured deny, an empty tool_name exits 2, and a single-quoted literal newline "
+          "keeps a writer spelling non-pristine. ROUND 6: the Bash rule decides "
+          "provably plain first and judges every other command by a coarse "
+          "product-root check (D-DISCARD-SOUND-RULE); an unquoted here-document "
+          "substitution, a commented-parenthesis command substitution and a line "
+          "continuation before ANSI-C quoting each deny from a product cwd (the "
+          "round-6 reproductions), a plain command touching nothing protected and "
+          "every exotic command outside all products allow, a variable, an "
+          "interpreter with inline code, an eval and the obsolete arithmetic form "
+          "deny from a product cwd, the pack own tree stays protected (R8), and Skill "
+          "and SlashCommand take R7 while a free slash command allows. ROUND 7: one strict "
+          "classifier (the shared plain-command specification, decided on the raw string "
+          "before any lexing) carries the specification's vector table as rows; a leading "
+          "redirection, the command -p, env -i and exec -a prefixes and an unlisted wrapper "
+          "before an interpreter each deny from a product cwd; a git alias override carrying inline "
+          "code takes the coarse rule; any here-document denies from a product cwd; and the "
+          "coarse double-quote escape decoder is pinned by a quote-named product root. ROUND 8: "
+          "a value glued to a short option (sort -oTODO.md, -o/abs/TODO.md), a spelling after a "
+          "delimiter inside a word (of=alias through a store symlink, --target-directory= into "
+          "the store, a quoted command string's redirection target, tar -C glued to a root), a "
+          "relative operand resolved against a directory the command names (git -C) or climbing "
+          "into a product from outside, and an inherited GIT_WORK_TREE, GIT_DIR or "
+          "GIT_EXTERNAL_DIFF each deny, a no-op GIT_EDITOR and GIT_PAGER allow, and one "
+          "discriminating vector pins each coarse, git and forbidden-character behaviour. ROUND 9: "
+          "a product directory its own user made unsearchable fails closed (an unlock-then-write "
+          "command and a view Write both deny) while an absent directory stays absence, a quoted "
+          "tilde is never expanded for the writer launch (a planted ~/opf/tools/opf.py denies) and "
+          "every other tilde spelling is judged literal and expanded (plain and coarse), a copy, "
+          "install or move into a directory holding a view denies at <directory>/<basename>, a "
+          "recursive copy, remove or git rm over a directory holding a view, and a remove of the "
+          "registration directory, deny, while a free copy into the directory and ls of it allow, "
+          "and an absolute GIT_TRACE value denies while GIT_TRACE=1 allows. ROUND 10: a "
+          "directory-plus-basename join stays container-checked when another word already names it "
+          "(cp -r -S docs, --suffix=docs, a second docs operand, and the registration directory "
+          "deny), git is read through a small allowlisted global-option grammar (--attr-source and "
+          "--shallow-file globals and a git -c override behind one deny from a product cwd, while "
+          "--no-pager, a separate and a glued value global and an unlisted global in an unbound "
+          "session allow), one vector per container verb and for the pack tree pins each, and "
+          "another user's unsearchable directory stays absence where the host offers one. ROUND "
+          "11: the classifier follows the shared specification's 2026-10-06 revision (a "
+          "command-word allowlist and no dollar sign, backquote, square bracket or backslash in "
+          "single quotes; its rows carried), so a wrapper word, every remover off the allowlist "
+          "and a dashed git builtin deny as not plain from a product cwd; in a bound product each "
+          "of the eighteen work-tree or index rewriting git subcommands denies from a directory "
+          "holding nothing protected, a single-quoted glob pathspec from a subdirectory and "
+          "through git -C from an unbound cwd denies, the strict dry-run grammar allows git clean "
+          "-n, git rm -n and git mv -n while an unlisted letter, a negation, an abbreviation and a "
+          "dry-run word after -- deny, every other git subcommand allows, read-only commands whose "
+          "argument words name a container program, git or an interpreter, or a directory beside "
+          "a joinable name, allow, a git work-tree rewrite in the pack's own repository denies "
+          "from a subdirectory, and a MultiEdit or Write payload carrying an unevaluated "
+          "path-like field denies while the documented MultiEdit schema allows)")
+    return EXIT_OK
+
+
 # A per-git-call runtime bound (SECA resource-bounds): a hung or pathological git probe fails SAFE to a
 # cannot-evaluate (exit 2) rather than blocking the gate indefinitely. Mirrors _opf_observe._GIT_TIMEOUT_S.
 _GIT_TIMEOUT_S = 30
@@ -2237,7 +4418,7 @@ def main(argv=None):
     try:
         args = list(sys.argv[1:] if argv is None else argv)
         if args == ["--self-test"]:
-            return _self_test()
+            return _self_test_legs()
         if args:
             print("check_opf_doctor: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR

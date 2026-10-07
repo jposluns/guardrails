@@ -345,6 +345,11 @@ jobs:
       - name: Agents drift
         run: python3 -I -B tools/gen_agents.py --check
 
+      - name: First-pin demonstration self-test
+        run: python3 -I -B tools/gen_first_pin_demo.py --self-test
+      - name: First-pin demonstration drift
+        run: python3 -I -B tools/gen_first_pin_demo.py --check
+
       - name: Mappings page drift
         run: python3 -I -B tools/gen_mappings.py --check
 
@@ -443,6 +448,11 @@ jobs:
 
       - name: Instruction-budget self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+
+      - name: Entry-guard self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
+      - name: Entry-guard gate
+        run: python3 -I -B tools/check_entry_guard.py
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test

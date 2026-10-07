@@ -80,10 +80,18 @@ Exit convention (matches the repo's gates):
   1  a real finding (a digest mismatch, a stale/absent evidence claim, or a forward-ratchet break)
   2  malformed input, a missing/unreadable artifact or evidence file, or a read error (fail-closed)
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_artifact_checksums.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import io
 import re
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 

@@ -240,13 +240,21 @@ mechanism claim and is deliberately NOT matched (no "works", no efficacy verb go
 
 Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required surface, fail-closed).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_overclaim.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import base64
 import binascii
 import json
 import os
 import re
 import stat
-import sys
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
