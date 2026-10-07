@@ -76,6 +76,15 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_first_pin_demo.py",
+      "sources": [
+        "AGENTS.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/release/first-pin-demonstration.toml"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_manifest.py",
       "sources": [
         ".aiqt/core/ownership.toml",

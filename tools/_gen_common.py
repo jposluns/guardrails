@@ -11,7 +11,9 @@ try:
 except ModuleNotFoundError:
     if tuple(sys.version_info[:2]) < (3, 14):
         # Reached only through an importer that carries no floor guard yet (every guarded
-        # entrypoint refuses an older Python first): the version is the problem, so name it.
+        # entrypoint refuses an older Python that can start it first; one that cannot start
+        # it fails with Python's own error before reaching here): the version is the
+        # problem, so name it.
         sys.stderr.write(
             "error: the roadmap/changelog generators require Python 3.14 or newer; this is Python "
             "%d.%d.%d (%s). Nothing was run (cannot evaluate).\n"
