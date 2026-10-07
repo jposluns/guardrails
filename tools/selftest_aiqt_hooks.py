@@ -64,8 +64,10 @@ handler's structured decision.
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
 commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
-(|| true, || :) or piped into a truncating sink (| head, | tail) asks; option-value, post-'--',
-and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+(|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
+verification run whose output reaches a truncating sink (head, tail, cut, grep -m/-q/-c/-l/-L, sed -n or q,
+awk NR limits or exit) denies; option-value, post-'--', and push/merge -n edges stay allowed; and the
+parse-error fallback fails safe.
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5866,8 +5868,9 @@ def _main_isolated(monitor):
         gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
 
         # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
-        # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. Only the CONFIRMED
-        # --no-verify bypass above still DENIES. These previously denied; each now allows with a note.
+        # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. These previously
+        # denied; each swallow now allows with a note. The truncating-pipe vectors here (gw-s, gw-t) are
+        # verification runs whose output reaches a truncating sink, so the gatdis deny tier DENIES them.
         gexpect("(gw-o) pytest || true allows-with-note (heuristic relaxed, finding 14)", "pytest || true",
                 "allow-note")
         gexpect("(gw-p) pytest || : allows-with-note (finding 14)", "pytest -q || :", "allow-note")
@@ -5875,9 +5878,9 @@ def _main_isolated(monitor):
                 "make test || true", "allow-note")
         gexpect("(gw-r) checker-named script || true allows-with-note (name parts; finding 14)",
                 "tools/run_all_checks.sh || true", "allow-note")
-        gexpect("(gw-s) pytest | head allows-with-note (truncating sink; finding 14)", "pytest | head",
-                "allow-note")
-        gexpect("(gw-t) pytest | tail -20 allows-with-note (finding 14)", "pytest -q | tail -20", "allow-note")
+        gexpect("(gw-s) pytest | head denies (verification run into a truncating sink; deny tier)",
+                "pytest | head", "deny")
+        gexpect("(gw-t) pytest -q | tail -20 denies (deny tier)", "pytest -q | tail -20", "deny")
         gexpect("(gw-u) python -m pytest || true allows-with-note (runner -m module; finding 14)",
                 "python -m pytest || true", "allow-note")
         gexpect("(gw-v) npm test || true allows-with-note (finding 14)", "npm test || true", "allow-note")
@@ -5926,8 +5929,8 @@ def _main_isolated(monitor):
         gexpect("(gw-ao) a plain pytest with no swallow allows", "pytest", "allow")
         gexpect("(gw-ap) ruff check . || true allows-with-note (finding 14)", "ruff check . || true",
                 "allow-note")
-        gexpect("(gw-aq) npm test | tail allows-with-note (truncating sink; finding 14)", "npm test | tail",
-                "allow-note")
+        gexpect("(gw-aq) npm test | tail denies (runner target 'test' into a truncating sink; deny tier)",
+                "npm test | tail", "deny")
         # DISCLOSED safe-direction over-deny (residue): a separated option VALUE that itself spells
         # --no-verify is scanned in the option region and DENIES; git would read it as the --message
         # value (no bypass), so this is a deliberate deny-direction over-match, never a silent allow.
@@ -5939,8 +5942,8 @@ def _main_isolated(monitor):
         # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
         gexpect("(gw-as) newline before the swallow allows-with-note (F3 adjacency held; finding 14)",
                 "pytest ||\n true", "allow-note")
-        gexpect("(gw-at) newline before the truncating sink allows-with-note (F3 held; finding 14)",
-                "pytest |\n head", "allow-note")
+        gexpect("(gw-at) newline before the truncating sink denies (F3 adjacency held; deny tier)",
+                "pytest |\n head", "deny")
         gexpect("(gw-au) am --resolvemsg -n consumes -n as the message value, allows (F4)",
                 "git am --resolvemsg -n patch.mbox", "allow")
         gexpect("(gw-av) pytest || true allows-with-note (adjacency lock held; finding 14)",
@@ -5975,8 +5978,8 @@ def _main_isolated(monitor):
                 "git commit --no-verify -m x >/dev/null", "deny")
         gexpect("(gw-l11c) leading redirect before the checker no longer hides the swallow; allows-with-note "
                 "(finding 14)", ">/dev/null pytest || true", "allow-note")
-        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink; allows-with-note "
-                "(finding 14)", "pytest 2>/dev/null | head", "allow-note")
+        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink; denies (deny tier)",
+                "pytest 2>/dev/null | head", "deny")
         # A QUOTED redirect-shaped option value stays argv and does not mask the bypass verb.
         gexpect("(gw-l11e) a quoted '>' -m value does not hide the trailing --no-verify, denies",
                 "git commit -m '>' --no-verify", "deny")
@@ -5984,6 +5987,124 @@ def _main_isolated(monitor):
         # bypass subcommand from the gate-weakening scan -> DENY.
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
+
+        # === gatdis deny tier: a VERIFICATION RUN whose output reaches a truncating sink =====================
+        # Two tiers: the narrow verification-run predicate piped into a truncating sink DENIES; everything else
+        # the broad checker heuristic matches keeps the finding-14 allow-with-note. Each pair below differs in
+        # one feature, so reverting the clause it tests turns one of its vectors red.
+        _ct = [
+            # step 2, the sink grammar (_truncating_sink_kind)
+            ("(gw-ct-s1) grep -m is a truncating sink, denies", "pytest | grep -m 5 FAIL", "deny"),
+            ("(gw-ct-s2) a plain grep filter is not truncating, allows", "pytest | grep FAIL", "allow"),
+            ("(gw-ct-s3) grep -e m: the m is the -e value, allows", "pytest | grep -e m", "allow"),
+            ("(gw-ct-s4) grep -q (a textual success token) denies", "pytest | grep -q passed", "deny"),
+            ("(gw-ct-s5) sed -n 1,40p denies", "pytest | sed -n 1,40p", "deny"),
+            ("(gw-ct-s6) sed 50q denies", "pytest | sed 50q", "deny"),
+            ("(gw-ct-s7) sed 's/q/x/' substitutes, allows", "pytest | sed 's/q/x/'", "allow"),
+            ("(gw-ct-s8) awk 'NR<=50' denies", "pytest | awk 'NR<=50'", "deny"),
+            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, allows", "pytest | awk '{print NR, $0}'",
+             "allow"),
+            ("(gw-ct-s10) '| command tail' resolves through the wrapper, denies", "pytest | command tail",
+             "deny"),
+            ("(gw-ct-s11) an alias-suppressing '| \\tail' denies", "pytest | \\tail", "deny"),
+            ("(gw-ct-s12) cut denies", "pytest | cut -c1-80", "deny"),
+            ("(gw-ct-s13) head --help truncates nothing: the broad note stays", "pytest | head --help",
+             "allow-note"),
+            # step 3, the effective argv (_gate_effective_argv)
+            ("(gw-ct-w1) nice-wrapped self-test into tail denies",
+             "nice -n 10 python3 -I -B tools/selftest_aiqt_hooks.py 2>&1 | tail -5", "deny"),
+            ("(gw-ct-w2) the same self-test redirected to an absolute file allows",
+             "nice -n 10 python3 -I -B tools/selftest_aiqt_hooks.py > /var/tmp/x/s.log 2>&1", "allow"),
+            ("(gw-ct-w3) timeout-wrapped pytest into tail denies", "timeout 600 pytest | tail", "deny"),
+            ("(gw-ct-w4) timeout-wrapped pytest redirected allows",
+             "timeout 600 pytest > /var/tmp/x/s.log 2>&1", "allow"),
+            ("(gw-ct-w5) sudo -u ci pytest into tail denies", "sudo -u ci pytest | tail", "deny"),
+            ("(gw-ct-w6) sudo -u ci pytest redirected allows", "sudo -u ci pytest > /var/tmp/x/s.log 2>&1",
+             "allow"),
+            ("(gw-ct-w7) env CI=1 pytest into tail denies", "env CI=1 pytest | tail", "deny"),
+            ("(gw-ct-w8) env CI=1 pytest redirected allows", "env CI=1 pytest > /var/tmp/x/s.log 2>&1", "allow"),
+            # step 4, the narrow predicate (_is_verification_run)
+            ("(gw-ct-p1) a --check run into head denies", "tools/gen_hooks.py --check | head", "deny"),
+            ("(gw-ct-p2) the same generator without --check allows", "tools/gen_hooks.py | head", "allow"),
+            ("(gw-ct-p3) --no-check-certificate is not --check, allows",
+             "wget --no-check-certificate https://example.invalid/x | head", "allow"),
+            ("(gw-ct-p4) git rev-parse --verify is git, allows", "git rev-parse --verify HEAD | head -1", "allow"),
+            ("(gw-ct-p5) inline python code keeps the broad note", "python3 -c 'import tests' | head",
+             "allow-note"),
+            ("(gw-ct-p6) python3 -m pytest into head denies", "python3 -m pytest | head", "deny"),
+            ("(gw-ct-p7) make -n is a dry run: the broad note stays", "make -n test | head", "allow-note"),
+            ("(gw-ct-p8) make test into head denies", "make test | head", "deny"),
+            ("(gw-ct-p9) pytest --collect-only lists tests: the broad note stays", "pytest --collect-only | tail",
+             "allow-note"),
+            ("(gw-ct-p10) uv run hops to python -m pytest, denies", "uv run python -m pytest | tail", "deny"),
+            ("(gw-ct-p11) bare make has no checker target, allows", "make | head", "allow"),
+            ("(gw-ct-p12) the test builtin keeps the broad note", "test -d /cache | head", "allow-note"),
+            ("(gw-ct-p13) ruff --version keeps the broad note", "ruff --version | head -1", "allow-note"),
+            # step 5, the pipeline walk (_verification_sink)
+            ("(gw-ct-k1) a non-truncating filter stage passes the cut on, denies",
+             "pytest -q 2>&1 | grep -v DEBUG | tail -30", "deny"),
+            ("(gw-ct-k2) '|&' into tail denies", "npm run lint |& tail", "deny"),
+            ("(gw-ct-k3) a ')' group is the producer, denies", "(cd opf && pytest) | tail", "deny"),
+            ("(gw-ct-k4) a '}' group is the producer, denies", "{ pytest -q; } 2>&1 | tail", "deny"),
+            ("(gw-ct-k5) inside a for-loop body, denies", "for f in a; do pytest $f | tail; done", "deny"),
+            ("(gw-ct-k6) inside an if condition, denies", "if make test | tail; then :; fi", "deny"),
+            ("(gw-ct-k7) an earlier real-file tee does not exempt the sink, denies",
+             "pytest | tee /var/tmp/x/l | tail", "deny"),
+            ("(gw-ct-k8) a real-file tee with no sink allows", "pytest | tee /var/tmp/x/l", "allow"),
+            ("(gw-ct-k9) the piped segment is echo, not the check, allows", "pytest && echo ok | head", "allow"),
+            ("(gw-ct-k10) less is not truncating, allows", "pytest | less", "allow"),
+            ("(gw-ct-k11) a sibling group's pipe is not the check's, allows", "pytest; (echo x) | tail", "allow"),
+            ("(gw-ct-k12) a check whose pipe ends inside its group allows", "(pytest | grep x); echo | tail",
+             "allow"),
+            # step 6, precedence
+            ("(gw-ct-o1) a later --no-verify deny keeps precedence (still deny)",
+             "pytest | tail; git commit -n -m x", "deny"),
+            ("(gw-ct-o2) set -o pipefail gives no exemption, denies", "set -o pipefail; pytest -q | tail -20",
+             "deny"),
+            # step 7, the parse-error path
+            ("(gw-ct-e1) a recovered prefix proves the sink before an unquoted heredoc, denies",
+             "pytest | tail; cat <<EOF\nx\nEOF", "deny"),
+            ("(gw-ct-e2) an in-progress (unclosed) sink segment is not proof: the raw note stays",
+             'pytest | tail "unbalanced', "allow-note"),
+            # the incident shape and its absolute-redirect form
+            ("(gw-ct-i1) the incident command denies",
+             "python3 -I -B tools/check_release_cut.py --self-test --red-on-revert | tail -20", "deny"),
+            ("(gw-ct-i2) the incident command redirected to an absolute file allows",
+             "python3 -I -B tools/check_release_cut.py --self-test --red-on-revert > /var/tmp/x/rc.log 2>&1",
+             "allow"),
+            # must stay allowed
+            ("(gw-ct-m1) reading a checker-named file allows", "head -50 tools/check_x.py", "allow"),
+            ("(gw-ct-m2) cat of a test file into head allows", "cat tests/x.py | head", "allow"),
+            ("(gw-ct-m3) ls of a tests dir into head allows", "ls tests | head", "allow"),
+            ("(gw-ct-m4) grep for 'check' into head allows", "grep -rn check tools | head", "allow"),
+            ("(gw-ct-m5) git log of tests into head allows", "git log -- tests/ | head", "allow"),
+            ("(gw-ct-m6) capture to a file, then read its tail, allows",
+             "pytest -q > /var/tmp/x/p.log 2>&1; tail -n 30 /var/tmp/x/p.log", "allow"),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # The deny message names an ABSOLUTE capture path (bash_absolute_paths denies a relative one), never
+        # suggests an exit-status echo trailer, and points a tee stage at its own file.
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest -q | tail -20"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "> /abs/path/check.log 2>&1" not in _ct_reason or "echo $?" in _ct_reason:
+            failures.append("(gw-ct-msg1) the deny reason must suggest an absolute capture path and no "
+                            "exit-status echo; got {!r}".format(_ct_reason))
+        _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "pytest | tee /var/tmp/x/l | tail"}})
+        _ct_reason = ((_ct_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        if "already goes to '/var/tmp/x/l'" not in _ct_reason:
+            failures.append("(gw-ct-msg2) the tee variant must point at the tee file; got {!r}".format(_ct_reason))
+        # The suggested capture form itself passes bash_absolute_paths (the relative form it replaces denies).
+        _ct_abs = _decision(aiqt_hooks.bash_absolute_paths, "pytest -q > /var/tmp/x/check.log 2>&1", cwd="/tmp")
+        if _ct_abs != "allow":
+            failures.append("(gw-ct-msg3) the absolute capture form must pass bash_absolute_paths; got {}"
+                            .format(_ct_abs))
+        _ct_rel = _decision(aiqt_hooks.bash_absolute_paths, "pytest -q > check.log 2>&1", cwd="/tmp")
+        if _ct_rel != "deny":
+            failures.append("(gw-ct-msg4) the relative capture form is expected to deny under "
+                            "bash_absolute_paths; got {}".format(_ct_rel))
 
         # GD-124: this BEST-EFFORT, ASK-only guard scans every token after a recognized git commit
         # subcommand. The handler reads _lex_command's per-token opacity without Git option binding; it
@@ -8423,9 +8544,10 @@ def _main_isolated(monitor):
           "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
           "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
           "non-creation commands ALLOW. "
-          "gatdis (gate_weakening) DENIES a --no-verify bypass and ALLOWS-WITH-NOTE a checker-shaped segment "
-          "whose failure is swallowed (|| true) or truncated (| head/tail) - the heuristic is too broad to "
-          "deny (finding 14). sectvl "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass and a verification run whose output reaches a "
+          "truncating sink (head, tail, cut, grep -m/-q/-c/-l/-L, sed -n or q, awk NR limits or exit), and "
+          "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
+          "truncated (| head/tail) - the broad heuristic is too broad to deny (finding 14). sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "
