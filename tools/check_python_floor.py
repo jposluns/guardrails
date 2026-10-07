@@ -105,11 +105,11 @@ Legs, in order:
                  run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
                  DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
-  completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on); until then an unlisted entrypoint is not a
-                 finding. The core-hook, preview-hook and adopter-tool units are listed, but
-                 tools/check_entry_guard.py is not guarded or listed yet, so it stays false. Once
-                 on, every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
+  completeness   ON when the source sets completeness-check = true, as it does since the unit that
+                 guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
+                 an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
+                 and OPF enforcement deny-hook units and tools/check_entry_guard.py are listed. On,
+                 every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
                  `if __name__ == "__main__":`, must be listed in guarded-surfaces.
   documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
                  must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
@@ -2069,28 +2069,19 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=EXECUTED), handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the
+        # red-on-revert legs run a copy of this gate in a fixture root that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-selftest-") as raw:
             _self_test_cases(Path(raw))
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
-        return 2
-    if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
     if expected is None:
@@ -2128,4 +2119,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    _code = main(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

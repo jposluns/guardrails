@@ -30,7 +30,9 @@ DEFERRED at this release (they refuse fail-closed); a migration cutover journal 
 but is reconciled by the deferred migration tool, never here.
 
 Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
-interpreter older than Python 3.14 is refused at exit 2 before anything runs.
+interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything runs. One
+that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a compile
+failure, which reads as a finding, or 2 for an interpreter predating -I when run with it.
 """
 import sys
 

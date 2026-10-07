@@ -7,7 +7,8 @@ extracts that expression from ci-status.sh and exercises it directly against cra
 use the child's return code and complete captured output, never a success token.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
-  selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
+  selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON,
+                                                     finalized at interpreter exit
 
 Exit 2 is a harness/setup error, including bad arguments, a failed report write, or an unreadable,
 malformed, or suite-missing expectation manifest.
@@ -35,6 +36,9 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
         "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
         "this installation is incomplete. Nothing was run (cannot evaluate).\n")
     raise SystemExit(2)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _selftest_exit_report  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = "/usr/bin:/bin"
@@ -240,21 +244,11 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def main(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     with tempfile.TemporaryDirectory(prefix="ci-status-selftest-") as raw:
         fixture = Fixture(Path(raw))
         head_sha = fixture.head_sha
@@ -398,8 +392,6 @@ def main(report_path=None):
             [[page([success_a], 3), page([success_b], 3)]])
         check("ci/pagination-count-mismatch-not-green", rc, 2)
 
-    if not _write_report(report_path):
-        return 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -428,4 +420,4 @@ def _parse_argv(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(_parse_argv(sys.argv[1:])))
+    _selftest_exit_report.exit_with(main(_parse_argv(sys.argv[1:])))

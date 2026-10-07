@@ -653,8 +653,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "vfxcmt"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:review-dispatch-pin"]
 
 [[rule]]
 corpus-id = "vrfdiv"
