@@ -1480,6 +1480,15 @@ def _stop_member_group(proc):
     return problems
 
 
+def _report_guarded(text, sink):
+    """Print a secondary diagnostic line on sink. A stream that refuses it loses that line: the
+    diagnostic never replaces the result it accompanies or an exception already propagating."""
+    try:
+        print(text, file=sink, flush=True)
+    except Exception:  # a refused secondary diagnostic is dropped, never raised
+        pass
+
+
 def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, report=None):
     """Run argv under a time bound; return (returncode, stdout, stderr), or (message, "", "") for
     a launch error (str(exc)) or a timeout ("TIMEOUT: ..."). The child leads its own session and
@@ -1492,11 +1501,16 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
     banner + message on report (default sys.stdout, never stderr: the cannot-evaluate path is a
     stdout report plus exit 2, and the execution gate requires the suite's error stream to hold
     only declared bytes); only then is the child cleaned up (_stop_member_group, bounded), in a
-    finally that runs whatever the record or the announcement does (a raising stream still has
-    the child killed and reaped before the exception propagates), and a cleanup problem is
-    printed on the same stream as a second line without changing the result.
-    config/member-timeout-record-before-cleanup and config/member-timeout-cleanup-on-raise pin
-    that order.
+    finally that runs whatever the record or the announcement does (a raising record or stream
+    still has the child killed and reaped before its exception propagates). A cleanup problem is
+    printed on the same stream as a second line through _report_guarded: a stream that refuses
+    that line loses it, so the diagnostic never replaces the timeout return or the exception
+    already propagating. Any other exception from the wait, including a BaseException such as
+    KeyboardInterrupt, also has the group killed and reaped first; an OSError, SubprocessError or
+    ValueError is then returned as its message, and anything else propagates unchanged.
+    config/member-timeout-record-before-cleanup, config/member-timeout-cleanup-on-raise,
+    config/member-timeout-diagnostic-guarded and config/member-timeout-interrupt-cleanup pin
+    that order and those guards.
     DISCLOSED RESIDUAL: a descendant that moved itself to another process group survives the
     kill; its pipe is drained for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are
     closed. In its own session the child has no controlling terminal: a read of an inherited
@@ -1519,13 +1533,19 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
             finally:
                 problems = _stop_member_group(proc)
                 if problems:
-                    print("{}cleanup after that timeout was incomplete (the timeout stays "
-                          "cannot-evaluate): {}".format(banner, "; ".join(problems)),
-                          file=sink, flush=True)
+                    _report_guarded("{}cleanup after that timeout was incomplete (the timeout "
+                                    "stays cannot-evaluate): {}".format(banner,
+                                                                        "; ".join(problems)),
+                                    sink)
             return message, "", ""
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             _stop_member_group(proc)
             return str(exc), "", ""
+        except BaseException:
+            # An interrupt (KeyboardInterrupt, SystemExit) or any other exception in the wait:
+            # the group is killed and reaped, then the exception propagates unchanged.
+            _stop_member_group(proc)
+            raise
         return proc.returncode, stdout, stderr
     finally:
         for stream in (proc.stdout, proc.stderr):
@@ -1661,19 +1681,32 @@ def _main_verdict_scenarios(sleeper, fixture, run=None):
     return observed, _partial_timeout_cause(observed, MAIN_VERDICT_EXPECTED)
 
 
+def _main_verdict_control(sleeper, fixture, run=None):
+    """The production config/member-timeout-main-verdict check: _main_verdict_scenarios through
+    run (default _run_bounded), checked with its own partial cause. _mixed_timeout_controls runs
+    this same function over an injected runner, so the cause this check passes is pinned."""
+    observed, cause = _main_verdict_scenarios(sleeper, fixture, run)
+    check("config/member-timeout-main-verdict", observed, MAIN_VERDICT_EXPECTED, cause)
+    return observed
+
+
 def _mixed_timeout_controls(sleeper):
-    """config/member-timeout-main-verdict-mixed: _main_verdict_scenarios over an injected runner
-    in which one scenario's child reaches its bound while the other returns, in BOTH scenario
-    orders: a definite mismatch beside the timeout (the attributed child times out and the
-    definite child exits 2, or the definite child times out and the attributed child exits 1)
-    keeps the finding definite and _verdict exits 1; a correct result beside the timeout is
-    attributed and exits 2.
+    """config/member-timeout-main-verdict-mixed: _main_verdict_control (the production check
+    call, against a private finding record) over an injected runner in which one scenario's
+    child reaches its bound while the other returns, in BOTH scenario orders: a definite
+    mismatch beside the timeout (the attributed child times out and the definite child exits 2,
+    or the definite child times out and the attributed child exits 1) keeps the finding definite
+    and _verdict exits 1; a correct result beside the timeout is attributed and exits 2.
     config/timeout-offenders-split: a lane with one member that only timed out and one definite
     offender lists ONLY the definite one, in _registered_offenders and in _lifecycle_finding, in
     both results orders; with only the timed-out member the finding is attributed; an
-    unrecorded timeout message is definite."""
+    unrecorded timeout message is definite; a lifecycle probe problem beside a member that only
+    timed out keeps the lifecycle finding definite."""
     import contextlib
     import io
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
 
     line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(sleeper)
     right = {"attributed": (2, line + "SELF-TEST CANNOT EVALUATE\n  - probe/attributed-rc\n", ""),
@@ -1691,14 +1724,19 @@ def _mixed_timeout_controls(sleeper):
                     label, bound), "", ""
             return right[argv[-1]] if outcome == "right" else outcome
 
-        observed, cause = _main_verdict_scenarios(sleeper, sleeper.parent, fake)
-        finding = "config/member-timeout-main-verdict: got {!r}".format(observed)
+        failures, caused, executed = [], {}, []
+        with patch.object(this, "FAILURES", failures), \
+                patch.object(this, "TIMEOUT_CAUSED", caused), \
+                patch.object(this, "EXECUTED", executed), \
+                patch.object(this, "_EXECUTED_SET", set()):
+            observed = _main_verdict_control(sleeper, sleeper.parent, fake)
         timeouts = [entry for entry in observed if _is_timeout(entry)]
         with contextlib.redirect_stdout(io.StringIO()):
-            code = _verdict([finding] if observed != MAIN_VERDICT_EXPECTED else [], timeouts,
-                            {finding: cause} if cause else {})
-        codes.append((len(cause), code))
-    check("config/member-timeout-main-verdict-mixed", codes, [(0, 1), (0, 1), (1, 2), (1, 2)])
+            code = _verdict(failures, timeouts, caused)
+        codes.append((executed, len(failures), [len(cause) for cause in caused.values()], code))
+    ran = ["config/member-timeout-main-verdict"]
+    check("config/member-timeout-main-verdict-mixed", codes,
+          [(ran, 1, [], 1), (ran, 1, [], 1), (ran, 1, [1], 2), (ran, 1, [1], 2)])
 
     timeout = "TIMEOUT: opf/tools/x.py --self-test reached its 1 s bound (cannot evaluate)"
     stalled = (("opf/tools/x.py", "--self-test"), (timeout, b"", b"", b""))
@@ -1709,12 +1747,15 @@ def _mixed_timeout_controls(sleeper):
         got.append((_registered_offenders(results, [timeout]),
                     _lifecycle_finding(list(results), results, set(), [], [timeout])))
     got.append(_registered_offenders(dict((stalled,)), []))
+    got.append(_lifecycle_finding([stalled[0]], dict((stalled,)), set(), ["m.e: (1, [])"],
+                                  [timeout]))
     check("config/timeout-offenders-split", got,
           [(([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
            (([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
            (([("opf/tools/x.py", "--self-test")], (timeout,)),
             ((["opf/tools/x.py"], []), (timeout,))),
-           ([("opf/tools/x.py", "--self-test")], ())])
+           ([("opf/tools/x.py", "--self-test")], ()),
+           (([], ["m.e: (1, [])"]), ())])
 
 
 def _timeout_cleanup_order_controls(sleeper):
@@ -1723,7 +1764,12 @@ def _timeout_cleanup_order_controls(sleeper):
     config/member-timeout-cleanup-on-raise: when the announcement stream raises, or the record
     itself raises, the exception still propagates AND the child has been killed and reaped
     (returncode -SIGKILL) first (a cleanup skipped by the raise leaves returncode None and fails
-    this). Every child spawned here is killed afterwards whatever the code under test did."""
+    this). config/member-timeout-diagnostic-guarded: with a cleanup problem injected and a
+    stream that refuses the cleanup diagnostic, a successful record still returns the timeout
+    tuple, and a failed record still propagates the record's own exception, the child reaped in
+    both. config/member-timeout-interrupt-cleanup: a KeyboardInterrupt injected into the wait
+    still propagates, after the child has been killed and reaped. Every child spawned here is
+    killed afterwards whatever the code under test did."""
     import contextlib
     import io
     from unittest.mock import patch
@@ -1731,11 +1777,13 @@ def _timeout_cleanup_order_controls(sleeper):
     this = sys.modules[__name__]
     real_stop = _stop_member_group
     real_popen = subprocess.Popen
-    spawned = []
+    spawned, interrupt = [], []
 
     def spawn(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         spawned.append(child)
+        if interrupt:
+            interrupt_first_wait(child)
         return child
 
     class RaisingStream:
@@ -1749,6 +1797,29 @@ def _timeout_cleanup_order_controls(sleeper):
         def append(self, entry):
             raise RuntimeError("injected record failure")
 
+    class RefusingCleanupReport(io.StringIO):
+        def write(self, text):
+            if "cleanup after that timeout" in text:
+                raise OSError("injected cleanup-report failure")
+            return super().write(text)
+
+    class InjectedInterrupt(KeyboardInterrupt):
+        pass
+
+    def interrupt_first_wait(child):
+        real_communicate, calls = child.communicate, []
+
+        def communicate(*c_args, **c_kwargs):
+            calls.append(c_kwargs.get("timeout"))
+            if len(calls) == 1:
+                raise InjectedInterrupt("injected interrupt in the wait")
+            return real_communicate(*c_args, **c_kwargs)
+
+        child.communicate = communicate
+
+    def stop_with_problem(proc):
+        return real_stop(proc) + ["injected cleanup problem"]
+
     argv = [sys.executable, "-I", "-B", str(sleeper)]
     snapshots = []
     recorded = []
@@ -1757,7 +1828,7 @@ def _timeout_cleanup_order_controls(sleeper):
         snapshots.append(list(recorded))
         return real_stop(proc)
 
-    order, outcomes = "not run", []
+    order, outcomes, guarded, interrupted = "not run", [], [], "not run"
     try:
         with patch.object(subprocess, "Popen", spawn), \
                 patch.object(this, "_stop_member_group", stop_after_record), \
@@ -1778,6 +1849,35 @@ def _timeout_cleanup_order_controls(sleeper):
             outcomes.append((raised, [child.returncode for child in spawned[first:]],
                              [_is_timeout(entry) for entry in record]
                              if isinstance(record, list) else None))
+        for record in ([], RaisingRecord()):
+            first, stream, rc, raised = len(spawned), RefusingCleanupReport(), None, None
+            try:
+                with patch.object(subprocess, "Popen", spawn), \
+                        patch.object(this, "_stop_member_group", stop_with_problem), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                            "diagnostic-guard control", "CONTROL ", record,
+                                            stream)
+            except Exception as exc:
+                raised = "{}: {}".format(type(exc).__name__, exc)
+            guarded.append((raised, _is_timeout(rc),
+                            [entry == rc for entry in record] if isinstance(record, list)
+                            else None,
+                            stream.getvalue() == ("CONTROL {}\n".format(rc)
+                                                  if _is_timeout(rc) else ""),
+                            [child.returncode for child in spawned[first:]]))
+        first, raised = len(spawned), None
+        interrupt.append(True)
+        try:
+            with patch.object(subprocess, "Popen", spawn), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                _run_bounded(argv, str(sleeper.parent), dict(os.environ), 60,
+                             "interrupt control", "CONTROL ", [], io.StringIO())
+        except (InjectedInterrupt, Exception) as exc:
+            raised = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            interrupt.clear()
+        interrupted = (raised, [child.returncode for child in spawned[first:]])
     finally:
         for child in spawned:
             if child.poll() is None:
@@ -1793,6 +1893,11 @@ def _timeout_cleanup_order_controls(sleeper):
     check("config/member-timeout-cleanup-on-raise", outcomes,
           [("injected announcement failure", [-signal.SIGKILL], [True]),
            ("injected record failure", [-signal.SIGKILL], None)])
+    check("config/member-timeout-diagnostic-guarded", guarded,
+          [(None, True, [True], True, [-signal.SIGKILL]),
+           ("RuntimeError: injected record failure", False, None, True, [-signal.SIGKILL])])
+    check("config/member-timeout-interrupt-cleanup", interrupted,
+          ("InjectedInterrupt: injected interrupt in the wait", [-signal.SIGKILL]))
 
 
 def _member_timeout_controls(base):
@@ -1812,7 +1917,8 @@ def _member_timeout_controls(base):
     with production defaults, exits 2 for a timeout with only attributed findings and 1 when a
     definite finding is also present, the diagnostic on stdout and stderr empty; one scenario's
     timeout never hides the other's definite mismatch (_mixed_timeout_controls). The timeout
-    record and cleanup order is pinned by _timeout_cleanup_order_controls.
+    record and cleanup order, the guarded cleanup diagnostic and the cleanup on an interrupted
+    wait are pinned by _timeout_cleanup_order_controls.
     config/member-bound-table pins the per-member bound table against the registered roster. A
     fixture that never got going inside its bound is attributed to that timeout, never a red."""
     import contextlib
@@ -1939,8 +2045,7 @@ def _member_timeout_controls(base):
            [([], ()), ([("a",)], (timeout,)), ([("a",)], ()), ([("b",)], ()),
             ([("a",)], ()), ([("a",)], ())]))
 
-    observed, cause = _main_verdict_scenarios(sleeper, fixture)
-    check("config/member-timeout-main-verdict", observed, MAIN_VERDICT_EXPECTED, cause)
+    _main_verdict_control(sleeper, fixture)
     _mixed_timeout_controls(sleeper)
     _timeout_cleanup_order_controls(sleeper)
 

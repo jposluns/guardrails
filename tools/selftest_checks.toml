@@ -647,6 +647,8 @@ expected-check-ids = [
   "config/member-timeout-cannot-evaluate",
   "config/member-timeout-cleanup-failure",
   "config/member-timeout-cleanup-on-raise",
+  "config/member-timeout-diagnostic-guarded",
+  "config/member-timeout-interrupt-cleanup",
   "config/member-timeout-kills-group",
   "config/member-timeout-main-verdict",
   "config/member-timeout-main-verdict-mixed",
