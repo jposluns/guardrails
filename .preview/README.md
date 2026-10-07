@@ -72,7 +72,8 @@ the authority, and the summary further down this page only points to it.
   it cannot make the assistant honour them. When Claude Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
   record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
   compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
-  with a warning, so a turn end is never held until an entry is recorded. The count is kept in its state
+  with a warning, so a turn end is not held past the cap, unless the host sends `stop_hook_active` false
+  on a turn end that continues a refusal. The count is kept in its state
   file, so the cap holds when the `stop_hook_active` input field is absent or true; it restarts only at
   the next prompt you submit (`UserPromptSubmit`), a new compaction, or a turn end whose
   `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the cap does not hold
@@ -93,7 +94,9 @@ the authority, and the summary further down this page only points to it.
   or a turn end whose `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the
   cap does not hold against a host that sends false on a turn end that continues a refusal). A state
   file that is missing, unreadable or malformed gives an unknown count, never 0, so until one of those
-  restarts the turn end is allowed with a warning instead of refused. Events: `PostToolUse` and
+  restarts, a conclusive turn end is allowed with a warning instead of refused only while a rerun seen
+  since is outstanding; any other is silent, and a lost record of earlier reruns is silent (a missed
+  refusal). Events: `PostToolUse` and
   `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and
   `Stop`. Its shell reading
   is exact only for a small closed grammar (listed in its docstring) and for commands of at most 8192
@@ -136,10 +139,10 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `dacdbd4a893849ca9de9b9cdedbc3f830deb3d3cf28b948ce2e779cfc896d703` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `aa1d5d3e5fbbacca88d948cc8325a1950a69aa8e2e42b7080b1a050598311eeb` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `0f382fa6deff87ebdd9fb125d88a67fcdc060b5231e399fbc4f978a622486f78` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `9a9e0b4d93d256feb952644edba6465dbaf9aafb3d9a1044e3dbad95f1c66a4f` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
@@ -403,8 +406,14 @@ section of its opening docstring. Read that section before relying on a hook; in
   the record was read or a constraint honoured, and it names only the constraints written in the record.
   It sees a compaction only through the platform markers named above, so a context lost without one (a
   new session, a host without those events, a hook not registered for them) is not seen. Without a state
-  folder or a session id it reminds once and then forgets. Its turn-end refusal is capped, so a model that
-  ignores it is allowed to stop after three refusals with a warning. Without `UserPromptSubmit` registered
+  folder or a session id it reminds once and then forgets, and a state file deleted after a compaction
+  forgets that compaction: the reminder and the refusals stop silently. Its turn-end refusal is capped at
+  three in a row, after which the stop is allowed with a warning, unless the host sends `stop_hook_active`
+  false on a turn end that continues a refusal (each such turn end is refused again). A refusal whose count
+  cannot be saved is allowed with a warning, also on an explicit false. Its state updates are serialized by
+  a lock file beside the state file; a call that cannot take the lock within two seconds saves nothing, and
+  a turn end it would refuse is allowed with a warning that names the lock. Without `UserPromptSubmit`
+  registered
   and without a `stop_hook_active` field in the input, the count stays at the cap, so every later turn end
   until the next compaction is allowed with the warning (a missed refusal); a state file that cannot be
   parsed gives an unknown count with the same effect from its first turn end.
@@ -434,14 +443,21 @@ section of its opening docstring. Read that section before relying on a hook; in
   clears it wherever the word stands, even inside a denial such as `I did not rerun CI`, whether or not
   the failure is recorded; it does not record or investigate the failure itself. It fails open on its own
   failure, by design for an advisory hook: an internal error or an unwritable stdout gives no note and no
-  refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed and
-  the stop is allowed with a warning, but the current call's own CI rerun or possible CI rerun note is
-  still given. A state file written by an earlier revision of the hook is read as no earlier runs too, so
+  refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed (a
+  turn end that reads it is allowed with a warning that the state could not be read when the final message
+  calls a pass conclusive or is missing), but the current call's own CI rerun or possible CI rerun note is
+  still given. A refusal whose count cannot be saved is allowed with a warning, also on an explicit
+  `stop_hook_active` false. Its state updates are serialized by a lock file beside the state file; a run
+  that cannot take the lock within two seconds saves nothing, and a turn end it would refuse is allowed
+  with a warning that names the lock. A state file written by an earlier revision of the hook is read as
+  no earlier runs too, so
   none of its flags arms a refusal. The state file is trusted: a hand-edited state of the current revision
   whose flags are of the kinds it keeps still arms a refusal. A state file that is missing (first use
   cannot be told from a lost file), unreadable or malformed gives an unknown count, so until a prompt you
   submit, a disclosure word or an explicit `stop_hook_active` false, a conclusive turn end is allowed with
-  a warning instead of refused. Without `UserPromptSubmit` registered and without a `stop_hook_active`
+  a warning instead of refused only while a rerun seen since is outstanding; any other is silent, and a
+  lost record of earlier reruns is silent (a missed refusal). Without `UserPromptSubmit` registered and
+  without a `stop_hook_active`
   field in the input, once it has refused twice in a row every later conclusive turn end is allowed with
   the warning until a final message names a disclosure word (a missed refusal).
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows

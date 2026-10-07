@@ -67,7 +67,12 @@ WHAT IT DOES
        deleted, and reading either as a count of 0 would let a lost file restart the cap without a new turn.
        So a failed or missing load is an unknown count (blocks null in the state the next tool call writes
        back), never a fresh 0, and a conclusive stop with outstanding reruns and an unknown count is allowed
-       with a warning (refusal count unknown) until one of the reset signals above sets the count to 0. A turn
+       with a warning (refusal count unknown) until one of the reset signals above sets the count to 0. A lost
+       state file also loses the record of earlier reruns: when the state file is missing at a Stop, or a tool
+       call has written back a lost or unreadable one, a conclusive turn end is allowed with a warning (refusal
+       count unknown) only while a rerun seen since is outstanding; any other is silent, and a lost record of
+       earlier reruns is silent (a missed refusal). A Stop that itself finds the state file unreadable or
+       malformed gives the warning that the state could not be read (FAILURE DIRECTION). A turn
        the user starts with a prompt fires UserPromptSubmit before any tool call, so with that event
        registered, or with stop_hook_active explicitly false on the Stop, the first use is refused as usual;
        with neither, every refusal is replaced by that warning until a disclosure (a missed refusal), the
@@ -131,7 +136,8 @@ WHAT IT DOES
     DIRECTION). No configuration is needed. State: one JSON file per session (named by a SHA-256 of
     session_id, else transcript_path) in AIQT_HOOK_STATE_DIR/rerun-pass-check when that is an absolute path,
     else $XDG_STATE_HOME/aiqt-guardrails/rerun-pass-check, else $HOME/.local/state/aiqt-guardrails/
-    rerun-pass-check (created 0700, written by an atomic replace).
+    rerun-pass-check (created 0700, written by an atomic replace), with its lock file (the same name plus .lock)
+    beside it.
 
 FAILURE DIRECTION
     After a tool call the safe direction is to inform: a rerun the hook recognizes is noted even when its state
@@ -142,8 +148,16 @@ FAILURE DIRECTION
     allowed with a warning that the state could not be read; any other final message is allowed silently,
     since no refusal could be due. While reruns are outstanding, a payload with no final message is allowed
     with a warning that says so, and a conclusive stop with an unknown refusal count (UNKNOWN COUNT in 4) or
-    one that cannot be saved is allowed with a warning; only a Stop whose stop_hook_active field is explicitly
-    false (read as a new turn, count 0) still refuses once when the count cannot be saved. With no state
+    one whose refusal cannot be saved is allowed with a warning, also on a Stop whose stop_hook_active field is
+    explicitly false, so a refusal that is not counted never goes past the cap. A reset whose save fails keeps
+    the stored count: after a failed save at a prompt the user submitted, the next Stop goes on from that count
+    (at the cap, a conclusive stop is allowed with the warning).
+    STATE LOCK. Each run holds an exclusive lock (flock) on the lock file beside the state file, opened without
+    following a symbolic link, over its whole load, update and save, so a tool call cannot write back a count
+    that a Stop saved meanwhile. A run that cannot take the lock within LOCK_WAIT (2) seconds, or at all (a lock
+    path that is a symbolic link or not a regular file, a platform without flock), saves nothing, as after a
+    failed save: a Stop that would refuse is allowed with a warning that names the lock, a tool call still gives
+    its note, and a prompt does not reset the count. With no state
     location at all (no session key in the payload, or no absolute state directory) nothing is ever kept, so
     every stop is allowed silently. A state file longer than STATE_MAX_BYTES, or with a negative
     counter or a non-text flag, is malformed and read as no state (it is never parsed from a cut prefix). A
@@ -212,7 +226,10 @@ RESIDUAL COVERAGE
     ("could not get it verified") is refused, and a message naming any disclosure word passes and clears the reruns,
     whether or not it records the failure and wherever the word stands, also inside a denial, a quotation or a
     negation ("I did not rerun CI"). It does not record or investigate the failure itself. Concurrent hook runs in
-    one session can lose a state update. A state file written by an earlier revision (without the current
+    one session are serialized by the state lock; a run that cannot take it within LOCK_WAIT seconds saves
+    nothing, so its update is lost (a change or a rerun of that tool call is not recorded, a prompt does not reset
+    the count), and a refusal it would give is allowed with a warning (a missed refusal). A state file written by
+    an earlier revision (without the current
     STATE_VERSION) is discarded, so a local rerun across it is missed. The state file is trusted: a hand-edited
     state of the current STATE_VERSION whose flags carry a prefix this version keeps still arms a refusal, and a
     failure recorded in it still makes a later pass a rerun. A check run again with a word quoted another way
@@ -225,11 +242,13 @@ RESIDUAL COVERAGE
     (one longer than MAX_KEY JSON characters is keyed by its SHA-256, so the state stays under STATE_MAX_BYTES) and
     MAX_FLAGS outstanding reruns. The hook fails open on its own failure (warn-only by design: an advisory hook must
     not block on its own failure): an internal error exits 0 with no output, an unreadable state file is read as no
-    earlier runs (so a local rerun across it is missed) with an unknown refusal count, and allows a conclusive stop
-    with a warning, though the current call's own CI rerun or possible CI rerun note is still given, and a note or
-    refusal that cannot be written to stdout is dropped, so each can miss a note or a refusal. A state file lost or
-    deleted during a session is read as an unknown count too (UNKNOWN COUNT in 4), so until a reset signal a
-    conclusive stop is allowed with a warning in place of a refusal (a missed refusal).
+    earlier runs (so a local rerun across it is missed) with an unknown refusal count (a Stop that reads it allows a
+    conclusive stop with a warning that the state could not be read), though the current call's own CI rerun or
+    possible CI rerun note is still given, and a note or refusal that cannot be written to stdout is dropped, so
+    each can miss a note or a refusal. A state file lost or deleted during a session is read as an unknown count
+    too (UNKNOWN COUNT in 4), so until a reset signal a conclusive turn end is allowed with a warning (refusal count
+    unknown) only while a rerun seen since is outstanding; any other is silent, and a lost record of earlier reruns
+    is silent (a missed refusal).
 
 Self-test: python3 -I -S -B rerun-pass-check.py --self-test
 """
@@ -250,10 +269,17 @@ import os
 import re
 import stat
 import tempfile
+import time
+
+try:
+    import fcntl
+except ImportError:  # no flock here: the state lock is never taken (FAILURE DIRECTION)
+    fcntl = None
 
 HOOK = "rerun-pass-check"
 STATE_MAX_BYTES = 1 << 18
 BLOCK_CAP = 2  # consecutive refusals before a Stop is allowed with a warning (see 4 in the docstring)
+LOCK_WAIT = 2.0  # seconds a run waits for the state lock before it goes on without it (FAILURE DIRECTION)
 MAX_CHECKS = 200
 MAX_FLAGS = 20
 MAX_SHOWN = 160  # characters of a command shown in a note
@@ -413,6 +439,45 @@ def save_state(path, state):
             except OSError:
                 pass
         return False
+
+
+def lock_state(path):
+    """An open descriptor that holds an exclusive flock on the lock file beside the state file (its name plus
+    .lock), so one run's whole load, update and save cannot interleave with another's; None when the lock is
+    not taken within LOCK_WAIT seconds or cannot be taken at all (never raises). Closing it releases the lock."""
+    if path is None or fcntl is None:
+        return None
+    fd = None
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("the state lock is not a regular file")
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return None
+
+
+def unlock_state(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 class _Unsupported(Exception):
@@ -804,21 +869,22 @@ NO_MESSAGE = ("rerun-pass-check: turn end allowed unchecked; the payload carries
               "as failed, or saw a check pass on a rerun after a recorded failure")
 
 
-def at_stop(payload, state, readable, path):
+def at_stop(payload, state, readable, path, locked=True):
     """The Stop output, or None. A reset signal (a disclosure word, or stop_hook_active explicitly false) is
     processed and saved before any return that lets the stop pass, and a stop let pass where a refusal could be
-    due gets a warning (FAILURE DIRECTION)."""
+    due gets a warning (FAILURE DIRECTION). Without the state lock (locked False) nothing is saved, and a
+    refusal, which could not be counted, is allowed with a warning that names the lock."""
     msg = payload.get("last_assistant_message")
     msg = msg if isinstance(msg, str) else None
     new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (see 4 in the docstring)
     if msg is not None and DISCLOSED_RE.search(msg):
-        if state["flags"] or state["blocks"] != 0:
+        if locked and (state["flags"] or state["blocks"] != 0):
             state["flags"], state["blocks"] = [], 0
             save_state(path, state)
         return None
-    if new_turn and state["blocks"] != 0:
+    if locked and new_turn and state["blocks"] != 0:
         state["blocks"] = 0
-        save_state(path, state)
+        save_state(path, state)  # on a failed save the stored count stays, and the refusal below is not saved
     claim = msg is not None and conclusive(msg)
     if not readable:
         return dict(systemMessage=UNREAD) if path is not None and (msg is None or claim) else None
@@ -837,7 +903,10 @@ def at_stop(payload, state, readable, path):
     if blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + " (loop cap)")
     state["blocks"] = blocks + 1
-    if not save_state(path, state) and not new_turn:
+    if not locked:  # a refusal that is not counted could exceed the cap
+        return dict(systemMessage=allowed + " (refusal count cannot be saved: the state lock " + str(path)
+                    + ".lock was not taken)")
+    if not save_state(path, state):  # also on an explicit false: an unsaved refusal could exceed the cap
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
     return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
                 "but this session ran a command that names a CI rerun and was not reported as failed, or saw a "
@@ -848,22 +917,26 @@ def at_stop(payload, state, readable, path):
 
 def decide(payload, env):
     event = payload.get("hook_event_name")
-    path = state_path(payload, env)
-    if event in ("PostToolUse", "PostToolUseFailure"):
-        state, readable = load_state(path)
-        what = after_tool(payload, state, event)
-        save_state(path, state)  # a failed save still notes below; a failed load is saved as an unknown count
-        return note(event, what) if what else None
-    if event == "UserPromptSubmit":  # a prompt the user submitted starts a new turn: the count restarts
-        state, readable = load_state(path)
-        if state["blocks"] != 0:
-            state["blocks"] = 0
-            save_state(path, state)
+    if event not in ("PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"):
         return None
-    if event == "Stop":
+    path = state_path(payload, env)
+    lock = lock_state(path)  # held over the whole load, update and save of this run
+    try:
+        locked = lock is not None
         state, readable = load_state(path)
-        return at_stop(payload, state, readable and path is not None, path)
-    return None
+        if event == "Stop":
+            return at_stop(payload, state, readable and path is not None, path, locked)
+        if event == "UserPromptSubmit":  # a prompt the user submitted starts a new turn: the count restarts
+            if locked and state["blocks"] != 0:
+                state["blocks"] = 0
+                save_state(path, state)  # on a failed save the stored count stays (the next Stop may warn)
+            return None
+        what = after_tool(payload, state, event)
+        if locked:
+            save_state(path, state)  # a failed save still notes below; a failed load is saved as an unknown count
+        return note(event, what) if what else None
+    finally:
+        unlock_state(lock)
 
 
 def _emit_line(text):
@@ -1925,16 +1998,15 @@ def _self_test():
             self.assertIsNone(self.stop("It was flaky; all tests pass.", active=None))  # a disclosure resets
             self.bash("gh run rerun 9")
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
-            # A count that cannot be saved allows without the field (and under it); explicit false refuses once.
+            # A refusal that cannot be saved is allowed with a warning, also under an explicit false (round 23,
+            # codex MEDIUM: an unsaved refusal on an explicit false let the count run 1, 1, 2 against a cap of 2).
             state = dict(new_state(), flags=["CI rerun command: gh run rerun 7"])
-            for active in (None, True):
+            for active in (None, True, False):
                 payload = dict(last_assistant_message="All tests pass.")
                 if active is not None:
                     payload["stop_hook_active"] = active
                 self.assertEqual(at_stop(payload, dict(state), True, None),
                                  dict(systemMessage=allowed + " (refusal count cannot be saved)"), active)
-            self.assertEqual(at_stop(dict(last_assistant_message="All tests pass.", stop_hook_active=False),
-                                     dict(state), True, None)["decision"], "block")
             doc = " ".join(__doc__.split())
             self.assertNotIn("per continuous stop_hook_active run", doc)
             # Round 21 (claude MEDIUM): an explicit false resets the count, so the cap does not hold whatever the field.
@@ -1978,6 +2050,175 @@ def _self_test():
                 self.bash("gh run rerun 7")
                 reset()  # an accepted new-turn signal sets the count to 0
                 self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+            # Round 23 (claude 2, codex 5): every failure branch of load_state gives an unknown count, which a tool
+            # call keeps and the next conclusive Stop reports; a mutant reading any of them as a fresh 0 fails here.
+            good = dict(new_state(), flags=["CI rerun command: gh run rerun 7"], blocks=1)
+            target = os.path.join(self.tmp, "target.json")
+
+            def put(obj, where=path):
+                with open(where, "w", encoding="utf-8") as fh:
+                    json.dump(obj, fh)
+
+            def oversized():
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(good) + " " * STATE_MAX_BYTES)
+
+            def symlink():  # ELOOP: the state file is opened without following a symbolic link
+                put(good, target)
+                os.symlink(target, path)
+
+            def unreadable():  # EACCES
+                put(good)
+                os.chmod(path, 0)
+
+            def not_json():
+                with open(path, "w", encoding="ascii") as fh:
+                    fh.write("\x7bbad")
+
+            corruptions = dict(
+                not_json=not_json, oversized=oversized, not_an_object=lambda: put([good]),
+                negative_blocks=lambda: put(dict(good, blocks=-1)), float_blocks=lambda: put(dict(good, blocks=1.0)),
+                text_blocks=lambda: put(dict(good, blocks="1")), bool_blocks=lambda: put(dict(good, blocks=True)),
+                no_blocks=lambda: put(dict((k, v) for k, v in good.items() if k != "blocks")),
+                negative_change=lambda: put(dict(good, change=-1)), float_change=lambda: put(dict(good, change=0.0)),
+                checks_list=lambda: put(dict(good, checks=[])), flags_text=lambda: put(dict(good, flags="x")),
+                flag_number=lambda: put(dict(good, flags=[7])), foreign_flag=lambda: put(dict(good, flags=["x: y"])),
+                fifo=lambda: os.mkfifo(path), symlink=symlink, unreadable=unreadable)
+            for name, corrupt in corruptions.items():
+                if os.path.lexists(path):
+                    os.unlink(path)
+                corrupt()
+                if name == "unreadable" and os.access(path, os.R_OK):
+                    continue  # privileges that ignore file modes: this case cannot be made here
+                self.assertEqual(load_state(path), (unknown_state(), False), name)
+                self.bash("gh run rerun 7")
+                self.assertEqual(load_state(path)[0]["blocks"], None, name)
+                self.assertEqual(self.stop("All tests pass.", active=None),
+                                 dict(systemMessage=allowed + " (refusal count unknown)"), name)
+            # A state file written by an earlier revision keeps its count, also the cap and an unknown count.
+            for blocks, expect in ((1, "(refusal 2 of"), (BLOCK_CAP, "(loop cap)"), (None, "(refusal count unknown)")):
+                for version in (None, 1):
+                    legacy = dict(change=3, checks=dict(), flags=["gh run rerun 7"], blocks=blocks)
+                    os.unlink(path)
+                    put(legacy if version is None else dict(legacy, version=version))
+                    self.assertEqual(load_state(path), (dict(new_state(), blocks=blocks), True), (blocks, version))
+                    self.bash("gh run rerun 7")
+                    self.assertEqual(load_state(path)[0]["blocks"], blocks, (blocks, version))
+                    out = self.stop("All tests pass.", active=None)
+                    self.assertIn(expect, out.get("reason", out.get("systemMessage")), (blocks, version))
+
+        def test_54_a_tool_call_cannot_restore_a_count_a_stop_saved_meanwhile(self):
+            # Round 23 (codex MAJOR): a tool call loaded the state, a conclusive Stop saved count 1, and the tool
+            # call then saved its stale copy with count 0, so the interleaving repeated gave "refusal 1 of at most
+            # 2" without end. Each round below holds a tool call between its load and its save while a Stop runs.
+            import threading
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            g = globals()
+            real = g["after_tool"]
+            outs = []
+            try:
+                for _ in range(BLOCK_CAP + 3):
+                    loaded, release = threading.Event(), threading.Event()
+
+                    def slow(payload, state, event, loaded=loaded, release=release):
+                        loaded.set()
+                        release.wait(10)
+                        return real(payload, state, event)
+
+                    g["after_tool"] = slow
+                    tool = threading.Thread(target=self.bash, args=("gh run rerun 7",))
+                    tool.start()
+                    self.assertTrue(loaded.wait(10))
+                    stop = threading.Thread(target=lambda: outs.append(self.stop("All tests pass.", active=None)))
+                    stop.start()
+                    stop.join(0.3)  # without the lock the Stop saves its count here, before the tool call's save
+                    release.set()
+                    tool.join(15)
+                    stop.join(15)
+                    g["after_tool"] = real
+            finally:
+                g["after_tool"] = real
+            self.assertEqual(len(outs), BLOCK_CAP + 3)
+            self.assertEqual(len([o for o in outs if o.get("decision") == "block"]), BLOCK_CAP)
+            self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
+
+        def test_55_a_state_lock_not_taken_saves_nothing_and_never_refuses(self):
+            # Round 23 (codex MAJOR): a run that cannot take the state lock in time skips its update, and a Stop
+            # that would refuse is allowed with a warning that names the lock.
+            if fcntl is None:
+                self.skipTest("SKIPPED, no flock on this platform")
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+            warning = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
+                       "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
+                       "pass on a rerun after a recorded failure (refusal count cannot be saved: the state lock "
+                       + path + ".lock was not taken)")
+            g = globals()
+            wait = g["LOCK_WAIT"]
+            g["LOCK_WAIT"] = 0.05
+            fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                before = load_state(path)
+                for active in (None, True, False):
+                    self.assertEqual(self.stop("All tests pass.", active=active), dict(systemMessage=warning), active)
+                self.assertIn("CI rerun", self.bash("gh run rerun 8")["hookSpecificOutput"]["additionalContext"])
+                self.edit()
+                self.assertIsNone(self.prompt())
+                self.assertIsNone(self.stop("It was flaky; all tests pass.", active=None))
+                self.assertEqual(load_state(path), before)  # no event saved anything
+            finally:
+                os.close(fd)
+                g["LOCK_WAIT"] = wait
+            os.unlink(path + ".lock")
+            os.symlink(os.path.join(self.tmp, "elsewhere"), path + ".lock")  # never followed
+            self.assertEqual(self.stop("All tests pass.", active=None), dict(systemMessage=warning))
+            self.assertFalse(os.path.lexists(os.path.join(self.tmp, "elsewhere")))
+            os.unlink(path + ".lock")
+            self.assertIn("(refusal 2 of", self.stop("All tests pass.", active=None)["reason"])
+
+        def test_56_an_explicit_false_resets_an_unreadable_state(self):
+            # Round 23 (claude MINOR 3): the reset of an explicit false runs before the readable check.
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("\x7bbad")
+            self.assertIsNone(self.stop("Still investigating.", active=False))
+            self.assertEqual(load_state(path), (new_state(), True))
+            self.bash("gh run rerun 7")
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+
+        def test_57_a_lost_record_of_earlier_reruns_is_silent_and_documented(self):
+            # Round 23 (codex 3, claude 4): a deleted or emptied state rewritten by a tool call keeps an unknown
+            # count but no record of earlier reruns, so a conclusive Stop is silent; the documents say exactly so.
+            path = state_path(dict(session_id="s"), self.env)
+            for lose in (lambda: os.unlink(path), lambda: open(path, "w", encoding="ascii").close()):
+                self.prompt()
+                self.bash("gh run rerun 7")
+                lose()
+                self.bash("ls")
+                self.assertEqual(load_state(path), (unknown_state(), True))
+                self.assertIsNone(self.stop("All tests pass.", active=None))
+            doc = " ".join(__doc__.split())
+            silent = ("a conclusive turn end is allowed with a warning (refusal count unknown) only while a rerun seen "
+                      "since is outstanding; any other is silent, and a lost record of earlier reruns is silent (a "
+                      "missed refusal)")
+            self.assertIn(silent, doc)
+            self.assertIn("also on a Stop whose stop_hook_active field is explicitly false", doc)
+            self.assertNotIn("still refuses once when the count cannot be saved", doc)
+            self.assertNotIn("Concurrent hook runs in one session can lose a state update", doc)
+            readme = os.path.join(os.path.dirname(here), "README.md")
+            if os.path.exists(readme):
+                with open(readme, encoding="utf-8") as fh:
+                    text = " ".join(fh.read().split())
+                self.assertNotIn("restarts the turn end is allowed with a warning instead of refused", text)
+                self.assertNotIn("missed and the stop is allowed with a warning", text)
+                self.assertIn("any other is silent, and a lost record of earlier reruns is silent", text)
 
         def test_51_an_explicit_false_resets_before_the_early_returns(self):
             # Round 21 (codex MEDIUM): an explicit false on a stop that presents no pass as conclusive was discarded,

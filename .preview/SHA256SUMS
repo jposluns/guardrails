@@ -1,9 +1,9 @@
 # SHA-256 checksums for the hooks-preview files, in sha256sum format. The README.md integrity table lists the same values.
 ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930  clock-inject.py
-dacdbd4a893849ca9de9b9cdedbc3f830deb3d3cf28b948ce2e779cfc896d703  constraint-reread.py
+aa1d5d3e5fbbacca88d948cc8325a1950a69aa8e2e42b7080b1a050598311eeb  constraint-reread.py
 0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c  future-stamp-write.py
 c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d  record-remove-check.py
-0f382fa6deff87ebdd9fb125d88a67fcdc060b5231e399fbc4f978a622486f78  rerun-pass-check.py
+9a9e0b4d93d256feb952644edba6465dbaf9aafb3d9a1044e3dbad95f1c66a4f  rerun-pass-check.py
 6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996  stamp-truth-stop.py
 482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc  unbounded-wait.py
 04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8  ungated-record.py
