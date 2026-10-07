@@ -320,7 +320,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.2"
@@ -329,7 +329,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.3"
@@ -338,7 +338,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.4"
@@ -347,7 +347,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.5"
@@ -356,7 +356,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.6"
@@ -365,7 +365,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.7"
@@ -374,7 +374,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 30
 end-line = 33
 canonical-text = "A value hardcoded into a reusable command, or carried over from the source the\ncommand was copied or templated from, is not evidence of the target the command now runs against: it is\nderived from the authoritative source at the point of use, or validated against it, before the guard\nrelies on it."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.8"
@@ -383,7 +383,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 39
 end-line = 42
 canonical-text = "Where a document asserts a fact about the\nsystem it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an\nauthority the document's author does not control, the live system or a second in-tree artefact whose purpose\nis to state that same fact, rather than against the document's own words."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.9"
@@ -392,7 +392,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 42
 end-line = 46
 canonical-text = "A membership question over a range\nor interval is likewise answered by a membership test, whether a value falls within the interval, not by\nmatching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a\nliteral-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one\nlying between its endpoints and written nowhere as a literal token."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.10"
@@ -401,7 +401,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 51
 end-line = 53
 canonical-text = "It is therefore scoped to the narrowest locus where\nthe string's presence would be a defect; a whole-artefact scope is right only where every occurrence is a\ndefect, such as a leaked secret, an invalid byte, or a forbidden character with no legitimate quotation."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.11"
@@ -410,7 +410,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 54
 end-line = 56
 canonical-text = "Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic\nstate, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact\nstring scan."
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "grdinp.12"
@@ -419,7 +419,34 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 60
 end-line = 62
 canonical-text = "A view that claims to cover a set checks, as it is\ngenerated, that each item of the authoritative set appears in it or is named in a recorded exclusion, and\nfails on an item in neither"
-source-digest = "5c62b1713f517e95a9afde01674227688a7fe66d2a76e12515cb38a655585de8"
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+
+[[clause]]
+clause-id = "grdinp.13"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 64
+end-line = 66
+canonical-text = "A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and\nevaluates every condition the apply enforces, the expected state after the change as well as the state\nbefore it."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+
+[[clause]]
+clause-id = "grdinp.14"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 66
+end-line = 68
+canonical-text = "An expensive apply and a check of whether it will succeed decide from one shared predicate, or,\nwhere the apply's predicate is out of reach, a test holds the check to failing on every input the apply\nrejects."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+
+[[clause]]
+clause-id = "grdinp.15"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 68
+end-line = 69
+canonical-text = "A check of whether an expensive apply will succeed refuses an input the apply would refuse, such\nas a version or sequence number no greater than the last one consumed, before any long work begins."
+source-digest = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
 
 [[clause]]
 clause-id = "estsep.1"

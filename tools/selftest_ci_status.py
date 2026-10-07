@@ -8,28 +8,36 @@ from ci-status.sh and exercises it directly against crafted JSON. Verdicts use t
 and complete captured output, never a success token.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
-  selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
+  selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON,
+                                                     finalized at interpreter exit
 
 Once the checks start, main() ends every run through one rule, whatever ends it: a normal finish, a
 recorded harness error, an uncaught exception, or SystemExit raised anywhere, including inside check().
 The rule: exit 1 if any assertion failed, else 2 if any harness error was recorded (an uncaught
-exception or SystemExit is recorded as one), else 0. Harness errors also include a failed report
-write, an unreadable or malformed expectation manifest (a suite container that is not an array of
+exception or SystemExit is recorded as one), else 0. Harness errors also include an unreadable or
+malformed expectation manifest (a suite container that is not an array of
 tables included), a ci-status.sh whose jq program cannot be extracted, a duplicate check id, and a
 diagnostic or result that cannot be printed or flushed. The execution set is reconciled against the
 manifest only when no check recorded a harness error, because an unevaluated check would also be
-reported missing. Bad arguments, a Python older than 3.14, and a
-missing tomllib are refused before any check runs, so they always exit 2.
+reported missing. Bad arguments, a Python older than 3.14, a
+missing tomllib, and a refused arming of the execution-report finalizer are refused before any check
+runs, so they always exit 2.
 
-Reporting can never escape or change the rule. An uncaught exception is recorded before its text is
-rendered, and exception or path text in a diagnostic goes through _safe_text(), which contains whatever
-str() or repr() raises (SystemExit included) and falls back to the type name. Each print and each flush
+Reporting can never escape or change the rule (under --execution-report, a refusal of the report
+finalizer, described below, ends the run with 2 after reporting). An uncaught exception is recorded
+before its text is rendered, and exception or path text in a diagnostic goes through _safe_text(),
+which contains whatever str() or repr() raises (SystemExit included) and falls back to the type name.
+Each print and each flush
 of a result line (the FAIL header, each failure line, the stderr summary line, the PASS line and each
 void line) is contained on its own and a failure is recorded as a harness error, so a fault on one line
 or stream does not stop the later lines, on the same stream or the other. The verdict is read only after
 both streams are flushed of earlier output; a PASS line is then the last output. The exit code is
-computed once, after all reporting, and the script ends with os._exit() on that code, so the
-interpreter's own exit-time flush cannot replace it.
+computed once, after all reporting. A run without --execution-report ends with os._exit() on that
+code, so the interpreter's own exit-time flush cannot replace it. A run with --execution-report ends
+through _selftest_exit_report.exit_with() on that code instead (os._exit() would skip the report): at
+interpreter exit its finalizer flushes both streams and writes the report, and every refusal of the
+finalizer, a stream it cannot flush included, ends the run with 2 and writes no report
+(tools/_selftest_exit_report.py), which the execution gate refuses.
 
 What a reader of stdout can rely on: only the exit code is authoritative. If printing or flushing the
 PASS line fails, the run exits 2 and then writes the void line (any PASS line above is void) to stdout
@@ -68,6 +76,9 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
         "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
         "this installation is incomplete. Nothing was run (cannot evaluate).\n")
     raise SystemExit(2)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _selftest_exit_report  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = "/usr/bin:/bin"
@@ -397,18 +408,6 @@ def _expected_check_ids():
     _record_harness_error("missing or malformed suite {!r} in {}".format(
         SUITE_ID, _safe_text(str, CHECKS_MANIFEST)))
     return None
-
-
-def _write_report(report_path):
-    if report_path is None:
-        return
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        _record_harness_error("cannot write execution report {}: {}".format(
-            _safe_text(str, report_path), _safe_text(str, exc)))
 
 
 def _run_checks():
@@ -883,11 +882,16 @@ def main(report_path=None, run_checks=_run_checks):
     and flush of a result line contained on its own, every failure recorded and none raised. The last
     statement computes the code from the records alone: any assertion failure -> 1; else any harness
     error, an uncaught exception or SystemExit included -> 2; else 0. run_checks is replaced only by
-    _finalisation_cases().
+    _finalisation_cases(). A report_path arms the execution-report finalizer before the try block, so
+    a refused arm exits 2 before any check runs.
     """
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         run_checks()
-        _reconcile(report_path)
+        _reconcile()
     except BaseException as exc:  # SystemExit and KeyboardInterrupt too: none may skip the report
         _record_uncaught(exc)
     _contained(_report)
@@ -910,12 +914,10 @@ def _describe_uncaught(name, exc):
     traceback.print_exception(exc, file=sys.stderr)
 
 
-def _reconcile(report_path):
+def _reconcile():
     # Only a run in which every check was evaluated is reconciled: a check that recorded a harness error
-    # never executed, and would also be reported missing. A failed report write does not stop it.
-    reconcile = not HARNESS_ERRORS
-    _write_report(report_path)
-    if not reconcile:
+    # never executed, and would also be reported missing.
+    if HARNESS_ERRORS:
         return
     expected = _expected_check_ids()
     if expected is None:
@@ -1233,94 +1235,91 @@ def _finalisation_cases():
             not_evaluated = manifest("not-evaluated.toml", [own, "seeded/not-evaluated"])
             scalar_suite = manifest("scalar-suite.toml", text="suite = 1\n")
             absent = base / "absent" / "selftest_checks.toml"
-            bad_report = str(base / "absent" / "report.json")
             exit_text = "uncaught RuntimeError: <unprintable RuntimeError>"
             value_text = "uncaught _UnprintableError: _UnprintableError()"
             unprintable_path = _UnprintablePath(str(absent))
-            # (seed a failure first?, checks run, report path, manifest, code, stdout texts, stderr texts,
+            # (seed a failure first?, checks run, manifest, code, stdout texts, stderr texts,
             # and optionally "stream:fault" from faults, several joined by "+", then the stdout PASS state
             # when not the default: "pass" for code 0, else "none")
-            for fail, run, report, path, code, out_texts, err_texts, *faulting in (
-                    (False, passes, None, own_only, 0, ["SELF-TEST PASS"], []),
-                    (True, passes, None, own_only, 1, [seeded], []),
-                    (True, recorded, None, own_only, 1, [seeded], ["seeded/not-evaluated"]),
-                    (False, recorded, None, not_evaluated, 2, [], ["seeded/not-evaluated"]),
-                    (True, duplicated, None, own_only, 1, [seeded, duplicate],
+            for fail, run, path, code, out_texts, err_texts, *faulting in (
+                    (False, passes, own_only, 0, ["SELF-TEST PASS"], []),
+                    (True, passes, own_only, 1, [seeded], []),
+                    (True, recorded, own_only, 1, [seeded], ["seeded/not-evaluated"]),
+                    (False, recorded, not_evaluated, 2, [], ["seeded/not-evaluated"]),
+                    (True, duplicated, own_only, 1, [seeded, duplicate],
                      [own + ": duplicate check id"]),
-                    (False, duplicated_passing, None, own_only, 2, [], [own + ": duplicate check id"]),
-                    (False, unrepresentable, None, own_only, 1,
+                    (False, duplicated_passing, own_only, 2, [], [own + ": duplicate check id"]),
+                    (False, unrepresentable, own_only, 1,
                      [own + ": got <unprintable _UnrepresentableValue>, want 0"], []),
-                    (False, passes, bad_report, never_run, 1, ["execution-set/missing: seeded/never-run"],
-                     ["cannot write execution report"]),
-                    (False, passes, bad_report, own_only, 2, [], ["cannot write execution report"]),
-                    (True, passes, None, absent, 1, [seeded], ["cannot read"]),
-                    (False, passes, None, absent, 2, [], ["cannot read"]),
-                    (True, passes, None, scalar_suite, 1, [seeded], ["missing or malformed suite"]),
-                    (False, passes, None, scalar_suite, 2, [], ["missing or malformed suite"]),
-                    (True, exits, None, own_only, 1, [seeded], ["uncaught SystemExit: 0"]),
-                    (False, exits, None, own_only, 2, [], ["uncaught SystemExit: 0"]),
-                    (True, raises, None, own_only, 1, [seeded], ["uncaught TimeoutExpired"]),
-                    (True, passes, None, _FaultingPath(), 1, [seeded], ["uncaught RuntimeError"]),
-                    (False, passes, None, _FaultingPath(), 2, [], ["uncaught RuntimeError"]),
-                    (True, exits_on_text, None, own_only, 1, [seeded], [exit_text]),
-                    (False, exits_on_text, None, own_only, 2, [], [exit_text]),
-                    (True, unprintable, None, own_only, 1, [seeded], [value_text]),
-                    (False, unprintable, None, own_only, 2, [], [value_text]),
+                    (False, passes, never_run, 1, ["execution-set/missing: seeded/never-run"], []),
+                    (True, passes, absent, 1, [seeded], ["cannot read"]),
+                    (False, passes, absent, 2, [], ["cannot read"]),
+                    (True, passes, scalar_suite, 1, [seeded], ["missing or malformed suite"]),
+                    (False, passes, scalar_suite, 2, [], ["missing or malformed suite"]),
+                    (True, exits, own_only, 1, [seeded], ["uncaught SystemExit: 0"]),
+                    (False, exits, own_only, 2, [], ["uncaught SystemExit: 0"]),
+                    (True, raises, own_only, 1, [seeded], ["uncaught TimeoutExpired"]),
+                    (True, passes, _FaultingPath(), 1, [seeded], ["uncaught RuntimeError"]),
+                    (False, passes, _FaultingPath(), 2, [], ["uncaught RuntimeError"]),
+                    (True, exits_on_text, own_only, 1, [seeded], [exit_text]),
+                    (False, exits_on_text, own_only, 2, [], [exit_text]),
+                    (True, unprintable, own_only, 1, [seeded], [value_text]),
+                    (False, unprintable, own_only, 2, [], [value_text]),
                     # The PASS print fails: the void line still reaches stderr.
-                    (False, passes, None, own_only, 2, [], [failed] + void, "stdout:write"),
-                    (True, passes, None, own_only, 1, [], [failed], "stdout:write"),
-                    (True, recorded, None, own_only, 1, [], ["seeded/not-evaluated", both_fail],
+                    (False, passes, own_only, 2, [], [failed] + void, "stdout:write"),
+                    (True, passes, own_only, 1, [], [failed], "stdout:write"),
+                    (True, recorded, own_only, 1, [], ["seeded/not-evaluated", both_fail],
                      "stdout:write"),
-                    (False, raises, None, own_only, 2, [], [], "stderr:write"),
-                    (False, duplicated, None, own_only, 1, [duplicate], [], "stderr:write"),
-                    (False, nameless, None, own_only, 2, [], ["uncaught <unnamed type>"]),
-                    (False, passes, None, unprintable_path, 2, [],
+                    (False, raises, own_only, 2, [], [], "stderr:write"),
+                    (False, duplicated, own_only, 1, [duplicate], [], "stderr:write"),
+                    (False, nameless, own_only, 2, [], ["uncaught <unnamed type>"]),
+                    (False, passes, unprintable_path, 2, [],
                      ["cannot read <unprintable _UnprintablePath>: [Errno 2]"]),
                     # The PASS line's own flush fails: exit 2, and the void line follows the PASS text.
-                    (False, passes, None, own_only, 2, void, [failed] + void, "stdout:flush", "void"),
+                    (False, passes, own_only, 2, void, [failed] + void, "stdout:flush", "void"),
                     # Output the checks left pending cannot be flushed: no PASS line at all.
-                    (False, noisy_out, None, own_only, 2, [], [failed, "(cannot evaluate)"],
+                    (False, noisy_out, own_only, 2, [], [failed, "(cannot evaluate)"],
                      "stdout:flush"),
                     # The last stderr flush is attempted too: its failure follows the summary line.
-                    (False, noisy_err, None, own_only, 2, [],
+                    (False, noisy_err, own_only, 2, [],
                      ["(cannot evaluate)\nSELF-TEST HARNESS ERROR: " + failed], "stderr:flush"),
                     # The failure list cannot flush: the stderr summary line still follows.
-                    (True, passes, None, own_only, 1, [seeded], [failed, both_fail], "stdout:flush"),
+                    (True, passes, own_only, 1, [seeded], [failed, both_fail], "stdout:flush"),
                     # A failing stderr flush, pending or not, does not stop the failure list on stdout.
-                    (True, duplicated, None, own_only, 1, [seeded, duplicate],
+                    (True, duplicated, own_only, 1, [seeded, duplicate],
                      [own + ": duplicate check id", both_fail], "stderr:flush"),
-                    (True, passes, None, own_only, 1, [seeded], [failed], "stderr:flush-always"),
+                    (True, passes, own_only, 1, [seeded], [failed], "stderr:flush-always"),
                     # A stdout closed before the run discards the PASS line; the code is still 0.
-                    (False, passes, None, own_only, 0, [], [], "stdout:closed", "none"),
+                    (False, passes, own_only, 0, [], [], "stdout:closed", "none"),
                     # The PASS line's line break is refused after its text was written: the void line
                     # still starts a line of its own.
-                    (False, passes, None, own_only, 2, [], [failed] + void, "stdout:newline-once", "void"),
+                    (False, passes, own_only, 2, [], [failed] + void, "stdout:newline-once", "void"),
                     # A refused FAIL header or failure line does not stop the failure lines after it.
-                    (True, passes, None, own_only, 1, ["  - " + seeded], [failed, both_fail],
+                    (True, passes, own_only, 1, ["  - " + seeded], [failed, both_fail],
                      "stdout:refuse-header"),
-                    (True, duplicated, None, own_only, 1, ["SELF-TEST FAIL:\n", duplicate],
+                    (True, duplicated, own_only, 1, ["SELF-TEST FAIL:\n", duplicate],
                      [failed, both_fail], "stdout:refuse-seeded"),
                     # A refused stderr summary line does not stop the last stderr flush delivering the
                     # diagnostic that records it, in either branch.
-                    (True, recorded, None, own_only, 1, [seeded], ["seeded/not-evaluated", failed],
+                    (True, recorded, own_only, 1, [seeded], ["seeded/not-evaluated", failed],
                      "stderr:refuse-summary-buffered"),
-                    (False, recorded, None, not_evaluated, 2, [], ["seeded/not-evaluated", failed],
+                    (False, recorded, not_evaluated, 2, [], ["seeded/not-evaluated", failed],
                      "stderr:refuse-summary-buffered"),
                     # Buffered streams: each result line reaches the reader only through its flush.
-                    (False, passes, None, own_only, 0, ["SELF-TEST PASS"], [], "stdout:buffered"),
-                    (True, passes, None, own_only, 1, ["SELF-TEST FAIL:\n  - " + seeded], [],
+                    (False, passes, own_only, 0, ["SELF-TEST PASS"], [], "stdout:buffered"),
+                    (True, passes, own_only, 1, ["SELF-TEST FAIL:\n  - " + seeded], [],
                      "stdout:buffered"),
-                    (False, recorded, None, not_evaluated, 2, [], ["(cannot evaluate)"],
+                    (False, recorded, not_evaluated, 2, [], ["(cannot evaluate)"],
                      "stderr:buffered"),
-                    (True, recorded, None, own_only, 1, [seeded], [both_fail], "stderr:buffered"),
+                    (True, recorded, own_only, 1, [seeded], [both_fail], "stderr:buffered"),
                     # The PASS flush fails once: the void line's own flush delivers both lines.
-                    (False, passes, None, own_only, 2, void, [failed] + void, "stdout:buffered-flush-once",
+                    (False, passes, own_only, 2, void, [failed] + void, "stdout:buffered-flush-once",
                      "void"),
                     # The stderr void line reaches the reader only through the last stderr flush.
-                    (False, passes, None, own_only, 2, [], [failed] + void,
+                    (False, passes, own_only, 2, [], [failed] + void,
                      "stdout:write+stderr:buffered"),
                     # A refused stderr void line does not stop the last stderr flush.
-                    (False, passes, None, own_only, 2, void, [failed],
+                    (False, passes, own_only, 2, void, [failed],
                      "stdout:flush+stderr:refuse-void-buffered", "void")):
                 FAILURES[:] = [seeded] if fail else []
                 HARNESS_ERRORS[:] = []
@@ -1335,7 +1334,7 @@ def _finalisation_cases():
                 out, err = streams["stdout"], streams["stderr"]
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     try:
-                        got = main(report, run)
+                        got = main(None, run)
                     except BaseException as exc:  # anything escaping main() is a failure here
                         got = ("escaped", type(exc).__name__)
                 out_text = "" if out is None else out.getvalue()
@@ -1376,13 +1375,20 @@ def _parse_argv(argv):
     sys.exit(2)
 
 
-def _end(code):
-    # os._exit: _report() has flushed both streams or recorded each flush that failed, and the
-    # interpreter's exit-time flush must not replace the code main() computed (a failing final flush
-    # would otherwise end the run with 120). _finalisation_cases() runs this ending in a child whose
-    # stdout cannot flush.
+def _end(code, report_path=None):
+    # A run that armed the execution-report finalizer ends through exit_with(), which records the code
+    # main() computed and raises it; at interpreter exit the finalizer flushes both streams and writes
+    # the report, and every refusal of the finalizer (a stream it cannot flush included) ends the run
+    # with 2 and no report (tools/_selftest_exit_report.py). os._exit would skip the finalizer.
+    if report_path is not None:
+        _selftest_exit_report.exit_with(code)
+    # Any other run: os._exit, because _report() has flushed both streams or recorded each flush that
+    # failed, and the interpreter's exit-time flush must not replace the code main() computed (a failing
+    # final flush would otherwise end the run with 120). _finalisation_cases() runs this ending in a
+    # child whose stdout cannot flush.
     os._exit(code)
 
 
 if __name__ == "__main__":
-    _end(main(_parse_argv(sys.argv[1:])))
+    _REPORT_PATH = _parse_argv(sys.argv[1:])
+    _end(main(_REPORT_PATH), _REPORT_PATH)
