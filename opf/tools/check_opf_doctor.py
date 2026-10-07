@@ -237,18 +237,21 @@ def _run_doctor(root, capture, extra=()):
     return EXIT_ERROR
 
 
+def _self_test_legs():
+    """Runs the doctor suite, then the enforcement-pack Claude deny-hook suite (git-independent, so it
+    runs even where the doctor suite SKIPs); the WORSE status of the two is the verdict (2 over 1 over
+    0), so neither leg can mask the other."""
+    return max(_self_test(), _claude_hook_self_test())
+
+
 def _self_test():
-    """Isolate fixture configuration and restore the caller even on failure. Runs the doctor suite,
-    then the enforcement-pack Claude deny-hook suite (git-independent, so it runs even where the
-    doctor suite SKIPs); the WORSE status of the two is the verdict (2 over 1 over 0), so neither
-    leg can mask the other."""
+    """Isolate fixture configuration and restore the caller even on failure."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            rc = _self_test_isolated()
-    return max(rc, _claude_hook_self_test())
+            return _self_test_isolated()
 
 
 def _self_test_isolated():
@@ -4415,7 +4418,7 @@ def main(argv=None):
     try:
         args = list(sys.argv[1:] if argv is None else argv)
         if args == ["--self-test"]:
-            return _self_test()
+            return _self_test_legs()
         if args:
             print("check_opf_doctor: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
