@@ -781,18 +781,37 @@ class FdCensusError(RuntimeError):
     to read with anything other than EBADF. A leak check never passes on one."""
 
 
+class FdCensusUnavailable(FdCensusError):
+    """This host has no /proc/self/fd, so no census can be taken: a leak check built on one cannot
+    evaluate. It neither passes nor reports a leak; the self-test says it cannot evaluate."""
+
+
 def _fd_pair_census():
     """The open descriptors as a frozenset of (number, identity) pairs, identity being (st_dev, st_ino,
-    st_mode, access mode). A number closed and reopened on another file between two censuses changes
-    its pair, which a count cannot see. The access-mode bits are the F_GETFL bits F_SETFL cannot change,
-    so a kept descriptor keeps its pair. Only EBADF reads as closed (the listing's own descriptor is
-    gone by the time it is read); any other listing, fstat or flag failure raises FdCensusError naming
-    the descriptor."""
+    the file type bits of st_mode, access mode). Each part stays fixed while a descriptor stays open:
+    the permission bits are left out because chmod or fchmod changes them under a kept descriptor, and
+    the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed and reopened on
+    another file, or on the same file with another access mode, changes its pair; a count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged, and so does the same file closed and
+    reopened at the same number with the same access mode. The census looks no further: the offset
+    (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines change under a kept
+    descriptor that is read, written or given F_SETFL, so comparing them would report a kept
+    descriptor as a leak. A descriptor gained at a number that was free before is always seen.
+
+    Only EBADF reads as closed (the listing's own descriptor is gone by the time it is read); any other
+    listing, fstat or flag failure raises FdCensusError naming the listing or the descriptor. A listing
+    that does not exist (ENOENT, ENOTDIR) raises FdCensusUnavailable."""
     import errno
     import fcntl
     try:
         names = os.listdir("/proc/self/fd")
     except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise FdCensusUnavailable("descriptor census: this host has no /proc/self/fd ({})".format(
+                exc)) from exc
         raise FdCensusError("descriptor census: cannot list /proc/self/fd: {}".format(exc)) from exc
     access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
     pairs = set()
@@ -805,20 +824,26 @@ def _fd_pair_census():
             if exc.errno == errno.EBADF:
                 continue
             raise FdCensusError("descriptor census: cannot read descriptor {}: {}".format(fd, exc)) from exc
-        pairs.add((fd, (st.st_dev, st.st_ino, st.st_mode, flags & access)))
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
     return frozenset(pairs)
 
 
 def _fd_leak_check(action):
-    """Run action() between two pair censuses and return (leak_free, detail). A pair present after but
-    not before is a leak, including a number closed and reopened on another file. An unreadable census
-    is never leak-free: it returns False with the census error as the detail."""
+    """Run action() between two pair censuses and return (verdict, detail). The verdict is True when no
+    pair is present after that was absent before; False on a gained pair (a leak, including a number
+    reopened on another file or with another access mode) or on an unreadable census; None when the
+    host has no /proc/self/fd (cannot evaluate, never a pass). action() runs even when the first
+    census fails, so the caller still sees its outcome."""
     try:
         before = _fd_pair_census()
+    except FdCensusError as exc:
         action()
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
+    action()
+    try:
         after = _fd_pair_census()
     except FdCensusError as exc:
-        return False, str(exc)
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
     gained = sorted(after - before)
     return not gained, "gained {}".format(gained)
 
@@ -841,6 +866,7 @@ def self_test():
         return 2
 
     failures = []
+    cannot_evaluate = []                    # checks this host cannot run (no /proc/self/fd)
     checked = 0
     # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
     # a ValueError); load_crosswalk must still refuse with RefuseError carrying the overflow.
@@ -1343,105 +1369,183 @@ def self_test():
         #     DEEP _open_parent walk (>=2 intermediate dirs => >=2 opened fds): post-fix _open_parent
         #     returns and the process fd count is unchanged; pre-fix the first raise aborts the loop, the
         #     second fd leaks, and the raw OSError escapes.
-        wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
-        (wroot / "a" / "b" / "dataA").write_bytes(b"x")
-        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
-        _w_real_close = os.close
-        _w_state = {"n": 0}
+        def _w_case(label, after_walk=None):
+            """Run the P3 check on a fresh tree and return (failure text or None, leak verdict, census
+            detail); after_walk, when given, runs inside the censused action after the walk."""
+            wroot = tmp / "walkclose" / label / "root"; (wroot / "a" / "b").mkdir(parents=True)
+            (wroot / "a" / "b" / "dataA").write_bytes(b"x")
+            wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+            _w_real_close = os.close
+            _w_state = {"n": 0}
 
-        def _w_boom_close(fd):
-            _w_state["n"] += 1
-            if _w_state["n"] == 1:
-                _w_real_close(fd)                                            # released first (close(2))
-                raise OSError(5, "EIO (self-test injected, after release)")
-            return _w_real_close(fd)
+            def _w_boom_close(fd):
+                _w_state["n"] += 1
+                if _w_state["n"] == 1:
+                    _w_real_close(fd)                                        # released first (close(2))
+                    raise OSError(5, "EIO (self-test injected, after release)")
+                return _w_real_close(fd)
 
-        _w = {"outcome": None}
+            _w = {"outcome": None}
 
-        def _w_walk():
-            _w_pfd = None
-            try:
-                os.close = _w_boom_close
+            def _w_walk():
+                _w_pfd = None
                 try:
-                    _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
-                    _w["outcome"] = "returned"
-                except OSError:
-                    _w["outcome"] = "raised"
-            finally:
-                os.close = _w_real_close
-            if _w_pfd is not None:
-                _w_real_close(_w_pfd)                        # real close so the test itself leaks nothing
+                    os.close = _w_boom_close
+                    try:
+                        _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
+                        _w["outcome"] = "returned"
+                    except OSError:
+                        _w["outcome"] = "raised"
+                finally:
+                    os.close = _w_real_close
+                if _w_pfd is not None:
+                    _w_real_close(_w_pfd)                    # real close so the test itself leaks nothing
+                if after_walk is not None:
+                    after_walk()
 
-        # A (number, identity) pair census: a leaked sibling fd is a pair gained, and an unreadable
-        # census FAILS this check (it once read as None and let the comparison be skipped).
-        _w_leak_ok, _w_detail = _fd_leak_check(_w_walk)
-        os.close(wroot_fd)
-        if not (_w["outcome"] == "returned" and _w_leak_ok):
-            failures.append("_open_parent contained-walk cleanup must GUARD each close so a raising close "
-                            "neither aborts the walk nor leaks a sibling fd (outcome={}, census {}; "
-                            "finding 8-2)".format(_w["outcome"], _w_detail))
-        checked += 1
-
-        # (P3b) THE LEAK CHECK ABOVE IS A PAIR CENSUS THAT FAILS CLOSED: (i) a number closed and reopened
-        #     on a different file between the censuses is a leak (a count is unchanged); (ii) an injected
-        #     EIO on the listing, or (iii) on one descriptor's fstat, makes the check fail naming the
-        #     listing or the descriptor, never pass; (iv) EBADF alone reads as closed.
-        _c_a = tmp / "fdcensus-a"; _c_a.write_bytes(b"a")
-        _c_b = tmp / "fdcensus-b"; _c_b.write_bytes(b"b")
-        _c_fd = os.open(str(_c_a), os.O_RDONLY)
-        _c_held = [_c_fd]
-
-        def _c_reuse():
-            os.close(_c_held.pop())
-            _c_held.append(os.open(str(_c_b), os.O_RDONLY))     # lowest free number: the one just closed
-
-        _c_ok, _c_detail = _fd_leak_check(_c_reuse)
-        _c_same = _c_held == [_c_fd]
-        for _c_value in _c_held:
-            os.close(_c_value)
-        if not _c_same or _c_ok:
-            failures.append("the descriptor leak check must see a number closed and reopened on a different "
-                            "file (same number: {}, leak-free: {}, census {})".format(_c_same, _c_ok, _c_detail))
-        checked += 1
-
-        _c_real_listdir, _c_real_fstat = os.listdir, os.fstat
-        _c_probe = os.open(str(_c_a), os.O_RDONLY)
-
-        def _c_eio_listdir(path=".", *args):
-            if str(path) == "/proc/self/fd":
-                raise OSError(5, "EIO (self-test injected on the descriptor listing)")
-            return _c_real_listdir(path, *args)
-
-        def _c_errno_fstat(code):
-            def _fstat(fd, *args):
-                if fd == _c_probe:
-                    raise OSError(code, "self-test injected on descriptor {}".format(fd))
-                return _c_real_fstat(fd, *args)
-            return _fstat
-
-        _c_results = {}
-        for _c_label, _c_listdir, _c_fstat in (("listing EIO", _c_eio_listdir, _c_real_fstat),
-                                               ("fstat EIO", _c_real_listdir, _c_errno_fstat(5)),
-                                               ("fstat EBADF", _c_real_listdir, _c_errno_fstat(9))):
-            os.listdir, os.fstat = _c_listdir, _c_fstat
+            # A (number, identity) pair census: a leaked sibling fd is a pair gained, and an unreadable
+            # census FAILS this check (it once read as None and let the comparison be skipped).
             try:
-                _c_results[_c_label] = _fd_leak_check(lambda: None)
+                _w_leak_ok, _w_detail = _fd_leak_check(_w_walk)
             finally:
-                os.listdir, os.fstat = _c_real_listdir, _c_real_fstat
-        os.close(_c_probe)
-        _c_list_ok, _c_list_detail = _c_results["listing EIO"]
-        _c_eio_ok, _c_eio_detail = _c_results["fstat EIO"]
-        _c_badf_ok, _c_badf_detail = _c_results["fstat EBADF"]
-        if _c_list_ok or "/proc/self/fd" not in _c_list_detail:
-            failures.append("an unreadable descriptor listing must FAIL the leak check naming the listing, "
-                            "never pass it (leak-free: {}, detail: {})".format(_c_list_ok, _c_list_detail))
-        if _c_eio_ok or "descriptor {}:".format(_c_probe) not in _c_eio_detail:
-            failures.append("an fstat failure other than EBADF must FAIL the leak check naming descriptor {} "
-                            "(leak-free: {}, detail: {})".format(_c_probe, _c_eio_ok, _c_eio_detail))
-        if not _c_badf_ok:
-            failures.append("an fstat EBADF reads as a closed descriptor and must not fail an unchanged "
-                            "census (detail: {})".format(_c_badf_detail))
+                os.close(wroot_fd)
+            if _w["outcome"] == "returned" and _w_leak_ok is not False:
+                return None, _w_leak_ok, _w_detail
+            return ("_open_parent contained-walk cleanup must GUARD each close so a raising close "
+                    "neither aborts the walk nor leaks a sibling fd (outcome={}, census {}; "
+                    "finding 8-2)".format(_w["outcome"], _w_detail)), _w_leak_ok, _w_detail
+
+        _w_failure, _w_verdict, _w_detail = _w_case("p3")
+        if _w_failure is not None:
+            failures.append(_w_failure)
+        elif _w_verdict is None:
+            cannot_evaluate.append("P3 walk-cleanup descriptor leak check (the walk itself returned): "
+                                   + _w_detail)
         checked += 1
+
+        # (P3b) THE LEAK CHECK ABOVE IS A PAIR CENSUS OF FIXED IDENTITIES THAT FAILS CLOSED: (i) a number
+        #     closed and reopened on a different file, or (ii) on the same file with another access mode,
+        #     between the censuses is a leak (a count is unchanged); (iii) a chmod of a kept descriptor is
+        #     not; (iv) an injected EIO on the listing, on one descriptor's fstat, or on its F_GETFL makes
+        #     the check fail naming the listing or the descriptor, never pass; (v) a missing listing
+        #     cannot evaluate, never passes; (vi) EBADF alone reads as closed. On a host with no
+        #     /proc/self/fd none of this can run: it is reported as cannot-evaluate, not as a failure.
+        import fcntl
+        if _fd_leak_check(lambda: None)[0] is None:
+            cannot_evaluate.append("P3b and P3c descriptor census checks: this host has no /proc/self/fd")
+        else:
+            _c_a = tmp / "fdcensus-a"; _c_a.write_bytes(b"a")
+            _c_b = tmp / "fdcensus-b"; _c_b.write_bytes(b"b")
+            for _c_label, _c_second, _c_mode in (("another file", _c_b, os.O_RDONLY),
+                                                 ("the same file with another access mode", _c_a, os.O_RDWR)):
+                _c_fd = os.open(str(_c_a), os.O_RDONLY)
+                _c_held = [_c_fd]
+
+                def _c_reuse():
+                    os.close(_c_held.pop())
+                    _c_held.append(os.open(str(_c_second), _c_mode))   # lowest free number: the one just closed
+
+                _c_ok, _c_detail = _fd_leak_check(_c_reuse)
+                _c_same = _c_held == [_c_fd]
+                for _c_value in _c_held:
+                    os.close(_c_value)
+                if not _c_same or _c_ok is not False:
+                    failures.append("the descriptor leak check must see a number closed and reopened on {} "
+                                    "(same number: {}, leak-free: {}, census {})".format(
+                                        _c_label, _c_same, _c_ok, _c_detail))
+                checked += 1
+
+            _c_kept = os.open(str(_c_a), os.O_RDONLY)
+            try:
+                _c_ok, _c_detail = _fd_leak_check(lambda: os.fchmod(_c_kept, 0o600))
+            finally:
+                os.close(_c_kept)
+            if _c_ok is not True:
+                failures.append("a chmod of a kept descriptor changes no identity and must not read as a leak "
+                                "(leak-free: {}, census {})".format(_c_ok, _c_detail))
+            checked += 1
+
+            _c_real_listdir, _c_real_fstat, _c_real_fcntl = os.listdir, os.fstat, fcntl.fcntl
+            _c_probe = os.open(str(_c_a), os.O_RDONLY)
+
+            def _c_errno_listdir(code):
+                def _listdir(path=".", *args):
+                    if str(path) == "/proc/self/fd":
+                        raise OSError(code, "self-test injected on the descriptor listing")
+                    return _c_real_listdir(path, *args)
+                return _listdir
+
+            def _c_errno_fstat(code):
+                def _fstat(fd, *args):
+                    if fd == _c_probe:
+                        raise OSError(code, "self-test injected on descriptor {}".format(fd))
+                    return _c_real_fstat(fd, *args)
+                return _fstat
+
+            def _c_eio_fcntl(fd, cmd, *args):
+                if fd == _c_probe and cmd == fcntl.F_GETFL:
+                    raise OSError(5, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+                return _c_real_fcntl(fd, cmd, *args)
+
+            _c_results = {}
+            for _c_label, _c_listdir, _c_fstat, _c_fcntl in (
+                    ("listing EIO", _c_errno_listdir(5), _c_real_fstat, _c_real_fcntl),
+                    ("listing ENOENT", _c_errno_listdir(2), _c_real_fstat, _c_real_fcntl),
+                    ("fstat EIO", _c_real_listdir, _c_errno_fstat(5), _c_real_fcntl),
+                    ("F_GETFL EIO", _c_real_listdir, _c_real_fstat, _c_eio_fcntl),
+                    ("fstat EBADF", _c_real_listdir, _c_errno_fstat(9), _c_real_fcntl)):
+                os.listdir, os.fstat, fcntl.fcntl = _c_listdir, _c_fstat, _c_fcntl
+                try:
+                    _c_results[_c_label] = _fd_leak_check(lambda: None)
+                finally:
+                    os.listdir, os.fstat, fcntl.fcntl = _c_real_listdir, _c_real_fstat, _c_real_fcntl
+            os.close(_c_probe)
+            _c_list_ok, _c_list_detail = _c_results["listing EIO"]
+            _c_gone_ok, _c_gone_detail = _c_results["listing ENOENT"]
+            _c_badf_ok, _c_badf_detail = _c_results["fstat EBADF"]
+            if _c_list_ok is not False or "/proc/self/fd" not in _c_list_detail:
+                failures.append("an unreadable descriptor listing must FAIL the leak check naming the listing, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_list_ok, _c_list_detail))
+            if _c_gone_ok is not None or "no /proc/self/fd" not in _c_gone_detail:
+                failures.append("a missing descriptor listing must leave the leak check unable to evaluate, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_gone_ok, _c_gone_detail))
+            for _c_label in ("fstat EIO", "F_GETFL EIO"):
+                _c_ok, _c_detail = _c_results[_c_label]
+                if _c_ok is not False or "descriptor {}:".format(_c_probe) not in _c_detail:
+                    failures.append("an injected {} must FAIL the leak check naming descriptor {} (leak-free: "
+                                    "{}, detail: {})".format(_c_label, _c_probe, _c_ok, _c_detail))
+            if _c_badf_ok is not True:
+                failures.append("an fstat EBADF reads as a closed descriptor and must not fail an unchanged "
+                                "census (detail: {})".format(_c_badf_detail))
+            checked += 1
+
+            # (P3c) THE P3 CHECK ITSELF FAILS CLOSED, not only the helper it calls: run P3's own code once
+            #     under an injected listing EIO and once with a number closed and reopened on another file
+            #     inside the censused walk; each must report P3's failure. Reverting P3 to a count that
+            #     skips an unreadable listing, or to any count, fails here.
+            os.listdir = _c_errno_listdir(5)
+            try:
+                _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-listing")
+            finally:
+                os.listdir = _c_real_listdir
+            if _c_p3_failure is None or "/proc/self/fd" not in _c_p3_failure:
+                failures.append("the P3 walk-cleanup check must FAIL under an unreadable descriptor listing, "
+                                "naming it (verdict: {}, detail: {})".format(_c_p3_verdict, _c_p3_detail))
+            checked += 1
+            _c_held = [os.open(str(_c_a), os.O_RDONLY)]
+
+            def _c_p3_reuse():
+                os.close(_c_held.pop())
+                _c_held.append(os.open(str(_c_b), os.O_RDONLY))
+
+            _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-reuse", _c_p3_reuse)
+            for _c_value in _c_held:
+                os.close(_c_value)
+            if _c_p3_failure is None:
+                failures.append("the P3 walk-cleanup check must FAIL when a number is closed and reopened on "
+                                "another file inside the walk (verdict: {}, detail: {})".format(
+                                    _c_p3_verdict, _c_p3_detail))
+            checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL
@@ -2398,6 +2502,12 @@ def self_test():
         for f in failures:
             print("  - " + f)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT EVALUATE: these checks could not run on this host, so the self-test does not "
+              "pass (the rest passed; {} scenarios ran):".format(checked))
+        for c in cannot_evaluate:
+            print("  - " + c)
+        return 2
     print("SELF-TEST PASS: crash-injection recovery proven from the journal alone across {} scenarios "
           "over 4 synthetic off-path cases across 3 tree structures (flat files, nested create, nested "
           "remove, plus a umask-reduced-mode remove variant). Every cutover-"

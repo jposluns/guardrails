@@ -5695,12 +5695,24 @@ def _st_staging_leftovers(dir_path, name):
 
 def _st_open_fds():
     """The descriptors this process holds open (Linux /proc/self/fd, else /dev/fd) as a frozenset of
-    (number, identity) pairs, identity being (st_dev, st_ino, st_mode, access mode): two equal
-    readings hold the same files at the same numbers, so a number closed and reopened on another
-    file in between is a difference a count cannot see. The access-mode bits are the F_GETFL bits
-    F_SETFL cannot change. Only EBADF reads as closed (the listing's own transient descriptor is gone
-    when it is read); any other listing, fstat or flag failure fails the check naming the descriptor,
-    never a census that passes."""
+    (number, identity) pairs, identity being (st_dev, st_ino, the file type bits of st_mode, access
+    mode). Each part stays fixed while a descriptor stays open: the permission bits are left out
+    because a chmod (_chmod_bound repairs modes through a descriptor) changes them under a kept
+    descriptor, and the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed
+    and reopened on another file, or on the same file with another access mode, changes its pair; a
+    count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged, and so does the same file closed and
+    reopened at the same number with the same access mode. The census looks no further: the offset
+    (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines change under a kept
+    descriptor that is read, written or given F_SETFL, so comparing them would report a kept
+    descriptor as a leak. A descriptor gained at a number that was free before is always seen.
+
+    Only EBADF reads as closed (the listing's own transient descriptor is gone when it is read); any
+    other listing, fstat or flag failure fails the check naming the listing or the descriptor, never
+    a census that passes."""
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(fd_dir):
             break
@@ -5722,14 +5734,16 @@ def _st_open_fds():
                 continue
             raise AssertionError("descriptor census: cannot read descriptor {}: {}".format(
                 fd, exc)) from exc
-        pairs.add((fd, (st.st_dev, st.st_ino, st.st_mode, flags & access)))
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
     return frozenset(pairs)
 
 
 def _st_fds_gained(baseline):
     """How many descriptors are open now that were not in `baseline` (a _st_open_fds census), or None
-    when a baseline descriptor is no longer open as the same file: a baseline number closed and
-    reused never balances a count."""
+    when a baseline pair is gone: a baseline number closed and reopened on another file, or with
+    another access mode, does not balance a count. Within the coverage boundary _st_open_fds states
+    (an anonymous-inode descriptor re-created, or the same file reopened with the same access mode,
+    at the same number) the pair reads as kept, so such a reuse is not seen."""
     now = _st_open_fds()
     if not baseline <= now:
         return None
@@ -5737,29 +5751,41 @@ def _st_fds_gained(baseline):
 
 
 def _t_fd_census_pairs(d, env):
-    """T-fd-census: the leak census compares (number, identity) pairs and fails closed. A number
-    closed and reopened on a different file between two censuses differs (a count does not), and
-    is not a balanced gain; an injected EIO on the listing or on one descriptor's fstat fails the
-    census naming the listing or the descriptor; EBADF alone reads as closed."""
+    """T-fd-census: the leak census compares (number, identity) pairs of fixed identities and fails
+    closed. A number closed and reopened on a different file, or on the same file with another
+    access mode, between two censuses differs (a count does not) and is not a balanced gain; a chmod
+    of a kept descriptor changes nothing; an injected EIO on the listing, on one descriptor's fstat
+    or on its F_GETFL fails the census naming the listing or the descriptor; EBADF alone reads as
+    closed."""
     path_a = os.path.join(d, "a")
     path_b = os.path.join(d, "b")
     for path in (path_a, path_b):
         with open(path, "wb") as fh:
             fh.write(b"x")
-    fd = os.open(path_a, os.O_RDONLY)
-    held = [fd]
+    for second, mode in ((path_b, os.O_RDONLY), (path_a, os.O_RDWR)):
+        fd = os.open(path_a, os.O_RDONLY)
+        held = [fd]
+        try:
+            baseline = _st_open_fds()
+            os.close(held.pop())
+            held.append(os.open(second, mode))
+            assert held[0] == fd, "the reopen must take the number just closed ({} != {})".format(
+                held[0], fd)
+            assert _st_open_fds() != baseline, \
+                "a number reused for {} must change the census".format(
+                    "another file" if second == path_b else "another access mode")
+            assert _st_fds_gained(baseline) is None, "a reused number must not balance a count"
+        finally:
+            for value in held:
+                os.close(value)
+    kept = os.open(path_a, os.O_RDONLY)
     try:
         baseline = _st_open_fds()
-        os.close(held.pop())
-        held.append(os.open(path_b, os.O_RDONLY))
-        assert held[0] == fd, "the reopen must take the number just closed ({} != {})".format(
-            held[0], fd)
-        assert _st_open_fds() != baseline, "a number reused for another file must change the census"
-        assert _st_fds_gained(baseline) is None, "a reused number must not balance a count"
+        os.fchmod(kept, 0o600)
+        assert _st_open_fds() == baseline, "a chmod of a kept descriptor must not change the census"
     finally:
-        for value in held:
-            os.close(value)
-    saved_listdir, saved_fstat = os.listdir, os.fstat
+        os.close(kept)
+    saved_listdir, saved_fstat, saved_fcntl = os.listdir, os.fstat, fcntl.fcntl
     probe = os.open(path_a, os.O_RDONLY)
     try:
         def eio_listdir(path=".", *args):
@@ -5774,10 +5800,16 @@ def _t_fd_census_pairs(d, env):
                 return saved_fstat(fd, *args)
             return fake
 
-        for attr, fake, needle in (("listdir", eio_listdir, "cannot list"),
-                                   ("fstat", errno_fstat(errno.EIO),
-                                    "cannot read descriptor {}:".format(probe))):
-            setattr(os, attr, fake)
+        def eio_fcntl(fd, cmd, *args):
+            if fd == probe and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+            return saved_fcntl(fd, cmd, *args)
+
+        for target, attr, fake, needle in (
+                (os, "listdir", eio_listdir, "cannot list"),
+                (os, "fstat", errno_fstat(errno.EIO), "cannot read descriptor {}:".format(probe)),
+                (fcntl, "fcntl", eio_fcntl, "cannot read descriptor {}:".format(probe))):
+            setattr(target, attr, fake)
             try:
                 try:
                     _st_open_fds()
@@ -5785,10 +5817,10 @@ def _t_fd_census_pairs(d, env):
                     assert needle in str(exc), "the census refusal must name {!r}: {}".format(
                         needle, exc)
                 else:
-                    raise AssertionError("an unreadable census ({}) must fail, never pass".format(
-                        needle))
+                    raise AssertionError("an unreadable census ({} {}) must fail, never pass".format(
+                        attr, needle))
             finally:
-                setattr(os, attr, saved_listdir if attr == "listdir" else saved_fstat)
+                os.listdir, os.fstat, fcntl.fcntl = saved_listdir, saved_fstat, saved_fcntl
         os.fstat = errno_fstat(errno.EBADF)
         try:
             census = _st_open_fds()

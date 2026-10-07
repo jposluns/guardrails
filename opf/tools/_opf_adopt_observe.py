@@ -1413,11 +1413,21 @@ def _cancellation_self_test():
         return original_import(name, *args, **kwargs)
 
     def descriptors():
-        # (number, identity) pairs, identity (st_dev, st_ino, st_mode, access
-        # mode): a number closed and reopened on another file between two
-        # censuses is a new pair. The access-mode bits are the F_GETFL bits
-        # F_SETFL cannot change. Only EBADF reads as closed (the listing's own
-        # descriptor); any other read failure refuses naming the descriptor.
+        # (number, identity) pairs, identity (st_dev, st_ino, file type bits
+        # of st_mode, access mode), each fixed while a descriptor stays open:
+        # permission bits are left out (a chmod changes them under a kept
+        # descriptor) and the access-mode bits are the F_GETFL bits F_SETFL
+        # cannot change. A number closed and reopened on another file, or with
+        # another access mode, between two censuses is a new pair.
+        # Coverage boundary: an anonymous-inode descriptor (eventfd, signalfd,
+        # timerfd, epoll and the like share one inode) re-created at the same
+        # number, and the same file reopened at the same number with the same
+        # access mode, read as unchanged. The offset (os.lseek(fd, 0,
+        # SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines are not
+        # compared: they change under a kept descriptor that is read, written
+        # or given F_SETFL, so a kept descriptor would read as a leak. Only
+        # EBADF reads as closed (the listing's own descriptor); any other read
+        # failure refuses naming the descriptor.
         try:
             names = os.listdir("/proc/self/fd")
         except OSError as exc:
@@ -1435,26 +1445,39 @@ def _cancellation_self_test():
                     raise AssertionError("descriptor census: cannot read descriptor "
                                          + str(fd) + ": " + str(exc)) from exc
             else:
-                present.add((fd, (info.st_dev, info.st_ino, info.st_mode, flags & access)))
+                present.add((fd, (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                                  flags & access)))
         return present
 
     def census_self_check():
         # The leak comparison below must see a number closed and reopened on a
-        # different file, and an unreadable census must refuse, never pass.
+        # different file or with another access mode, must not see a chmod of a
+        # kept descriptor, and an unreadable census (listing, fstat or F_GETFL)
+        # must refuse, never pass.
         with tempfile.TemporaryDirectory(prefix="opf-census-", dir="/dev/shm") as temp:
             paths = [os.path.join(temp, name) for name in ("a", "b")]
             for path in paths:
                 with open(path, "wb") as handle:
                     handle.write(b"x")
-            held = [os.open(paths[0], os.O_RDONLY)]
+            held = []
             try:
-                first = held[0]
+                for second, mode in ((paths[1], os.O_RDONLY), (paths[0], os.O_RDWR)):
+                    held.append(os.open(paths[0], os.O_RDONLY))
+                    first = held[0]
+                    before = descriptors()
+                    os.close(held.pop())
+                    held.append(os.open(second, mode))
+                    if held[0] != first or not descriptors() - before:
+                        raise AssertionError("descriptor census missed a number reused for "
+                                             + ("another file" if second == paths[1]
+                                                else "another access mode"))
+                    os.close(held.pop())
+                held.append(os.open(paths[0], os.O_RDONLY))
                 before = descriptors()
-                os.close(held.pop())
-                held.append(os.open(paths[1], os.O_RDONLY))
-                if held[0] != first or not descriptors() - before:
-                    raise AssertionError("descriptor census missed a number reused for another file")
-                real_listdir, real_fstat = os.listdir, os.fstat
+                os.fchmod(held[0], 0o600)
+                if descriptors() != before:
+                    raise AssertionError("descriptor census read a chmod of a kept descriptor as a change")
+                real_listdir, real_fstat, real_fcntl = os.listdir, os.fstat, fcntl.fcntl
 
                 def eio_listdir(path=".", *args):
                     if str(path) == "/proc/self/fd":
@@ -1466,10 +1489,16 @@ def _cancellation_self_test():
                         raise OSError(errno.EIO, "injected")
                     return real_fstat(fd, *args)
 
-                for name, fake, needle in (("listdir", eio_listdir, "cannot list"),
-                                           ("fstat", eio_fstat,
-                                            "cannot read descriptor " + str(held[0]) + ":")):
-                    setattr(os, name, fake)
+                def eio_fcntl(fd, cmd, *args):
+                    if fd == held[0] and cmd == fcntl.F_GETFL:
+                        raise OSError(errno.EIO, "injected")
+                    return real_fcntl(fd, cmd, *args)
+
+                for target, name, fake, needle in (
+                        (os, "listdir", eio_listdir, "cannot list"),
+                        (os, "fstat", eio_fstat, "cannot read descriptor " + str(held[0]) + ":"),
+                        (fcntl, "fcntl", eio_fcntl, "cannot read descriptor " + str(held[0]) + ":")):
+                    setattr(target, name, fake)
                     try:
                         descriptors()
                     except AssertionError as exc:
@@ -1479,7 +1508,7 @@ def _cancellation_self_test():
                     else:
                         raise AssertionError("descriptor census passed an injected " + name + " EIO")
                     finally:
-                        os.listdir, os.fstat = real_listdir, real_fstat
+                        os.listdir, os.fstat, fcntl.fcntl = real_listdir, real_fstat, real_fcntl
             finally:
                 for fd in held:
                     os.close(fd)
