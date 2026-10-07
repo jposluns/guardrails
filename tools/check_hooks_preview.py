@@ -112,10 +112,14 @@ HOOK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.py$")
 # self-test through it and leg (d) proves its dispatch with one deny payload per PreToolUse hook.
 LAUNCHER_NAME = "preview-launch.py"
 # The deny object every PreToolUse preview hook prints: one JSON object whose hookSpecificOutput
-# names the PreToolUse event and the deny decision. Leg (d) parses stdout as JSON and checks
-# those fields (_deny_object), so a bare substring, another event's object, or non-JSON text
-# never passes.
+# names the PreToolUse event and the deny decision. Leg (d) parses stdout as STRICT JSON (no NaN,
+# Infinity or -Infinity, no duplicate key at any depth) and requires the exact key schema
+# (_deny_object): the probe's own top-level key set, hookSpecificOutput keys exactly
+# DENY_SPECIFIC_KEYS, non-empty reason and banner strings. So a bare substring, another event's
+# object, non-JSON text, a NaN member, a duplicate decision key, an extra key at either level or a
+# "decision": "block" beside the deny never passes.
 DENY_EVENT = "PreToolUse"
+DENY_SPECIFIC_KEYS = frozenset(("hookEventName", "permissionDecision", "permissionDecisionReason"))
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # sha256sum text-mode line: 64 lowercase hex, exactly two spaces, a name without whitespace. The name is
 # parsed even when it carries a `/` so leg (b) can report a path entry as a finding (not a parse failure).
@@ -399,9 +403,11 @@ def leg_integrity(pdir, hooks, rows, sums, findings):
 
 
 def _deny_probes(work):
-    """(mode file name, payload, extra environment) per PreToolUse preview hook: one payload each
-    hook's own documented contract denies. `work` holds the store root the two store-rooted hooks
-    read through AIQT_STORE_ROOT; 2099 stays a future year for any plausible run of this gate."""
+    """(mode file name, payload, extra environment, top-level deny keys) per PreToolUse preview
+    hook: one payload each hook's own documented contract denies, and the exact top-level key set
+    of that hook's deny object (record-remove-check.py also carries a systemMessage banner).
+    `work` holds the store root the two store-rooted hooks read through AIQT_STORE_ROOT; 2099
+    stays a future year for any plausible run of this gate."""
     store = os.path.join(work, "store")
     os.makedirs(store, exist_ok=True)
     record = os.path.join(store, "X.md")
@@ -417,35 +423,74 @@ def _deny_probes(work):
          {"hook_event_name": "PreToolUse", "tool_name": "Write",
           "tool_input": {"file_path": os.path.join(store, "record.md"),
                          "content": "recorded-at: 2099-01-01T00:00:00Z"}},
-         {"AIQT_STORE_ROOT": store}),
-        ("record-remove-check.py", bash("rm -f " + record), {"AIQT_STORE_ROOT": store}),
-        ("unbounded-wait.py", bash("until grep -q X f; do sleep 5; done", run_in_background=True), {}),
-        ("ungated-record.py", bash("pytest; echo PASS >> report"), {}),
+         {"AIQT_STORE_ROOT": store}, DENY_ONLY),
+        ("record-remove-check.py", bash("rm -f " + record), {"AIQT_STORE_ROOT": store}, DENY_BANNER),
+        ("unbounded-wait.py", bash("until grep -q X f; do sleep 5; done", run_in_background=True), {},
+         DENY_ONLY),
+        ("ungated-record.py", bash("pytest; echo PASS >> report"), {}, DENY_ONLY),
     )
 
 
-def _deny_object(stdout_text):
-    """True only when stdout is one JSON object whose hookSpecificOutput carries
-    hookEventName == DENY_EVENT and permissionDecision == "deny" (the documented PreToolUse
-    deny shape); non-JSON text, a bare substring of the shape, trailing text, or another event
-    name is not a deny object."""
+# The two top-level deny shapes the probed hooks print: the deny alone, or the deny with a banner.
+DENY_ONLY = frozenset(("hookSpecificOutput",))
+DENY_BANNER = frozenset(("hookSpecificOutput", "systemMessage"))
+
+
+def _reject_json_constant(name):
+    """parse_constant hook for strict_json: NaN, Infinity and -Infinity are not JSON (RFC 8259), and
+    json.loads accepts them by default."""
+    raise ValueError("non-standard JSON constant {}".format(name))
+
+
+def _reject_duplicate_keys(pairs):
+    """object_pairs_hook for strict_json: a repeated object key is refused, never resolved by the
+    default last-one-wins rule (which would let a second permissionDecision replace the first)."""
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate JSON object key")
+    return dict(pairs)
+
+
+def strict_json(text):
+    """text parsed as strict JSON: NaN, Infinity, -Infinity and a duplicate object key (at any
+    depth) raise ValueError, as malformed JSON does. The same rule as tools/check_python_floor.py's
+    strict_json, carried here so this gate stays stdlib-only and self-contained; the hooks suite
+    (tools/selftest_aiqt_hooks.py) checks the copies agree on one fixture corpus."""
+    return json.loads(text, parse_constant=_reject_json_constant,
+                      object_pairs_hook=_reject_duplicate_keys)
+
+
+def _deny_object(stdout_text, top_keys):
+    """True only when stdout is ONE strict JSON object (strict_json) whose top-level keys are
+    EXACTLY top_keys (DENY_ONLY or DENY_BANNER, the probed hook's own deny shape) and whose
+    hookSpecificOutput keys are EXACTLY DENY_SPECIFIC_KEYS, with hookEventName == DENY_EVENT,
+    permissionDecision == "deny" and a reason (and, in DENY_BANNER, a systemMessage) holding
+    non-whitespace text. Non-JSON text, a bare substring of the shape, trailing text, another
+    event name, a NaN or infinite member, a duplicate key at any depth, an extra key at either
+    level ("decision": "block" beside the deny, an updatedInput) or a missing reason is not a
+    deny object: each can change what the platform does with the output."""
     try:
-        payload = json.loads(stdout_text)
-    except ValueError:
+        payload = strict_json(stdout_text)
+    except (ValueError, RecursionError):
         return False
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or set(payload) != set(top_keys):
         return False
-    specific = payload.get("hookSpecificOutput")
-    return (isinstance(specific, dict) and specific.get("hookEventName") == DENY_EVENT
-            and specific.get("permissionDecision") == "deny")
+    specific = payload["hookSpecificOutput"]
+    if not isinstance(specific, dict) or set(specific) != DENY_SPECIFIC_KEYS:
+        return False
+    reason = specific["permissionDecisionReason"]
+    banner = payload.get("systemMessage", "x")
+    return (specific["hookEventName"] == DENY_EVENT and specific["permissionDecision"] == "deny"
+            and isinstance(reason, str) and bool(reason.strip())
+            and isinstance(banner, str) and bool(banner.strip()))
 
 
 def leg_launch(pdir, hooks, findings, unverifiable):
     """(d) The launcher's dispatch really runs each PreToolUse hook at this interpreter: one deny
     payload per hook file present, sent on stdin through the launcher, must exit 0 and print the
-    hook's PreToolUse deny object (_deny_object: stdout parsed as JSON, the event name and the
-    decision both checked). Inert when the launcher is absent; a probed hook file that is absent
-    is already a leg (b) finding."""
+    hook's PreToolUse deny object (_deny_object: stdout parsed as strict JSON, the exact key schema
+    at both levels, the event name, the decision and the reason all checked). Inert when the
+    launcher is absent; a probed hook file that is absent is already a leg (b) finding."""
     if LAUNCHER_NAME not in hooks:
         return
     launcher = str((pdir / LAUNCHER_NAME).resolve())
@@ -456,7 +501,7 @@ def leg_launch(pdir, hooks, findings, unverifiable):
             PREVIEW_DIR, LAUNCHER_NAME, _bounded(exc)))
         return
     try:
-        for name, payload, extra in _deny_probes(work):
+        for name, payload, extra, top_keys in _deny_probes(work):
             if name not in hooks:
                 continue
             env = _selftest_env()
@@ -475,7 +520,7 @@ def leg_launch(pdir, hooks, findings, unverifiable):
                 unverifiable.append("{}/{}: the deny probe could not be launched: {}".format(
                     PREVIEW_DIR, name, exc))
                 continue
-            if res.returncode != 0 or not _deny_object(res.stdout.decode("utf-8", "replace")):
+            if res.returncode != 0 or not _deny_object(res.stdout.decode("utf-8", "replace"), top_keys):
                 detail = _tail(res.stdout) + _tail(res.stderr)
                 findings.append("{}/{}: the deny probe through {} exited {} without a parsed "
                                 "PreToolUse deny object "
@@ -580,6 +625,28 @@ _STUB_LAUNCH_WRONG_EVENT = (b"import sys\n"
                             b"sys.stdout.write('{\"hookSpecificOutput\": {\"hookEventName\": "
                             b"\"PostToolUse\", \"permissionDecision\": \"deny\", "
                             b"\"permissionDecisionReason\": \"stub\"}}\\n')\n")
+# Stand-in launchers that exit 0 and print one deny-like object a lenient judge (a plain json.loads
+# and a check of the event and decision fields only) accepts: leg (d) must refuse each.
+_STUB_LAUNCH_LENIENT = {
+    "nan": b'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+           b'"permissionDecisionReason": "stub"}, "extra": NaN}',
+    "duplicate": b'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", '
+                 b'"permissionDecision": "deny", "permissionDecisionReason": "stub"}}',
+    "extra-specific": b'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": '
+                      b'"deny", "permissionDecisionReason": "stub", "updatedInput": {}}}',
+    "decision-block": b'{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": '
+                      b'"deny", "permissionDecisionReason": "stub"}, "decision": "block"}',
+}
+
+
+def _stub_launch_printing(text):
+    """A stand-in launcher: exits 0 on --self-test, otherwise reads stdin and prints text and LF."""
+    return (b"import sys\n"
+            b"if sys.argv[-1] == '--self-test':\n    sys.exit(0)\n"
+            b"sys.stdin.read()\n"
+            b"sys.stdout.write(" + repr(text.decode("ascii") + "\n").encode("ascii") + b")\n")
+
+
 # Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
 # was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
@@ -695,6 +762,58 @@ def self_test_main():
             failures.append("parse_sums did not accept a comment-only listing as empty")
         if parse_sums("{}  x.py".format("0" * 64)) != {"x.py": "0" * 64}:
             failures.append("parse_sums did not accept a listing without a trailing LF")
+
+        # The leg (d) judge. old_judge replays the former lenient judgement (a plain json.loads, the
+        # event and decision fields only): each negative fixture below must pass it and fail
+        # _deny_object, so every fixture discriminates the strict rule and the exact key schema.
+        def old_judge(text):
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                return False
+            specific = payload.get("hookSpecificOutput") if isinstance(payload, dict) else None
+            return (isinstance(specific, dict) and specific.get("hookEventName") == DENY_EVENT
+                    and specific.get("permissionDecision") == "deny")
+
+        spec = '"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "r"'
+        good = '{"hookSpecificOutput": {' + spec + '}}'
+        good_banner = '{"hookSpecificOutput": {' + spec + '}, "systemMessage": "b"}'
+        for label, text, keys in (("control", good, DENY_ONLY), ("control-banner", good_banner, DENY_BANNER)):
+            if not (old_judge(text) and _deny_object(text, keys)):
+                failures.append("(d-judge-{}) the exact deny object is not accepted".format(label))
+        for label, text, keys in (
+                ("nan-top", '{"hookSpecificOutput": {' + spec + '}, "extra": NaN}', DENY_ONLY),
+                ("infinity-top", '{"hookSpecificOutput": {' + spec + '}, "extra": Infinity}', DENY_ONLY),
+                ("neg-infinity-specific", '{"hookSpecificOutput": {' + spec + ', "x": -Infinity}}', DENY_ONLY),
+                ("nan-banner", '{"hookSpecificOutput": {' + spec + '}, "systemMessage": NaN}', DENY_BANNER),
+                ("duplicate-decision", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+                 '"permissionDecision": "allow", "permissionDecision": "deny", '
+                 '"permissionDecisionReason": "r"}}', DENY_ONLY),
+                ("duplicate-event", '{"hookSpecificOutput": {"hookEventName": "Stop", ' + spec + '}}',
+                 DENY_ONLY),
+                ("duplicate-specific", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+                 '"permissionDecision": "allow"}, "hookSpecificOutput": {' + spec + '}}', DENY_ONLY),
+                ("duplicate-banner", '{"hookSpecificOutput": {' + spec + '}, "systemMessage": "", '
+                 '"systemMessage": "b"}', DENY_BANNER),
+                ("extra-top", '{"hookSpecificOutput": {' + spec + '}, "extra": 1}', DENY_ONLY),
+                ("extra-specific", '{"hookSpecificOutput": {' + spec + ', "updatedInput": {}}}', DENY_ONLY),
+                ("decision-block", '{"hookSpecificOutput": {' + spec + '}, "decision": "block"}', DENY_ONLY),
+                ("continue-false", '{"hookSpecificOutput": {' + spec + '}, "continue": false}', DENY_ONLY),
+                ("banner-unexpected", good_banner, DENY_ONLY),
+                ("banner-missing", good, DENY_BANNER),
+                ("banner-blank", '{"hookSpecificOutput": {' + spec + '}, "systemMessage": " "}', DENY_BANNER),
+                ("no-reason", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+                 '"permissionDecision": "deny"}}', DENY_ONLY),
+                ("blank-reason", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+                 '"permissionDecision": "deny", "permissionDecisionReason": " "}}', DENY_ONLY),
+                ("reason-not-string", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+                 '"permissionDecision": "deny", "permissionDecisionReason": ["r"]}}', DENY_ONLY)):
+            if not old_judge(text):
+                failures.append("(d-judge-{}) the fixture does not discriminate: the former lenient "
+                                "judgement already refuses it".format(label))
+            elif _deny_object(text, keys):
+                failures.append("(d-judge-{}) _deny_object accepted {!r}".format(label, text))
+        ran.append("leg (d) judge fixture table")
         saved_env = _seed_env()
         try:
             got_env = {k: v for k, v in _selftest_env().items() if k.startswith(SCRUB_PREFIXES)}
@@ -851,6 +970,14 @@ def self_test_main():
             base / "launch-wrong-event", {"preview-launch.py": _STUB_LAUNCH_WRONG_EVENT,
                                            "unbounded-wait.py": _STUB_OK}),
             needle="without a parsed PreToolUse deny object")
+        # (d) exit 0 with an object the former lenient judge accepted (a NaN member, a duplicate
+        # decision key, an extra hookSpecificOutput key, "decision": "block" beside the deny): each
+        # is a finding through the real gate run.
+        for label, text in sorted(_STUB_LAUNCH_LENIENT.items()):
+            case("launcher deny probe with a lenient-only object ({})".format(label), 1, _build(
+                base / ("launch-lenient-" + label),
+                {"preview-launch.py": _stub_launch_printing(text), "unbounded-wait.py": _STUB_OK}),
+                needle="without a parsed PreToolUse deny object")
         # 23. (a) a non-launcher hook's self-test runs THROUGH the launcher (the registered
         #     path): a hook whose direct --self-test fails passes only via the launcher's routed
         #     answer, so reverting the routing to direct runs turns this case red.
@@ -881,7 +1008,8 @@ def self_test_main():
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "
           "file, a mismatched text or target, an absolute URL, a path with a slash, a bare name, an "
           "angle-bracketed link, and a missing link; d: a launcher that answers the deny probe, one that "
-          "does not, a bare deny substring, a wrong-event object, and a hook self-test that "
+          "does not, a bare deny substring, a wrong-event object, four objects only a lenient judge "
+          "accepts, the strict judge's fixture table, and a hook self-test that "
           "passes only through the launcher) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 

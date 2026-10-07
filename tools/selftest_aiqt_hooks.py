@@ -138,6 +138,11 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 
 
+# The one PreToolUse deny shape the hooks emit (aiqt_hooks._deny): its top-level and hookSpecificOutput keys.
+_GENERATED_DENY_KEYS = {"hookSpecificOutput", "systemMessage"}
+_GENERATED_DENY_SPECIFIC_KEYS = {"hookEventName", "permissionDecision", "permissionDecisionReason"}
+
+
 def _reduce_result(code, stdout_obj):
     """Reduce a PreToolUse handler's (code, stdout_obj) to one value, the single reducer every case uses.
     "allow" is ONLY the silent no-decision (exit 0, no stdout object, the hooks' _allow). "allow-note" is
@@ -147,25 +152,46 @@ def _reduce_result(code, stdout_obj):
     source emits on a PreToolUse allow (_allow_note returns (0, {"systemMessage": message}, None)), so a note
     beside any other top-level key (a "decision", a "continue", a "suppressOutput", ...) is "unexpected", as
     is a whitespace-only or non-string note. "deny" and "ask" (which these hooks must
-    NEVER emit) carry that permissionDecision. An explicit permissionDecision "allow", with or without a
-    note, is "explicit-allow": the hooks' _allow docstring forbids it (it would bypass the user's own
-    permission flow), so no expectation accepts it and it never reads as either allow. Any other shape is
-    an "unexpected" string so a malformed decision cannot read as a pass."""
+    NEVER emit) carry that permissionDecision in EXACTLY the _deny shape (_GENERATED_DENY_KEYS at the top
+    level, _GENERATED_DENY_SPECIFIC_KEYS in hookSpecificOutput, the PreToolUse event, a reason and a banner
+    holding non-whitespace text), so a "decision", a "continue", an "updatedInput" or another event beside
+    the decision is "unexpected". The object must also serialize as strict JSON (_finite_json: no NaN or
+    infinite float, which the dispatcher's json.dumps would print as a non-standard token). An explicit
+    permissionDecision "allow", with or without a note, is "explicit-allow": the hooks' _allow docstring
+    forbids it (it would bypass the user's own permission flow), so no expectation accepts it and it never
+    reads as either allow. Any other shape is an "unexpected" string so a malformed decision cannot read as
+    a pass."""
     if code == 0 and stdout_obj is None:
         return "allow"
-    if code == 0 and isinstance(stdout_obj, dict):
+    if code == 0 and isinstance(stdout_obj, dict) and _finite_json(stdout_obj):
         specific = stdout_obj.get("hookSpecificOutput")
         if isinstance(specific, dict):
             decision = specific.get("permissionDecision")
             if decision == "allow":
                 return "explicit-allow"
-            if decision in ("ask", "deny"):
+            if (decision in ("ask", "deny") and set(stdout_obj) == _GENERATED_DENY_KEYS
+                    and set(specific) == _GENERATED_DENY_SPECIFIC_KEYS
+                    and specific["hookEventName"] == "PreToolUse"
+                    and isinstance(specific["permissionDecisionReason"], str)
+                    and specific["permissionDecisionReason"].strip()
+                    and isinstance(stdout_obj["systemMessage"], str) and stdout_obj["systemMessage"].strip()):
                 return decision
         elif set(stdout_obj) == {"systemMessage"}:
             note = stdout_obj["systemMessage"]
             if isinstance(note, str) and note.strip():
                 return "allow-note"
     return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+
+
+def _finite_json(obj):
+    """True when obj serializes as STRICT JSON (json.dumps with allow_nan=False): the in-process form of the
+    strict rule, since the dispatcher prints a handler's object with json.dumps, which writes a NaN or
+    infinite float as the non-standard NaN, Infinity or -Infinity token."""
+    try:
+        json.dumps(obj, allow_nan=False)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    return True
 
 
 def _strict_constant(name):
@@ -181,8 +207,10 @@ def _strict_pairs(pairs):
 
 def _strict_hook_json(text):
     """text (a hook's stdout) parsed as strict JSON: NaN, Infinity, -Infinity and a duplicate object key at
-    any depth raise ValueError, as malformed JSON does. This mirrors tools/check_python_floor.py's strict_json
-    (mirrored, not imported, so this suite stays stdlib-only and self-contained). The default json.loads
+    any depth raise ValueError, as malformed JSON does. This is the same rule as tools/check_python_floor.py's
+    strict_json and tools/check_hooks_preview.py's strict_json. It is a local copy, not an import, so the
+    judge this suite applies does not change when a gate module is edited; the (srp-*) parity checks
+    (_test_strict_rule_parity) hold every copy to the same verdicts on one fixture corpus. The default json.loads
     accepts all four, yet each can change what the platform does: a parser that refuses a NaN member sees no
     decision at all, and one that keeps the FIRST of two duplicate keys reads a different value from the
     last-one-wins value a lenient check would judge."""
@@ -200,10 +228,6 @@ def _note_failure(label, result, needle):
     if needle not in obj["systemMessage"]:
         return "{}: the note does not name {!r}: {!r}".format(label, needle, obj["systemMessage"])
     return None
-
-
-_GENERATED_DENY_KEYS = {"hookSpecificOutput", "systemMessage"}
-_GENERATED_DENY_SPECIFIC_KEYS = {"hookEventName", "permissionDecision", "permissionDecisionReason"}
 
 
 def _generated_deny_ok(stdout, rule, detail):
@@ -931,6 +955,139 @@ class _JsonDumpsShim:
         return self._text
 
 
+def _test_reducer_deny_schema(failures):
+    """(rd-*) _reduce_result's deny shape. The exact _deny object reduces to "deny"; each variant below
+    reduced to "deny" under the former reducer (which read only permissionDecision, replayed here as
+    lenient) and must now reduce to an "unexpected" string: a top-level "decision": "block" or
+    "continue": false, a NaN or infinite member, an updatedInput, another event, a blank or missing
+    reason or banner. A note beside "decision": "block" (which the former expect_warn accepted) must not
+    reduce to "allow-note"."""
+    def lenient(obj):
+        specific = obj.get("hookSpecificOutput")
+        return specific.get("permissionDecision") if isinstance(specific, dict) else None
+
+    def variant(top=None, specific=None, drop=()):
+        spec = {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "r"}
+        spec.update(specific or {})
+        obj = {"hookSpecificOutput": spec, "systemMessage": "b"}
+        obj.update(top or {})
+        for key in drop:
+            (spec if key in spec else obj).pop(key)
+        return obj
+
+    if _reduce_result(0, variant()) != "deny":
+        failures.append("(rd-control) the exact _deny object does not reduce to deny: {}".format(
+            _reduce_result(0, variant())))
+    for label, obj in (
+            ("decision-block", variant(top={"decision": "block"})),
+            ("decision-approve", variant(top={"decision": "approve"})),
+            ("continue-false", variant(top={"continue": False})),
+            ("nan-extra", variant(top={"extra": float("nan")})),
+            ("inf-banner", variant(top={"systemMessage": float("inf")})),
+            ("nan-reason", variant(specific={"permissionDecisionReason": float("nan")})),
+            ("specific-extra", variant(specific={"updatedInput": {}})),
+            ("event-stop", variant(specific={"hookEventName": "Stop"})),
+            ("blank-reason", variant(specific={"permissionDecisionReason": " "})),
+            ("no-reason", variant(drop=("permissionDecisionReason",))),
+            ("no-banner", variant(drop=("systemMessage",))),
+            ("blank-banner", variant(top={"systemMessage": ""})),
+            ("ask-decision-block", variant(top={"decision": "block"}, specific={"permissionDecision": "ask"}))):
+        want = obj["hookSpecificOutput"]["permissionDecision"]
+        if lenient(obj) != want:
+            failures.append("(rd-{}) the fixture does not discriminate: the former reducer did not read "
+                            "{}".format(label, want))
+        elif not _reduce_result(0, obj).startswith("unexpected"):
+            failures.append("(rd-{}) expected an unexpected reduction, got {}".format(
+                label, _reduce_result(0, obj)))
+    if _reduce_result(0, {"systemMessage": "stash@{0}", "decision": "block"}) == "allow-note":
+        failures.append("(rd-note-decision-block) a note beside decision=block reduced to allow-note")
+
+
+def _test_strict_rule_parity(failures):
+    """(srp-*) Every copy of the strict hook-stdout rule agrees on one fixture corpus: the parse
+    (tools/check_python_floor.py strict_json, tools/check_hooks_preview.py strict_json, this suite's
+    _strict_hook_json, tools/selftest_orch_hooks.py's _strict_constant and _strict_pairs), the fail-open
+    note (check_python_floor.warning_note, selftest_orch_hooks._stop_warning, and _strict_hook_json with
+    _reduce_result's allow-note) and the deny (check_hooks_preview._deny_object with the banner shape,
+    _generated_deny_ok, _strict_hook_json with _reduce_result's deny, selftest_orch_hooks._verdict). Each
+    tool keeps its own copy (stdlib-only and self-contained); this check holds them together."""
+    import check_hooks_preview as preview_gate
+    import check_python_floor as floor_gate
+    import selftest_orch_hooks as orch
+
+    def parsed(parse, text):
+        try:
+            return ("ok", parse(text))
+        except (ValueError, RecursionError):
+            return ("refused",)
+
+    def orch_parse(text):
+        return json.loads(text, parse_constant=orch._strict_constant, object_pairs_hook=orch._strict_pairs)
+
+    def local_obj(text):
+        try:
+            return _strict_hook_json(text)
+        except (ValueError, RecursionError):
+            return None
+
+    def local_note(text):
+        obj = local_obj(text)
+        return obj["systemMessage"] if _reduce_result(0, obj) == "allow-note" else None
+
+    def orch_note(text):
+        shape, note = orch._stop_warning(text)
+        return note if shape == "json object with a string systemMessage" else None
+
+    def local_deny(text):
+        obj = local_obj(text)
+        return obj is not None and _reduce_result(0, obj) == "deny"
+
+    def orch_deny(text):
+        obj = local_obj(text)
+        return obj is not None and orch._verdict((0, obj, None)) == "deny"
+
+    spec = '"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "r"'
+    deny = '{"hookSpecificOutput": {' + spec + '}, "systemMessage": "b"}'
+    corpus = (
+        '{"systemMessage": "x"}', '{"systemMessage": " x "}', deny,
+        '{"systemMessage": ""}', '{"systemMessage": "  "}', '{"systemMessage": "\\t\\n"}',
+        '{"systemMessage": 1}', '{"systemMessage": null}', '{"systemMessage": ["x"]}',
+        '{"systemMessage": "x", "decision": "block"}', '{"systemMessage": "x", "extra": NaN}',
+        '{"systemMessage": "x", "extra": Infinity}', '{"systemMessage": "x", "extra": -Infinity}',
+        '{"systemMessage": "a", "systemMessage": "x"}', '{"systemMessage": "x", "o": {"k": 1, "k": 2}}',
+        '{"systemMessage": "x", "n": 1e400}', '\ufeff{"systemMessage": "x"}', '{"systemMessage": "x"} x',
+        '{"systemMessage": "x"}{"systemMessage": "x"}', "NaN", "[]", "null", '"x"', "x", "",
+        "[" * 100000 + "]" * 100000,
+        '{"hookSpecificOutput": {' + spec + '}, "systemMessage": "b", "decision": "block"}',
+        '{"hookSpecificOutput": {' + spec + ', "updatedInput": {}}, "systemMessage": "b"}',
+        '{"hookSpecificOutput": {' + spec + '}, "systemMessage": "b", "extra": NaN}',
+        '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", '
+        '"permissionDecision": "deny", "permissionDecisionReason": "r"}, "systemMessage": "b"}',
+        '{"hookSpecificOutput": {' + spec + '}, "systemMessage": ""}',
+        '{"hookSpecificOutput": {' + spec + '}}',
+        '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny"}, '
+        '"systemMessage": "b"}')
+    accepted = {"note": 0, "deny": 0}
+    for index, text in enumerate(corpus):
+        parses = [parsed(parse, text) for parse in (floor_gate.strict_json, preview_gate.strict_json,
+                                                    _strict_hook_json, orch_parse)]
+        if any(p != parses[0] for p in parses):
+            failures.append("(srp-parse-{}) the strict parses disagree on {!r}: {}".format(
+                index, text[:80], parses))
+        notes = [floor_gate.warning_note(text), orch_note(text), local_note(text)]
+        if any(n != notes[0] for n in notes):
+            failures.append("(srp-note-{}) the note judges disagree on {!r}: {}".format(index, text[:80], notes))
+        denies = [preview_gate._deny_object(text, preview_gate.DENY_BANNER), _generated_deny_ok(text, "", ""),
+                  local_deny(text), orch_deny(text)]
+        if any(d != denies[0] for d in denies):
+            failures.append("(srp-deny-{}) the deny judges disagree on {!r}: {}".format(index, text[:80], denies))
+        accepted["note"] += notes[0] is not None
+        accepted["deny"] += bool(denies[0])
+    if accepted != {"note": 2, "deny": 1}:
+        failures.append("(srp-controls) expected exactly the two note controls and the one deny control "
+                        "accepted, got {}".format(accepted))
+
+
 def _test_hook_stdout_strict(failures):
     """(hs-*) The two parses of hook stdout in this suite that judge a fail-open warning or a decision use
     _strict_hook_json: _terminal_dispatch (the dispatcher's fail-open note, judged by _note_failure as the
@@ -1540,11 +1697,8 @@ def _test_git_stash_ref(failures):
 
     def expect_warn(label, command):
         code, stdout_obj, stderr = run(label, payload(command))
-        if not (code == 0 and isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                "stash@{" in stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
+        if not (_reduce_result(code, stdout_obj) == "allow-note" and
+                "stash@{" in stdout_obj["systemMessage"] and stderr is None):
             failures.append("{}: expected stash warning only, got {!r}"
                             .format(label, (code, stdout_obj, stderr)))
 
@@ -7665,6 +7819,8 @@ def _main_isolated(monitor):
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_hook_stdout_strict(failures)
+        _test_reducer_deny_schema(failures)
+        _test_strict_rule_parity(failures)
         _test_note_shape_pins(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========

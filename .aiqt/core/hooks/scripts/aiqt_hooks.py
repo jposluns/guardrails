@@ -180,7 +180,11 @@ import sys
 # refusal delivers its stderr diagnostic FIRST and imports json only after it, inside the protected block: if
 # that `import json` fails (a MemoryError, for example), the stderr diagnostic has already been delivered and
 # the exit status still holds, but the JSON systemMessage warning is not written to stdout, so the platform
-# shows no warning for that refusal.
+# shows no warning for that refusal. On a DIRECT launch of this file below the floor (no registration does
+# that; the launcher refuses first), these guard steps run outside its protected block, so a fault in one
+# of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call: the `import sys`, the
+# FLOOR_FAIL_OPEN_MODES assignment, the floor test, the guard's `import os`, its status decision, the def
+# statement for _floor_tail, and the closing os._exit call.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 

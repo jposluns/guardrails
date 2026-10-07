@@ -111,10 +111,29 @@ def _expected_check_ids():
     return None
 
 
+# The hookSpecificOutput keys of the one PreToolUse deny shape the hooks emit (aiqt_hooks._deny).
+DENY_SPECIFIC_KEYS = frozenset(("hookEventName", "permissionDecision", "permissionDecisionReason"))
+
+
+def _finite_json(obj):
+    """True when obj serializes as STRICT JSON (json.dumps with allow_nan=False): the in-process form
+    of the strict rule, since the dispatcher prints a handler's object with json.dumps, which writes a
+    NaN or infinite float as the non-standard NaN, Infinity or -Infinity token."""
+    try:
+        json.dumps(obj, allow_nan=False)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    return True
+
+
 def _verdict(result):
     """Reduce a handler result tuple to one of: allow, warn, ask, deny, block2, explicit-allow, matching
     selftest_aiqt_hooks._reduce_result. "warn" is ONLY exit 0 with a stdout object whose keys are exactly
-    systemMessage, holding non-whitespace text (the allow-with-note shape). An explicit permissionDecision
+    systemMessage, holding non-whitespace text (the allow-with-note shape). "deny" and "ask" require the
+    exact _deny shape: top-level keys EXACTLY {"hookSpecificOutput", "systemMessage"}, hookSpecificOutput
+    keys EXACTLY DENY_SPECIFIC_KEYS, the PreToolUse event, and a reason and banner holding non-whitespace
+    text, so a "decision", a "continue", an "updatedInput" or another event beside the decision is not a
+    deny. The object must also serialize as strict JSON (_finite_json). An explicit permissionDecision
     "allow", with or without a note, is "explicit-allow", which no check expects (the hooks' _allow never
     emits one). Any other shape is an "unexpected" string."""
     code, obj, _err = result
@@ -122,19 +141,53 @@ def _verdict(result):
         return "block2"
     if code == 0 and obj is None:
         return "allow"
-    if code == 0 and isinstance(obj, dict):
+    if code == 0 and isinstance(obj, dict) and _finite_json(obj):
         specific = obj.get("hookSpecificOutput")
         if isinstance(specific, dict):
             decision = specific.get("permissionDecision")
             if decision == "allow":
                 return "explicit-allow"
-            if decision in ("ask", "deny"):
+            if (decision in ("ask", "deny") and set(obj) == {"hookSpecificOutput", "systemMessage"}
+                    and set(specific) == DENY_SPECIFIC_KEYS and specific["hookEventName"] == "PreToolUse"
+                    and isinstance(specific["permissionDecisionReason"], str)
+                    and specific["permissionDecisionReason"].strip()
+                    and isinstance(obj["systemMessage"], str) and obj["systemMessage"].strip()):
                 return decision
         elif set(obj) == {"systemMessage"}:
             note = obj["systemMessage"]
             if isinstance(note, str) and note.strip():
                 return "warn"
     return "unexpected({!r})".format(result)
+
+
+def _strict_constant(name):
+    raise ValueError("non-standard JSON constant " + name)
+
+
+def _strict_pairs(pairs):
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate JSON object key")
+    return dict(pairs)
+
+
+def _stop_warning(stdout):
+    """(shape, note) for a fail-open Stop warning, judged strictly: stdout must be ONE strict JSON
+    object (NaN, Infinity, -Infinity and a duplicate key at any depth are refused, which the default
+    json.loads accepts) whose keys are EXACTLY {"systemMessage"} with a string value holding
+    non-whitespace text (the note rule of tools/selftest_aiqt_hooks.py's _reduce_result and
+    tools/check_python_floor.py's warning_note, which the hooks suite checks agree: a note beside
+    "decision": "block" would BLOCK a Stop, so it is not a fail-open warning, and a blank note surfaces
+    nothing), and only that field is searched; any other shape fails the check (plain text naming the
+    exception on stdout is not a warning the platform would surface)."""
+    try:
+        obj = json.loads(stdout, parse_constant=_strict_constant, object_pairs_hook=_strict_pairs)
+    except (ValueError, RecursionError):
+        obj = None
+    note = obj["systemMessage"] if isinstance(obj, dict) and set(obj) == {"systemMessage"} else None
+    if isinstance(note, str) and note.strip():
+        return "json object with a string systemMessage", note
+    return "parse or schema failure: stdout " + repr(stdout), ""
 
 
 def _registry_ceiling(root, probe):
@@ -1451,34 +1504,10 @@ def _main_isolated(report_path=None):
         ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
                             capture_output=True, text=True, timeout=120)
 
-        def _strict_constant(name):
-            raise ValueError("non-standard JSON constant " + name)
-
-        def _strict_pairs(pairs):
-            keys = [key for key, _value in pairs]
-            if len(keys) != len(set(keys)):
-                raise ValueError("duplicate JSON object key")
-            return dict(pairs)
-
-        def _stop_warning(stdout):
-            """(shape, note) for a fail-open Stop warning, judged strictly: stdout must be ONE strict JSON
-            object (NaN, Infinity, -Infinity and a duplicate key at any depth are refused, which the default
-            json.loads accepts) whose keys are EXACTLY {"systemMessage"} with a string value (the exact-key
-            rule of tools/selftest_aiqt_hooks.py's _reduce_result: a note beside "decision": "block" would
-            BLOCK a Stop, so it is not a fail-open warning), and only that field is searched; any other shape
-            fails the check (plain text naming the exception on stdout is not a warning the platform would
-            surface)."""
-            try:
-                obj = json.loads(stdout, parse_constant=_strict_constant, object_pairs_hook=_strict_pairs)
-            except (ValueError, RecursionError):
-                obj = None
-            note = obj["systemMessage"] if isinstance(obj, dict) and set(obj) == {"systemMessage"} else None
-            if isinstance(note, str):
-                return "json object with a string systemMessage", note
-            return "parse or schema failure: stdout " + repr(stdout), ""
-        # Negative fixtures: each shape a lenient parse or a lenient key test would accept as a warning
-        # (a NaN or infinite member, a duplicate systemMessage whose last value carries the text, an extra
-        # key, decision=block beside the note) must read as a parse or schema failure.
+        # Negative fixtures for the module-level _stop_warning: each shape a lenient parse or a lenient key
+        # test would accept as a warning (a NaN or infinite member, a duplicate systemMessage whose last
+        # value carries the text, an extra key, decision=block beside the note) must read as a parse or
+        # schema failure, and so must a blank note (an empty or whitespace-only systemMessage).
         check("trunc/stop-warning-strict-json", [_stop_warning(text)[0] == "json object with a string systemMessage"
                                                  for text in (
             json.dumps({"systemMessage": "RecursionError"}) + "\n",
@@ -1491,6 +1520,37 @@ def _main_isolated(report_path=None):
             json.dumps({"decision": "block", "reason": "x", "systemMessage": "RecursionError"}) + "\n",
             json.dumps({"systemMessage": ["RecursionError"]}) + "\n",
             "RecursionError\n")], [True] + [False] * 9)
+        check("trunc/stop-warning-blank-note", [_stop_warning(text)[0] == "json object with a string systemMessage"
+                                                for text in (json.dumps({"systemMessage": ""}) + "\n",
+                                                             json.dumps({"systemMessage": "  "}) + "\n",
+                                                             json.dumps({"systemMessage": " x "}) + "\n")],
+              [False, False, True])
+        # _verdict's deny shape: the exact _deny object reads deny; each variant below read deny under the
+        # former reducer (which checked only permissionDecision, replayed here as _lenient) and must now
+        # read as an "unexpected" string.
+
+        def _lenient(obj):
+            specific = obj.get("hookSpecificOutput")
+            return specific.get("permissionDecision") if isinstance(specific, dict) else None
+
+        def _deny_variant(top=None, specific=None, drop=None):
+            spec = {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "r"}
+            spec.update(specific or {})
+            obj = {"hookSpecificOutput": spec, "systemMessage": "b"}
+            obj.update(top or {})
+            for key in drop or ():
+                (spec if key in spec else obj).pop(key)
+            return obj
+        _vd_variants = (
+            _deny_variant(top={"decision": "block"}), _deny_variant(top={"continue": False}),
+            _deny_variant(top={"extra": float("nan")}), _deny_variant(top={"systemMessage": float("inf")}),
+            _deny_variant(specific={"updatedInput": {}}), _deny_variant(specific={"hookEventName": "Stop"}),
+            _deny_variant(specific={"permissionDecisionReason": " "}), _deny_variant(drop=("systemMessage",)),
+            _deny_variant(drop=("permissionDecisionReason",)), _deny_variant(top={"systemMessage": ""}))
+        check("verdict/deny-exact-schema",
+              ([_verdict((0, _deny_variant(), None))]
+               + [(_lenient(v), _verdict((0, v, None)).startswith("unexpected")) for v in _vd_variants]),
+              ["deny"] + [("deny", True)] * len(_vd_variants))
         ds_shape, ds_note = _stop_warning(ds.stdout)
         check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, ds_shape, "RecursionError" in ds_note),
               (0, "json object with a string systemMessage", True))

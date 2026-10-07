@@ -49,19 +49,24 @@ with O_NOFOLLOW kept on the final component, and where the platform does not sup
 os.open the hook is opened by its full name, still with O_NOFOLLOW on the final component; and a
 writer whose in-place rewrite of the SAME inode is still in progress when the launcher reads it
 (never a rename, removal or replacement, which the descriptor acquisition covers) can expose a
-partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs. The
-steps before the acquisition refusal decides its status run outside any protected block, so a
-fault in one of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call:
-the module imports (sys before the floor guard; os, stat and types after it), the
-FLOOR_FAIL_OPEN_MODES assignment, the floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor
-guard's own steps before its try (its `import os`, its status decision and the def statement for
-_floor_tail), the def statements for _deliver_tail, _deliver and _acquire_hook, the _hook path
-computation, and the acquisition refusal's own status decision (the mode test on sys.argv). Each
-fail-open refusal (the floor guard's and the acquisition refusal's) delivers its stderr diagnostic
-FIRST and imports json only after it, inside the protected block: if that `import json` fails (a
-MemoryError, for example), the stderr diagnostic has already been delivered and the exit status
-still holds, but the JSON systemMessage warning is not written to stdout, so the platform shows no
-warning for that refusal.
+partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs. These
+launcher steps, and no others, run outside any protected block, so a fault in one of them (a
+MemoryError, for example) exits 1, which does not block a PreToolUse call: the module imports (sys
+before the floor guard; os, stat and types after it), the FLOOR_FAIL_OPEN_MODES assignment, the
+floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor guard's own steps before its try (its
+`import os`, its status decision and the def statement for _floor_tail), the def statements for
+_deliver_tail, _deliver and _acquire_hook, the _hook path computation, the acquisition refusal's own
+status decision (the mode test on sys.argv), and, after it, the `_got = ("the acquisition raised",
+None)` sentinel assignment, the `isinstance(_got, tuple)` test that selects the refusal, the
+refusal's closing os._exit call, and the exec statement's own evaluation (loading exec, _got and
+_module.__dict__) before the hook's first statement runs. The __main__ setup between the acquisition
+and the exec (the sys.argv[0] rewrite, the module allocation, its __file__, __package__ and
+__cached__ assignments and its sys.modules install) runs inside the acquisition's protected block
+and is refused by the same mode rule. Each fail-open refusal (the floor guard's and the acquisition
+refusal's) delivers its stderr diagnostic FIRST and imports json only after it, inside the protected
+block: if that `import json` fails (a MemoryError, for example), the stderr diagnostic has already
+been delivered and the exit status still holds, but the JSON systemMessage warning is not written to
+stdout, so the platform shows no warning for that refusal.
 
 SOURCE tree copy: tools/gen_hooks.py copies this file byte-identical into the plugin surface beside
 the dispatcher; edit the source, never the generated copy.
@@ -183,21 +188,37 @@ def _acquire_hook(path):
 # The same mode rule as the floor guard: a dispatcher that cannot be acquired (missing, a symbolic
 # link, not a regular file, empty, unreadable, uncompilable) must not surface as an unhandled
 # exception's exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired
-# content runs: removing, renaming or replacing the file after the open changes nothing; an
-# in-place rewrite of the same inode still in progress at the read is the module docstring's
-# stated residual. The refusal's exit status is decided FIRST, before the acquisition runs; the
-# acquisition itself runs inside a try/except BaseException (an exception it does not map is
-# refused by the mode rule too, as "the acquisition raised"); every diagnostic step (formatting the
-# acquisition error, whose __str__ can raise anything, a SystemExit included, the message,
-# the import of json, serialization, delivery) runs inside one try/except BaseException, with the bare reason as the
-# fallback when the error's text cannot be formatted; the refusal ends with os._exit, which no
-# shutdown flush, stream-buffer state or atexit handler can change.
+# content runs: removing, renaming or replacing the file after the open changes nothing; an in-place
+# rewrite of the same inode still in progress at the read is the module docstring's stated residual.
+# The refusal's exit status is decided FIRST, before the acquisition runs; the acquisition itself
+# runs inside a try/except BaseException (an exception it does not map is refused by the mode rule
+# too, as "the acquisition raised"), and so does the __main__ setup that follows a successful
+# acquisition (the argv rewrite, the module allocation and initialization and its sys.modules
+# install: a fault there is refused as "the launcher's __main__ setup for it raised", and only a
+# completed setup leaves _got the code object the exec runs); every diagnostic step (formatting the
+# acquisition error, whose __str__ can raise anything, a SystemExit included, the message, the
+# import of json, serialization, delivery) runs inside one try/except BaseException, with the bare
+# reason as the fallback when the error's text cannot be formatted; the refusal ends with os._exit,
+# which no shutdown flush, stream-buffer state or atexit handler can change.
 _refusal_status = 2
 if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
     _refusal_status = 0
 _got = ("the acquisition raised", None)
 try:
-    _got = _acquire_hook(_hook)
+    _code = _acquire_hook(_hook)
+    if not isinstance(_code, tuple):
+        # The __main__ setup: the acquired content runs in a NEW module installed as
+        # sys.modules["__main__"] (as a direct launch presents it), so code that resolves names
+        # through the main module (a dataclass string annotation, for example) sees the hook's
+        # globals, never this launcher's. A fault in any setup step leaves _got a refusal reason.
+        _got = ("the launcher's __main__ setup for it raised", None)
+        sys.argv[0] = _hook
+        _module = types.ModuleType("__main__")
+        _module.__file__ = _hook
+        _module.__package__ = ""
+        _module.__cached__ = None
+        sys.modules["__main__"] = _module
+    _got = _code
 except BaseException:
     pass
 if isinstance(_got, tuple):
@@ -219,16 +240,8 @@ if isinstance(_got, tuple):
     except BaseException:
         pass
     os._exit(_refusal_status)
-sys.argv[0] = _hook
-# The acquired content runs in a NEW module installed as sys.modules["__main__"] (as a direct
-# launch presents it), so code that resolves names through the main module (a dataclass string
-# annotation, for example) sees the hook's globals, never this launcher's. An exception the
-# dispatcher raises and does not catch propagates out of the exec statement: the traceback prints
-# and the process exits 1, exactly as when aiqt_hooks.py is launched directly (a direct
-# `python3 -I` launch does not put the hook's directory on sys.path, and neither does this).
-_module = types.ModuleType("__main__")
-_module.__file__ = _hook
-_module.__package__ = ""
-_module.__cached__ = None
-sys.modules["__main__"] = _module
+# The exec statement stays outside every protected block: an exception the dispatcher raises and
+# does not catch propagates out of it, the traceback prints and the process exits 1, exactly as
+# when aiqt_hooks.py is launched directly (a direct `python3 -I` launch does not put the hook's
+# directory on sys.path, and neither does this).
 exec(_got, _module.__dict__)

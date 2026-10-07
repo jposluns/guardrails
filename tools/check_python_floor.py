@@ -1167,10 +1167,12 @@ def strict_json(text):
 
 def warning_note(out):
     """The systemMessage of out when out is ONE strict JSON object (strict_json) whose keys are
-    EXACTLY {"systemMessage"} and whose value is a string, else None. This is the exact-key rule
-    tools/selftest_aiqt_hooks.py's _reduce_result applies to a note: any other key is refused,
-    because a fail-open warning beside "decision": "block" would BLOCK a Stop, so a check that
-    ignored extra keys would accept a refusal that does not fail open."""
+    EXACTLY {"systemMessage"} and whose value is a string holding non-whitespace text, else None.
+    This is the note rule tools/selftest_aiqt_hooks.py's _reduce_result and
+    tools/selftest_orch_hooks.py's _stop_warning apply (the hooks suite checks all three agree on
+    one fixture corpus): any other key is refused, because a fail-open warning beside
+    "decision": "block" would BLOCK a Stop, so a check that ignored extra keys would accept a
+    refusal that does not fail open, and an empty or whitespace-only note surfaces nothing."""
     try:
         parsed = strict_json(out)
     except (ValueError, RecursionError):
@@ -1178,7 +1180,7 @@ def warning_note(out):
     if not isinstance(parsed, dict) or set(parsed) != {"systemMessage"}:
         return None
     note = parsed["systemMessage"]
-    return note if isinstance(note, str) else None
+    return note if isinstance(note, str) and note.strip() else None
 
 
 def _child(code, args, flags, cwd):
@@ -2522,6 +2524,12 @@ def _self_test_cases(base):
         json.dumps(dict(systemMessage="the needle")) * 2 + "\n",
         "the needle\n")],
           [True] + [False] * 12)
+    # A blank note surfaces nothing: an empty or whitespace-only systemMessage is not a warning
+    # (the same rule as the hooks suite's _reduce_result and _stop_warning).
+    check("launcher/warning-json-blank-note", [warning_note(text) for text in (
+        json.dumps(dict(systemMessage="")), json.dumps(dict(systemMessage="  ")),
+        json.dumps(dict(systemMessage="\t\n")), json.dumps(dict(systemMessage=" x ")))],
+          [None, None, None, " x "])
 
     def _acquire_case(scenario, mode_kind):
         got = []
@@ -2949,6 +2957,69 @@ def _self_test_cases(base):
     check("launcher/dispatcher-refusal-fd-states", dispatcher_got, dispatcher_want)
     check("launcher/acquire-error-text-fault-injection", text_got, text_want)
     check("launcher/acquire-unmapped-exception-mode-rule", unmapped_got, unmapped_want)
+    # The __main__ setup after a successful acquisition (argv rewrite, module allocation and
+    # initialization, sys.modules install) runs inside the acquisition's protected block: a fault
+    # injected by a line trace AT each setup statement (MemoryError, or SystemExit(0), which would
+    # be a silent exit 0 on a blocking event) is refused by the mode rule, the hook never runs, and
+    # no traceback is printed. The child exits 98 when the named statement is not exactly one line
+    # of the launcher, so a renamed or removed setup step fails this check instead of passing it.
+    setup_runner = (
+        "import os, runpy, sys\n"
+        "fault, path, statement = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "sys.argv = [path] + sys.argv[4:]\n"
+        "handle = open(path, encoding='utf-8')\n"
+        "lines = [n for n, text in enumerate(handle.read().splitlines(), 1)\n"
+        "         if text.strip() == statement]\n"
+        "handle.close()\n"
+        "if len(lines) != 1:\n"
+        "    os.write(2, ('setup statement %r found on %d lines' % (statement, len(lines))).encode())\n"
+        "    os._exit(98)\n"
+        "def _local(frame, event, arg):\n"
+        "    if event == 'line' and frame.f_lineno == lines[0]:\n"
+        "        if fault == 'memoryerror':\n"
+        "            raise MemoryError('injected at the __main__ setup')\n"
+        "        raise SystemExit(0)\n"
+        "    return _local\n"
+        "def _global(frame, event, arg):\n"
+        "    if frame.f_code.co_filename == path and frame.f_code.co_name == '<module>':\n"
+        "        return _local\n"
+        "    return None\n"
+        "sys.settrace(_global)\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+    setup_steps = {
+        False: ("sys.argv[0] = _hook", 'sys.modules["__main__"] = _module'),
+        True: ("sys.argv = [_hook] + sys.argv[2:]", 'sys.modules["__main__"] = _module'),
+    }
+    setup_shared = ('_module = types.ModuleType("__main__")', "_module.__file__ = _hook",
+                    '_module.__package__ = ""', "_module.__cached__ = None", "_got = _code")
+    setup_reason = "(the launcher's __main__ setup for it raised)"
+    # A fault at the setup sentinel's own assignment leaves the acquisition sentinel in place.
+    setup_sentinel = ("_got = (\"the launcher's __main__ setup for it raised\", None)",
+                      "(the acquisition raised)")
+    if os.name != "posix":
+        setup_got = setup_want = "skipped (the line-trace child needs posix)"
+    else:
+        setup_got, setup_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+                for statement, reason in ([setup_sentinel] + [
+                        (step, setup_reason) for step in setup_steps[multi] + setup_shared]):
+                    for fault in ("memoryerror", "systemexit"):
+                        spot = Path(tempfile.mkdtemp(prefix="main-setup-", dir=base))
+                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                        (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                        rc, out, err = _child(setup_runner,
+                                              [fault, str(spot / Path(rel).name), statement, mode],
+                                              (), spot)
+                        seen = _warning(out, reason) if kind == "fail_open" else out
+                        setup_got.append((rel, kind, statement, fault, rc, reason in err,
+                                          "Traceback" not in err, "HOOK_RAN" not in out, seen))
+                        setup_want.append((rel, kind, statement, fault, rc_want, True, True, True,
+                                           True if kind == "fail_open" else ""))
+    check("launcher/main-setup-fault-mode-rule", setup_got, setup_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
