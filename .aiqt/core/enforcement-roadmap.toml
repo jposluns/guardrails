@@ -4,7 +4,9 @@
 # enforced: the enforceability ledger links at least one shipped control to the rule; `mechanisms`
 #   RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is reviewable
 #   standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so the two
-#   can never fork. none: enforcement is not built yet. pending: not built yet, and `description` states
+#   can never fork. A rule whose only linked controls are preview-channel hooks (.aiqt/core/hooks/
+#   preview.toml: standalone .preview/ files installed by hand, not in the plugin) is still enforced here,
+#   by that linkage, and the register shows it as "Preview only", not as enforced. none: enforcement is not built yet. pending: not built yet, and `description` states
 #   the intended build. This file records the DECISION only; the linkage itself is authored in the gate
 #   and hook manifests and rendered into .aiqt/enforceability.json, never re-authored here.
 # Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
@@ -113,8 +115,8 @@ mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:constraint-reread"]
 
 [[rule]]
 corpus-id = "cntdef"
@@ -313,8 +315,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:rerun-pass-check"]
 
 [[rule]]
 corpus-id = "rmvpth"

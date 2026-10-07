@@ -32,8 +32,10 @@ python-floor = "3.14"
 guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
     ".preview/clock-inject.py",
+    ".preview/constraint-reread.py",
     ".preview/future-stamp-write.py",
     ".preview/record-remove-check.py",
+    ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
@@ -168,6 +170,8 @@ guarded-surfaces = [
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [
+    ".preview/constraint-reread.py",
+    ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
 ]
 completeness-check = true

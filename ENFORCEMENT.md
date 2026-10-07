@@ -2,15 +2,16 @@
 
 This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus by tools/gen_enforcement_register.py. Do not edit it by hand; change the source and regenerate.
 
-This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
+This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of preview only means every linked control is a preview-channel hook: a standalone file under .preview/ that an adopter installs by hand, not part of the plugin, so nothing runs for it unless it is installed. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
 
 ## Summary
 
 | Status | Rules |
 |---|---:|
 | Enforced | 35 |
+| Preview only | 2 |
 | Pending | 0 |
-| None | 97 |
+| None | 95 |
 
 ## Rules
 
@@ -49,7 +50,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Preserve uncommitted work | `prsunc` | Enforced | `hook:git-discard`, class b |
 | Protected-branch integrity | `prtbrn` | Enforced | `hook:protected-line-guard`, class b |
 | A required step remains required under friction | `reqstp` | None | Enforcement has not been built yet. |
-| A rerun pass does not erase an earlier failure | `rerunf` | None | Enforcement has not been built yet. |
+| A rerun pass does not erase an earlier failure | `rerunf` | Preview only | `hook:rerun-pass-check` (preview channel, installed by hand), class b |
 | A review in flight pins its artefact | `rvwpin` | None | Enforcement has not been built yet. |
 | Make retries safe to repeat | `rtsafe` | None | Enforcement has not been built yet. |
 | Separate task changes from pre-existing work | `septsk` | Enforced | `hook:write-scope`, class c |
@@ -92,7 +93,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Records first | `recfst` | Enforced | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | None | Enforcement has not been built yet. |
 | Resume from the durable handoff | `sesres` | Enforced | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | None | Enforcement has not been built yet. |
+| A standing constraint persists across context loss | `cnstpr` | Preview only | `hook:constraint-reread` (preview channel, installed by hand), class b |
 | Trust recovery and escalation | `trstre` | None | Enforcement has not been built yet. |
 | Autonomy steps down after a confirmed trust loss | `trsrcv` | None | Enforcement has not been built yet. |
 | Decision classification before enacting | `deccls` | None | Enforcement has not been built yet. |
@@ -163,6 +164,7 @@ Class letters:
 - Default: `block`
 - Entry point: `tools/gen_adapters.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -176,6 +178,7 @@ A byte-identity drift gate over the artefact tools/gen_adapters.py generates fro
 - Default: `block`
 - Entry point: `tools/aei_backlog_md.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -189,6 +192,7 @@ The reference enumerator's own grammar and fail-closed vectors: a malformed item
 - Default: `block`
 - Entry point: `tools/gen_agents.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -202,6 +206,7 @@ A byte-identity drift gate over the artefact tools/gen_agents.py generates from 
 - Default: `block`
 - Entry point: `tools/check_branch_root.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -215,6 +220,7 @@ Judges only the revision under gate against the derived protected ref: it does n
 - Default: `block`
 - Entry point: `tools/gen_changelog.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -228,6 +234,7 @@ A byte-identity drift gate over the artefact tools/gen_changelog.py generates fr
 - Default: `block`
 - Entry point: `tools/check_ci_parity.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -241,6 +248,7 @@ Token-level set parity between the two named files only (tools/run_all_checks.sh
 - Default: `block`
 - Entry point: `tools/gen_claude.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -254,6 +262,7 @@ A byte-identity drift gate over the artefact tools/gen_claude.py generates from 
 - Default: `block`
 - Entry point: `tools/gen_crosswalk.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -267,6 +276,7 @@ A byte-identity drift gate over the shipped adopter-facing schema reference .aiq
 - Default: `block`
 - Entry point: `tools/gen_cursor.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -280,6 +290,7 @@ A byte-identity drift gate over the artefact tools/gen_cursor.py generates from 
 - Default: `block`
 - Entry point: `tools/check_derived_command_parameters.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -293,6 +304,7 @@ An adopter-parameterized scan that flags a hardcoded LITERAL value at an adopter
 - Default: `block`
 - Entry point: `tools/gen_disclosure.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -306,6 +318,7 @@ A byte-identity drift gate over the artefact tools/gen_disclosure.py generates f
 - Default: `block`
 - Entry point: `tools/gen_enforceability.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -319,6 +332,7 @@ A byte-identity drift gate over the artefact tools/gen_enforceability.py generat
 - Default: `block`
 - Entry point: `tools/gen_enforcement_register.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -332,6 +346,7 @@ A byte-identity drift gate over the Markdown register (ENFORCEMENT.md) and the w
 - Default: `block`
 - Entry point: `tools/check_entry_guard.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -345,6 +360,7 @@ Total over its declared surface: every Python script the local check roster laun
 - Default: `block`
 - Entry point: `tools/gen_first_pin_demo.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -358,6 +374,7 @@ A byte-identity drift gate over the artefact tools/gen_first_pin_demo.py generat
 - Default: `block`
 - Entry point: `tools/check_gensrc_failclose.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -371,6 +388,7 @@ A registry-driven fail-close gate: for every target the gensrc registry declares
 - Default: `block`
 - Entry point: `tools/gen_gensrc.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -384,6 +402,7 @@ A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from 
 - Default: `block`
 - Entry point: `tools/gen_hooks.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -397,6 +416,7 @@ A byte-identity drift gate over the artefact tools/gen_hooks.py generates from i
 - Default: `block`
 - Entry point: `tools/gen_install.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -410,6 +430,7 @@ A byte-identity drift gate over the artefact tools/gen_install.py generates from
 - Default: `block`
 - Entry point: `tools/gen_manifest.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -423,6 +444,7 @@ A byte-identity drift gate over the five generated outputs (manifest, .gitattrib
 - Default: `block`
 - Entry point: `tools/gen_mappings.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -436,6 +458,7 @@ A byte-identity drift gate over the artefact tools/gen_mappings.py generates fro
 - Default: `block`
 - Entry point: `tools/check_mistakes_register.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -449,6 +472,7 @@ Total over the declared register: a broken digest chain or sequence, a reused id
 - Default: `block`
 - Entry point: `tools/gen_notice.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -462,6 +486,7 @@ A byte-identity drift gate over the artefact tools/gen_notice.py generates from 
 - Default: `block`
 - Entry point: `tools/check_python_launcher_isolation.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -475,6 +500,7 @@ A deterministic scan over a RECOGNIZABLE SUBSET of the repo's Python launcher co
 - Default: `block`
 - Entry point: `tools/check_record_drift.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -488,6 +514,7 @@ Total over the surface it examines: an OPEN merge_pending row carrying a TYPED r
 - Default: `block`
 - Entry point: `tools/check_record_sections.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -501,6 +528,7 @@ Partial over a best-effort, adopter-configured surface. It proves preservation o
 - Default: `block`
 - Entry point: `tools/gen_reference_facts.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -514,6 +542,7 @@ A byte-identity drift gate over the artefact tools/gen_reference_facts.py genera
 - Default: `block`
 - Entry point: `tools/gen_renderers.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -527,6 +556,7 @@ A byte-identity drift gate over the renderer/generator declaration rendered from
 - Default: `block`
 - Entry point: `tools/gen_roadmap.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -540,6 +570,7 @@ A byte-identity drift gate over the artefact tools/gen_roadmap.py generates from
 - Default: `block`
 - Entry point: `tools/gen_rules.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -553,6 +584,7 @@ A byte-identity drift gate over the artefact tools/gen_rules.py generates from i
 - Default: `block`
 - Entry point: `tools/gen_secret_patterns.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -566,6 +598,7 @@ A byte-identity drift gate over the artefact tools/gen_secret_patterns.py genera
 - Default: `block`
 - Entry point: `tools/check_secrets.py`
 - Class: `c`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -579,6 +612,7 @@ A pattern scanner for hardcoded credentials: it catches recognizable provider-to
 - Default: `block`
 - Entry point: `tools/check_selftest_execution.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -592,6 +626,7 @@ Total over its declared surface, in three layers. Layer one, STATIC pre-launch: 
 - Default: `block`
 - Entry point: `tools/gen_skill.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -605,6 +640,7 @@ A byte-identity drift gate over the artefact tools/gen_skill.py generates from i
 - Default: `block`
 - Entry point: `tools/gen_worker_pack.py`
 - Class: `a`
+- Channel: `repository gate`
 
 Technical limits (from the enforcement ledger):
 
@@ -618,6 +654,7 @@ A byte-identity drift gate over the artefact tools/gen_worker_pack.py generates 
 - Default: `block`
 - Entry point: `PreToolUse on Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -631,6 +668,7 @@ Covers the required-absolute file_path of Read, Write, and Edit and the required
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -644,6 +682,7 @@ A SEPARATE best-effort Bash layer of abspth, distinct from the structured typed-
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -657,6 +696,7 @@ Lexical trigger over an open command grammar. NO-ASK posture: this guard never r
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -670,11 +710,26 @@ A best-effort QUOTE-AWARE LEXICAL check over the Bash command string: tokenized 
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
 ```
 A BEST-EFFORT QUOTE-AWARE LEXICAL check via the shared tokenizer (_lex_command); it is DENY-and-educate (NO-ASK posture: this guard never returns an ask; read every ASK/ASKS/over-ASK below as that DENY-and-educate outcome, which NAMES the safe rewrite), so a detected substitution is denied with the reachable correct action rather than silently allowed, and it makes NO soundness or universal-coverage claim. In a parsed simple segment it resolves the effective command word past leading shell assignments and the recognized command modifiers command, exec, builtin, nohup, time, !, and env; for env it skips leading option tokens, the separated operands of common value-taking options, and NAME=VALUE assignments. When that word is literal git and the subcommand after recognized Git-global options is literal commit, it scans EVERY argv token after commit, including tokens after `--` or `--end-of-options`, for a backtick or $( marker in a substituting double-quoted or unquoted context, using the shared lexer's parallel per-token opacity plus the narrow unquoted-$( split form where a final opaque token ending in $ is immediately followed by the ( operator. It deliberately does no Git option binding because the shell expands argv before Git parses it. On an unparseable command, the raw fallback ASKS when coarse git-commit and substitution-marker probes both match; that fallback can over-match quoted prose or literal markers. HONEST RESIDUALS: the option tokens belonging to a recognized command modifier are not skipped (for example command -p git commit, time -p git commit, exec -c git commit, exec -a x git commit, and nohup -- git commit), so resolution advances one word past the modifier, stops on the option, and silently ALLOWs a substitution-bearing commit; command modifiers outside the recognized set (notably sudo, nice, timeout, doas, stdbuf, and ionice) are not resolved, so for example sudo git commit -m "$(x)" silently ALLOWs; reserved-word compounds (if/while/until and `{ ...; }`) are not parsed through to their inner git command; shell functions and aliases that rename git; git-config subcommand aliases (for example alias.ci=commit making git ci -m "$(x)") cannot be known lexically and silently ALLOW; sh -c or bash -c script bodies; eval or xargs indirection; redirect targets on a recognized commit segment are removed from argv by the lexer and are not scanned, so git commit -m ok > "$(x)" and git commit -m ok 2> "`x`" silently ALLOW; leading environment-assignment values and Git-global option/value tokens before commit; a pre-subcommand unquoted $( that fragments the lexer segment, letting the whole commit invocation including its message escape inspection; quote-mangled command words such as g''it are outside the claimed command-resolution surface even where the shared lexer happens to normalize a form to git; $VAR indirection, concatenation, PATH-shadowed commands, and any other non-literal command word that does not resolve lexically to git; commands outside the Bash tool; and unparseable commands beyond the raw fallback probes. Deliberate over-ASKs: $((...)) includes $(; a bare $ immediately before an escaped parenthesis (for example git commit -m $\(x\)) is marked opaque and the decoded-marker check sees $(, so it ASKS even though Bash passes literal $(x) and runs no substitution; ANSI-C $'...' is treated as an opaque marker-bearing token even though Bash does not substitute inside it; whole-token opacity means an escaped literal backtick or $( sharing a word with an unrelated unquoted expansion or glob prompts; and a post-boundary pathspec produced by substitution (for example git commit -- $(ls)) prompts because the shell still executes it. It targets the accidental case, not an adversary.
+```
+
+### `hook:constraint-reread`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `Stop`
+- Class: `b`
+- Channel: `preview, installed by hand from .preview/constraint-reread.py; not in the plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin, and off until AIQT_CONSTRAINT_RECORD names the project's durable record. After a compaction reported by the platform's own markers (SessionStart with source compact, or PreCompact), it reminds the assistant of the record's Constraint lines on every user prompt, and refuses the turn end, while the record holds no Constraints-reread entry dated after the compaction and no more than 60 seconds ahead of the hook's clock (an entry dated up to 60 seconds ahead counts); the refusals are capped at 3 in a row, after which each later stop is allowed with a warning and no entry, unless the host sends stop_hook_active false on a turn end that continues a refusal. A refusal whose count cannot be saved is allowed with a warning, also on a Stop whose stop_hook_active field is explicitly false. The refusal count is kept in the hook's state file, so the cap holds when the platform's stop_hook_active field is absent or true; the count is reset to 0 only by a UserPromptSubmit event, a new compaction, or a Stop whose stop_hook_active field is explicitly false, never by an allowed stop, so without UserPromptSubmit registered and without that field every later stop until the next compaction is allowed with the warning (a missed refusal), and a state file that cannot be parsed (an unknown count) has the same effect from its first Stop. An explicit false is trusted as a new turn, so a host that sends it on a Stop that continues a refusal is refused at every such Stop (the cap does not hold). It proves only that an entry was written, not that the record was read or a constraint honoured; it names only constraints written in the record; a compaction without one of those markers (a host without the events, a hook not registered for them, a new session) is not seen; with no state location or no session key in the payload a compaction is reminded once and then forgotten; if its state location exists but cannot be examined, it keeps reminding with the compaction time unknown (a reminder no entry can clear, which says so) and allows each turn end with a warning; a state file over its size limit is read as a compaction at the file's modification time; a state file deleted after a compaction forgets that compaction, so the reminder and the refusals stop silently; concurrent hook runs are serialized by a lock file beside the state file, and a call saves only while that lock file and the state file are the ones it locked and loaded: a call that cannot take the lock within 2 seconds saves nothing (a compaction not recorded, a count not reset) and allows a turn end it would refuse with a warning that names the lock, and a call whose lock file is deleted or replaced while it holds it (also one moved away and put back after another call saved), or whose state file another call saved meanwhile, saves nothing and allows a turn end it would refuse with a warning that the refusal count cannot be saved (a deletion, replacement or save that lands in the few system calls between its last check and its write can still let one stale save through, and so can a save whose state file matches the loaded one in device, inode, size, modification time and change time, all five fields it compares, as when an inode number is reused within the filesystem's timestamp granularity); while the lock cannot be taken at all (a lock path that is a symbolic link or not a regular file, a lock file it cannot open, a filesystem that refuses flock, a platform without flock), it keeps no state, so a compaction is reminded once and then forgotten and, with no compaction saved before then, every turn end passes silently (a missed reminder and a missed refusal), while a compaction saved before then is still reminded and each turn end is allowed with a warning; a state folder moved away or deleted during a session forgets the compaction silently, like a deleted state file; once a record is declared every call creates the state directory and an empty lock file for its session, and nothing removes the lock or state files; an entry beyond the first MiB of the record is not seen, and a line cut at that limit is dropped; and the host clock is trusted.
 ```
 
 ### `hook:diff-source`
@@ -683,6 +738,7 @@ A BEST-EFFORT QUOTE-AWARE LEXICAL check via the shared tokenizer (_lex_command);
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -696,6 +752,7 @@ AIRTIGHT-NARROW (L11 redesign: the GD-112 philosophy applied to diff-dumps). NO-
 - Default: `warn`
 - Entry point: `Stop`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -709,6 +766,7 @@ This Stop layer is a NON-BLOCKING surfacing WARN (systemMessage, exit 0), not a 
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -722,6 +780,7 @@ A best-effort QUOTE-AWARE LEXICAL check over the Bash command string (the shared
 - Default: `block`
 - Entry point: `PreToolUse on Write|Edit|MultiEdit`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -735,6 +794,7 @@ A REGISTRY-DRIVEN path guard, not a content judge: it fires only when the Write/
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -748,6 +808,7 @@ An ULTRA-CONSERVATIVE "recover-then-allow unless PRISTINE and provably clean" gu
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -761,6 +822,7 @@ A best-effort LEXICAL check over the Bash command via the shared quote/redirect-
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -787,6 +849,7 @@ FAIL POSTURE: a tokenizer ValueError silently allows because unparsed text suppl
 - Default: `block`
 - Entry point: `PreToolUse on AskUserQuestion`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -800,6 +863,7 @@ Registry-scoped: inert with no registry or no declared mode record. Blocks a blo
 - Default: `warn`
 - Entry point: `PostToolUse on Bash|TaskOutput`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -813,6 +877,7 @@ A RECORDING substrate, not an enforcement point: it appends launch rows (a Bash 
 - Default: `warn`
 - Entry point: `UserPromptSubmit`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -826,6 +891,7 @@ A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prom
 - Default: `warn`
 - Entry point: `SessionStart`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -839,6 +905,7 @@ SessionStart cannot block at the platform (exit 2 shows stderr only, doc-confirm
 - Default: `warn`
 - Entry point: `PreToolUse on Write|Edit|MultiEdit|NotebookEdit|Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -852,6 +919,7 @@ The mutation barrier behind orch-resume-audit, shipped WARN-FIRST (stage bake, a
 - Default: `block`
 - Entry point: `Stop`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -865,6 +933,7 @@ REGISTRY-SCOPED: entirely inert unless an orchestration registry (.aiqt/orchestr
 - Default: `block`
 - Entry point: `TeammateIdle`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -878,6 +947,7 @@ The TeammateIdle binding of the same decision core as orch-stop-guard, sharing i
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -891,6 +961,7 @@ AIRTIGHT-NARROW (round 32, maintainer-directed simplification): this guard does 
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -904,6 +975,7 @@ Registry-scoped deny companion to orch-truncation-guard's bare-& DENY-and-educat
 - Default: `block`
 - Entry point: `PreToolUse on ScheduleWakeup|CronCreate`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -917,6 +989,7 @@ The scheduled-yield binding of the decision core: a call that parks the run (sch
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `b`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -939,12 +1012,27 @@ Push residuals include execution outside Bash; renamed executables, aliases, fun
 
 ```
 
+### `hook:rerun-pass-check`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `Stop`
+- Class: `b`
+- Channel: `preview, installed by hand from .preview/rerun-pass-check.py; not in the plugin`
+
+Technical limits (from the enforcement ledger):
+
+```
+PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin. After a CI rerun command that succeeds (gh run rerun, glab ci retry: a simple command, in a small closed shell grammar the hook reads exactly, whose words hold gh, run and rerun, or glab, ci and retry, in that order at any positions), or a recognized check command that failed and then passed with the same words, each as written with its quoting (pytest 'a  b' and pytest 'a b' differ; blanks and comments between words do not count), and no recorded change between, it adds a note after the tool call, and at turn end it refuses a final message that presents a pass as conclusive without naming the earlier failure, at most 2 times in a row, after which each later conclusive stop is allowed with a warning and the reruns stay outstanding. The refusal count is kept in the hook's state file, so the cap holds when the platform's stop_hook_active field is absent or true; the count is reset to 0 only by a UserPromptSubmit event, a Stop whose stop_hook_active field is explicitly false, or a final message that names a disclosure word, never by a tool call or an allowed stop, so without UserPromptSubmit registered and without that field, after 2 refusals each later conclusive stop is allowed with the warning until a disclosure (a missed refusal). An explicit false is trusted as a new turn, so a host that sends it on a Stop that continues a refusal is refused at every such Stop (the cap does not hold). A state file that is missing (the first use of a session cannot be told from a lost one), unreadable or malformed gives an unknown refusal count, never a fresh 0; while the state file cannot be read or is malformed, a conclusive turn end, or one with no final message, is allowed with a warning that the state could not be read, and once it is missing, or a tool call has written back a lost or unreadable one, until one of those reset signals a conclusive turn end is allowed with a warning in place of a refusal only while a rerun seen since is outstanding; any other is silent, and a lost record of earlier reruns is silent (a missed refusal); with neither UserPromptSubmit registered nor stop_hook_active explicitly false, every refusal is replaced by that warning until a disclosure (a missed refusal). It recognizes only the listed CI rerun and check commands run through the shell tool. A rerun through a web page, a pushed empty commit, a runner's own retry option, an API call such as gh api .../rerun, a gh alias, or a changed command line is not seen. The shell reading is exact only for the closed grammar described in the hook's docstring, which reads a command of at most 8192 characters. Inside the grammar, a CI rerun is missed only when its words come into existence when the command runs, or bash runs gh under another name: an expansion that has a value ($c run rerun, with c=gh), a tilde expansion (~ run rerun with HOME=/path/to/gh, ~+ run rerun with PWD=/path/to/gh, or ~-; bash tilde-expands a word the hook reads as a plain ~), a pathname expansion (/usr/bin/g? run rerun), an alias, a shell function, a hashed command name (hash -p /path/to/gh x; x run rerun), or a command string handed to another program (sh -c '...', eval '...', ssh, xargs input, a script). The name rule ignores command position, so a simple command that names gh, run and rerun in order without running them is noted anyway: echo gh run rerun, unquoted or with each word quoted alone (echo "gh" "run" "rerun"), command -v gh run rerun, a function body that is defined but never called, false && gh run rerun 7; true (a false note, and a false refusal when the call succeeds). The hook reads an exit status only from an integer exit-code field of the tool response, where one is present, and that status is the whole call's: a later command, || true, a background &, a ! or an if or while condition can hide a gh call the server refused (HTTP 403), with or without pipefail set, and so can a pipe under default bash options, so gh run rerun 7 2>&1 | tail -5, gh run rerun 7 || true, gh run rerun 7; echo done, gh run rerun 7 &, ! gh run rerun 7 and if gh run rerun 7; then :; fi exit 0 and are kept as certain (a false refusal); with pipefail set, the pipe form exits nonzero and gets the uncertain note only, and the other forms still exit 0. The note for a CI rerun call that succeeds says only that the call was not reported as failed and asserts neither a rerun nor an earlier failure, and the refusal asks the assistant to state any earlier failure; neither it nor the warning given when a refusal is capped or its count cannot be saved asserts a CI rerun (each says only that a command naming one was not reported as failed). Every command outside the grammar is a possible CI rerun by construction: the hook could not parse it, so a CI rerun cannot be ruled out, and no search of its text decides otherwise; this includes echo "$(date)", a here-document, a line continuation, ${x:-y}, $'...', a redirection spelling not listed, and any command longer than 8192 characters. Each nonblank one gets a note, even when it fails (a blank command gets no note), so an off-grammar command that reruns nothing (a here-document commit, notably) gets a false note. Such a command, and a CI rerun call that fails (the rerun may or may not have started), is an uncertain rerun: its note says that a CI rerun cannot be ruled out and asserts no rerun and no earlier check failure, and it is never kept, so it never brings a turn-end refusal; a real CI rerun written outside the grammar, a failed call that did start a rerun, and an off-grammar check command that fails and then passes each get their note and no refusal (a missed refusal). An off-grammar command also counts as a change unless it fails, so a local rerun across it gets no local-rerun note of its own, and a check command outside the grammar is never compared as a check. Read-only is decided only inside the grammar: env with any argument, an assignment prefix (X=1 ls), a command word holding an expansion, and any output redirection (> >> >| &> &>>) whose target is not the unquoted word /dev/null count as a change; an input redirection (< <<<) and a descriptor duplication or close (>&2, <&0, >&-) write nothing. Also: a failed call is never counted as a change, so a fix made by a command that then failed reads as no change (a false note); a change made outside the tool calls it sees reads as no change (a false note), and a read-only-looking command with a side effect reads as no change; a setup command that is not read-only beside a check (source venv/bin/activate && pytest, an export; cd, pushd, popd, set and tee are not counted) counts as a change, so a later rerun of that check alone is not flagged; pass and fail are read from the event name and a few response fields, not the output; the Stop check reads only the final message against fixed phrase lists, so a claim worded otherwise passes, a claim after an unlisted negation is refused, any disclosure word clears the reruns wherever it stands, even inside a denial such as I did not rerun CI, whether or not the failure is recorded; it does not record or investigate the failure itself; with a state file that cannot be read or is malformed, a final message that presents a pass as conclusive without a disclosure word, or a payload with no final message, is allowed with a warning that the state could not be read, and any other final message is allowed silently; while reruns are outstanding, a payload with no final message is allowed with a warning that says so; with no state location at all (no session key in the payload, or no absolute state directory) nothing is kept and every stop is allowed silently; a refusal whose count cannot be saved is allowed with a warning, also on a Stop whose stop_hook_active field is explicitly false; concurrent hook runs are serialized by a lock file beside the state file, and a run saves only while that lock file and the state file are the ones it locked and loaded: a run that cannot take the lock within 2 seconds saves nothing (a tool call's change or rerun is not recorded, a prompt does not reset the count) and allows a turn end it would refuse with a warning that names the lock, and a run whose lock file is deleted or replaced while it holds it (also one moved away and put back after another run saved), or whose state file another run saved meanwhile, saves nothing and allows a turn end it would refuse with a warning that the refusal count cannot be saved (a deletion, replacement or save that lands in the few system calls between its last check and its write can still let one stale save through, and so can a save whose state file matches the loaded one in device, inode, size, modification time and change time, all five fields it compares, as when an inode number is reused within the filesystem's timestamp granularity); while the lock cannot be taken at all (a lock path that is a symbolic link or not a regular file, a lock file it cannot open, a filesystem that refuses flock, a platform without flock), it keeps no state, so it only notes after each tool call and, with no state saved before then, every turn end passes silently (a missed refusal), while the outstanding reruns of a state saved before then still bring a warning; a state folder moved away or deleted during a session is read as no state, so the next turn end passes silently (a missed refusal); nothing removes its state and lock files, one of each per session; a state file written by an earlier revision of the hook (without the current state version) is discarded and read as no earlier runs, so none of its flags arms a refusal and a local rerun across it is missed; a state file of the current version holding a flag of a kind this version never keeps is malformed, but the state file is trusted: a hand-edited state of the current version whose flags carry a prefix this version keeps still arms a refusal; a check run again with a word quoted another way ('a b', then "a b") is a different check (a missed note), and so is one with an operator spelled another way (pytest -q; ls, then pytest -q && ls, or a newline in place of the ;), while leading and trailing newlines and a final ; do not count; a check command whose words hold an expansion (a $ expansion, or an unquoted * ? or ~) is never compared with another run, so its fail-then-pass gets no local-rerun note (a missed note, never a false one); a command holding a tab, a newline or another control character (C0, DEL or C1) is shown in a note as one $'...' string with those characters escaped; and the hook fails open on its own failure (warn-only by design: an advisory hook must not block on its own failure): an internal error exits 0 with no output, an unreadable state file is read as no earlier runs (so a local rerun across it is missed) with an unknown refusal count (a Stop that reads it allows a conclusive stop with a warning that the state could not be read), though the current call's own CI rerun or possible CI rerun note is still given, and a note or refusal that cannot be written to stdout is dropped.
+```
+
 ### `hook:review-dispatch-pin`
 
 - Platform: `claude-code`
 - Default: `block`
 - Entry point: `PreToolUse on Bash`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -958,6 +1046,7 @@ Registry scoped and inert without a review dispatch binding. It checks only a pr
 - Default: `block`
 - Entry point: `PreToolUse on Write|Edit|MultiEdit|Bash`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
@@ -971,6 +1060,7 @@ A COMPENSATING control, not a replacement: the CI secret-scan and gitleaks gates
 - Default: `block`
 - Entry point: `PreToolUse on Write|Edit|MultiEdit`
 - Class: `c`
+- Channel: `plugin`
 
 Technical limits (from the enforcement ledger):
 
