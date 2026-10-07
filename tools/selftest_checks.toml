@@ -283,6 +283,7 @@ expected-check-ids = [
   "doctor/hook-resume-audit-keeps-strict-scope-barrier",
   "doctor/resume-audit-registry-unreadable-arms-barrier",
   "doctor/default-cannot-evaluate-above-root-reports-fault-not-registry",
+  "doctor/resume-audit-walk-fail-arms-barrier-every-mode",
   "trunc/union-missing-toplevel-reads-absent-strict-denies",
   "trunc/aiqt-search-permission-decides-probe",
   "trunc/walk-recheck-realpath-fault-denies",

@@ -45,8 +45,10 @@ What an absent registry means (two modes, truncation guard only):
   scope the truncation guard is inert and allows every Bash call that passes those pre-scope
   checks. A `.aiqt` entry it cannot evaluate (a regular file or a symlink named `.aiqt`, or a
   `.aiqt` directory the guard's process lacks search (execute) permission on, such as mode `0600`
-  or `0000`; a `.aiqt` of mode `0100` evaluates normally, because read permission is never needed;
-  or a registry name that is not a regular file or cannot be examined) counts as present, so the
+  or `0000`; a `.aiqt` of mode `0100` evaluates normally for its owner where `O_PATH` exists (Linux),
+  because the `O_PATH` open needs no read permission, but it cannot be evaluated by a process that is
+  not its owner (mode `0100` grants search to the owner only), nor where `O_PATH` is unavailable and
+  the `O_RDONLY` fallback open also needs read permission; or a registry name that is not a regular file or cannot be examined) counts as present, so the
   guard stays active there. The git toplevel is consulted only when the whole chain probes as a
   clean not-present: one that exists but cannot be opened as a directory (it is a regular file, or
   the process may not reach it) keeps the guard active the same way, while one that does not exist
@@ -61,8 +63,17 @@ What an absent registry means (two modes, truncation guard only):
   other components use follows it and accepts it; a symlinked `orchestration.json` beside a regular
   `orchestration.local.json` is never examined. Discovery checks presence and file type only: a
   regular registry file that is unreadable, invalid JSON, or empty satisfies this mode (the other
-  components then read it as bad). No other component reads the variable, so every other component
-  stays inert on an absent registry in both modes.
+  components then read it as bad). The only other reader of the variable is the resume audit (the
+  SessionStart hook and `tools/orch_doctor.py --resume-audit`, which write the same resume barrier).
+  With no registry at the repository root it stays silent in both modes, so every other component
+  stays inert on an absent registry in both modes. With a registry present, the audit also arms the
+  barrier (and SessionStart warns) when the truncation guard would deny a Bash call from the
+  repository root: in BOTH modes when the root cannot be walked (for example a root directory this
+  process cannot read and enter), and in this mode also when that root's registry scope is absent or
+  cannot be confirmed (for example a symlinked `orchestration.json`). The barrier does not record the
+  mode, so the two writers agree only when they run with the same value: a doctor run without the
+  variable can clear a barrier a registry-required SessionStart armed for a scope deny. Clearing it does
+  not allow any Bash call: the barrier only warns, and the guard still denies on its own scope check.
 
 The write-scope guard is not part of this suite but locates its declaration through this registry,
 and it is not inert on an absent registry: it then reads the declaration from the default state

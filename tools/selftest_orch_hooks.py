@@ -1782,6 +1782,39 @@ def _main_isolated(report_path=None):
                "hit a fault it reads as present" in _r8_cev_out, "a registry entry was found" in _r8_cev_out,
                "cannot be confirmed as a registry" in _r8_cev_out),
               (2, True, True, False, True))
+        # ROUND 9, A WALK FAILURE ARMS THE BARRIER IN EVERY MODE: a repository root the truncation guard's
+        # walk cannot carry out is denied in every mode, so _orch_guard_scope_report flags it as a deny and
+        # the SessionStart resume audit arms the barrier and warns with that finding, unset and set alike
+        # (red when the 'fail' branch reports denies=False). The warning names the condition as a repair,
+        # not only the record.
+        _r9_fx = Fixture(tmp, "doc-walk-fail")
+        _r9_bar = Path(aiqt_hooks._orch_state_dir_for_root(str(_r9_fx.root))) / "resume-barrier.json"
+        _r9_walk = aiqt_hooks._orch_registry_walk
+        _r9_old = os.environ.get(_doc_env)
+        _r9_rows = []
+        try:
+            aiqt_hooks._orch_registry_walk = lambda _cwd: (
+                "fail", ("is a directory this process cannot read and enter", "fix the root's mode"))
+            for _r9_val in (None, "1"):
+                if _r9_val is None:
+                    os.environ.pop(_doc_env, None)
+                else:
+                    os.environ[_doc_env] = _r9_val
+                _r9_rep = aiqt_hooks._orch_guard_scope_report(str(_r9_fx.root))
+                _r9_res = aiqt_hooks.orch_resume_audit(_r9_fx.payload("SessionStart"))
+                _r9_msg = json.dumps(_r9_res[1]) if _r9_res[1] is not None else ""
+                _r9_b = _r8_bar(_r9_bar)
+                _r9_rows.append((_r9_rep[1], _verdict(_r9_res), _r9_b[0],
+                                 [f for f in _r9_b[1] or [] if "denied in every mode" in f] != [],
+                                 "the condition it names" in _r9_msg))
+        finally:
+            aiqt_hooks._orch_registry_walk = _r9_walk
+            if _r9_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _r9_old
+        check("doctor/resume-audit-walk-fail-arms-barrier-every-mode", tuple(_r9_rows),
+              ((True, "warn", True, True, True), (True, "warn", True, True, True)))
         # ROUND 8, A MISSING GIT TOPLEVEL READS AS ABSENT (decided, not a fault): git names a toplevel that
         # does not exist (core.worktree naming a removed directory). It holds no registry, so the union leg
         # returns False and the scope is ('none', None): inert by default, and DENIED in registry-required
@@ -1838,12 +1871,28 @@ def _main_isolated(report_path=None):
                     _sp_res.append(aiqt_hooks._orch_dirfd_has_registry(_sp_fd))
                 finally:
                     os.close(_sp_fd)
+            # The O_RDONLY fallback (platforms without O_PATH) also needs READ permission to open .aiqt, so
+            # there the mode 0o100 .aiqt cannot be evaluated: forced here on any platform.
+            _sp_walk = aiqt_hooks._ORCH_O_WALK
+            aiqt_hooks._ORCH_O_WALK = os.O_RDONLY
+            try:
+                _sp_rd_fd = os.open(str(_sp_dirs[0o100]), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    _sp_res.append(aiqt_hooks._orch_dirfd_has_registry(_sp_rd_fd))
+                finally:
+                    os.close(_sp_rd_fd)
+            finally:
+                aiqt_hooks._ORCH_O_WALK = _sp_walk
         finally:
             aiqt_hooks.os.stat = _sp_stat
             for _sp_dir in _sp_dirs.values():
                 os.chmod(str(_sp_dir / ".aiqt"), 0o755)
+        # Mode 0o100 evaluates normally only under an O_PATH walk (or for root, whom no mode bit binds).
+        _sp_rdonly_100 = True if os.geteuid() == 0 else aiqt_hooks._ORCH_REG_CANNOT_EVALUATE
+        _sp_walk_100 = True if getattr(os, "O_PATH", None) == aiqt_hooks._ORCH_O_WALK else _sp_rdonly_100
         check("trunc/aiqt-search-permission-decides-probe", tuple(_sp_res),
-              (True, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE))
+              (_sp_walk_100, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, aiqt_hooks._ORCH_REG_CANNOT_EVALUATE,
+               _sp_rdonly_100))
         saved_recheck_fc = aiqt_hooks._orch_walk_recheck
         saved_realpath = aiqt_hooks.os.path.realpath
         saved_open_fc = aiqt_hooks.os.open
