@@ -880,7 +880,9 @@ def _roster_checks():
           (None, None))
     if local_diagnostic is not None or ci_diagnostic is not None:
         return
-    binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+    binding = ('dir=$(dirname -- "$0") || exit 2\n'
+               '[ -n "$dir" ] || exit 2\n'
+               'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2')
     # The valid failure-state initializers, so an empty-roster fixture reaches
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'

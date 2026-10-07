@@ -2,7 +2,13 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 2
+# The repository root, resolved in checked steps: a dirname that fails or prints nothing exits 2 here,
+# before any gate, rather than leaving the runner in the calling directory's parent or at /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start (tools/run_all_checks.sh)
+# would otherwise resolve through a CDPATH entry holding a tools directory and run that tree's gates.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+CDPATH= cd -- "$dir/.." || exit 2
 
 # Every gate below launches isolated: `python3 -I -B tools/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling (a stray tools/os.py) cannot shadow a
@@ -184,6 +190,8 @@ run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
 run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
 run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
+run_gate "hook-scripts-selftest" python3 -I -B tools/check_hook_scripts.py --self-test
+run_gate "hook-scripts" python3 -I -B tools/check_hook_scripts.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
@@ -226,7 +234,7 @@ run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
-run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
+run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py --self-test
 run_gate "commonmark-conformance" python3 -I -B opf/tools/selftest_commonmark_conformance.py
 run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
 run_gate "cwe-importer-selftest" python3 -I -B tools/import_cwe.py --self-test

@@ -2447,8 +2447,8 @@ def init_operation(product_root, *, ancestral=None, recover=False):
 
 # --- self-test ------------------------------------------------------------------------------------
 #
-# The physical tests drive the REAL operation in child processes: `--selftest-child ROOT KILL [SEED]`
-# runs run_init_operation in a fresh interpreter, optionally SIGKILLing itself at a named point through
+# The physical tests drive the REAL operation in child processes: _CHILD_STUB imports this module and calls
+# _child_main(ROOT KILL SEED RECOVER UMASK), which runs run_init_operation in a fresh interpreter, optionally SIGKILLing itself at a named point through
 # hooks the child entry installs (production code carries no kill hooks), and prints the result as
 # JSON. Each retry is a fresh process, as a real restart would be. Process-kill tests establish
 # process-crash behaviour only; power-loss durability is NOT verified here.
@@ -2594,10 +2594,19 @@ def _tree_snapshot(root):
     return snap
 
 
+# The child is launched through this import stub, not as `__main__` with an argument list, so the module's own
+# entry accepts `--self-test` alone. argv: this file, then _child_main's five arguments.
+_CHILD_STUB = (
+    "import importlib, os, sys\n"
+    "sys.path.insert(0, os.path.dirname(sys.argv[1]))\n"
+    "module = importlib.import_module(os.path.basename(sys.argv[1])[:-3])\n"
+    "sys.exit(module._child_main(sys.argv[2:]))\n")
+
+
 def _child(root, env, kill="none", seed=None, recover=True, umask=None):
     """Run run_init_operation in a FRESH interpreter; returns (exit status, result dict or None)."""
     import subprocess
-    argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--selftest-child", root, kill,
+    argv = [sys.executable, "-I", "-B", "-c", _CHILD_STUB, os.path.abspath(__file__), root, kill,
             seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask)]
     proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=300)
@@ -2609,7 +2618,7 @@ def _child(root, env, kill="none", seed=None, recover=True, umask=None):
 
 
 def _child_main(argv):
-    """The --selftest-child entry: install the named kill hook, run once, print the result."""
+    """The child entry (_CHILD_STUB): install the named kill hook, run once, print the result."""
     import signal
     root, kill, seed, recover, umask = argv
     if umask != "-":
@@ -3869,10 +3878,8 @@ def _view_tests(base, env, ok, signal):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
+    if sys.argv[1:] == ["--self-test"]:
         sys.exit(_run_self_test())
-    if len(sys.argv) == 7 and sys.argv[1] == "--selftest-child":
-        sys.exit(_child_main(sys.argv[2:]))
     sys.stderr.write("usage: python3 -I -B _opf_init_operation.py --self-test "
                      "(a library module; no live mode)\n")
     sys.exit(2)

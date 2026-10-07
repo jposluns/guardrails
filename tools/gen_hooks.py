@@ -18,6 +18,14 @@ non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSu
 SubagentStop, SessionStart) or under an explicit bake stage, the named handler must exist in the
 source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
 control.
+
+A control is EITHER a `handler` (a function in the dispatcher scripts/aiqt_hooks.py) OR a `script` (a
+standalone hook file under .aiqt/core/hooks/scripts/, named like `clock-inject.py`); exactly one of the
+two keys is required. A script is copied byte for byte to plugin/aiqt-guardrails-hooks/hooks/scripts/
+and launched as python3 -I -S -B -c SCRIPT_LAUNCHER <path> with no handler argument (the launcher, below,
+makes a missing or failing script exit 1, never 2); one script may back controls on more than one event,
+but each (script, event) pair is unique. An optional integer `timeout` (seconds,
+1 to 600) overrides the default of 10 for either kind.
   gen_hooks.py             regenerate the plugin surface
   gen_hooks.py --check     fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_hooks.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
@@ -71,9 +79,9 @@ WARN_EVENTS = {"PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "Sessi
 NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default must be "warn"
 STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
 
-HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue",
-             "stage"}
-REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage"}
+HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "script", "default", "class",
+             "residue", "stage", "timeout"}
+REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage", "handler", "script", "timeout"}
 PLUGIN_KEYS = ("name", "version", "description", "author-name", "author-email", "homepage")
 PLATFORMS = {"claude-code"}
 DEFAULTS = {"block", "warn"}  # no-ask posture: "ask" is not a permitted default
@@ -82,16 +90,59 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")     # a stable kebab-case control id
 CID_RE = re.compile(r"^[a-z0-9]{6,}$")        # a corpus-id (matches gen_rules' own shape)
 HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+SCRIPT_FILE_RE = re.compile(r"[a-z][a-z0-9-]*\.py")  # a standalone hook file name, no path (fullmatch)
 TIMEOUT = 10  # seconds; every control is a lexical scan, far under this
+TIMEOUT_MAX = 600
+# A standalone script runs in Python's isolated mode with site packages and bytecode writes off.
+SCRIPT_ARGS_PREFIX = ("-I", "-S", "-B")
+# A standalone script is never launched as `python3 <file>`: Python itself exits 2 when it cannot open
+# the file, and exit 2 blocks a PreToolUse call. It runs through this fixed -c program instead, which runs
+# the file with runpy and exits 0 when the script ends with code 0 or None and 1 on anything else (a
+# missing, unreadable, unparsable or crashing file, or any other exit code, 2 included), writing the
+# reason to stderr. A script that ends the process itself (os._exit) bypasses it; the hook-scripts gate
+# checks the shipped scripts' exit codes on its fixtures. The script path is sys.argv[1], a position this
+# generator fixes: Python sets sys.argv[0] to "-c" and puts the next arg, the rendered path, at [1], so an
+# argument a host appended after it is ignored rather than taken as the script (the gate's leg (l) runs
+# one such launch). It reaches the launcher as one argv element only if the host runs command and args
+# without a shell; that rests on the repository's reading of the host hook documentation recorded in
+# render_hooks_json (2026-08-17), not re-checked or probed for this launcher. A host that joined them into
+# one shell string would hit a shell syntax error on this program's quotes and line breaks, and sh exits 2.
+SCRIPT_LAUNCHER = (
+    "import sys\n"
+    "p = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "r = 1\n"
+    "m = 'was given no script path'\n"
+    "try:\n"
+    "    if p:\n"
+    "        import runpy\n"
+    "        sys.argv = [p]\n"
+    "        runpy.run_path(p, run_name='__main__')\n"
+    "        r = 0\n"
+    "except SystemExit as e:\n"
+    "    r = 0 if e.code is None or e.code == 0 else 1\n"
+    "    m = 'exited %r' % (e.code,)\n"
+    "except BaseException as e:\n"
+    "    m = 'did not run: %s: %s' % (type(e).__name__, e)\n"
+    "if r:\n"
+    "    try:\n"
+    "        sys.stderr.write('aiqt hook launcher: %s %s; reported as exit 1, never 2\\n' % (p, m))\n"
+    "    except BaseException:\n"
+    "        pass\n"
+    "sys.exit(r)\n"
+)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
 GENSRC_OUTPUTS = (
     {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
-     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 ".aiqt/core/hooks/scripts/clock-inject.py",
+                 ".aiqt/core/hooks/scripts/future-stamp-write.py"),
      "regenerate": "python3 tools/gen_hooks.py"},
     {"target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", "kind": "file",
-     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 ".aiqt/core/hooks/scripts/clock-inject.py",
+                 ".aiqt/core/hooks/scripts/future-stamp-write.py"),
      "regenerate": "python3 tools/gen_hooks.py"},
 )
 
@@ -135,13 +186,14 @@ def load_manifest(path):
         raise ValueError("{}: unknown [plugin] key(s): {}".format(path.name, ", ".join(sorted(p_extra))))
     for key in PLUGIN_KEYS:
         _req_str(plugin, key, "{}: [plugin]".format(path.name))
-    if not SEMVER_RE.match(plugin["version"]):
+    if not SEMVER_RE.fullmatch(plugin["version"]):
         raise ValueError("{}: [plugin] version must be SemVer (MAJOR.MINOR.PATCH)".format(path.name))
     hooks = data.get("hook")
     if not isinstance(hooks, list) or not hooks:
         raise ValueError("{}: at least one [[hook]] entry is required".format(path.name))
     seen_ids = set()
     seen_handlers = set()
+    seen_scripts = set()
     for hook in hooks:
         if not isinstance(hook, dict):
             raise ValueError("{}: every [[hook]] must be a table".format(path.name))
@@ -153,7 +205,7 @@ def load_manifest(path):
             raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(extra))))
         hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
         where = "{}: [[hook]] {}".format(path.name, hid)
-        if not ID_RE.match(hid):
+        if not ID_RE.fullmatch(hid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
         if hid in seen_ids:
             raise ValueError("{}: duplicate hook id".format(where))
@@ -162,7 +214,7 @@ def load_manifest(path):
         if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and r for r in rules):
             raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
         for rule in rules:
-            if not CID_RE.match(rule):
+            if not CID_RE.fullmatch(rule):
                 raise ValueError("{}: rules entry '{}' is not a corpus-id shape (^[a-z0-9]{{6,}}$)"
                                  .format(where, rule))
         if _req_str(hook, "platform", where) not in PLATFORMS:
@@ -178,12 +230,30 @@ def load_manifest(path):
                 raise ValueError("{}: matcher is not a valid regex: {}".format(where, exc))
         elif "matcher" in hook:
             raise ValueError("{}: matcher is forbidden on the non-tool event {}".format(where, event))
-        handler = _req_str(hook, "handler", where)
-        if not HANDLER_RE.match(handler):
-            raise ValueError("{}: handler must be a python identifier".format(where))
-        if handler in seen_handlers:
-            raise ValueError("{}: duplicate handler '{}' (each control has its own)".format(where, handler))
-        seen_handlers.add(handler)
+        if ("handler" in hook) == ("script" in hook):
+            raise ValueError("{}: exactly one of 'handler' or 'script' is required".format(where))
+        if "handler" in hook:
+            handler = _req_str(hook, "handler", where)
+            if not HANDLER_RE.fullmatch(handler):
+                raise ValueError("{}: handler must be a python identifier".format(where))
+            if handler in seen_handlers:
+                raise ValueError("{}: duplicate handler '{}' (each control has its own)"
+                                 .format(where, handler))
+            seen_handlers.add(handler)
+        else:
+            script = _req_str(hook, "script", where)
+            if not SCRIPT_FILE_RE.fullmatch(script) or script == SCRIPT_NAME:
+                raise ValueError("{}: script must be a bare file name like clock-inject.py under "
+                                 "scripts/, not the dispatcher {}".format(where, SCRIPT_NAME))
+            if (script, event) in seen_scripts:
+                raise ValueError("{}: duplicate (script, event) pair ({}, {})"
+                                 .format(where, script, event))
+            seen_scripts.add((script, event))
+        if "timeout" in hook:
+            timeout = hook["timeout"]
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= TIMEOUT_MAX:
+                raise ValueError("{}: timeout must be an integer number of seconds, 1 to {}"
+                                 .format(where, TIMEOUT_MAX))
         default = _req_str(hook, "default", where)
         if default not in DEFAULTS:
             raise ValueError("{}: default must be one of {}".format(where, "/".join(sorted(DEFAULTS))))
@@ -213,6 +283,8 @@ def cross_check(hooks, corpus_ids, script_text, name):
             if rule not in corpus_ids:
                 raise ValueError("{}: rules entry '{}' is not a corpus-id in .aiqt/core/rules/"
                                  .format(where, rule))
+        if "handler" not in hook:
+            continue  # a standalone script: its file is read (fail-closed) by build_desired
         if not re.search(r"^def {}\(".format(re.escape(hook["handler"])), script_text, re.M):
             raise ValueError("{}: handler '{}' is not defined in scripts/{}"
                              .format(where, hook["handler"], SCRIPT_NAME))
@@ -222,20 +294,28 @@ def render_hooks_json(hooks):
     """The plugin hooks.json, deterministic: events in KNOWN_EVENTS order, entries sorted by id,
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
-    is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted);
-    matcher is omitted for non-tool events. Every launcher runs isolated: args[0] is "-I" (Python's
-    isolated mode), placed before the script path, so a file written beside the dispatcher cannot
-    shadow a standard-library import and silently neuter the hook. The generator asserts this invariant
-    in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
+    is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted;
+    read from code.claude.com/docs/en/hooks on 2026-08-17, the contract date in aiqt_hooks.py);
+    matcher is omitted for non-tool events. A standalone `script` control runs as python3 -I -S -B -c
+    SCRIPT_LAUNCHER with its own copied file as the last arg and no handler. Every launcher runs
+    isolated: args[0] is "-I" (Python's isolated mode), placed before the script path, so a file
+    written beside the dispatcher cannot shadow a standard-library import and silently neuter the
+    hook. The generator asserts this invariant in its --self-test, and the
+    check_python_launcher_isolation gate re-checks the rendered surface."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
         entry = {}
         if "matcher" in hook:
             entry["matcher"] = hook["matcher"]
+        if "script" in hook:
+            args = list(SCRIPT_ARGS_PREFIX) + ["-c", SCRIPT_LAUNCHER,
+                                               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + hook["script"]]
+        else:
+            args = ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]]
         entry["hooks"] = [{"type": "command",
                            "command": "python3",
-                           "args": ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]],
-                           "timeout": TIMEOUT}]
+                           "args": args,
+                           "timeout": hook.get("timeout", TIMEOUT)}]
         events.setdefault(hook["event"], []).append(entry)
     obj = {"description": "AIQT Guardrails mechanical-enforcement hooks, generated from "
                           ".aiqt/core/hooks/manifest.toml by tools/gen_hooks.py; do not hand-edit.",
@@ -269,9 +349,17 @@ def build_desired(root, src_dir):
     if not script_text.strip():
         raise ValueError("{} is empty".format(script_src))
     cross_check(hooks, corpus_ids, script_text, manifest_path.name)
-    return {HOOKS_JSON_REL: render_hooks_json(hooks),
-            SCRIPT_REL: script_text,
-            PLUGIN_JSON_REL: render_plugin_json(plugin)}
+    desired = {HOOKS_JSON_REL: render_hooks_json(hooks),
+               SCRIPT_REL: script_text,
+               PLUGIN_JSON_REL: render_plugin_json(plugin)}
+    for name in sorted({hook["script"] for hook in hooks if "script" in hook}):
+        # A missing standalone script is FileNotFoundError -> OSError -> exit 2, never a skipped copy.
+        # Read as bytes and decoded strictly, with no newline translation, so the copy is byte for byte.
+        text = (src_dir / "scripts" / name).read_bytes().decode("utf-8")
+        if not text.strip():
+            raise ValueError("{} is empty".format(src_dir / "scripts" / name))
+        desired[PLUGIN_ROOT_REL + "/hooks/scripts/" + name] = text
+    return desired
 
 
 def run(root, check):
@@ -297,12 +385,13 @@ def run(root, check):
     try:
         for rel, content in sorted(desired.items()):
             target = root / rel
-            current = target.read_text(encoding="utf-8") if _exists(target) else None
+            # Bytes in and out, with no newline translation, so a CR difference is drift, never hidden.
+            current = target.read_bytes().decode("utf-8") if _exists(target) else None
             if current != content:
                 drift.append(rel)
                 if not check:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
+                    target.write_bytes(content.encode("utf-8"))
         # Orphan scan, scoped to the RESERVED plugin hooks/ subtree (100% generated) plus the one
         # managed .claude-plugin/plugin.json; nothing else is ever walked, written, or deleted.
         hooks_dir = root.joinpath(*HOOKS_SUBTREE_PARTS)
@@ -361,6 +450,12 @@ def main():
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
+#  16. a standalone `script` control: copied byte for byte (a CRLF source keeps its CR bytes, and a
+#      plugin copy that differs from its source only in CR bytes is drift, exit 1), rendered as
+#      python3 -I -S -B -c SCRIPT_LAUNCHER <path> with no handler arg, its `timeout` rendered; one script
+#      on two events is accepted; both `handler` and `script`, neither, a dispatcher, pathed or
+#      newline-suffixed script name, a duplicate (script, event) pair, a missing script file, and a
+#      malformed timeout each fail closed (exit 2).
 
 _APEX = """---
 corpus-id: apex01
@@ -656,6 +751,76 @@ def self_test_main():
                 'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
         if run_quiet(ssblock, check=True) != 2:
             failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
+
+        # 16. Standalone script controls.
+        script_body = "#!/usr/bin/env python3\n# self-test standalone hook\nprint('')\n"
+        script_hook = ('\n[[hook]]\nid = "selftest-script-{0}"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+                       'event = "{1}"\nmatcher = ".*"\n{2}default = "warn"\nclass = "c"\n'
+                       'residue = "A self-test script control catches nothing real."\n')
+
+        def _script_tree(name, hooks_spec, write_script=True):
+            base = tmp / name
+            base.mkdir()
+            _build_tree(base)
+            if write_script:
+                (base / ".aiqt" / "core" / "hooks" / "scripts" / "stamp-a.py").write_text(
+                    script_body, encoding="utf-8")
+            mpath = base / ".aiqt" / "core" / "hooks" / "manifest.toml"
+            extra = "".join(script_hook.format(i, ev, body) for i, (ev, body) in enumerate(hooks_spec))
+            mpath.write_text(mpath.read_text(encoding="utf-8") + extra, encoding="utf-8")
+            return base
+
+        sgood = _script_tree("script-good", [("PostToolUse", 'script = "stamp-a.py"\ntimeout = 20\n'),
+                                             ("PreToolUse", 'script = "stamp-a.py"\nstage = "bake"\n')])
+        if run_quiet(sgood, check=False) != 0 or run_quiet(sgood, check=True) != 0:
+            failures.append("script control (one script on two events) expected a clean generate")
+        else:
+            copied = sgood / PLUGIN_ROOT_REL / "hooks" / "scripts" / "stamp-a.py"
+            if not copied.is_file() or copied.read_bytes() != script_body.encode("utf-8"):
+                failures.append("script control: expected a byte-identical plugin copy of stamp-a.py")
+            rendered = json.loads((sgood / HOOKS_JSON_REL).read_text(encoding="utf-8"))
+            want_args = ["-I", "-S", "-B", "-c", SCRIPT_LAUNCHER,
+                         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/stamp-a.py"]
+            post = [h for e in rendered["hooks"].get("PostToolUse", []) for h in e["hooks"]]
+            pre = [h for e in rendered["hooks"].get("PreToolUse", []) for h in e["hooks"]
+                   if h["args"] == want_args]
+            if [h["args"] for h in post] != [want_args] or [h["timeout"] for h in post] != [20]:
+                failures.append("script control: expected isolated args {!r} with timeout 20, got {!r}"
+                                .format(want_args, post))
+            if [h["timeout"] for h in pre] != [TIMEOUT]:
+                failures.append("script control: expected the default timeout on the PreToolUse copy")
+            if [h["command"] for h in post + pre] != ["python3", "python3"]:
+                failures.append("script control: expected the command python3 on both launchers")
+            # A CR-only difference between the plugin copy and its source is drift, not hidden by a
+            # newline-translating read.
+            copied.write_bytes(script_body.replace("\n", "\r\n").encode("utf-8"))
+            if run_quiet(sgood, check=True) != 1:
+                failures.append("script control: a CRLF plugin copy of an LF source expected drift (exit 1)")
+        scrlf = _script_tree("script-crlf", [("PostToolUse", 'script = "stamp-a.py"\n')])
+        crlf_body = script_body.replace("\n", "\r\n").encode("utf-8")
+        (scrlf / ".aiqt" / "core" / "hooks" / "scripts" / "stamp-a.py").write_bytes(crlf_body)
+        if run_quiet(scrlf, check=False) != 0 or run_quiet(scrlf, check=True) != 0:
+            failures.append("script control (CRLF source) expected a clean generate")
+        elif (scrlf / PLUGIN_ROOT_REL / "hooks" / "scripts" / "stamp-a.py").read_bytes() != crlf_body:
+            failures.append("script control: a CRLF source expected a byte-for-byte plugin copy")
+        for name, spec, write in (
+                ("script-both", [("PostToolUse", 'script = "stamp-a.py"\nhandler = "test_handler"\n')], True),
+                ("script-neither", [("PostToolUse", "")], True),
+                ("script-dispatcher", [("PostToolUse", 'script = "aiqt_hooks.py"\n')], True),
+                ("script-pathed", [("PostToolUse", 'script = "../stamp-a.py"\n')], True),
+                ("script-dup", [("PostToolUse", 'script = "stamp-a.py"\n'),
+                                ("PostToolUse", 'script = "stamp-a.py"\n')], True),
+                ("script-missing", [("PostToolUse", 'script = "stamp-a.py"\n')], False),
+                ("script-timeout-zero", [("PostToolUse", 'script = "stamp-a.py"\ntimeout = 0\n')], True),
+                ("script-timeout-str", [("PostToolUse", 'script = "stamp-a.py"\ntimeout = "10"\n')], True)):
+            if run_quiet(_script_tree(name, spec, write), check=True) != 2:
+                failures.append("{}: expected exit 2 (fail-closed)".format(name))
+        # A newline-suffixed name is refused by the name check itself, even when a file of that name exists.
+        snl = _script_tree("script-newline", [("PostToolUse", 'script = "stamp-a.py\\n"\n')])
+        (snl / ".aiqt" / "core" / "hooks" / "scripts" / "stamp-a.py\n").write_text(script_body,
+                                                                                encoding="utf-8")
+        if run_quiet(snl, check=True) != 2:
+            failures.append("script-newline: expected exit 2 (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -674,8 +839,10 @@ def self_test_main():
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); and a Stop hook renders "
-          "byte-identical hooks.json whether its default is 'block' or 'warn'" + note)
+          "PreToolUse and the SessionStart-cannot-block overclaim); a Stop hook renders "
+          "byte-identical hooks.json whether its default is 'block' or 'warn'; and a standalone script "
+          "control is copied byte for byte and launched isolated through the launcher with its timeout, "
+          "while a malformed script or timeout key fails closed" + note)
     return 0
 
 

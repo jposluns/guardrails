@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "424015ad1a02c7c44976c54bf692683cd6891e9772e79f0becef0dfe48d8c791"
+tree-sha256 = "8bf8268c2d5b73ebafafdf3dbacf971859a4431c05807f77d8f5fb5146e7b476"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -46,8 +46,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 11574
-sha256 = "e2cab917387da87327141c833fd96193b215d0a38e088bbdbc51d8b57780349b"
+bytes = 11664
+sha256 = "25f891984f355c37e4eaadc18169d2f276af7ed274a2de1c87b1cb39b4dcc360"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257623
-sha256 = "c53c28f2dd9769cbefa84815d41784e5b9e8588a69b56d8060ce858127a87341"
+bytes = 263778
+sha256 = "fb0b5aaad95174b0176085cc79b8d4ed5e3fdd3425ac0fe63b5e387eebf7cbad"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -71,13 +71,23 @@ sha256 = "81e5002753bd34d86e60ed52555b09ea8d71eee9b54bff5d5f67f8e1b0626a08"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 151086
-sha256 = "1ecc66d73c19610bace9e4cd414701f107ad1888234cc8601b5429b0ef0ab8f6"
+bytes = 157434
+sha256 = "9bbed5af221f6038256e73b7f0a33683a731ba56bcfdf49915946ba52f559679"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 bytes = 904042
 sha256 = "a0beac11ff6926d1fd7a428e5f0584c1afd53f41a284e95dd30c74b4b9a90eea"
+
+[[sources]]
+path = ".aiqt/core/hooks/scripts/clock-inject.py"
+bytes = 52774
+sha256 = "0cc12f0aca2ad64b12c6732c82b6f192601ed0223711c96a3fd92b048dbb022c"
+
+[[sources]]
+path = ".aiqt/core/hooks/scripts/future-stamp-write.py"
+bytes = 408968
+sha256 = "44b549607c79e6d685607b5f6b68f58955067f317725cab9c1edbf151d55286d"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -111,8 +121,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7335
-sha256 = "6b29dcd329f90ea34ca26121d38f23516687ef561d6bc8f9190d25eabdcfa9c0"
+bytes = 7785
+sha256 = "08466d44ea1e0d97982681dc99bbae932d268fbf287a8fab3073d8e1afc6fd1a"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -796,8 +806,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 350506
-sha256 = "062d95f7006943f7d83d196ce7bdc46e1ef150d485d7e7e87105e047ce9612f4"
+bytes = 366945
+sha256 = "44aba03ebbc7877d802e233fce947b52a7304dcf8ec0894d0156a4c014cd639b"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -806,8 +816,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10421
-sha256 = "29e0f12fe0f0bb7c7a0f64657b0a2a853bfa6643131cf7ff1d74ae05be80a3a0"
+bytes = 10641
+sha256 = "dea5dc18693c96e14e9cd4702acf6800c3d08219511d21fb0590cb47fbc30545"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2246,8 +2256,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41719
-sha256 = "70069c3fdae82a6d19d4ad0d0355f7ebabb17b9f7a556c181807f374f1a47bc3"
+bytes = 41980
+sha256 = "184c1f0c4e179e6fb5b3417229c31742dc2e46d2035bfa796cbf599d9b7a89d1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2256,23 +2266,13 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 24904
-sha256 = "7bd922742de46f038556bf7fca45347c9631be26bc956fcfd4093d338c2c88e6"
+bytes = 25517
+sha256 = "e70d9807417da3d33ed4cc7b485bd48359d2d446ffb6b642bc615dec0824a436"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
-bytes = 636
-sha256 = "ea3c85456d5b64fbd53469f42f1bcf91626c8d7ba7d893d61ab7d9f67a0bdaff"
-
-[[sources]]
-path = ".preview/clock-inject.py"
-bytes = 63918
-sha256 = "ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930"
-
-[[sources]]
-path = ".preview/future-stamp-write.py"
-bytes = 422943
-sha256 = "0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c"
+bytes = 466
+sha256 = "c825e7f57b64ad9c7d92554d1c7d586594798dfdf4c4c8e35df727cd11954b5c"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
@@ -2281,8 +2281,8 @@ sha256 = "c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 327407
-sha256 = "6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996"
+bytes = 318326
+sha256 = "87e9652ee4d18bb330f5c5c9518069025c3cb7f17a4b525edb161123f348d164"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -2311,8 +2311,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 205406
-sha256 = "ac5ad3f091d182236f81ca816f09fd6d7af2f2eaeb9a77d6fa247a7d819e7e93"
+bytes = 216415
+sha256 = "75186ce51250423c6194dcbc2ea3abdbc466eeaff58297150f72df7b5bf5d015"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2431,8 +2431,8 @@ sha256 = "f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5"
 
 [[sources]]
 path = "opf/enforcement/ci/opf-ci.sh"
-bytes = 2178
-sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+bytes = 2980
+sha256 = "f630855b4c96918e3e4e7e87cf8f4811c186e8ab59b6890be042b9631a70020c"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
@@ -2580,6 +2580,11 @@ bytes = 3976
 sha256 = "d2247bf246136735bef911aa3129a9e2895c0bc2297a0480b9d1daf2d8fdbd99"
 
 [[sources]]
+path = "opf/tools/_child_contract.py"
+bytes = 97925
+sha256 = "af2c8310f6401b52fb2e348e6fab8d9399fc78265d89cf9159bb585276a27d1a"
+
+[[sources]]
 path = "opf/tools/_commonmark_headings.py"
 bytes = 28716
 sha256 = "72026d6e7d77dbd23b091a569a7791ab183025f06b9b7ae60362f7b8e16b0df9"
@@ -2601,23 +2606,23 @@ sha256 = "dffd776380014e2ba701f1050050c2ba13d2f912b5ff3bf503fd847eead91684"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
-bytes = 179480
-sha256 = "d4e0d9a7ec619191e928417deaec0971a61049772630bf59d1d30af598523a04"
+bytes = 179442
+sha256 = "45776344dd55167738f8bb86351778ccf637dd54d755cdd799a28fd85e8ebc1c"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 214591
-sha256 = "f0e2b818eeba233ce1cc542d1f60cf42cc65d56e6e34f35ce902ba50b95665d0"
+bytes = 214553
+sha256 = "36e25ce5fbaf294cc7e454670c72e379c8b55e994b6cda611da8b7972022982c"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
-bytes = 143751
-sha256 = "142a4f48b5722c73b70960654d2b390e6c66d03595c81991ea7a4540da578225"
+bytes = 143713
+sha256 = "f6876a4d6339c1b9a6e8bf48ef97b1af0b24067ced1dde0c7f6bb67799773b26"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_observe.py"
-bytes = 229905
-sha256 = "6d33ec961adbb0562589616b6995e2ff013216d3f3d1fafec188e7bc11b59a91"
+bytes = 230007
+sha256 = "244e168ddff558703021f67592a69975075884e4c4bcff25abc87bb4fe9781cb"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
@@ -2631,28 +2636,28 @@ sha256 = "ee5ef15ee9309baaf8482231cca2758161d9e8fdbc3460766323165c9fc1ea17"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 333503
-sha256 = "e5b247fcfac32598749e13358ba11ac25b280691968c08d3ffdeee2c204f0002"
+bytes = 333589
+sha256 = "afa208ee8870d1285053e74732bf6ad6a94e55874db0fc646e321eebb792e974"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 271252
-sha256 = "5c728aa96b71fca7a0e45e84dc3e4163b358ae683113b9c9a579f443f249a7f0"
+bytes = 281915
+sha256 = "8d034397a51ab4819e7114d0e5d97d3a1451ffe7dbdb7739d75631e1defe93c1"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
-bytes = 76909
-sha256 = "1f3e82480ab1b5d2290ffece7cdbff15c23028f4f23c22ef40f2faf86c40be69"
+bytes = 77019
+sha256 = "31c0060b25f84da8d32dfc672299d151d25e3b15976a876e7c04637befefb049"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
-bytes = 22882
-sha256 = "96beece4a516c2d5fef34ccd34e881834f865f33c3d01b0a26d2248a023caa6b"
+bytes = 22864
+sha256 = "d0683ac77ddd452825ec49b995c395885134e0d03df1cdfacea59fc6abde812e"
 
 [[sources]]
 path = "opf/tools/_opf_init_contract.py"
-bytes = 38262
-sha256 = "747d1f454282affcfb61ebcb634c637460c5e44ca567111551a411d3bacb19ca"
+bytes = 38268
+sha256 = "a12bf1dfbd719a6176194f5493aa65dc15863bdbeed6b938bba6487b959058dd"
 
 [[sources]]
 path = "opf/tools/_opf_init_observe.py"
@@ -2661,8 +2666,8 @@ sha256 = "bedaaa5ea7e877549825f9cdb367a34f2addb7681f313fa8564837738bc235a7"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 213086
-sha256 = "eab7cc5a695232af1bf10b82103db0c9962494be51f54b846c86abfb775d78d9"
+bytes = 213437
+sha256 = "758e927ef80640d4a4748ad84e1167dd2c2adff9a585d0d37be2a64a5d3e5353"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -2671,53 +2676,53 @@ sha256 = "4e888d822384a33e835a79c7b9124f70c4ede17b4c99350bd95c119f7561fbc5"
 
 [[sources]]
 path = "opf/tools/_opf_init_substrate.py"
-bytes = 139183
-sha256 = "1618bf36e4bdbc9dab1076b69194943901ea0ff1d46050064491376507bcc67e"
+bytes = 139157
+sha256 = "9345cc5268ede69354b6ef82bc41cd82953b956f5252fa598116e05f69ef7e9f"
 
 [[sources]]
 path = "opf/tools/_opf_journal.py"
-bytes = 13543
-sha256 = "d63e80cd4855ba5e7ae973bff8222d07da6a1da80b6c5555120a1b3633b72eff"
+bytes = 13681
+sha256 = "492b4ee3d9b38e58ae32cd61c423513c1ae01329253ba5fa2a2f921becdf1343"
 
 [[sources]]
 path = "opf/tools/_opf_manifest_regressions.py"
-bytes = 23798
-sha256 = "80bedee0a9245cac9f2480e1af7e523f3933f1f752d310c9887cd2ac0156ce1c"
+bytes = 23933
+sha256 = "4a126ec1e208b8b764f6996e7c415922c269a4a8862d5a6e82dcaf4ccd0f5aba"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 82793
-sha256 = "c4793e73b3a8029d8dbad909ced5b8a029dff163c8ef8aa7442a00e30fd6a8b2"
+bytes = 82881
+sha256 = "d0c3edb8bd43150c90e64f7271060f0b3eff8afb71be735d39a42a0e56f7cb2a"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
-bytes = 550308
-sha256 = "05c1d897cd1bf15508cbd070c62d52afee2c299ad263ee414aa0561b205e0daa"
+bytes = 550282
+sha256 = "ddceb431e33c7689767a4c3261a6df52177eafe4b5691e29e464c5b9243b1fa6"
 
 [[sources]]
 path = "opf/tools/_opf_pack_manifest.py"
-bytes = 60846
-sha256 = "99f5e14d342ab666898042c8f2d2ff9ab5ca12dfd1ac8139939d267b5b620d57"
+bytes = 60972
+sha256 = "6d17e190c6f6fd7eef13d9a897fac46f302216808b0a9db3f4c041faa275cd24"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 248779
-sha256 = "5882c96f1d3f6cc9fb13bbad0db2ae23154e1a2f9eadb347c399cf472cbd0d62"
+bytes = 248766
+sha256 = "913d446f8f01385062fb40fcac281163afe5cce549678b665ebe70a34d2ab8c3"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
-bytes = 128474
-sha256 = "8d67ebf45eae6c0436c5c0474b500d94d6425451abb4e908f7e2b02a1b1aa1ed"
+bytes = 128562
+sha256 = "f24ad42ca6db0c2172eca455fa13529e78ce91d6736d3ad323a1e29119158f9f"
 
 [[sources]]
 path = "opf/tools/_opf_schema.py"
-bytes = 191615
-sha256 = "2f8238e8e6aad6a6abcb03f3679bfba333d12b2f3a669fc5ff652dbe93c41e87"
+bytes = 191702
+sha256 = "c2c9df3f74345f595512722256a5495739c32e8743d18538384765359b576bee"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 214647
-sha256 = "4da7df5ff925642db47f08d513ec5e8689dfbcf62dd73fda1bf1f1ad45d4e991"
+bytes = 214733
+sha256 = "32364f321960741696d6c58c0807af1259fbb1f4352c8f8cd6c9a13397a58a9a"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -2896,8 +2901,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 317393
-sha256 = "8ed3850bf46568ffba50ed35e75a9a23546a82080392d885735798b742e4dd74"
+bytes = 322708
+sha256 = "fee996e0fff87ff5e113bf067fe3bcd2b18594336663e9b816ba6d72af52d06c"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -2911,28 +2916,28 @@ sha256 = "c0338032d8d9922799ff8129744b310637d69d2a634c469e5077f2b744825993"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
-bytes = 73522
-sha256 = "9e65fc9a6e18692e499ed96c0292fcf634b97c93fd0ecfeeb778c79a4ca80290"
+bytes = 73998
+sha256 = "8ed43a3d405023fb97a3241b95e12799dde3f5464606aca31e1f5e89c2d8f298"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
-bytes = 13317
-sha256 = "e4deedfeab3eeae244ce21f9124fd2d2f599134bd87fd5b68f07d20540bc4758"
+bytes = 13489
+sha256 = "4365e7a5a3d1d6137b87399216f5a56941726a182cd920262cd6b13da1d24358"
 
 [[sources]]
 path = "opf/tools/check_opf_init_observe.py"
-bytes = 21850
-sha256 = "5fa13e225c56cfa433b565ce8174f8d5fbbcf4dff08bc8293e65d556f5b9c013"
+bytes = 22165
+sha256 = "c110ee2c26c1d4fb7b9db4d6532025bd987e3e7873f29f2e67b689e1cc234724"
 
 [[sources]]
 path = "opf/tools/check_opf_init_p0.py"
-bytes = 53476
-sha256 = "643946542c6759cb097383790f2894abde5e8b3b4c54be333af335b292049510"
+bytes = 53944
+sha256 = "cb7e2c16b04f2237718b5afdf9a8d3f41ee1ddb9ebfedc018fb18aecf2a12a82"
 
 [[sources]]
 path = "opf/tools/check_opf_init_qa.py"
-bytes = 23750
-sha256 = "05132954d42388d6151ce46db03c79f11154fea082b6fe615b0f0676073bdd43"
+bytes = 23837
+sha256 = "410b6c1ace79ba03126e987a800b3af4751bf5d49d539a0ec2248468abeacaa2"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
@@ -2951,38 +2956,48 @@ sha256 = "bd9f2ed39cb01c64e41cb355c7ef3c4a1d3b89265e51c66e39163c6eb9a855e7"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 898412
-sha256 = "0754fa5812bc5e6c84681efbc4c12ef12f34978ae17ab56a5daf33236f5fb686"
+bytes = 1457007
+sha256 = "34761327e8f69f761d14c826b8f38726b895dbfaaf4ba7cec7b8f3d13d24c887"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
-bytes = 3879
-sha256 = "02bb881749dfe9654fe7dd6322a3d2b853c30fd91cb276900ce5372eb2d7c95e"
+bytes = 4437
+sha256 = "0c904c59e447fe15e103a35372992423038af041e028c8d3573be125561a0939"
 
 [[sources]]
 path = "opf/tools/selftest_commonmark_conformance.py"
-bytes = 14445
-sha256 = "13f47cd2fb13f1af562a4b265d4fc259a54c70c1f18797a567d5aec6067cbe4d"
+bytes = 14511
+sha256 = "a699209c9699684e782c19973f2a9dbd08dd12f4f38b7be4bd330bfbee0ad584"
 
 [[sources]]
 path = "opf/tools/selftest_commonmark_headings.py"
-bytes = 15833
-sha256 = "83ec0ac3db1ad8704d3a201b15bfa7dfb4cf2e8ad48c1a4321f53a5f4c91ab0c"
+bytes = 15951
+sha256 = "cffe23b8f8c022b55bca50346c55160585b0346b303ca236214e16434760c667"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 bytes = 288
-sha256 = "d0a878cceb8a33d2baa4c0f658e1cac39b92fbdccdf859e6bc73eedfb49f2915"
+sha256 = "6a019cab82e0df55d88b44b1199d10bf95d37c5bd959fffd57b7aa36df84c591"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
-bytes = 9353
-sha256 = "177c34471fdc07dd961373cb12ca58aab8e108488f4d3b5c601ffa473432ad7d"
+bytes = 11324
+sha256 = "8ddcdf206236a8afe0aa0faa55d8abb171e0ee4ef8d26b67389ecabf3f969887"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
 bytes = 904042
 sha256 = "a0beac11ff6926d1fd7a428e5f0584c1afd53f41a284e95dd30c74b4b9a90eea"
+
+[[sources]]
+path = "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py"
+bytes = 52774
+sha256 = "0cc12f0aca2ad64b12c6732c82b6f192601ed0223711c96a3fd92b048dbb022c"
+
+[[sources]]
+path = "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py"
+bytes = 408968
+sha256 = "44b549607c79e6d685607b5f6b68f58955067f317725cab9c1edbf151d55286d"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3071,8 +3086,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 254346
-sha256 = "ff04feedb1cc94639dea37a030b6ed33eddd7086498750fe94fcdce30c8951da"
+bytes = 267017
+sha256 = "525f417d630396eeda40757c4b92539cbd920bba919e23af7d5dcebba7fb7e9e"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3231,8 +3246,8 @@ sha256 = "ea93326432bf55baf145953dc4cc6129e20bd2f5b0293844565f2a95cbea526b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 185186
-sha256 = "779c0b288bcd5f573fd05c535023d52bd0fc3449c07ef91f55f2ba1d26cf0bb3"
+bytes = 195330
+sha256 = "3d08303a7d5495db9be977bdd4660951dc059b2e0190b646974f45c315f0c6e4"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3270,6 +3285,11 @@ bytes = 34623
 sha256 = "d456b2c3761da4ea225a8e899996530cef8d2c0911d01820dd681c1ca474ef70"
 
 [[sources]]
+path = "tools/check_hook_scripts.py"
+bytes = 84147
+sha256 = "58f32284f93c5fe7620dd47b20568d4a5e320edcb2cfdb726b40da7c48809e2f"
+
+[[sources]]
 path = "tools/check_hooks_preview.py"
 bytes = 38297
 sha256 = "47537e62848fbbc9c0b129a6e82efbb48f7b022b60bc992ec3e70e38a9b2a00c"
@@ -3286,8 +3306,8 @@ sha256 = "df6b5f111b1eee2d9c72f190e23c171046cea8816bc77d632ffa65598a17c209"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 31380
-sha256 = "aa39168fdcb703188800a5cb7e965d03c665d6c1fc3b99614e867cc170333c4a"
+bytes = 31776
+sha256 = "494113b7e61fac0df17697cbe2efd09a9692a82e76721bf8e233284d634d3523"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3336,8 +3356,8 @@ sha256 = "a76243a81df779a9b7f0f66468bd1558077c48677c39a2204c85a88063254c4b"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 13791
-sha256 = "5e43f5bab71ae523e8c68dd7559d685a38c601aca683a9e01d0bdc4b2b1bbd54"
+bytes = 40452
+sha256 = "40cebfa6a02fedec7e040cadda80e0a03aa3149e8dc10cb3adfba49e41fb41dd"
 
 [[sources]]
 path = "tools/check_overclaim.py"
@@ -3381,8 +3401,8 @@ sha256 = "7d6bb9cfc2910a1f3bb5312eb438c21bec885af9d0265f8d08a13d35350d0bee"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 145279
-sha256 = "8f7ca328638595921fee7c24cbd7b2d8ce15d010be8dd6573e920e1c07c86979"
+bytes = 152303
+sha256 = "17815dfca5cd0c22435cce0a3b1de6664cb9746667e156b72db3db3cf773fca2"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3511,8 +3531,8 @@ sha256 = "f1c8ab469a3e9ca02c1159281fa159cb9d75ee19189d8e28cbdaf4bb74cdd2d5"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 35957
-sha256 = "8be3abda3d4fb20f67b94c474c3729207cffc07703b3723fab5a0279c4eff4f3"
+bytes = 47719
+sha256 = "151415c8604188756f07fbe1e368acf992304354146360ee255c2121beb69367"
 
 [[sources]]
 path = "tools/gen_install.py"
@@ -3621,8 +3641,8 @@ sha256 = "d85603f7325c71e095078da726bb5217bffa51aa35330f462ebe0c06997e6fe0"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 18828
-sha256 = "02beda472896e419a202df0ba665172eb9cdc2697d0510e9cf6e7350e733d939"
+bytes = 19459
+sha256 = "16741b5e678af4c287d795ff44cdf30f904fadc6ac5bc5291522f49826c670b9"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3646,8 +3666,8 @@ sha256 = "bba258891d905bcefa39e005cb1aee5848a79242c11823a359d44e49bed5c44f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 272989
-sha256 = "d7f10235567b2f695654d4f3b43078ba848a0d32d898ea1140107e6b4c16caef"
+bytes = 273088
+sha256 = "3013df1d817d7e95345b72f6531cd4065d58cf18cb4c149e3e450bd4d708f237"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

@@ -42,7 +42,16 @@ and launch-failure normalization for BOTH steps (a missing or non-executable OPF
 step to 2, and an interpreter that VANISHES after a passing doctor fails the render step's own launch to 2);
 the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
-verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
+verdict; the recipe run from inside a decoy pack's ci directory with a dirname that is missing, fails
+(printing .) or prints nothing exits 2 with no step launched and the refusing guard's own message, with
+dash or bash as sh, the shells these vectors are run under (the failing one is held by the status check
+alone, the empty one by the non-empty check alone; busybox sh resolves dirname with its own built-in, so
+the PATH stubs do not reach it and these vectors do not apply there); a full recipe run with seven trace
+variables (GIT_TRACE, GIT_TRACE_SETUP, GIT_TRACE_PERFORMANCE, GIT_TRACE_PACKET, GIT_TRACE2,
+GIT_TRACE2_EVENT and GIT_TRACE2_PERF) naming a file outside the fixtures leaves that file unchanged (a
+regression guard over those seven alone, the vector setting no other trace variable such as
+GIT_TRACE_REFS: the recipe runs no git itself and opf.py's git reads drop every inherited GIT_ variable);
+a committed clean store with ONE declared, planner-populated view red-flags end to end once the
 view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the read-only snapshot
 unchanged, covering EXACTLY: every entry under the root with only the TOP-LEVEL .git directory pruned (a
 nested .git directory below the root is walked like any other entry), by lstat kind, mode, content digest
@@ -442,7 +451,7 @@ def _self_test_isolated():
         _git(root, home, "commit", "-m", "seed store")
 
     def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None,
-                       preexec=None):
+                       preexec=None, stderr_sink=None):
         """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
         OPF_PYTHON, returning its exit status unmasked. A `root` of None omits the ROOT operand entirely
         (the recipe's documented no-operand invocation: ROOT defaults to the child's current directory,
@@ -454,7 +463,8 @@ def _self_test_isolated():
         working directory, and `recipe` substitutes a recipe path passed VERBATIM (the CDPATH vector runs
         a COPY by a RELATIVE path; the default stays the shipped recipe, absolute). `preexec` is
         forwarded to subprocess.run as preexec_fn (the SIGTERM-inherited-as-SIG_IGN vectors ignore
-        SIGTERM in the child before exec). A missing `sh`, a
+        SIGTERM in the child before exec). A `stderr_sink` list receives the recipe's stderr text (the
+        dirname vectors name the guard that refused). A missing `sh`, a
         missing shipped recipe, or a launch failure raises OSError (a harness error, exit 2 via
         _classify)."""
         sh = shutil.which("sh")
@@ -474,9 +484,21 @@ def _self_test_isolated():
             argv.append(str(root))
         argv += [str(a) for a in extra_args]
         proc = subprocess.run(argv, env=env, cwd=None if cwd is None else str(cwd),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL if stderr_sink is None else subprocess.PIPE,
                               preexec_fn=preexec)
+        if stderr_sink is not None:
+            stderr_sink.append(proc.stderr.decode("utf-8", "replace"))
         return proc.returncode
+
+    def _absent(path):
+        """True when nothing is at `path`, False when something is. Any other error (an unreadable
+        parent, say) propagates as a harness error, so an unreadable log never reads as absent."""
+        try:
+            os.lstat(str(path))
+        except FileNotFoundError:
+            return True
+        return False
 
     def _run_render_check(root):
         """Run `opf.py render --check --root <root>` isolated (-I -B) with output discarded, returning its
@@ -785,7 +807,7 @@ def _self_test_isolated():
             rc = _run_ci_recipe(clean, tool=stub, extra_env=dict(OPF_STUB_LOG=str(usage_log)),
                                 extra_args=("surplus",))
             expect("ci-recipe-usage-surplus-operand",
-                   (rc, usage_log.exists()), (EXIT_ERROR, False))
+                   (rc, _absent(usage_log)), (EXIT_ERROR, True))
             # The CDPATH regression vector: the recipe resolves its own directory with `CDPATH= cd`; a
             # plain `cd` under a hostile CDPATH PRINTS the resolved directory (corrupting `here` with a
             # second output line) and can resolve into the CDPATH entry instead of the script's real
@@ -812,6 +834,52 @@ def _self_test_isolated():
                             cd_log.read_text(encoding="utf-8").splitlines()]
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
+            # The dirname vectors: the recipe resolves its own directory with a checked dirname, its
+            # status first, then a non-empty name, each refusing with its own message before any step.
+            # Each runs the shipped recipe by its absolute path from inside a decoy pack whose
+            # opf/tools/opf.py is the recording stub (sh and OPF_PYTHON are absolute), and asserts exit 2,
+            # no stub run and the refusing guard's own message, so the verdict holds under any `sh`: a
+            # shell whose `cd ""` stays put (dash) would run the decoy, one that refuses it (bash) would
+            # fail at `cd` with a different message, and both red the vector. A dirname that prints `.`
+            # and exits 7 is held by the status check alone (without it `.` is the decoy's ci directory);
+            # one that prints nothing and exits 0 is held by the non-empty check alone.
+            nodir_decoy = base / "no-dirname-decoy"
+            (nodir_decoy / "opf" / "enforcement" / "ci").mkdir(parents=True)
+            (nodir_decoy / "opf" / "tools").mkdir(parents=True)
+            shutil.copyfile(str(stub), str(nodir_decoy / "opf" / "tools" / "opf.py"))
+            status_refusal = "could not resolve the directory of {} (dirname failed)".format(
+                Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh")
+            empty_refusal = status_refusal[:-len(" (dirname failed)")] + "\n"
+            for label, dirname_body, refusal in (
+                    ("missing", None, status_refusal),
+                    ("failed", "printf '.\\n'\nexit 7\n", status_refusal),
+                    ("empty", "exit 0\n", empty_refusal)):
+                nodir_bin = base / ("bin-dirname-" + label)
+                nodir_bin.mkdir()
+                if dirname_body is not None:
+                    (nodir_bin / "dirname").write_text("#!/bin/sh\n" + dirname_body, encoding="utf-8")
+                    (nodir_bin / "dirname").chmod(0o755)
+                nodir_log = base / ("stub-log-dirname-" + label)
+                nodir_err = []
+                rc = _run_ci_recipe(clean, extra_env=dict(OPF_STUB_LOG=str(nodir_log), PATH=str(nodir_bin)),
+                                    cwd=nodir_decoy / "opf" / "enforcement" / "ci", stderr_sink=nodir_err)
+                expect("ci-recipe-dirname-{}-refused".format(label),
+                       (rc, _absent(nodir_log), refusal in nodir_err[0]), (EXIT_ERROR, True, True))
+            # Inherited git trace destinations: a CI environment can carry GIT_TRACE* or GIT_TRACE2* naming
+            # any file, and no git process the recipe starts (its own or opf.py's observation gather) may
+            # write there. A file outside every fixture, named by each of the seven trace variables below
+            # (no other, GIT_TRACE_REFS for one), keeps its exact text through a full recipe run over the
+            # clean store, and the verdict stays 0.
+            trace_target = base / "trace-target"
+            trace_target.mkdir()
+            traced = trace_target / "TRACED.md"
+            traced.write_text("traced\n", encoding="utf-8")
+            trace_env = dict((name, str(traced)) for name in (
+                "GIT_TRACE", "GIT_TRACE_SETUP", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_PACKET",
+                "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"))
+            expect("ci-recipe-git-trace-scrubbed",
+                   (_run_ci_recipe(clean, extra_env=trace_env), traced.read_text(encoding="utf-8")),
+                   (EXIT_OK, "traced\n"))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
             # in this repository would otherwise drift as prose) by EXACT TEXT over a BYTE GATE, not a
             # line pattern: the file is read as RAW BYTES and any byte outside printable ASCII
@@ -2147,7 +2215,9 @@ def _self_test_isolated():
               "stopping before render, launch failures -> 2 for BOTH steps (a missing or non-executable "
               "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
-              "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
+              "verdict, a missing, failing or empty dirname -> 2 with no step run and the refusing "
+              "guard named, seven inherited GIT_TRACE*/GIT_TRACE2* destinations left unchanged, a "
+              "committed drifted view -> 1 end to end (render --check, doctor, "
               "recipe), both recipe runs read-only over EXACTLY this snapshot (every entry under the "
               "root with only the top-level .git pruned, nested .git dirs walked, by lstat "
               "kind/mode/content/target; the directory set; the root and .git/hooks directory "

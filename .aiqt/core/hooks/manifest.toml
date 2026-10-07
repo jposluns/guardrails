@@ -7,7 +7,8 @@
 # (cnsdif has both a Stop layer and a PreToolUse diff-source layer), so the control key is `id`, not the
 # corpus-id, and `rules` carries the corpus linkage. tools/gen_hooks.py renders this manifest into the
 # shipped Claude Code plugin surface under plugin/aiqt-guardrails-hooks/ (hooks/hooks.json,
-# hooks/scripts/aiqt_hooks.py, .claude-plugin/plugin.json) and drift-gates it in CI; this file and the
+# hooks/scripts/aiqt_hooks.py, a byte-identical copy of each standalone hook script named by a `script`
+# key, .claude-plugin/plugin.json) and drift-gates it in CI; this file and the
 # scripts/ tree beside it are the single edit point, the generated surface is never hand-edited.
 #
 # Fields per [[hook]]:
@@ -17,7 +18,15 @@
 #   platform "claude-code" (the only renderer so far; a neutrality dimension, not an abstraction)
 #   event    a known Claude Code hook event (Stop, PreToolUse, ...); whitelisted by the generator
 #   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
-#   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
+#   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control);
+#            exactly one of handler or script is set
+#   script   instead of a handler: a standalone hook file in scripts/ (for example clock-inject.py),
+#            launched as python3 -I -S -B -c <launcher> <file> (gen_hooks.SCRIPT_LAUNCHER) with no
+#            handler argument; one script may back controls
+#            on more than one event, but each (script, event) pair is unique
+#   timeout  optional: the seconds the host lets one run take (an integer, 1 to 600; default 10)
+#   stage    optional: "bake" (a recorded warn-first posture, the only way a PreToolUse control may
+#            declare warn) or "enforce" (the default when absent)
 #   default  "block" (hard deny / exit 2) or "warn" (a non-blocking surfacing warn, exit 0,
 #            legal on a WARN_EVENTS event: PostToolUse, UserPromptSubmit, Stop, SubagentStop,
 #            SessionStart, or under an explicit bake stage); "ask" is no longer an accepted default
@@ -35,7 +44,7 @@
 
 [plugin]
 name = "aiqt-guardrails-hooks"
-version = "0.4.0"
+version = "0.5.0"
 description = "Mechanical enforcement of AIQT Guardrails rules for Claude Code, generated from the rule corpus."
 author-name = "Jeff Posluns"
 author-email = "jeff@posluns.ca"
@@ -352,3 +361,28 @@ default = "warn"
 stage = "bake"
 class = "b"
 residue = "The mutation barrier behind orch-resume-audit, shipped WARN-FIRST (stage bake, a recorded posture): while the barrier state is armed it surfaces a systemMessage on the first mutation outside the allowlist (the record surfaces, the registry files, and the suite's own state directory stay writable, so the only exit, correcting the record, is never blocked), and it blocks nothing during the bake. The flip to deny is a manifest edit (stage to enforce, default to ask/deny) taken on recorded guard-events evidence after the bake period, per the guardrail-config-integrity discipline. Bash targets are not path-judged (a command's write targets are not lexically resolvable), so Bash mutations pass with the same surfacing only. Clearing the barrier requires re-running the audit (tools/orch_doctor.py --resume-audit) against corrected records; acknowledgement alone does not clear it."
+
+[[hook]]
+id = "clock-inject"
+rules = ["tstamp"]  # accur / timestamp-from-clock
+platform = "claude-code"
+event = "PostToolUse"
+matcher = ".*"
+script = "clock-inject.py"
+default = "warn"
+class = "c"
+timeout = 10
+residue = "An INFORMING hook, not an enforcement point: after a tool call that succeeded it adds one line to the assistant context, CLOCK (read by hook, authoritative): <local time> <zone> | <UTC time>, plus the session elapsed time when AIQT_LEASE_FILE names a valid lease. It blocks nothing and denies nothing; the assistant can still ignore or mis-copy the line. It reproduces the host clock and the lease faithfully, so a wrong host clock or a wrong lease gives a wrong reading, and TZ changes the local field and zone name. It is registered on PostToolUse only: a failed tool call (the PostToolUseFailure event, whose name is not yet verified against the host) gets no clock line, and neither does a tool call rejected before it ran or a stretch of prose with no tool call. The matcher .* is taken to mean every tool name; that host behaviour is not verified here. No worker-marker bypass remains, and no legacy ORCH_ variable is read, so a setup that set only ORCH_LEASE_FILE now gets no elapsed segment while a retained preview Stop hook may still read that lease. It is launched through the fixed python3 -I -S -B -c launcher described for future-stamp-write, so a missing, unreadable, unparsable or crashing script, or an exit code other than 0 reached through sys.exit or by returning, gives exit 1 with the reason on stderr; on PostToolUse the tool call has already run, so a launch failure is a hook error, not an undo. A script that ends the process itself with os._exit bypasses the launcher and its code reaches the host unchanged (the shipped script calls os._exit only with 0). A python3 older than 3.4 rejects -I with a usage error, exit 2 (from Python's option history, not run here), and a directory as a standard stream makes Python exit 1 at startup (the preview channel launch guard is not carried into the plugin)."
+
+[[hook]]
+id = "future-stamp-write"
+rules = ["tstamp"]  # accur / timestamp-from-clock
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Write|Edit|MultiEdit|Bash"
+script = "future-stamp-write.py"
+default = "warn"
+stage = "bake"
+class = "c"
+timeout = 30
+residue = "WARN ONLY (stage bake, a label with no flip criteria and no observations collected): when a Write, Edit, MultiEdit, or Bash call would record an ISO-like timestamp literal that lies ahead of the clock into a folder named by AIQT_STORE_ROOT, it emits one systemMessage line of at most 100 characters (future-stamp-write: future stamp <literal> (+N more); now <UTC minute>; run date -u) and exits 0. Its code never denies or blocks; the launch paths that could are listed at the end. Unset or empty AIQT_STORE_ROOT makes it inert. It is not established whether the model sees a PreToolUse systemMessage, and there is no cap across calls. Not covered: NotebookEdit, MCP tools, outbound tools, writes made inside a script, time-only stamps, a time built from parts, a time in a quote or code span in a record, and a time just after a scheduling word. An unzoned literal counts as future only when both its UTC and its local (TZ) reading are; CDPATH can make a relative cd target unknown and keep it silent. Known over-warnings: a bare future literal written to a store by Bash, a literal piped through a filter that removes it, a run a later source: line demotes, and an append that lands in a blockquote. Final prose is not checked by the pack. No worker-marker bypass remains and no legacy ORCH_ variable is read; a retained preview copy keeps the older deny and worker bypass. The plugin does not run the file as python3 <file>, which exits 2 on a missing file, and on PreToolUse the host treats exit 2 as blocking. It runs a fixed launcher, python3 -I -S -B -c <launcher> <file>, which runs the file with runpy and exits 1 with the reason on stderr when the file is missing, unreadable, unparsable or crashing, or exits through sys.exit or by returning with any code other than 0; the host treats exit 1 as a non-blocking error (both taken from the host hook documentation, not a live probe). The launcher takes the file from sys.argv[1], the position the generator fixes, so an argument a host appended is ignored. The hook-scripts gate requires every hooks.json entry naming this file, in any spelling of its path (resolved path or file name), to match the manifest, counted, and runs each such entry against a missing file, an unreadable file, a directory, a syntax error, a raised error and an exit 2, requiring exit 1 each time (an unreadable file is readable to a privileged user, so there that case runs as an exit 2). The args reach the launcher as separate argv elements only if the host runs them without a shell, which is the repository's 2026-08-17 reading of the host hook documentation, not re-checked for the launcher; joined into a shell string, the launcher would be a shell syntax error, exit 2. Not covered by the launcher: a python3 older than 3.4 rejects -I with a usage error, exit 2, which blocks (from Python's option history, not run here); a python3 that cannot be found or started has whatever outcome the host gives it (not verified); a script that ends the process itself with os._exit(2) bypasses the launcher (the shipped script calls os._exit only with 0); and a directory as a standard stream makes Python exit 1 at startup. A run past the 30 second timeout is ended by the host, which the host documentation describes as non-blocking (not verified here)."

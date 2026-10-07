@@ -2,6 +2,7 @@
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
+  opf.py --self-test-unit LABEL     run ONE registered unit in this dedicated process (the suite's child entry)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
@@ -108,7 +109,9 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
+    global _child_contract
     try:
+        import _child_contract  # the shared fail-closed child contract (secfcl, merge train 2 QA r6)
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -339,6 +342,82 @@ def _unconditional_binding(statements):
     return found
 
 
+def _entry_tail_gap(tree, block):
+    """Return the reason the statements after the canonical `--self-test` statement in `block` (the module's
+    `__main__` block, in the parsed module `tree`) let another argument reach self_test or exit unchecked, or
+    None. That tail must be non-empty and name self_test nowhere, and it must be exactly the refusal the
+    library modules use, `print("usage: ...", file=sys.stderr)` (one str constant starting "usage: " and only
+    the keyword file=sys.stderr) then `sys.exit(2)` and nothing else, or a live mode whose last statement is
+    `sys.exit(<name>(...))` for a <name> whose only module-scope binding is its single top-level def
+    (`sys.exit(main())`; an assignment, augmented assignment, import or `as` alias binding <name>, a second
+    def, or a `global` naming it anywhere is a gap, each counted as _binds counts), with no exit before that
+    last statement's own call (a sys.exit, os._exit, exit or quit call, or a `raise`, anywhere in the tail
+    outside that call). Those binding forms are the only rebindings of <name> it rejects. It does not inspect
+    decorators on the def (a decorator returning self_test passes), default arguments (`def main(f=self_test)`),
+    a `__code__` or other attribute swap, a call through another name (`sys.exit(main(run()))` with
+    `run = self_test`), or what the dispatched def does (a def that reaches self_test directly, or through
+    exec, eval, getattr, globals() or any other dynamic dispatch); _self_test_dispatch_probe backstops these
+    at run time for the argument lists it tries."""
+    import ast
+    tail = block.body[1:]
+    if not tail:
+        return "its `__main__` block (line {}) ends with the canonical `--self-test` statement, so any other " \
+               "argument falls through and exits 0; it must go on to refuse (`print(\"usage: ...\", " \
+               "file=sys.stderr)` then `sys.exit(2)`) or end with `sys.exit(<def>(...))`".format(block.lineno)
+    named = [node.lineno for statement in tail for node in ast.walk(statement)
+             if isinstance(node, ast.Name) and node.id == "self_test"]
+    if named:
+        return "its `__main__` block (line {}) names self_test after the canonical `--self-test` statement " \
+               "(line {}), so an argument other than exactly `--self-test` can run the suite".format(
+                   block.lineno, min(named))
+
+    def exits(statement):
+        # The call inside a statement `sys.exit(<one argument>)`, or None.
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and ast.dump(call.func) == ast.dump(ast.parse("sys.exit").body[0].value)
+                and len(call.args) == 1 and not call.keywords):
+            return None
+        return call.args[0]
+
+    if len(tail) == 2 and isinstance(tail[0], ast.Expr) and isinstance(tail[0].value, ast.Call):
+        usage = tail[0].value
+        code = exits(tail[1])
+        if (isinstance(usage.func, ast.Name) and usage.func.id == "print" and len(usage.args) == 1
+                and isinstance(usage.args[0], ast.Constant) and isinstance(usage.args[0].value, str)
+                and usage.args[0].value.startswith("usage: ") and len(usage.keywords) == 1
+                and usage.keywords[0].arg == "file"
+                and ast.dump(usage.keywords[0].value) == ast.dump(ast.parse("sys.stderr").body[0].value)
+                and isinstance(code, ast.Constant) and type(code.value) is int and code.value == 2):
+            return None
+    code = exits(tail[-1])
+    if isinstance(code, ast.Call) and isinstance(code.func, ast.Name):
+        name = code.func.id
+        ends = [ast.dump(ast.parse(spelling).body[0].value)
+                for spelling in ("sys.exit", "os._exit", "exit", "quit")]
+        early = [node.lineno for statement in tail for node in ast.walk(statement)
+                 if node is not tail[-1].value and (isinstance(node, ast.Raise)
+                                                    or isinstance(node, ast.Call) and ast.dump(node.func) in ends)]
+        if early:
+            return "its `__main__` block (line {}) can end the run (line {}) before its last statement " \
+                   "dispatches to {}, so an argument may exit without that dispatch's refusal".format(
+                       block.lineno, min(early), name)
+        defs = [node for node in tree.body[:-1] if isinstance(node, ast.FunctionDef) and node.name == name]
+        if not defs:
+            return "its `__main__` block (line {}) ends with `sys.exit({}(...))`, but {} is not a top-level " \
+                   "def".format(block.lineno, name, name)
+        bound = [node.lineno for node in _module_scope(tree) for _ in range(_binds(node, name))] + [
+            node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for each in node.names
+            if each == name]
+        if len(bound) != 1:
+            return "its `__main__` block (line {}) dispatches to {}, which is bound {} times at module scope " \
+                   "(lines {}), other than by its single top-level def".format(
+                       block.lineno, name, len(bound), ", ".join(str(line) for line in sorted(bound)))
+        return None
+    return "its `__main__` block (line {}) does not follow the canonical `--self-test` statement with exactly " \
+           "a refusal (`print(\"usage: ...\", file=sys.stderr)` then `sys.exit(2)`) or a last statement " \
+           "`sys.exit(<def>(...))`".format(block.lineno)
+
+
 def _self_test_entry_gap(tree):
     """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
     by any form _binds counts, or by a `global self_test` anywhere (a function can bind it so). An exposing
@@ -358,9 +437,10 @@ def _self_test_entry_gap(tree):
     `__builtins__` nowhere at module scope (counted as `__name__` is), no statement before the block changes
     sys through the name sys (_sys_change: a store to, delete of or augmented assignment to any
     `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none
-    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), and none stores
+    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), none stores
     to or deletes through the name self_test or through a target that starts from an expression rather than
-    a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
+    a name (_self_test_or_expression_store), and the block's statements after the canonical one are a usage
+    refusal or a live-mode dispatch (_entry_tail_gap); otherwise it names the first rule broken."""
     import ast
     import _optlevel
 
@@ -466,7 +546,7 @@ def _self_test_entry_gap(tree):
     if store is not None:
         return True, "it stores to or deletes through an expression, not a name (line {}), before its " \
                      "`__main__` block; the guard does not follow such a target".format(store[0].lineno)
-    return True, None
+    return True, _entry_tail_gap(tree, block)
 
 
 def _self_test_entry_gaps(directory, required=()):
@@ -477,8 +557,12 @@ def _self_test_entry_gaps(directory, required=()):
         if __name__ == "__main__":
             if sys.argv[1:] == ["--self-test"]:
                 sys.exit(self_test())
-            ...  # any other argument handling the module has
+            print("usage: <module>.py --self-test", file=sys.stderr)   # a module with no live mode
+            sys.exit(2)
 
+    or, for a module with a live mode, the same block whose statements after the canonical one name self_test
+    nowhere, end with `sys.exit(<def>(...))` for a name whose only module-scope binding is one top-level def
+    (`sys.exit(main())`), and hold no sys.exit, os._exit, exit or quit call or `raise` outside that last call,
     as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
     nothing else and no else, no other test of `__name__` against "__main__" that runs at import (an if, while,
     conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
@@ -556,7 +640,11 @@ def _self_test_entry_gaps(directory, required=()):
     including one under a `__main__` test it does not count, such as one in a function body or one reached
     through a held value). For example, _opf_adopt_observe's sys.path setup holds its `__name__` comparison in
     a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
-    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
+    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test). For a live-mode entry the rule is
+    structural: it checks that the dispatched name is one top-level def and that the tail cannot end the run
+    first, and it does not inspect what that def does. A def that reaches self_test or ends the run through
+    exec, eval, getattr, globals(), an alias held in a value, or any other dynamic dispatch is residual; each
+    live-mode dispatcher carries its own exact-argument rule and child-run vectors for that.
 
     Beyond the return shape above, the guard does not check the value self_test returns at run time, or how
     sys.exit treats that value. How sys.exit treats a value is platform- and version-dependent, and no rule
@@ -631,6 +719,7 @@ _ENTRY_FLOOR_EXEMPT = {
     "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
                                   "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
+    "opf-unit-bound": "the dispatcher's hard outer-bound vectors (QA26, _unit_bound_self_test)",
 }
 
 
@@ -671,7 +760,9 @@ def _self_test_floor(registry, directory, exempt):
 # required too, so the floor does not over-reject), and absent/ and empty/ are a missing and an empty directory.
 _ENTRY_HEAD = 'import sys\n\n\ndef self_test():\n    return 0\n\n\n'
 _ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
-_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
+_ENTRY_REFUSE = '    print("usage: fixture.py --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY + _ENTRY_REFUSE
+_ENTRY_OPEN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
 _ENTRY_NONE = 'no `if __name__ == "__main__":` block'
 _ENTRY_FIRST = "not the canonical `--self-test` statement"
 _ENTRY_BLOCK_BINDS = ") binds self_test"
@@ -688,12 +779,19 @@ _ENTRY_STAR = "a star import may bind `__name__`, `sys` or `self_test`"
 _ENTRY_BUILTINS = "binds `__builtins__` at module scope"
 _ENTRY_SELF_TEST_STORE = "stores to or deletes through `self_test`"
 _ENTRY_EXPRESSION_STORE = "through an expression, not a name"
+_ENTRY_TAIL_SELF_TEST = "names self_test after the canonical `--self-test` statement"
+_ENTRY_TAIL_EMPTY = "ends with the canonical `--self-test` statement"
+_ENTRY_TAIL_SHAPE = "does not follow the canonical `--self-test` statement with exactly"
+_ENTRY_TAIL_DISPATCH = "is not a top-level def"
+_ENTRY_TAIL_EARLY_EXIT = "before its last statement dispatches"
+_ENTRY_TAIL_REBOUND = "other than by its single top-level def"
 _ENTRY_FIXTURES = (
-    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
+    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_OPEN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
     ("canonical_import.py", "import sys\nfrom _no_such_module import self_test\n\n" + _ENTRY_MAIN, True, None),
     ("canonical_spaced.py", _ENTRY_HEAD + "if (__name__ == '__main__'):  # entry\n    if sys.argv[1 :] == [\n"
-     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n", True, None),
+     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n    print( 'usage: x' ,file = sys.stderr )\n"
+     "    sys.exit( 2 )  # refuse\n", True, None),
     ("plain.py", 'if __name__ == "__main__":\n    raise SystemExit(0)\n', False, None),
     ("local_only.py", "import holder\n\n\ndef helper():\n    self_test = 1\n    return self_test\n\n\n"
      "class Holder:\n    self_test = 0\n\n\nholder.self_test = [self_test for self_test in ()]\n"
@@ -721,7 +819,7 @@ _ENTRY_FIXTURES = (
      "    sys.exit(main())\n", True, _ENTRY_FIRST),
     ("drops_result.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      "        self_test()\n", True, _ENTRY_FIRST),
-    ("inner_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
+    ("inner_else.py", _ENTRY_HEAD + _ENTRY_OPEN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
     ("inner_extra.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      '        print("self-test")\n        sys.exit(self_test())\n', True, _ENTRY_FIRST),
     ("not_first.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    print("entry")\n' + _ENTRY_BODY, True,
@@ -769,8 +867,8 @@ _ENTRY_FIXTURES = (
     ("argv_append.py", _ENTRY_HEAD + 'sys.argv.append("--quiet")\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
     ("argv_class.py", _ENTRY_HEAD + 'class Quiet:\n    sys.argv += ["--quiet"]\n\n\n' + _ENTRY_MAIN, True,
      _ENTRY_ARGV),
-    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_MAIN
-     + "    sys.argv.pop()\n", True, None),
+    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_OPEN
+     + "    sys.argv.pop()\n    sys.exit(reset())\n", True, None),
     ("two_bindings.py", _ENTRY_HEAD + "def main():\n    return 0\n\n\nself_test = main\n\n\n" + _ENTRY_MAIN, True,
      _ENTRY_REBOUND),
     ("star_after_def.py", _ENTRY_HEAD + "from _no_such_module import *\n\n\n" + _ENTRY_MAIN, True,
@@ -860,6 +958,44 @@ _ENTRY_FIXTURES = (
      _ENTRY_EXPRESSION_STORE),
     ("name_root_store.py", _ENTRY_HEAD + 'rows = {}\nrows[len(rows)] = 0\nrows.copy()["x"] = 1\n\n\n'
      + _ENTRY_MAIN, True, None),
+    ("tail_self_test.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit(self_test())\n", True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_raise.py", _ENTRY_HEAD + _ENTRY_OPEN + "    raise SystemExit(self_test())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_recheck.py", _ENTRY_HEAD + _ENTRY_OPEN + '    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":\n'
+     '        sys.exit(self_test())\n    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_main_alias.py", _ENTRY_HEAD + _ENTRY_OPEN + "    main = self_test\n    sys.exit(main())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_empty.py", _ENTRY_HEAD + _ENTRY_OPEN, True, _ENTRY_TAIL_EMPTY),
+    ("tail_exit_one.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(1)\n',
+     True, _ENTRY_TAIL_SHAPE),
+    ("tail_stdout.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x")\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_exit_string.py", _ENTRY_HEAD + _ENTRY_OPEN + '    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_exit_name.py", "import sys\n\nEXIT_MALFORMED = 2\n\n\n" + _ENTRY_HEAD[len("import sys\n\n\n"):]
+     + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(EXIT_MALFORMED)\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_no_usage.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("x", file=sys.stderr)\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_after_refusal.py", _ENTRY_HEAD + _ENTRY_MAIN + '    print("unreached")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_bare_exit.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit()\n", True, _ENTRY_TAIL_SHAPE),
+    ("tail_dispatch_import.py", "import sys\nfrom _no_such_module import main\n\n\n"
+     + _ENTRY_HEAD[len("import sys\n\n\n"):] + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_DISPATCH),
+    ("tail_dispatch.py", _ENTRY_HEAD + "def render(argv):\n    return len(argv)\n\n\n" + _ENTRY_OPEN
+     + "    argv = sys.argv[1:]\n    sys.exit(render(argv))\n", True, None),
+    ("tail_main_assigned.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain = self_test\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_augmented.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain += 0\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_import_as.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nfrom _no_such_module import helper as main"
+     "\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_two_defs.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef main():\n    return self_test()\n\n\n"
+     + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_global.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef install():\n    global main\n"
+     "    main = len\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_early_exit.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(0)\n    sys.exit(main())\n", True, _ENTRY_TAIL_EARLY_EXIT),
+    ("tail_early_nested.py", _ENTRY_HEAD + "def main(code):\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    if sys.argv[1:]:\n        raise SystemExit(0)\n    sys.exit(main(sys.exit(0)))\n", True,
+     _ENTRY_TAIL_EARLY_EXIT),
 )
 
 
@@ -924,11 +1060,3607 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+# Every module in this directory with a `__main__` block, this host included, declares here the exact argument
+# lists it is run with: the self-test forms (`--self-test`, and a `--vectors-only` or `--red-on-revert`
+# variant) and the bare live or gate run, `()`. _self_test_dispatch_probe reconciles the table with every
+# invocation of these modules in the runners (_dispatch_runner_forms) and runs every module but this host with
+# each refused form. No module is chosen by reading its source: a module with a `__main__` block that the table
+# does not name is itself a probe failure. These are fast pre-checks; _self_test_runtime_probe, which runs every
+# *.py module here with each refused form and judges only its behaviour, is the authority.
+_DISPATCH_LIBRARY = (("--self-test",),)
+_DISPATCH_LIVE = ((), ("--self-test",))
+_DISPATCH_FORMS = dict(
+    {name: _DISPATCH_LIBRARY for name in (
+        "_child_contract.py",
+        "_journal.py", "_opf_adopt.py", "_opf_adopt_apply.py", "_opf_adopt_hook.py", "_opf_adopt_plan.py",
+        "_opf_check.py", "_opf_emit.py", "_opf_fuzz.py", "_opf_init.py",
+        "_opf_init_contract.py", "_opf_init_operation.py", "_opf_init_substrate.py", "_opf_observe.py",
+        "_opf_oplock.py", "_opf_record.py", "_opf_release.py", "_opf_schema.py", "_opf_store.py",
+        "_opf_worklog.py", "_opf_worklog_regressions.py", "check_opf_init_qa.py",
+        "selftest_commonmark_headings.py", "opf.py")},
+    **{name: _DISPATCH_LIVE for name in (
+        "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
+        "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
+    **{"_opf_views.py": ((), ("--check",)), "_opf_absorb.py": ((), ("--freeze-digest",)),
+       "_opf_changelog.py": ((),)},
+    **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
+    **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_record.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_init_p0.py": (("--self-test",), ("--self-test", "--red-on-revert"),
+                                ("--self-test", "--vectors-only"))})
+# Declared forms no runner calls, each with its reason. The exact `--self-test` needs no entry: the entry scan
+# requires it of every module that binds self_test, and this host runs most of those suites in process.
+_DISPATCH_UNRUN = {
+    ("_opf_views.py", ()): "the `opf render` engine; run bare it renders the current directory, as the verb does",
+    ("_opf_absorb.py", ()): "the `opf absorb` engine; run bare it absorbs the current directory, as the verb does",
+    ("_opf_views.py", ("--check",)): "the `opf render --check` engine flag, which the bare run defaults to",
+    ("_opf_absorb.py", ("--freeze-digest",)): "the `opf absorb --freeze-digest` engine mode over the current "
+    "directory",
+    ("_opf_changelog.py", ()): "the changelog gates; run bare they check the current directory",
+    ("selftest_commonmark_conformance.py", ("--interpreters", "python3")): "the documented optional matrix "
+    "facility (module docstring); each word after --interpreters names an interpreter, `python3` stands for any",
+}
+_DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
+# Also refused by every module: the subcommand spellings, and the bare run where the table declares none.
+_DISPATCH_REFUSED_WORDS = (["selftest"], ["self-test"])
+# The suite functions a refused form must not enter: one so named in any module of the probed directory, or a
+# function of the probed module that an exact `--self-test` branch of it calls (_dispatch_targets).
+_DISPATCH_SUITES = ("self_test", "_suite", "_self_check", "_run_single", "vectors")
+# A refusal's stderr must hold a line containing one of these (case-insensitive): the library modules print
+# `usage: ...`, the live modules name the refused argument.
+_DISPATCH_USAGE = ("usage", "unknown argument", "unexpected argument", "unrecognized argument",
+                   "expected --self-test")
+# The runners the table is reconciled with, relative to the repository root two levels above this directory,
+# besides this directory's own run_all_checks.sh (required). A standalone opf copy carries none of them, so
+# there only the runner-to-table direction is checked.
+_DISPATCH_RUNNERS = ("tools/run_all_checks.sh", ".github/workflows/quality.yml",
+                     "tools/check_opf_standalone_closure.py")
+_DISPATCH_STUB = (
+    "import os, sys\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path.insert(0, os.path.dirname(sys.argv[0]))\n"
+    "module = __import__(os.path.basename(sys.argv[0])[:-3])\n"
+    "module.self_test = lambda **kwargs: print('DISPATCHED', sorted(kwargs.items())) or 0\n"
+    "sys.exit(module.main())\n")
+# For a module that binds no self_test: run it as `__main__` with a profile hook that, at the first call of a
+# function the exact `--self-test` branches dispatch (_dispatch_targets), prints its bool arguments and ends
+# the child before the suite runs.
+_DISPATCH_REACH_STUB = (
+    "import os, runpy, sys\n"
+    "path, targets = os.path.realpath(sys.argv[1]), sys.argv[2].split(',')\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
+    "sys.path.insert(0, os.path.dirname(path))\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and code.co_name in targets and code.co_filename == path:\n"
+    "        print('DISPATCHED', sorted((k, v) for k, v in frame.f_locals.items() if isinstance(v, bool)),\n"
+    "              flush=True)\n"
+    "        os._exit(0)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n"
+    "sys.setprofile(None)\n"
+    "print('NOT DISPATCHED')\n")
+# A refused form runs the real module as `__main__`, nothing replaced, under a profile hook (this thread and
+# every thread started later) that at the entry of a suite function writes `ENTERED <name>` to stderr and ends
+# the child with exit 3 before the suite runs. argv: module, fallback import directory, suite names, the
+# module's own targets, then the form.
+_DISPATCH_REFUSE_STUB = (
+    "import os, runpy, sys, threading\n"
+    "path, fallback = os.path.realpath(sys.argv[1]), sys.argv[2]\n"
+    "suites, local = set(sys.argv[3].split(',')), set(sys.argv[4].split(',')) - {''}\n"
+    "sys.argv = [path] + sys.argv[5:]\n"
+    "sys.path[:0] = [os.path.dirname(path)]\n"
+    "sys.path.append(fallback)\n"
+    "here = os.path.dirname(path) + os.sep\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and (code.co_name in suites and code.co_filename.startswith(here)\n"
+    "                            or code.co_name in local and code.co_filename == path):\n"
+    "        os.write(2, ('ENTERED ' + code.co_name + '\\n').encode())\n"
+    "        os._exit(3)\n"
+    "threading.setprofile(hook)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n")
+
+
+def _dispatch_targets(tree):
+    """The names of the functions called in the bodies of the module's exact `--self-test` branches: each
+    `if <argument list> == ["--self-test", ...]:` (`sys.argv[1:]`, or a name holding a copy of it)."""
+    import ast
+    targets = set()
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, ast.If) else None
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.comparators[0], ast.List) and test.comparators[0].elts
+                and isinstance(test.comparators[0].elts[0], ast.Constant)
+                and test.comparators[0].elts[0].value == "--self-test"):
+            continue
+        targets.update(call.func.id for statement in node.body for call in ast.walk(statement)
+                       if isinstance(call, ast.Call) and isinstance(call.func, ast.Name))
+    return targets
+
+
+def _dispatch_triggers(tree):
+    """The environment variables a refused form also runs with, set to "1": every str constant in the module
+    spelled as an environment name (an upper-case letter, then three or more upper-case letters, digits or
+    underscores) that the probe's own environment does not set. This widens the inputs; it selects no module."""
+    import ast
+    import re
+    return sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                   and isinstance(node.value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", node.value)
+                   and node.value not in os.environ})
+
+
+def _dispatch_runner_forms(directory, names, runners=_DISPATCH_RUNNERS):
+    """Map each module in `names` to every argument list the runners pass it, bare runs included: this
+    directory's run_all_checks.sh and each `runners` file present under the repository root. A shell or
+    workflow line is split as a shell word list; a word naming the module (the basename of a path under
+    `opf/tools/`, or under `$here/` in this directory's runner) takes the words after it up to the first shell
+    operator or redirection. A Python runner is parsed: a str constant naming the module followed, in the same
+    tuple, list or call, by a list or tuple of str constants is one form. Returns (forms, misses, complete),
+    `complete` False when a root runner is absent."""
+    import ast
+    import shlex
+    forms, misses = {}, []
+    root = Path(directory).resolve().parent.parent
+    own = Path(directory, "run_all_checks.sh")
+    paths = [own] + [root / rel for rel in runners if (root / rel).is_file()]
+    complete = len(paths) == len(runners) + 1
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            misses.append("runner {} cannot be read ({})".format(path.name, type(exc).__name__))
+            continue
+        if path.suffix == ".py":
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError) as exc:
+                misses.append("runner {} cannot be parsed ({})".format(path.name, type(exc).__name__))
+                continue
+            for node in ast.walk(tree):
+                elements = node.elts if isinstance(node, (ast.Tuple, ast.List)) else (
+                    node.args if isinstance(node, ast.Call) else ())
+                for at, each in enumerate(elements[:-1]):
+                    form = elements[at + 1]
+                    if (isinstance(each, ast.Constant) and each.value in names
+                            and isinstance(form, (ast.List, ast.Tuple))
+                            and all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+                                    for item in form.elts)):
+                        forms.setdefault(each.value, set()).add(tuple(item.value for item in form.elts))
+            continue
+        for line in text.splitlines():
+            try:
+                words = shlex.split(line, comments=True)
+            except ValueError:
+                words = line.split()
+            for at, word in enumerate(words):
+                name = word.rsplit("/", 1)[-1]
+                if name not in names or not ("opf/tools/" in word or path == own and word.startswith("$here/")):
+                    continue
+                args = []
+                for each in words[at + 1:]:
+                    if each in ("|", "||", "&&", ";", "&") or each.startswith((">", "<", "2>", "1>")):
+                        break
+                    args.append(each)
+                forms.setdefault(name, set()).add(tuple(args))
+    return forms, misses, complete
+
+
+def _self_test_dispatch_probe(directory, tmp, table=None, unrun=None, runners=_DISPATCH_RUNNERS, fallback=None):
+    """Probe every module in `directory` that has a `__main__` block (_main_tests), whatever its source holds.
+    `table` (default _DISPATCH_FORMS) must name exactly those modules, and is reconciled with
+    _dispatch_runner_forms: a form a runner calls that the table lacks is a miss, and so, when every runner is
+    present, is a declared form no runner calls, except the exact `--self-test`, a variant the module's own
+    source spells out (the runner fixture it forwards, `--self-test --vectors-only`), and the `unrun` entries
+    (default _DISPATCH_UNRUN), which must each be declared and uncalled. Every module but this host (whose verb
+    routing _cli_self_test covers) then runs as a child under _DISPATCH_REFUSE_STUB with each _DISPATCH_REFUSED
+    and _DISPATCH_REFUSED_WORDS form and, unless the table declares a bare run, no argument, with
+    _dispatch_triggers set: each must exit 2, write nothing to stdout, write a stderr line holding a
+    _DISPATCH_USAGE phrase, and enter no _DISPATCH_SUITES function nor any function of its own an exact
+    `--self-test` branch calls. Each declared `--self-test` variant must still reach the self-test: for a
+    module whose `__main__` block ends `sys.exit(<def>(...))` a child imports it, stubs self_test and calls
+    main(); otherwise `--self-test` and each variant run under _DISPATCH_REACH_STUB and must enter a function
+    an exact `--self-test` branch calls, a variant with a True argument and `--self-test` alone with none; a
+    variant with neither route is a miss. Returns the list of discrepancies. Residuals: the hook sees Python
+    function entries in this process only (a suite run in a child process, or as module top-level code, is
+    seen only through the exit, stdout and stderr tests), a trigger needing a value other than "1" or a name
+    built at run time, and argument lists outside the forms tried. A fast pre-check that names a cause:
+    _self_test_runtime_probe, which runs every module whatever its source holds, is the authority."""
+    import ast
+    import concurrent.futures
+    import subprocess
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    unrun = _DISPATCH_UNRUN if unrun is None else unrun
+    fallback = str(Path(directory).resolve()) if fallback is None else str(fallback)
+    host = Path(__file__).name
+    trees, sources, misses = {}, {}, []
+    for name in sorted(name for name in os.listdir(str(directory)) if name.endswith(".py")):
+        try:
+            source = Path(directory, name).read_bytes()
+            tree = _optlevel.parse(source, name)
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{} cannot be read or parsed ({})".format(name, type(exc).__name__))
+            continue
+        if _main_tests(tree):
+            trees[name], sources[name] = tree, source.decode("utf-8", "replace")
+    if not trees:
+        misses.append("no module with a `__main__` block found")
+    misses += ["{} has a `__main__` block but is not declared in _DISPATCH_FORMS".format(name)
+               for name in sorted(set(trees) - set(table))]
+    misses += ["{} is declared in _DISPATCH_FORMS but has no `__main__` block here".format(name)
+               for name in sorted(set(table) - set(trees))]
+    forms, runner_misses, complete = _dispatch_runner_forms(directory, set(table), runners)
+    misses += runner_misses
+    for name, called in sorted(forms.items()):
+        misses += ["a runner calls {} {} but that form is not declared in _DISPATCH_FORMS".format(
+            name, list(argv)) for argv in sorted(called - set(table[name]))]
+    for (name, argv), _reason in sorted(unrun.items()):
+        if argv not in table.get(name, ()) or argv in forms.get(name, set()):
+            misses.append("unrun entry {} {} is not a declared form no runner calls".format(name, list(argv)))
+    if complete:
+        misses += ["{} {} is declared in _DISPATCH_FORMS but no runner calls it".format(name, list(argv))
+                   for name, declared in sorted(table.items()) for argv in declared
+                   if argv != ("--self-test",) and argv not in forms.get(name, set()) and (name, argv) not in unrun
+                   and not (len(argv) > 1 and " ".join(argv) in sources.get(name, ""))]
+    runs = []
+    for name, tree in sorted(trees.items()):
+        if name == host or name not in table:
+            continue
+        targets = sorted(_dispatch_targets(tree))
+        refused = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + ([[]] if () not in table[name] else [])
+        runs += [(name, argv, "refuse", targets) for argv in refused]
+        variants = [list(argv) for argv in table[name] if len(argv) > 1 and argv[0] == "--self-test"]
+        exposes, reason = _self_test_entry_gap(tree)
+        last = tree.body[-1].body[-1] if exposes and reason is None else None
+        if (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call) and last.value.args
+                and isinstance(last.value.args[0], ast.Call) and isinstance(last.value.args[0].func, ast.Name)):
+            runs += [(name, argv, "stub", targets) for argv in variants]
+        elif targets and not exposes:
+            runs += [(name, argv, "reach", targets) for argv in [["--self-test"]] + variants]
+        else:
+            misses += ["{} declares {} but neither route can confirm it reaches the self-test".format(name, argv)
+                       for argv in variants]
+
+    def child(run):
+        name, argv, mode, targets = run
+        path = str(Path(directory, name))
+        env = None
+        if mode == "refuse":
+            command = [_DISPATCH_REFUSE_STUB, path, fallback, ",".join(_DISPATCH_SUITES), ",".join(targets)] + argv
+            env = dict(os.environ, **{each: "1" for each in _dispatch_triggers(trees[name])})
+        elif mode == "stub":
+            command = [_DISPATCH_STUB, path] + argv
+        else:
+            command = [_DISPATCH_REACH_STUB, path, ",".join(targets)] + argv
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c"] + command, cwd=tmp, capture_output=True,
+                                  text=True, timeout=120, stdin=subprocess.DEVNULL, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "{} {}: child failed to run ({})".format(name, argv, type(exc).__name__)
+        if mode != "refuse":
+            variant = argv != ["--self-test"]
+            if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "NOT DISPATCHED" in proc.stdout \
+                    or ("True" in proc.stdout) != variant:
+                return "{} {}: the {} did not reach the self-test as declared (rc {})".format(
+                    name, argv, "declared variant" if variant else "exact `--self-test`", proc.returncode)
+            return None
+        entered = [line[len("ENTERED "):] for line in proc.stderr.splitlines() if line.startswith("ENTERED ")]
+        if entered:
+            return "{} {}: not refused, entered {}".format(name, argv, entered[0])
+        if proc.returncode != 2 or proc.stdout or not any(
+                phrase in line.lower() for line in proc.stderr.splitlines() for phrase in _DISPATCH_USAGE):
+            return "{} {}: not refused (rc {}, {} bytes of stdout; want 2, no stdout and a usage line on " \
+                   "stderr)".format(name, argv, proc.returncode, len(proc.stdout))
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    return misses
+
+
+_DISPATCH_USAGE_TAIL = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_DISPATCH_SUITE_DEF = "def self_test():\n    return 0\n\n\n"
+# The escape fixtures (name, source, table forms, the phrase its miss must hold, or None for a clean module).
+_DISPATCH_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, None),
+    ("clean_live.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("clean_live: unexpected argument(s)", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, None),
+    ("const_alias.py", "import sys\n\n_SELF_TEST_FORMS = ([\"--self-test\"], [\"--selftest\"])\n\n\n"
+     + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n    if sys.argv[1:] in _SELF_TEST_FORMS:\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("match_form.py", "import sys\n\n\ndef _suite():\n    return 0\n\n\n" 'if __name__ == "__main__":\n'
+     '    match sys.argv[1:]:\n        case ["--self-test", *_]:\n            sys.exit(_suite())\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY,
+     "entered _suite"),
+    ("built_string.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\n' + _DISPATCH_SUITE_DEF
+     + 'if __name__ == "__main__":\n    if sys.argv[1:2] == [FLAG]:\n        sys.exit(self_test())\n'
+     + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("env_trigger.py", "import os\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"] or os.environ.get("FIXTURE_SELF_TEST"):\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("argparse_sub.py", "import argparse\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main():\n"
+     '    parser = argparse.ArgumentParser(prog="fixture")\n    verbs = parser.add_subparsers(dest="verb")\n'
+     '    verbs.add_parser("selftest")\n    args, _ = parser.parse_known_args()\n'
+     '    if args.verb == "selftest":\n        return self_test()\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     "    sys.exit(main())\n", _DISPATCH_LIBRARY, "entered self_test"),
+    ("decorated_main.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _wrap(func):\n"
+     "    def inner():\n        self_test()\n        return func()\n    return inner\n\n\n@_wrap\ndef main():\n"
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    sys.exit(main())\n',
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("prints_exit2.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _cases():\n"
+     '    print("case 1 ok")\n    return 2\n\n\n' 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    _cases()\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "bytes of stdout"),
+    ("silent_suite.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] != ["--self-test"]:\n        self_test()\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("no_usage.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     '    print("error", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY, "a usage line on stderr"),
+    ("undeclared.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     None, "not declared in _DISPATCH_FORMS"),
+    ("runner_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "a runner calls runner_form.py"),
+    ("unused_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("usage: unused_form.py [--self-test]", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, "no runner calls it"),
+)
+# The runner lines the fixture tree carries: every bare declared form is called except unused_form.py's, and
+# runner_form.py is called with a form its table lacks.
+_DISPATCH_FIXTURE_RUNNER = (
+    "python3 -I -B opf/tools/clean_live.py\n"
+    "python3 -I -B opf/tools/runner_form.py --self-test --vectors-only\n"
+    "python3 -I -B opf/tools/selftest_commonmark_conformance.py\n")
+# The reverted conformance pre-check: _self_check runs again before the argument list is checked.
+_DISPATCH_CONFORMANCE_REVERT = ("def main(argv):\n", "def main(argv):\n    _self_check()\n")
+
+
+def _self_test_dispatch_escape_probe(tmp):
+    """Run _self_test_dispatch_probe over a synthetic tree in `tmp`: the reviewers' escape fixtures (a flag
+    set held in a constant, a match statement, a built string, an environment trigger, an argparse
+    subcommand, a decorated main, a suite that prints and exits 2, a suite run silently before the refusal), a
+    refusal without a usage line, an undeclared module, a runner form the table lacks, a declared form no
+    runner calls, and selftest_commonmark_conformance.py with its argument pre-check reverted. Each red module
+    must be named for its reason and the clean ones not at all. The modules are files run as children; nothing
+    is passed to exec or eval. Returns a list of the discrepancies."""
+    root = Path(tmp, "tree")
+    directory = root / "opf" / "tools"
+    os.makedirs(str(directory))
+    os.makedirs(str(root / "tools"))
+    os.makedirs(str(root / ".github" / "workflows"))
+    here = Path(__file__).resolve().parent
+    table, expected = {}, {}
+    for name, source, forms, want in _DISPATCH_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        if forms is not None:
+            table[name] = forms
+        expected[name] = want
+    conformance = (here / "selftest_commonmark_conformance.py").read_text(encoding="utf-8")
+    before, after = _DISPATCH_CONFORMANCE_REVERT
+    if conformance.count(before) != 1:
+        return ["selftest_commonmark_conformance.py: the pre-check revert has no single `def main(argv):`"]
+    (directory / "selftest_commonmark_conformance.py").write_text(conformance.replace(before, after),
+                                                                  encoding="utf-8")
+    table["selftest_commonmark_conformance.py"] = ((),)
+    expected["selftest_commonmark_conformance.py"] = "entered _self_check"
+    (directory / "run_all_checks.sh").write_text("", encoding="utf-8")
+    (root / "tools" / "run_all_checks.sh").write_text(_DISPATCH_FIXTURE_RUNNER, encoding="utf-8")
+    (root / ".github" / "workflows" / "quality.yml").write_text("", encoding="utf-8")
+    (root / "tools" / "check_opf_standalone_closure.py").write_text("", encoding="utf-8")
+    os.makedirs(str(Path(tmp, "cwd")))
+    found = _self_test_dispatch_probe(directory, str(Path(tmp, "cwd")), table=table, unrun={}, fallback=here)
+    faults = []
+    for name, want in sorted(expected.items()):
+        mine = [miss for miss in found if name in miss]
+        if want is None and mine:
+            faults.append("clean fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("escape fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    return faults
+
+
+# The runtime probe (_self_test_runtime_probe), the authority over the refusal: each module runs at most this
+# many seconds per form.
+_RUNTIME_TIMEOUT = 60
+
+
+def _runtime_snapshot(top):
+    """Map each path under `top` (relative; only the TOP-LEVEL `.git` pruned, a nested `.git` recorded;
+    symlinks not followed) to its mode, size, modification time, inode identity (st_ino, st_nlink and
+    st_dev, so a hardlink swap that preserves bytes, mode, size and mtime is still a change) and
+    content: the sha256 of a regular file's bytes, a symlink's target. Returns (snap,
+    unread): `unread` names, with the error, every path that could not be listed, stat'ed or read, and `top`
+    itself when it is not a directory, so a tree the probe cannot see is a cannot-evaluate finding, never a
+    skip."""
+    import errno
+    import hashlib
+    snap, unread = {}, []
+
+    def failed(exc):
+        unread.append("{} ({})".format(getattr(exc, "filename", None) or top, type(exc).__name__))
+
+    try:
+        if not stat.S_ISDIR(os.lstat(str(top)).st_mode):
+            unread.append("{} (not a directory)".format(top))
+    except OSError as exc:
+        failed(exc)
+    for base, dirs, files in os.walk(str(top), onerror=failed):
+        dirs[:] = sorted(each for each in dirs if each != ".git" or base != str(top))
+        for name in dirs + sorted(files):
+            path = os.path.join(base, name)
+            try:
+                st = os.lstat(path)
+                content = os.readlink(path) if stat.S_ISLNK(st.st_mode) else None
+                if stat.S_ISREG(st.st_mode):
+                    digest = hashlib.sha256()
+                    guard = _unit_guard_flags()
+                    if guard is None:
+                        # No race-free guard on this platform: the entry is reported unread,
+                        # never opened through an unguarded name-based resolution (QA30 gemini).
+                        raise OSError(errno.EOPNOTSUPP, "no O_NOFOLLOW/O_NONBLOCK on this "
+                                      "platform; an unguarded open is refused (QA30)", path)
+                    fd = os.open(path, os.O_RDONLY | guard)
+                    with os.fdopen(fd, "rb") as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                    content = digest.hexdigest()
+            except OSError as exc:
+                failed(exc)
+                continue
+            snap[os.path.relpath(path, str(top))] = (
+                st.st_mode, st.st_size, st.st_mtime_ns, st.st_ino, st.st_nlink, st.st_dev, content)
+    return snap, unread
+
+
+# Set in each runtime-probe child's environment to a token naming its run; it is informational only. No
+# kill is ever chosen by an environment match, a name match or uid ownership, so an unrelated same-uid
+# process whose environment happens to carry the marker is never signalled and never reported;
+# containment is the supervisor's own-children subtree alone.
+_RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
+# Seconds the runtime probe waits after a child exits before it censuses the child's descendants. The
+# census is report-only: exited children are reaped and a live descendant is reported as a survivor,
+# never signalled. The same pause precedes each tree-snapshot comparison.
+_RUNTIME_SETTLE = 0.05
+# Bounds on the supervisor's report-and-reap rounds over its own children after the module exits: past
+# either, a child that still appears is reported as a survivor the rounds never drained, a finding.
+_RUNTIME_REAP_SECONDS = 5.0
+_RUNTIME_REAP_ROUNDS = 250
+
+# The per-run supervisor source the runtime probe passes inline (python3 -I -B -c <source>), so no
+# supervisor file ever exists for a probed module to overwrite or pre-plant, and the self-test's own
+# process never carries the subreaper flag. The supervisor FIRST resets SIGCHLD to SIG_DFL: an inherited
+# SIG_IGN would make the kernel auto-reap its children, so subprocess would read a failing module as
+# rc 0 on ECHILD and a reaped pid could be reused before it is signalled. It then makes ITSELF a child
+# subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
+# every orphaned descendant of the module, a setsid'd, non-dumpable or fork-hopping one included,
+# reparents to the supervisor. It also makes ITSELF non-dumpable (PR_SET_DUMPABLE, option 4, to 0), so
+# a same-uid process can neither list /proc/<sup>/fd nor pidfd_getfd its descriptors whatever Yama's
+# ptrace_scope says, and it carries the module's stdout and stderr over SOCKETPAIRS, never pipes: a
+# pipe end could be reopened through /proc/<pid>/fd by a concurrent same-uid process and drained, so a
+# failing module's output would vanish into a clean-looking report; reopening a socket end that way
+# gives ENXIO (QA8 claude M1/m4). After the module exits it repeatedly REPORTS, by pid, and reaps (as they
+# exit on their own) the processes its census names (D-385-CURRENT-CHILD: a census pid is an ADOPTED
+# descendant the supervisor never forked, so it is named as an undrained survivor and NEVER signalled --
+# no pidfd is opened on it -- the disclosed orphan-escape residual; the retired rounds SIGKILLed these).
+# The census is /proc/self/task/*/children, or where that file
+# is unavailable the ppid field of /proc/<pid>/stat equal to its own pid; a vanished pid is skipped, and
+# a record that is unreadable for any other reason, or malformed, raises, making the run cannot-evaluate,
+# never clean and never any kill. There is no numeric kill anywhere, and no census pid is ever a signal
+# target (the ONE kill in the source, the module timeout, goes through Popen.kill on the supervisor's own
+# un-reaped direct child, whose pid the kernel cannot reuse while it stays un-reaped). Reaping is
+# waitpid(WNOHANG) inside
+# the round deadline, never a blocking wait: a traced child, whose exit only its tracer can collect,
+# cannot stall the supervisor past its bound, and anything still present when the deadline ends is
+# reported as an undrained survivor, a finding, before the supervisor exits. It prints one JSON line:
+# the module's exit status and output, a timeout flag, the survivors (any is a finding) and whether the
+# rounds drained. When prctl fails, the census is unavailable or untrustworthy, or pidfd signalling is
+# unavailable, it says so and the probe reports cannot-evaluate, never a clean pass and never a numeric
+# fallback kill. Residual: a clean report proves only that the supervisor's own subtree is drained; ANY
+# same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+# socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+# shared-uid worker pool such processes exist) can act for the module after the report.
+_RUNTIME_SUPERVISOR = """\
+import base64
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+
+def _children():
+    kids = set()
+    try:
+        for task in os.listdir("/proc/self/task"):
+            with open("/proc/self/task/{}/children".format(task)) as handle:
+                kids.update(int(pid) for pid in handle.read().split())
+        return kids
+    except (OSError, ValueError):
+        kids = set()
+    me = str(os.getpid()).encode()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or entry.encode() == me:
+            continue
+        try:
+            with open("/proc/{}/stat".format(entry), "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            raise OSError("/proc/{}/stat unreadable ({})".format(entry, type(exc).__name__))
+        except IndexError:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if len(fields) < 2:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if fields[1] == me:
+            kids.add(int(entry))
+    return kids
+
+
+def _reap(report, reap_seconds, reap_rounds):
+    # D-385-CURRENT-CHILD: this supervisor forked only the module process,
+    # killed and reaped above through its own Popen handle. A census pid is
+    # an ADOPTED descendant it never forked: it is REPORTED, by pid, and
+    # never signalled -- no pidfd is opened on it -- the disclosed
+    # orphan-escape residual. Exited ones are collected with WNOHANG polls.
+    deadline = time.monotonic() + reap_seconds
+    for _ in range(reap_rounds):
+        kids = _children()
+        if not kids:
+            break
+        for pid in sorted(kids):
+            label = "pid {}".format(pid)
+            if label not in report["survivors"]:
+                report["survivors"].append(label)
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if _children():
+        report["drained"] = False
+
+
+def _emit(report_fd, report):
+    os.write(report_fd, (json.dumps(report) + "\\n").encode("utf-8"))
+
+
+def main():
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    report_fd = int(sys.argv[1])
+    timeout, settle = float(sys.argv[2]), float(sys.argv[3])
+    reap_seconds, reap_rounds = float(sys.argv[4]), int(sys.argv[5])
+    report = {"subreaper": False, "undumpable": False, "enumerable": False, "pidfd": False,
+              "census": None, "spawn": None, "timeout": False, "rc": None, "stdout": "",
+              "stderr": "", "survivors": [], "drained": True}
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        report["subreaper"] = libc.prctl(36, 1, 0, 0, 0) == 0
+        # PR_SET_DUMPABLE (4) 0: a non-dumpable process's /proc/<pid>/fd is
+        # root-owned and pidfd_getfd against it is refused whatever Yama's
+        # ptrace_scope says, so a same-uid process can neither enumerate nor
+        # copy this supervisor's channel descriptors (QA8 claude m4). Required
+        # like the subreaper flag: failure is cannot-evaluate, never best-effort.
+        report["undumpable"] = libc.prctl(4, 0, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        report["subreaper"] = False
+        report["undumpable"] = False
+    try:
+        _children()
+        report["enumerable"] = True
+    except OSError as exc:
+        report["census"] = str(exc)
+    try:
+        probe = os.pidfd_open(os.getpid(), 0)
+        os.close(probe)
+        report["pidfd"] = (hasattr(signal, "pidfd_send_signal")
+                           and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT"))
+    except (AttributeError, OSError):
+        report["pidfd"] = False
+    if not (report["subreaper"] and report["undumpable"] and report["enumerable"]
+            and report["pidfd"]):
+        _emit(report_fd, report)
+        return 0
+    # The module's stdout and stderr travel over SOCKETPAIRS, never pipes: a
+    # same-uid process could reopen a pipe end through /proc/<pid>/fd and drain a
+    # failing module's output into a clean-looking report, but reopening a socket
+    # end that way gives ENXIO (QA8 claude M1).
+    pairs = {"stdout": socket.socketpair(), "stderr": socket.socketpair()}
+    try:
+        proc = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL,
+                                stdout=pairs["stdout"][1].fileno(),
+                                stderr=pairs["stderr"][1].fileno(),
+                                start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["spawn"] = type(exc).__name__
+        proc = None
+    for key in ("stdout", "stderr"):
+        pairs[key][1].close()
+    gathered = {"stdout": [], "stderr": []}
+    deadline = time.monotonic() + timeout + reap_seconds + 10.0
+
+    def drain(key):
+        sock = pairs[key][0]
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                return
+            sock.settimeout(left)
+            try:
+                piece = sock.recv(65536)
+            except OSError:
+                return
+            if not piece:
+                return
+            gathered[key].append(piece)
+
+    pumps = [threading.Thread(target=drain, args=(key,)) for key in ("stdout", "stderr")]
+    for pump in pumps:
+        pump.start()
+    if proc is not None:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            report["timeout"] = True
+            proc.kill()
+            try:
+                proc.wait(timeout=reap_seconds)
+            except subprocess.TimeoutExpired:
+                report["drained"] = False
+                report["survivors"].append(
+                    "module pid {} did not exit within {}s of SIGKILL".format(proc.pid, reap_seconds))
+        report["rc"] = proc.returncode
+    time.sleep(min(settle, 1.0))
+    try:
+        _reap(report, reap_seconds, reap_rounds)
+    except OSError as exc:
+        report["enumerable"] = False
+        report["census"] = str(exc)
+    # The pumps end at EOF (the module and any descendant that inherited a write
+    # end are dead after the reap) or at their deadline (an undrained survivor
+    # still holds a write end); either way the join is bounded and the report
+    # carries what arrived.
+    for pump in pumps:
+        pump.join(max(0.0, deadline - time.monotonic()) + 1.0)
+    for key in ("stdout", "stderr"):
+        pairs[key][0].close()
+    report["stdout"] = base64.b64encode(b"".join(gathered["stdout"])).decode("ascii")
+    report["stderr"] = base64.b64encode(b"".join(gathered["stderr"])).decode("ascii")
+    _emit(report_fd, report)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def _runtime_flag_forms(tree):
+    """The argument lists the runtime probe adds for a module from its own source: each str constant that
+    starts with `--` and holds no whitespace, alone and after `--self-test`, so an undeclared form the source
+    spells out is tried. The caller drops the module's declared forms."""
+    import ast
+    import re
+    flags = sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str) and node.value.startswith("--")
+                    and not re.search(r"\s", node.value)})
+    return [[flag] for flag in flags] + [["--self-test", flag] for flag in flags]
+
+
+def _runtime_probe_runs(directory, table=None, names=None):
+    """The runtime probe's (module, argv) run list and the read/parse misses of building it, exactly
+    as _self_test_runtime_probe dispatches it: every *.py module in `directory` (restricted by
+    `names`), with each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form, the bare form unless
+    `table` declares one, and each undeclared `--` flag form the module's own source spells
+    (_runtime_flag_forms)."""
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    directory = Path(directory).resolve()
+    misses, runs = [], []
+    for name in sorted(name for name in os.listdir(str(directory))
+                       if name.endswith(".py") and (names is None or name in names)):
+        forms = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + (
+            [[]] if () not in table.get(name, ()) else [])
+        try:
+            extra = _runtime_flag_forms(_optlevel.parse((directory / name).read_bytes(), name))
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{}: cannot be read or parsed for its `--` forms ({})".format(name, type(exc).__name__))
+            extra = []
+        forms += [argv for argv in extra if argv not in forms and argv != ["--self-test"]
+                  and tuple(argv) not in table.get(name, ())]
+        runs += [(name, argv) for argv in forms]
+    return misses, runs
+
+
+def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
+                             timeout=_RUNTIME_TIMEOUT, spy=None):
+    """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
+    this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe passes
+    it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
+    and the empty argument list (unless `table`, default _DISPATCH_FORMS, declares a bare run of it), and each
+    form _runtime_flag_forms takes from the module's source (each `--` string constant alone and after
+    `--self-test`) that `table` does not declare for it, the exact `--self-test` aside (the entry scan's). Each run has a fresh empty cwd, HOME and TMPDIR under
+    `tmp`, stdin closed, a `timeout` second limit, its own process group (start_new_session) and an
+    environment of PATH (os.defpath), HOME, TMPDIR, LC_ALL=C.UTF-8 and _RUNTIME_MARKER (a token naming the
+    run; informational only). Each run is supervised by a dedicated child-subreaper process
+    (_RUNTIME_SUPERVISOR, passed inline as `python3 -I -B -c <source>`, so no supervisor file exists
+    anywhere for a probed module to overwrite or pre-plant): the supervisor first resets SIGCHLD to
+    SIG_DFL (an inherited SIG_IGN would auto-reap its children, reading a failing module as rc 0 and
+    reopening pid reuse), and _RUNTIME_SETTLE seconds after the module exits it CENSUSES and reaps, in
+    bounded rounds and time (every wait a WNOHANG poll, so a traced child, whose exit only its tracer
+    can collect, cannot stall it past the deadline), exactly its own un-reaped children, to which every
+    orphaned descendant of the module (a setsid'd, non-dumpable or fork-hopping one included) has
+    reparented: an exited one is collected, and a LIVE one is reported by pid as an undrained
+    survivor, a finding -- NEVER signalled (D-385-PIDFD-HANDOFF as read by the D-385-CURRENT-CHILD
+    ruling: an adopted descendant is a process the supervisor never forked, so no signal reaches it;
+    it is left running, the disclosed orphan-escape residual; the only process the supervisor
+    signals is the module child its own Popen forked, through that handle). A host where PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the
+    /proc child census is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
+    malformed, makes the run a cannot-evaluate discrepancy, never a clean pass and never a wider kill. A form passes only if the module
+    refuses it (exit 2, nothing on stdout, and on stderr
+    one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
+    and in both cases leaves no process running, its cwd, HOME and TMPDIR empty and `tree` unchanged (default:
+    the repository root two levels above `directory` when it holds `.git`, else `directory`; compared by
+    _runtime_snapshot, by content). Anything else (output, a write, a surviving descendant, another exit
+    status, a timeout, a failure to start, a module that cannot be read or parsed) is a discrepancy naming the
+    module and the form, and a path of `tree` that cannot be listed, stat'ed or read (or `tree` absent) is a
+    cannot-evaluate discrepancy naming it. The tree is compared once around the whole parallel run, after
+    _RUNTIME_SETTLE; when it changed, every run is repeated one at a time to name the writer.
+    The static checks (_self_test_entry_gaps, _entry_tail_gap, _self_test_dispatch_probe) are fast pre-checks
+    that name a cause; this probe decides. Residuals: it sees only the forms it tries, so behaviour gated on
+    any other argument list (one built at run time, a word not spelled as a `--` constant, or a longer
+    combination), an environment variable, the date, the network or a file outside its fresh directories is
+    unseen; a module that runs a suite silently, writes nothing it can see and exits 0 or 2 passes; a write
+    outside the fresh directories and `tree` (the top-level `.git` included; a nested `.git` IS
+    recorded) is unseen; a clean report proves only that the supervisor's own subtree is drained, so ANY
+    same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+    socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+    shared-uid worker pool such processes exist) can act for the module after the report, and is unseen
+    unless it writes into `tree` before the tree is compared; and a write by another process during the run may be blamed on a module. `spy`, when given, is
+    called with (name, argv, token) just before a run's supervisor starts; only
+    _self_test_runtime_escape_probe passes it, to time a decoy against a live run token. Returns the
+    list of discrepancies."""
+    import base64
+    import concurrent.futures
+    import json
+    import shutil
+    import socket
+    import subprocess
+    import tempfile
+    import threading
+    import time
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    directory = Path(directory).resolve()
+    if tree is None:
+        tree = directory.parent.parent if (directory.parent.parent / ".git").exists() else directory
+    host = Path(__file__).name
+    misses, runs = _runtime_probe_runs(directory, table, names)
+    if names is None and not runs and not misses:
+        return ["no *.py module found in {}".format(directory)]
+    usage = (str(__doc__) + "\n").encode("utf-8")
+
+    def child(run):
+        name, argv = run
+        box = tempfile.mkdtemp(prefix="run-", dir=str(tmp))
+        try:
+            fresh = [os.path.join(box, each) for each in ("cwd", "home", "tmp")]
+            for each in fresh:
+                os.mkdir(each)
+            token = os.path.basename(box)
+            env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8",
+                       **{_RUNTIME_MARKER: token})
+            if spy is not None:
+                spy(name, argv, token)
+            report_r, report_w = socket.socketpair()
+            try:
+                proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+                                         str(report_w.fileno()), str(timeout), str(_RUNTIME_SETTLE),
+                                         str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+                                         sys.executable, "-I", "-B",
+                                         str(directory / name)] + argv, cwd=fresh[0], env=env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, start_new_session=True,
+                                        pass_fds=(report_w.fileno(),))
+            except (OSError, subprocess.SubprocessError) as exc:
+                report_r.close()
+                report_w.close()
+                return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
+            report_w.close()
+            # The supervisor returns its report ONLY over this socketpair, never over
+            # its stdout, and the module's own stdout/stderr reach the supervisor over
+            # socketpairs too: opening a socket end through /proc/<pid>/fd gives ENXIO
+            # (a pipe, the former channel for both, could be reopened that way), and
+            # the supervisor is non-dumpable, so a same-uid process can neither list
+            # nor pidfd_getfd its descriptors whatever Yama ptrace_scope says (QA7
+            # claude M1; QA8 claude M1/m4) -- that closes the report channel on the
+            # SUPERVISOR side only. NOT covered: the supervisor's own stdout/stderr
+            # pipes to this process, where tampering can only turn a pass into a
+            # failure (the supervisor's stdout must be empty, and a drained or
+            # garbled report fails the run); and THIS test process, which stays
+            # dumpable, so at Yama ptrace_scope 0 a same-uid process could
+            # pidfd_getfd this reader's report_r (and report_w until the close
+            # above) and turn a FAILURE INTO A PASS by draining the genuine report
+            # and writing a forged clean one (QA9 claude F4) -- at scope 0 such a
+            # process could already ptrace this test outright, so the route adds no
+            # new exposure, and at scope >= 1 pidfd_getfd on a non-descendant is
+            # refused. Drain the socket in a thread so a large report cannot deadlock
+            # against communicate() draining the supervisor's stdio pipes.
+            collected = {}
+            budget = timeout + _RUNTIME_REAP_SECONDS + 30
+            drained_by = time.monotonic() + budget + 5
+
+            def drain():
+                parts = []
+                try:
+                    while True:
+                        left = drained_by - time.monotonic()
+                        if left <= 0.0:
+                            break
+                        report_r.settimeout(left)
+                        chunk = report_r.recv(65536)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                except OSError:
+                    pass
+                collected["raw"] = b"".join(parts)
+
+            def settle():
+                # Join the pump BEFORE closing report_r, so the drain thread never races a
+                # reused fd number (QA8 claude nit). The join is bounded: every recv carries a
+                # timeout ending at `drained_by`; a reader still alive past it is shut down
+                # (EOF to its recv, its fd number still held) and joined once more, briefly.
+                pump.join(max(0.0, drained_by - time.monotonic()) + 1.0)
+                if pump.is_alive():
+                    try:
+                        report_r.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    pump.join(1.0)
+                return not pump.is_alive()
+
+            pump = threading.Thread(target=drain)
+            pump.start()
+            try:
+                sup_out, sup_err = proc.communicate(timeout=budget)
+            except subprocess.TimeoutExpired:
+                proc.kill()   # the probe's own supervisor child; its reap is bounded too
+                try:
+                    proc.communicate(timeout=_RUNTIME_REAP_SECONDS)
+                    unreaped = ""
+                except subprocess.TimeoutExpired:
+                    unreaped = " and was not reaped within {} s of its kill".format(_RUNTIME_REAP_SECONDS)
+                settle()
+                report_r.close()
+                return "{} {}: the probe supervisor did not finish within {} s{}".format(
+                    name, argv, budget, unreaped)
+            if not settle():
+                report_r.close()
+                return "{} {}: the probe's report reader did not stop by its {} s deadline".format(
+                    name, argv, budget + 5)
+            report_r.close()
+            report_raw = collected.get("raw", b"")
+            written = []
+            for each in fresh:
+                try:
+                    if os.listdir(each):
+                        written.append(os.path.basename(each))
+                except OSError as exc:
+                    written.append("{} (cannot be listed: {})".format(os.path.basename(each),
+                                                                      type(exc).__name__))
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+        if proc.returncode != 0:
+            return "{} {}: the probe supervisor failed (rc {}; stderr tail {!r})".format(
+                name, argv, proc.returncode, sup_err[-160:])
+        if sup_out:
+            return "{} {}: the probe supervisor wrote to stdout ({!r}); the report channel is the " \
+                   "socketpair alone".format(name, argv, sup_out[:160])
+        try:
+            text = report_raw.decode("utf-8")
+        except ValueError as exc:
+            return "{} {}: the probe supervisor report was not valid UTF-8 ({})".format(
+                name, argv, type(exc).__name__)
+        if text.count("\n") != 1 or not text.endswith("\n"):
+            return "{} {}: the probe supervisor report was not exactly one line ({} newlines, {} bytes)".format(
+                name, argv, text.count("\n"), len(report_raw))
+        try:
+            report = json.loads(text)
+            stdout = base64.b64decode(report["stdout"])
+            stderr = base64.b64decode(report["stderr"])
+            survivors = sorted(set(report["survivors"]))
+        except (ValueError, KeyError, TypeError) as exc:
+            return "{} {}: the probe supervisor returned no result ({})".format(
+                name, argv, type(exc).__name__)
+        if not (report.get("subreaper") and report.get("undumpable")
+                and report.get("enumerable") and report.get("pidfd")):
+            return ("cannot evaluate {} {}: the supervisor cannot contain descendants here "
+                    "(PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the "
+                    "/proc child census is unavailable{})").format(name, argv,
+                                             "; " + report["census"] if report.get("census") else "")
+        if report.get("spawn"):
+            return "{} {}: failed to run ({})".format(name, argv, report["spawn"])
+        if report.get("timeout"):
+            return "{} {}: timed out after {} s".format(name, argv, timeout)
+        if not report.get("drained"):
+            survivors.append("children still appearing when the reap rounds ended")
+        if survivors:
+            return ("{} {}: left a process running after it exited ({}; not signalled: "
+                    "D-385-CURRENT-CHILD leaves an adopted survivor as the disclosed "
+                    "orphan-escape residual)").format(name, argv, ", ".join(survivors[:4]))
+        if written:
+            return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
+        rc = report.get("rc")
+        refused = rc == 2 and not stdout and (
+            len(stderr.splitlines()) == 1 or name == host and stderr == usage)
+        if not (refused or rc == 0 and not stdout and not stderr):
+            return "{} {}: neither refused nor idle (rc {}, {} bytes of stdout, {} lines of stderr; want " \
+                   "exit 2 with one stderr line, or exit 0 with no output)".format(
+                       name, argv, rc, len(stdout), len(stderr.splitlines()))
+        return None
+
+    def cannot_evaluate(unread):
+        return "cannot evaluate {}: the runtime probe cannot list, stat or read {}".format(
+            tree, ", ".join(unread[:8]))
+
+    def changed_since(before):
+        after, unread = _runtime_snapshot(tree)
+        return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path)) + [
+            "{} unreadable".format(each) for each in unread]
+
+    before, unread = _runtime_snapshot(tree)
+    if unread:
+        misses.append(cannot_evaluate(unread))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    if unread:
+        return misses
+    time.sleep(_RUNTIME_SETTLE)
+    changed = changed_since(before)
+    if changed:
+        misses.append("{} changed during the runtime probe ({})".format(tree, ", ".join(changed[:8])))
+        for run in runs:
+            before, unread = _runtime_snapshot(tree)
+            if unread:
+                misses.append(cannot_evaluate(unread))
+                break
+            child(run)
+            time.sleep(_RUNTIME_SETTLE)
+            changed = changed_since(before)
+            if changed:
+                misses.append("{} {}: changed {} ({})".format(run[0], run[1], tree, ", ".join(changed[:8])))
+    return misses
+
+
+_RUNTIME_USAGE = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_RUNTIME_EXIT_TAIL = ('def cases():\n    print("SUITE RAN")\n\n\ndef main():\n'
+                      '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+                      'if __name__ == "__main__":\n')
+# The escaping fixtures (detached.py, nondumpable.py, hopper.py) leave their writer running
+# (D-385-CURRENT-CHILD), and it writes its LATE-<kind>-<mark> marker 30 s later into the `late`
+# directory BESIDE the probed one, never into it, so no late write can be blamed on a later run. The
+# module takes an flock on its own LIVE-<mark> file there before it forks; the writer inherits it (on a
+# descriptor of at least 3, since the writer points 0-2 at /dev/null) and holds it until it exits, so
+# _self_test_runtime_escape_probe can wait, for at most _RUNTIME_LATE_BOUND seconds, until every
+# writer has exited before its directory is removed.
+_RUNTIME_LATE_HOLD = (
+    '    late = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "late")\n'
+    "    mark = os.urandom(8).hex()\n"
+    '    hold = fcntl.fcntl(os.open(os.path.join(late, "LIVE-" + mark), os.O_WRONLY | os.O_CREAT | os.O_EXCL),\n'
+    "                       fcntl.F_DUPFD, 3)\n"
+    "    fcntl.flock(hold, fcntl.LOCK_EX)\n")
+_RUNTIME_LATE_BOUND = 40.0
+# The runtime probe's fixtures (name, source, the phrase its discrepancy must hold, or None for a passing
+# module): the reviewers' reproductions the static checks miss, run as files. None but clean_lib.py binds
+# self_test or compares an argument list with a `--self-test` list literal, so the static selection is it alone.
+_RUNTIME_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _RUNTIME_USAGE, None),
+    ("idle_lib.py", "import sys\n\nVALUE = len(sys.argv)\n", None),
+    # Round-6 claude F1: a module that plants (or overwrites) a would-be supervisor file two levels
+    # above its fresh cwd, where the per-run boxes live. The supervisor source is passed inline, so no
+    # such file is ever read and later runs stay contained: detached.py and its siblings, which sort
+    # and run after this module, pin that their setsid'd writers are still caught.
+    ("a_planter.py", "import os\nimport sys\n\n"
+     "boxes = os.path.dirname(os.path.dirname(os.getcwd()))\n"
+     'target = os.path.join(boxes, "_opf_runtime_supervisor.py")\n'
+     'fake = ("import json\\n"\n'
+     '        "print(json.dumps(dict(subreaper=True, enumerable=True, pidfd=True, census=None,"\n'
+     '        " spawn=None, timeout=False, rc=0, stdout=\'\', stderr=\'\', survivors=[],"\n'
+     '        " drained=True)))\\n")\n'
+     'scratch = target + ".{}".format(os.getpid())\n'
+     'with open(scratch, "w") as handle:\n    handle.write(fake)\n'
+     "os.replace(scratch, target)\n"
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, None),
+    ("var_guard.py", 'import sys\n\n\ndef cases():\n    print("TEST VECTOR EXECUTED")\n    return 0\n\n\n'
+     'IS_MAIN = __name__ == "__main__"\nif IS_MAIN:\n    sys.exit(cases())\n', "neither refused nor idle"),
+    ("built_flag.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\ndef cases():\n'
+     '    print("TEST VECTOR EXECUTED", file=sys.stderr)\n    return 0\n\n\nif __name__ == "__main__":\n'
+     "    if sys.argv[1:] == [FLAG]:\n        sys.exit(cases())\n    if sys.argv[1:2] == [FLAG]:\n        cases()\n"
+     + _RUNTIME_USAGE, "['--self-test', 'extra']: neither refused nor idle"),
+    ("suite_name.py", 'import sys\n\n\ndef run_checks():\n    print("CHECKS RAN")\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    if "--self-test" in sys.argv[1:]:\n        sys.exit(run_checks())\n'
+     + _RUNTIME_USAGE, "neither refused nor idle"),
+    ("toplevel.py", 'import sys\n\n\ndef _vectors():\n    print("VECTOR 1 ok")\n\n\n'
+     'if sys.argv[1:2] == ["--selftest"]:\n    _vectors()\n', "['--selftest']: neither refused nor idle"),
+    ("alias_main.py", "import sys\n\nimport __main__ as _me\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        'if __name__ == "__main__":\n', '_me.main = cases\nif __name__ == "__main__":\n')
+     + "    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_call.py", "import sys\n\n\ndef _pre():\n    sys.exit(0)\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _pre()\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_alias.py", "import sys\nfrom sys import exit as leave\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    leave(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_builtins.py", "import builtins\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    builtins.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_sysalias.py", "import sys\n\n_s = sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _s.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_execv.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    os.execv(sys.executable, [sys.executable, "-I", "-B", "-c", "print(1)"])\n    sys.exit(main())\n',
+     "neither refused nor idle"),
+    ("writes_cwd.py", 'import sys\n\nopen("left.txt", "w").close()\nif __name__ == "__main__":\n'
+     + _RUNTIME_USAGE, "wrote into its fresh cwd"),
+    ("writes_tree.py", "import os\nimport sys\n\n"
+     'open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "left.txt"), "w").close()\n'
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, "writes_tree.py ['--self-test', 'extra']: changed"),
+    ("sleeps.py", 'import sys\nimport time\n\nif sys.argv[1:] == ["--selftest"]:\n    time.sleep(60)\n',
+     "['--selftest']: timed out"),
+    ("restores.py", "import os\nimport sys\n\n"
+     'path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "same.txt")\nst = os.stat(path)\n'
+     'with open(path, "w") as handle:\n    handle.write(os.urandom(8).hex())\n'
+     "os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))\n" 'if __name__ == "__main__":\n' + _RUNTIME_USAGE,
+     "restores.py ['--self-test', 'extra']: changed"),
+    ("detached.py", "import fcntl\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
+        '        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n            os.dup2(null, fd)\n'
+        "        time.sleep(30)\n"
+        '        open(os.path.join(late, "LATE-detached-" + mark), "w").close()\n        os._exit(0)\n')
+     + "    sys.exit(main())\n", "left a process running"),
+    ("nondumpable.py", "import ctypes\nimport fcntl\nimport os\nimport sys\nimport time\n\n\n"
+     + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
+        "        ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        time.sleep(30)\n"
+        "        open(os.path.join(late, \"LATE-nondumpable-\" + mark), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("hopper.py", "import fcntl\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        end = time.monotonic() + 0.5\n        while time.monotonic() < end:\n"
+        "            if os.fork() != 0:\n                os._exit(0)\n"
+        "        time.sleep(30)\n"
+        "        open(os.path.join(late, \"LATE-hopper-\" + mark), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("inode_swap.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\ntarget = os.path.join(here, \"pin.txt\")\n"
+     "dir_st = os.stat(here)\nst = os.stat(target)\n"
+     "with open(target, \"rb\") as handle:\n    data = handle.read()\n"
+     "outside = os.path.join(os.path.dirname(here), \"outside-{}.bin\".format(os.getpid()))\n"
+     "with open(outside, \"wb\") as handle:\n    handle.write(data)\n"
+     "os.chmod(outside, st.st_mode & 0o7777)\nos.utime(outside, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+     "hop = target + \".{}\".format(os.getpid())\nos.link(outside, hop)\nos.rename(hop, target)\n"
+     "os.utime(here, ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "inode_swap.py ['--self-test', 'extra']: changed"),
+    ("gitnest.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\nsub = os.path.join(here, \"sub\")\n"
+     "nest = os.path.join(sub, \".git\")\nsub_st = os.stat(sub)\nnest_st = os.stat(nest)\n"
+     "with open(os.path.join(nest, \"config\"), \"w\") as handle:\n"
+     "    handle.write(os.urandom(8).hex())\n"
+     "os.utime(nest, ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))\n"
+     "os.utime(sub, ns=(sub_st.st_atime_ns, sub_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "gitnest.py ['--self-test', 'extra']: changed"),
+    ("literal_form.py", "import sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    if sys.argv[1:2] == ["--self-test"] and sys.argv[2:] == ["--vectors-only"]:\n        sys.exit(cases())\n'
+     "    sys.exit(main())\n", "literal_form.py ['--self-test', '--vectors-only']: neither refused nor idle"),
+    ("locked.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    here = os.path.dirname(os.path.abspath(__file__))\n"
+        '    with open(os.path.join(here, "locked", "payload"), "w") as handle:\n'
+        '        handle.write("AFTER!")\n') + "    sys.exit(main())\n", None),
+)
+
+
+def _runtime_supervisor_signal_audit(source):
+    """A TRIPWIRE over the supervisor source for ORDINARY signalling spellings, not a proof of
+    absence (QA7 codex 3 / claude m1 + codex 2; QA8 codex minor / claude m2). Returns (signals,
+    unbounded_wait): the sorted names of every DIRECT call spelled as os.kill, os.killpg or
+    signal.pthread_kill, through any `import os as x` module alias, or as a bare name from
+    `from os import kill`/`killpg` or `from signal import pthread_kill`; and True when a .wait()
+    call carries neither argument nor keyword. It reads the parse tree (a textual scan missed an
+    aliased import), and it does NOT see dynamic or indirect spellings: getattr(os, "kill"),
+    os.__dict__["kill"], an assignment alias (k = os.kill; k(...)), functools.partial(os.kill),
+    ctypes/libc.kill, posix.kill, __import__("os").kill, `from os import *`, a subprocess or
+    os.system kill(1), an unproven pidfd_send_signal, or a wait made unbounded by an explicit
+    None (wait(None), wait(timeout=None), a bare communicate(), os.waitpid(pid, 0)). The
+    behavioural checks are the safeguard: the report-only reap pinned by
+    _self_test_runtime_supervisor_unit's kill-restored mutant run, and
+    _kill_proved_child's forged-pid and undeclared-target refusals."""
+    import ast
+    tree = ast.parse(source)
+    os_mods = set()
+    signal_mods = set()
+    bare = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    os_mods.add(alias.asname or "os")
+                elif alias.name == "signal":
+                    signal_mods.add(alias.asname or "signal")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name in ("kill", "killpg"):
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "signal":
+            for alias in node.names:
+                if alias.name == "pthread_kill":
+                    bare.add(alias.asname or alias.name)
+    signals = []
+    unbounded_wait = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            base = func.value
+            if isinstance(base, ast.Name):
+                if base.id in os_mods and func.attr in ("kill", "killpg"):
+                    signals.append("{}.{}".format(base.id, func.attr))
+                elif base.id in signal_mods and func.attr == "pthread_kill":
+                    signals.append("{}.{}".format(base.id, func.attr))
+            if func.attr == "wait" and not node.args and not node.keywords:
+                unbounded_wait = True
+        elif isinstance(func, ast.Name) and func.id in bare:
+            signals.append(func.id)
+    return sorted(set(signals)), unbounded_wait
+
+
+def _self_test_runtime_supervisor_unit(tmp):
+    """Unit checks over _RUNTIME_SUPERVISOR, loaded as a module from a file private to this check (the
+    probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
+    the source holds no numeric kill (the census is REPORT-ONLY; no census pid is ever a signal target,
+    and the one kill is Popen.kill on the supervisor's own un-reaped module child) and resets SIGCHLD to
+    SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
+    /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop is
+    REPORT-ONLY within its bound (D-385-CURRENT-CHILD: a census pid is an adopted descendant the
+    supervisor never forked, so it is named as an undrained survivor, reaped only once it exits on
+    its own through WNOHANG polls, and never signalled or locally pidfd-opened), never a blocking
+    waitpid a traced child could stall. The report-only reap is load-bearing: a mutant with the
+    retired adopted-descendant kill restored signals a modelled adopted child where the committed
+    source sends nothing. _kill_proved_child -- the one route for any self-test signal on a pid from
+    a file or an earlier /proc read -- must refuse a FORGED live non-child pid (no signal recorded),
+    must refuse even this process's own live child when the call site supplies neither a handoff
+    descriptor nor its forked=True own-fork declaration (the retired adoption license, fail closed),
+    and must own the declared fork; an AST pin keeps this check's cleanup and the helper free of
+    numeric kills, so restoring the QA7 reaped-child `os.kill` turns this red (QA8). Returns the list
+    of faults."""
+    import importlib.util
+    import signal
+    import time
+    import types
+    faults = []
+    signals, unbounded_wait = _runtime_supervisor_signal_audit(_RUNTIME_SUPERVISOR)
+    if signals:
+        faults.append("the supervisor source can signal a process by pid ({}); the census is REPORT-ONLY "
+                      "(D-385-CURRENT-CHILD: no census pid is ever a signal target)".format(
+                          ", ".join(signals)))
+    if unbounded_wait:
+        faults.append("the supervisor waits on the module without a timeout, so a traced or wedged module "
+                      "could stall the run past its deadline")
+    if "signal.signal(signal.SIGCHLD, signal.SIG_DFL)" not in _RUNTIME_SUPERVISOR:
+        faults.append("the supervisor does not reset SIGCHLD to SIG_DFL, so an inherited SIG_IGN would "
+                      "auto-reap its children")
+    base = Path(tmp, "supervisor-unit")
+    os.makedirs(str(base))
+    source = base / "_runtime_supervisor_unit.py"
+    source.write_text(_RUNTIME_SUPERVISOR, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("_runtime_supervisor_unit", str(source))
+    sup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sup)
+    real_os = sup.os
+
+    def shadow(**overrides):
+        copied = {name: getattr(real_os, name) for name in dir(real_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    def shadow_for(base_os, **overrides):
+        copied = {name: getattr(base_os, name) for name in dir(base_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    records = {}
+
+    def census_listdir(target):
+        if target == "/proc":
+            return sorted(records)
+        raise OSError("the unit census has no task listing")
+
+    class _Payload:
+        def __init__(self, data):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return self.data
+
+    def census_open(target, _mode="r"):
+        data = records[target.split("/")[2]]
+        if isinstance(data, Exception):
+            raise data
+        return _Payload(data)
+
+    me = str(os.getpid()).encode("ascii")
+    sup.os = shadow(listdir=census_listdir)
+    sup.open = census_open
+    try:
+        records["4242"] = ProcessLookupError("vanished")
+        try:
+            if sup._children() != set():
+                faults.append("the census did not skip a vanished pid")
+        except OSError:
+            faults.append("a vanished pid made the census raise instead of being skipped")
+        records["4242"] = b"4242 (comm) S " + me + b" 0 0"
+        try:
+            if sup._children() != {4242}:
+                faults.append("the census did not list a live child of this process")
+        except OSError:
+            faults.append("a well-formed child record made the census raise")
+        for label, data in (("an unreadable", PermissionError("denied")),
+                            ("a malformed", b"no stat fields here")):
+            records["4242"] = data
+            try:
+                sup._children()
+                faults.append("{} /proc stat record gave a clean census instead of raising, so a run "
+                              "with unavailable ownership evidence could read as clean".format(label))
+            except OSError:
+                pass
+    finally:
+        sup.os = real_os
+        del sup.open
+
+    remaining = set()
+    waits = []
+
+    def unit_census():
+        return set(remaining)
+
+    def unit_waitpid(pid, flags):
+        waits.append(flags)
+        done = real_os.waitpid(pid, flags)
+        if done[0] == pid:
+            remaining.discard(pid)
+        return done
+
+    child = os.fork()
+    if child == 0:
+        time.sleep(60)
+        os._exit(1)
+    remaining.add(child)
+    try:
+        child_fd = os.pidfd_open(child, 0)
+    except OSError:
+        child_fd = None
+    real_children = sup._children
+    real_signal_module = sup.signal
+    report = {"survivors": [], "drained": True}
+    unit_sent = []
+    unit_opens = []
+
+    def unit_pidfd_open(pid, flags=0):
+        unit_opens.append(pid)
+        return real_os.pidfd_open(pid, flags)
+
+    begin = time.monotonic()
+    try:
+        sup._children = unit_census
+        sup.os = shadow(waitpid=unit_waitpid, pidfd_open=unit_pidfd_open)
+        sup.signal = shadow_for(real_signal_module,
+                                pidfd_send_signal=lambda fd, sig: unit_sent.append(sig))
+        sup._reap(report, _RUNTIME_REAP_SECONDS, _RUNTIME_REAP_ROUNDS)
+    finally:
+        sup.os = real_os
+        sup.signal = real_signal_module
+        sup._children = real_children
+        # Clean up the forked child WITHOUT a numeric kill, through the descriptor
+        # this process opened on its OWN direct fork above (QA7 blocker, shared-pool
+        # rule; D-385-CURRENT-CHILD: the caller answers for the descriptor's own-fork
+        # provenance). ECHILD (already reaped) or any waitid error means nothing is
+        # signalled. The numeric-kill AST pin below keeps this cleanup red if the
+        # pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
+        if child_fd is not None:
+            try:
+                _kill_proved_child(child, pidfd=child_fd, unreaped=faults)
+            finally:
+                os.close(child_fd)
+    took = time.monotonic() - begin
+    # D-385-CURRENT-CHILD: the census pid models an ADOPTED descendant, so the
+    # report-only reap must NAME it as an undrained survivor and leave it
+    # running -- never signal it or open a pidfd on it. The retired reap
+    # SIGKILLed it here: the survival requirement below is the revert flip.
+    if unit_sent or unit_opens:
+        faults.append("the report-only reap signalled or locally pidfd-opened an adopted-model "
+                      "census pid (sent {}, opened {}; D-385-CURRENT-CHILD)".format(
+                          unit_sent, unit_opens))
+    if child not in remaining or report["drained"]             or "pid {}".format(child) not in report["survivors"]:
+        faults.append("the report-only reap did not leave the live adopted-model child running and "
+                      "named as an undrained survivor (survivors {}, drained {})"
+                      .format(report["survivors"], report["drained"]))
+    if not waits or any(not flags & os.WNOHANG for flags in waits):
+        faults.append("the reap waited without WNOHANG, so a traced child, whose exit only its tracer "
+                      "can collect, would block the supervisor past its bound")
+    if took > _RUNTIME_REAP_SECONDS + 2:
+        faults.append("the reap unit overran its bound ({:.1f} s)".format(took))
+
+    # D-385-CURRENT-CHILD: the report-only reap is load-bearing. Model a census
+    # naming a live pid (this process's own fork stands in for an adopted
+    # descendant; the kernel keeps no provenance either way): the committed
+    # supervisor must send it NO signal, and a mutant with the retired
+    # adopted-descendant kill restored must try to, so reverting the reap turns
+    # this check red. No real signal is ever delivered: pidfd_send_signal is
+    # shadowed by a recorder in both runs.
+    kid = os.fork()
+    if kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    try:
+        kid_fd = os.pidfd_open(kid, 0)
+    except OSError:
+        kid_fd = None
+    if kid_fd is None:
+        faults.append("could not model an adopted census pid for the report-only reap pin")
+    else:
+        sent = []
+
+        def recording_signal(fd, sig):
+            sent.append(sig)
+
+        def fake_census():
+            return set([kid])
+
+        def run_reap(module):
+            del sent[:]
+            saved_os = module.os
+            saved_signal = module.signal
+            saved_children = module._children
+            module._children = fake_census
+            module.os = shadow_for(saved_os, pidfd_open=lambda pid, flags=0: os.dup(kid_fd))
+            module.signal = shadow_for(saved_signal, pidfd_send_signal=recording_signal)
+            try:
+                module._reap(dict(survivors=[], drained=True), 0.2, 3)
+            finally:
+                module.os = saved_os
+                module.signal = saved_signal
+                module._children = saved_children
+            return list(sent)
+
+        if run_reap(sup):
+            faults.append("the committed supervisor signalled a census pid it never forked "
+                          "(D-385-CURRENT-CHILD: adopted descendants are reported, never signalled)")
+        reporting = ("            try:\n"
+                     "                os.waitpid(pid, os.WNOHANG)\n"
+                     "            except OSError:\n"
+                     "                pass\n")
+        retired = ("            try:\n"
+                   "                fd = os.pidfd_open(pid, 0)\n"
+                   "            except OSError:\n"
+                   "                continue\n"
+                   "            try:\n"
+                   "                try:\n"
+                   "                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n"
+                   "                except OSError:\n"
+                   "                    continue\n"
+                   "                try:\n"
+                   "                    signal.pidfd_send_signal(fd, signal.SIGKILL)\n"
+                   "                except OSError:\n"
+                   "                    pass\n"
+                   "            finally:\n"
+                   "                os.close(fd)\n"
+                   "            try:\n"
+                   "                os.waitpid(pid, os.WNOHANG)\n"
+                   "            except OSError:\n"
+                   "                pass\n")
+        if _RUNTIME_SUPERVISOR.count(reporting) != 1:
+            faults.append("the report-only reap body was not found in its expected form, so the "
+                          "kill-restored mutant check is vacuous")
+        else:
+            mutant_file = base / "_runtime_supervisor_killrestored.py"
+            mutant_file.write_text(_RUNTIME_SUPERVISOR.replace(reporting, retired, 1),
+                                   encoding="utf-8")
+            mspec = importlib.util.spec_from_file_location(
+                "_runtime_supervisor_killrestored", str(mutant_file))
+            mutant = importlib.util.module_from_spec(mspec)
+            mspec.loader.exec_module(mutant)
+            if not run_reap(mutant):
+                faults.append("restoring the retired adopted-descendant kill did not change what the "
+                              "recorder sees, so the report-only reap is not pinned by this check")
+        # Hygiene through the descriptor opened on this process's OWN fork above.
+        try:
+            _kill_proved_child(kid, pidfd=kid_fd, unreaped=faults)
+        finally:
+            os.close(kid_fd)
+
+    # QA8 codex blocker (class check): _kill_proved_child is the single route for a
+    # self-test signal whose target pid came from a file or an earlier /proc read.
+    # Feed it a FORGED pid -- a live process that is NOT this process's child (its
+    # own parent) -- and require NO signal: the waitid(P_PIDFD, ..., WNOWAIT) proof
+    # answers ECHILD and the helper refuses. The recorder captures any signal a
+    # proof-less mutant would send; nothing real is ever delivered.
+    forged_sent = []
+    real_send = signal.pidfd_send_signal
+    signal.pidfd_send_signal = lambda fd, sig: forged_sent.append(sig)
+    try:
+        forged_signalled = _kill_proved_child(os.getppid())
+    finally:
+        signal.pidfd_send_signal = real_send
+    if forged_sent or forged_signalled:
+        faults.append("the ownership helper signalled a live pid it could not prove is this "
+                      "process's own child (sent {})".format(forged_sent))
+    probe_kid = os.fork()
+    if probe_kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    # D-385-CURRENT-CHILD: with neither a handoff descriptor nor the call
+    # site's forked=True own-fork declaration, the helper refuses even this
+    # process's own live child and opens nothing -- the retired adoption
+    # license (a waitid-proved CURRENT child was enough) is the revert this
+    # recorder-backed refusal pins.
+    undeclared_sent = []
+    undeclared_send = signal.pidfd_send_signal
+    signal.pidfd_send_signal = lambda fd, sig: undeclared_sent.append(sig)
+    try:
+        undeclared = _kill_proved_child(probe_kid)
+    finally:
+        signal.pidfd_send_signal = undeclared_send
+    if undeclared or undeclared_sent:
+        faults.append("the ownership helper signalled an undeclared target (sent {}): the retired "
+                      "adoption license is back (D-385-CURRENT-CHILD)".format(undeclared_sent))
+    if not _kill_proved_child(probe_kid, forked=True, unreaped=faults):
+        faults.append("the ownership helper refused this process's own declared live un-reaped child")
+        try:
+            kid_fd = os.pidfd_open(probe_kid, 0)
+        except OSError:
+            kid_fd = None
+        if kid_fd is not None:
+            try:
+                signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
+                if not _reap_pidfd(kid_fd, _PIDFD_REAP_SECONDS):
+                    faults.append("this process's own child pid {} was not reaped within {} s of its "
+                                  "SIGKILL".format(probe_kid, _PIDFD_REAP_SECONDS))
+            except OSError:
+                pass
+            finally:
+                os.close(kid_fd)
+
+    # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9
+    # claude F1 and by QA10 (D-385-PIDFD-HANDOFF). Parse this host file and
+    # require, across the shared helper, this check, and EVERY _watchdog_*
+    # fixture driver (nested fixture helpers included), that a numeric
+    # signal call targets only os.getpid(), the un-reaped launcher
+    # guardian's `child.pid`, or a name whose NEAREST PRECEDING binding in
+    # the same scope is `os.fork()` (plain or annotated assignment) and that
+    # has NOT since been passed to os.waitpid/wait4/waitid (a waited child
+    # may be reaped, so its number is no longer pinned), and that a bare
+    # os.pidfd_open pins only such a target: every other pid -- one read
+    # from a fixture file included -- must route through _kill_proved_child
+    # or arrive as a descriptor from its forking parent
+    # (_pidfd_handoff_recv). QA11 (codex blocker) adds the SENDER licence:
+    # _pidfd_handoff_send takes only a fork-bound, un-waited name bound in
+    # the SAME fork generation -- never a constant, a reaped child, or a
+    # name sent from a later fork's child branch (a different process) --
+    # so no scanned driver can launder a file-read or foreign number into
+    # a handoff; new senders route through _pidfd_handoff_fork_send, which
+    # can only ever send the pid its own os.fork() just returned. QA12
+    # (claude m2) widens the recognized child-branch spellings -- the
+    # accepted shape set is exactly `q == 0` / `0 == q` / `not q` bodies
+    # and the ORELSE of `q != 0` / `0 != q` / bare `q` -- and adds the
+    # interleaved-fork rule: ANY later fork binding on the send's own path
+    # between the target's fork and the send revokes the licence, because
+    # the send then also runs in that later fork's child whether or not a
+    # recognized branch follows. QA12 (claude m1) also treats
+    # emit._fixture_pidfd exactly like a bare os.pidfd_open (an unproved
+    # opener; aliases included), and a whole-file SCM_RIGHTS sweep below
+    # requires socket.send_fds/sendmsg to appear ONLY inside
+    # _pidfd_handoff_send, the leg-1j misuse fixture, and (in
+    # _opf_emit.py) _fixture_send_subject. Aliased
+    # spellings that would dodge the name
+    # match -- getattr(os, "kill"), k = os.kill, po = os.pidfd_open -- are
+    # refused, except an alias bound in a scope that patch.object-replaces
+    # that same attribute (the standard forward-to-the-real-one patch shim).
+    # Inside this check and the helper themselves the rule stays TOTAL (the
+    # QA7 reaped-child class: even a fork-bound name can be stale here), so
+    # restoring the pre-fix `os.kill(child, signal.SIGKILL)` turns this red
+    # -- as does reverting any QA9 rerouted cleanup kill or any QA10 handoff
+    # receive to a bare open. Like _runtime_supervisor_signal_audit, a
+    # tripwire over ordinary spellings, NOT a proof: it does not see a
+    # rebind through `nonlocal`, a loop-carried rebind, `except ... as`, a
+    # closure capturing a name its owner scope later rebinds, a dynamic
+    # getattr with a computed name, os.__dict__ lookups, or
+    # functools.partial, and a plain alias of _pidfd_handoff_send is
+    # likewise unseen (the census-exception leg 1i aliases it DELIBERATELY
+    # to exercise the sender's own kernel proof, which no spelling
+    # dodges); the forged-pid runs and the handoff legs are the
+    # behavioural safeguard.
+    import ast
+    host_tree = ast.parse(Path(__file__).read_bytes())
+
+    def scan_scope(scope, owner, total, faults=faults):
+        aliasable = ("kill", "killpg", "pthread_kill", "pidfd_open",
+                     "_fixture_pidfd")
+        bindings, calls, nested, aliases = {}, [], [], []
+        arguments = scope.args
+        for argument in (tuple(getattr(arguments, "posonlyargs", ()))
+                         + tuple(arguments.args) + tuple(arguments.kwonlyargs)
+                         + tuple(filter(None, (arguments.vararg, arguments.kwarg)))):
+            bindings.setdefault(argument.arg, []).append((scope.lineno, "other", ()))
+
+        def bind(target, lineno, kind, generation):
+            if isinstance(target, ast.Name):
+                bindings.setdefault(target.id, []).append((lineno, kind, generation))
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    bind(element, lineno, "other", generation)
+            elif isinstance(target, ast.Starred):
+                bind(target.value, lineno, "other", generation)
+
+        def fork_bound(name, lineno):
+            prior = [entry for entry in bindings.get(name, ()) if entry[0] < lineno]
+            return bool(prior) and max(prior)[1] == "fork"
+
+        def fork_generation(name, lineno):
+            prior = [entry for entry in bindings.get(name, ()) if entry[0] < lineno]
+            return max(prior)[2] if prior else None
+
+        def fork_call(value):
+            # A fork-licensed binding: os.fork() itself, or the fork-and-send
+            # helper, which can only ever hand off the pid its own os.fork()
+            # just returned (QA11 codex blocker).
+            return isinstance(value, ast.Call) and (
+                (isinstance(value.func, ast.Attribute)
+                 and value.func.attr == "fork")
+                or (isinstance(value.func, ast.Name)
+                    and value.func.id == "_pidfd_handoff_fork_send"))
+
+        def child_branch(test):
+            # The fork CHILD's branch, for the ordinary spellings (QA11
+            # codex blocker; widened QA12 claude m2): the child runs the
+            # BODY of `q == 0` / `0 == q` / `not q` and the ORELSE of
+            # `q != 0` / `0 != q` / bare `q`. Code in a child branch runs
+            # in a DIFFERENT process, whose own child a name the enclosing
+            # process fork-bound never is. The accepted shape set is
+            # exactly these six spellings; anything else (a walrus, a
+            # boolean composite, a comparison through a temporary) is NOT
+            # recognized -- the interleaved-fork rule below and the
+            # sender's own kernel proof are the backstop. Returns
+            # (name, branch) with branch "body" or "orelse", or None.
+            def forked_name(node, lineno=test.lineno):
+                if isinstance(node, ast.Name) and fork_bound(node.id, lineno):
+                    return node.id
+                return None
+
+            if isinstance(test, ast.Compare) and len(test.ops) == 1 \
+                    and len(test.comparators) == 1:
+                left, right = test.left, test.comparators[0]
+                name = None
+                if isinstance(right, ast.Constant) and right.value == 0:
+                    name = forked_name(left)
+                elif isinstance(left, ast.Constant) and left.value == 0:
+                    name = forked_name(right)
+                if name is not None and isinstance(test.ops[0], ast.Eq):
+                    return name, "body"
+                if name is not None and isinstance(test.ops[0], ast.NotEq):
+                    return name, "orelse"
+                return None
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                name = forked_name(test.operand)
+                return None if name is None else (name, "body")
+            name = forked_name(test)
+            return None if name is None else (name, "orelse")
+
+        def collect(items, generation):
+            for item in items:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    nested.append(item)
+                    bindings.setdefault(item.name, []).append(
+                        (item.lineno, "other", generation))
+                    continue
+                if isinstance(item, ast.Assign):
+                    kind = "fork" if (
+                        fork_call(item.value)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name)) else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
+                    for target in item.targets:
+                        bind(target, item.lineno, kind, generation)
+                elif isinstance(item, ast.AnnAssign):
+                    # `p: int = os.fork()` binds ownership exactly like the
+                    # plain assignment (QA10 codex minor).
+                    kind = "fork" if fork_call(item.value) else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
+                    bind(item.target, item.lineno, kind, generation)
+                elif isinstance(item, (ast.AugAssign, ast.NamedExpr)):
+                    bind(item.target, item.lineno, "other", generation)
+                elif isinstance(item, ast.For):
+                    bind(item.target, item.lineno, "other", generation)
+                elif isinstance(item, ast.withitem) and item.optional_vars is not None:
+                    bind(item.optional_vars, item.context_expr.lineno, "other",
+                         generation)
+                if isinstance(item, ast.Call):
+                    calls.append((item, generation))
+                if isinstance(item, ast.If):
+                    branch = child_branch(item.test)
+                    if branch is not None:
+                        _name, which = branch
+                        child_generation = generation + (item.lineno,)
+                        collect(ast.iter_child_nodes(item.test), generation)
+                        collect(item.body, child_generation
+                                if which == "body" else generation)
+                        collect(item.orelse, child_generation
+                                if which == "orelse" else generation)
+                        continue
+                collect(ast.iter_child_nodes(item), generation)
+
+        collect(ast.iter_child_nodes(scope), ())
+
+        patched = set()
+        for call, generation in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if named in ("waitpid", "wait4", "waitid", "_bounded_wait") and not (
+                    # A nowait bounded wait (WNOWAIT) leaves the child unreaped,
+                    # so its number stays pinned by the fork (QA22).
+                    named == "_bounded_wait" and any(
+                        keyword.arg == "nowait" and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True for keyword in call.keywords)):
+                index = 1 if named == "waitid" else 0
+                if len(call.args) > index and isinstance(call.args[index], ast.Name):
+                    # A waited name may already be reaped: its number is no
+                    # longer pinned by the fork, so later kills in this scope
+                    # lose the fork-bound licence (QA10 codex minor).
+                    bindings.setdefault(call.args[index].id, []).append(
+                        (call.lineno, "waited", generation))
+            elif named == "object" and isinstance(func, ast.Attribute) \
+                    and isinstance(func.value, ast.Name) \
+                    and func.value.id == "patch" and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant):
+                patched.add(call.args[1].value)
+        for attr, lineno in aliases:
+            if attr not in patched:
+                faults.append("{} binds an alias of {} (line {}); aliased signal/pidfd "
+                              "spellings outside a patch-forwarding shim dodge this "
+                              "tripwire and are refused (QA10 claude m3)".format(
+                                  owner, attr, lineno))
+
+        def allowed(argument, lineno):
+            if isinstance(argument, ast.Call) and isinstance(argument.func, ast.Attribute) \
+                    and argument.func.attr == "getpid":
+                return True
+            if isinstance(argument, ast.Attribute) and argument.attr == "pid" \
+                    and isinstance(argument.value, ast.Name) and argument.value.id == "child":
+                return True
+            if isinstance(argument, ast.Name):
+                return fork_bound(argument.id, lineno)
+            return False
+
+        for call, generation in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if isinstance(func, ast.Name) and func.id == "getattr" \
+                    and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant) \
+                    and call.args[1].value in aliasable:
+                faults.append("{} fetches {} through getattr (line {}); dynamic "
+                              "signal/pidfd spellings dodge this tripwire and are "
+                              "refused (QA10 claude m3)".format(
+                                  owner, call.args[1].value, call.lineno))
+            if named in ("kill", "killpg", "pthread_kill"):
+                if total:
+                    faults.append("{} holds a numeric signal call ({}, line {}); the QA7 "
+                                  "reaped-child kill blocker is back".format(
+                                      owner, named, call.lineno))
+                elif not (call.args and allowed(call.args[0], call.lineno)):
+                    faults.append("{} holds a numeric signal call ({}, line {}) on a target "
+                                  "it cannot prove is its own; route it through "
+                                  "_kill_proved_child or a proved pidfd (QA9 claude F1)"
+                                  .format(owner, named, call.lineno))
+            elif named in ("pidfd_open", "_fixture_pidfd") and not total \
+                    and not (call.args and allowed(call.args[0], call.lineno)):
+                # emit._fixture_pidfd is a bare opener too: laundering a
+                # file-read number through it (directly or as the fd
+                # argument of a send) is the QA12 claude m1 route.
+                faults.append("{} opens an unproved pidfd ({}, line {}) on a pid liveness alone "
+                              "cannot authenticate; take the descriptor from the forking "
+                              "parent instead (_pidfd_handoff_recv, D-385-PIDFD-HANDOFF; "
+                              "QA9 codex blocker 1, QA12 claude m1)".format(
+                                  owner, named, call.lineno))
+            elif named == "_bounded_wait" and any(
+                    keyword.arg == "forked" for keyword in call.keywords) \
+                    and (total or not (call.args and allowed(call.args[0], call.lineno))):
+                # QA21: forked=True licenses the bounded wait's expiry SIGKILL,
+                # so the declaration is pinned exactly like a numeric kill.
+                faults.append("{} declares forked=True on a bounded wait (line {}) whose "
+                              "target it cannot prove is its own fork; its expiry kill "
+                              "would reach an adopted child (D-385-CURRENT-CHILD)".format(
+                                  owner, call.lineno))
+            elif named == "_pidfd_handoff_send":
+                target = call.args[1] if len(call.args) > 1 else None
+                licensed = (not total and isinstance(target, ast.Name)
+                            and fork_bound(target.id, call.lineno)
+                            and fork_generation(target.id, call.lineno)
+                            == generation)
+                if licensed:
+                    bound_at = max(entry for entry
+                                   in bindings.get(target.id, ())
+                                   if entry[0] < call.lineno)[0]
+                    for entries in bindings.values():
+                        for entry_lineno, kind, entry_generation in entries:
+                            if (kind == "fork"
+                                    and entry_generation == generation
+                                    and bound_at < entry_lineno
+                                    < call.lineno):
+                                # QA12 claude m2 (interleaved fork): a later
+                                # fork on the send's own path means the send
+                                # also runs in that fork's CHILD -- a
+                                # different process -- whether or not a
+                                # recognized child branch follows it.
+                                licensed = False
+                if not licensed:
+                    faults.append(
+                        "{} hands a pid to _pidfd_handoff_send (line {}) that "
+                        "is not the NEWEST fork-bound, un-waited name of the "
+                        "same fork generation; only a pid os.fork() just "
+                        "returned to THIS process may be handed off -- route "
+                        "anything else through _pidfd_handoff_fork_send "
+                        "(QA11 codex blocker, QA12 claude m2, "
+                        "D-385-PIDFD-HANDOFF)".format(owner, call.lineno))
+        for inner in nested:
+            scan_scope(inner, owner, total, faults)
+
+    for node in host_tree.body:
+        # QA22 (claude QA21 minor 3): EVERY function holding a forked= own-fork
+        # declaration is scanned, not only the named owners, so every
+        # _bounded_wait(..., forked=True) declaration is pinned. _bounded_wait is
+        # the one function left out: its _kill_proved_child(pid, forked=True)
+        # relays its own caller's declaration, which is pinned at that caller.
+        if isinstance(node, ast.FunctionDef) and (
+                node.name in ("_self_test_runtime_supervisor_unit", "_kill_proved_child")
+                or node.name.startswith("_watchdog_")
+                or (node.name != "_bounded_wait" and any(
+                    isinstance(call, ast.Call) and any(keyword.arg == "forked" for keyword in call.keywords)
+                    for call in ast.walk(node)))):
+            scan_scope(node, node.name, node.name in (
+                "_self_test_runtime_supervisor_unit", "_kill_proved_child"))
+
+    # QA12 (orchestrator ruling 1): SCM_RIGHTS stays inside the handoff.
+    # Sweep BOTH runtime-probe source files, module scope and every
+    # function, for socket.send_fds/sendmsg calls, and refuse any outside
+    # the licensed sender scopes: _pidfd_handoff_send (the one checking
+    # sender) and _pidfd_handoff_misuse_send (the leg-1j wire-shape
+    # fixture, whose every message feeds a receiver the test requires to
+    # refuse) here, and _fixture_send_subject in _opf_emit.py (the
+    # guardian's receipt send; its descriptor is the guardian's own
+    # subject pidfd). Like the rest of this check, a tripwire over
+    # ordinary spellings, NOT a proof: a computed getattr, an aliased
+    # module, or a raw send from an UNSWEPT file can dodge it -- that
+    # residual is disclosed in the handoff docstrings, not closed.
+    def scm_sweep(tree, filename, licensed_senders, faults=faults):
+        def walk(node, owner):
+            for inner in ast.iter_child_nodes(node):
+                inner_owner = owner
+                if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    inner_owner = inner.name
+                if isinstance(inner, ast.Call):
+                    called = inner.func.attr \
+                        if isinstance(inner.func, ast.Attribute) \
+                        else getattr(inner.func, "id", "")
+                    if called in ("send_fds", "sendmsg") \
+                            and owner not in licensed_senders:
+                        faults.append(
+                            "{}:{} sends descriptors outside the licensed "
+                            "handoff senders ({}, line {}): SCM_RIGHTS stays "
+                            "inside _pidfd_handoff_send (QA12 orchestrator "
+                            "ruling 1)".format(
+                                filename, owner, called, inner.lineno))
+                walk(inner, inner_owner)
+        walk(tree, "<module>")
+
+    scm_sweep(host_tree, "opf.py",
+              {"_pidfd_handoff_send", "_pidfd_handoff_misuse_send"})
+    scm_sweep(ast.parse(Path(__file__).resolve().with_name(
+        "_opf_emit.py").read_bytes()), "_opf_emit.py",
+        {"_fixture_send_subject"})
+    # The sweep is itself pinned: a probe scope with a raw send must flag,
+    # and the licensed sender scope must stay clean.
+    sweep_probe = []
+    scm_sweep(ast.parse(
+        "def helper(peer, fd):\n"
+        "    import socket\n"
+        "    socket.send_fds(peer, [b'1'], [fd])\n"), "probe",
+        {"_pidfd_handoff_send"}, sweep_probe)
+    if not any("send_fds" in fault for fault in sweep_probe):
+        faults.append("the SCM_RIGHTS sweep did not flag a raw send_fds "
+                      "probe: the QA12 sweep is not load-bearing")
+    sweep_probe = []
+    scm_sweep(ast.parse(
+        "def _pidfd_handoff_send(conn, pid):\n"
+        "    import socket\n"
+        "    socket.send_fds(conn, [b'1'], [1])\n"), "probe",
+        {"_pidfd_handoff_send"}, sweep_probe)
+    if sweep_probe:
+        faults.append("the SCM_RIGHTS sweep flagged the licensed sender "
+                      "scope: {}".format(sweep_probe))
+
+    # QA12 claude m1: the emit._fixture_pidfd laundering route is pinned
+    # like a bare pidfd_open -- an unproved argument is flagged, a
+    # fork-bound one stays licensed.
+    pidfd_probe = []
+    scan_scope(ast.parse(
+        "def _watchdog_probe(note):\n"
+        "    n = int(Path(note).read_text())\n"
+        "    signal.pidfd_send_signal(emit._fixture_pidfd(n),\n"
+        "                             signal.SIGKILL)\n").body[0],
+        "fixture-pidfd-probe", False, pidfd_probe)
+    if not any("unproved pidfd" in fault for fault in pidfd_probe):
+        faults.append("the emit._fixture_pidfd laundering probe was not "
+                      "flagged (QA12 claude m1): found {}".format(
+                          pidfd_probe))
+    pidfd_probe = []
+    scan_scope(ast.parse(
+        "def _watchdog_probe(note):\n"
+        "    p = os.fork()\n"
+        "    if p == 0:\n"
+        "        os._exit(0)\n"
+        "    fd = emit._fixture_pidfd(p)\n"
+        "    os.close(fd)\n").body[0],
+        "fixture-pidfd-control", False, pidfd_probe)
+    if pidfd_probe:
+        faults.append("the fork-bound emit._fixture_pidfd control was "
+                      "flagged: {}".format(pidfd_probe))
+
+    # QA11 codex blocker / QA12 claude m2: the handoff-send licence is
+    # itself pinned. Each flagged probe scope launders a pid into
+    # _pidfd_handoff_send -- a constant, a reaped (waited) fork child, a
+    # sibling sent from a LATER fork's child branch in each recognized
+    # spelling (`q == 0`, `0 == q`, `not q`, the orelse of `q != 0` and of
+    # bare `q`), a sibling sent with NO branch at all after an interleaved
+    # fork, and one sent after a child branch that falls through -- while
+    # the straight fork-and-send control and a control whose extra fork
+    # happens only inside the FIRST fork's child branch must stay clean,
+    # so weakening the licence in either direction turns this red.
+    handoff_probes = (
+        ("constant", "def _watchdog_probe(peer):\n"
+                     "    _pidfd_handoff_send(peer, 123)\n", True),
+        ("reaped", "def _watchdog_probe(peer):\n"
+                   "    p = os.fork()\n"
+                   "    os.waitpid(p, 0)\n"
+                   "    _pidfd_handoff_send(peer, p)\n", True),
+        ("generation", "def _watchdog_probe(peer):\n"
+                       "    p = os.fork()\n"
+                       "    q = os.fork()\n"
+                       "    if q == 0:\n"
+                       "        _pidfd_handoff_send(peer, p)\n", True),
+        ("reversed-eq", "def _watchdog_probe(peer):\n"
+                        "    p = os.fork()\n"
+                        "    q = os.fork()\n"
+                        "    if 0 == q:\n"
+                        "        _pidfd_handoff_send(peer, p)\n", True),
+        ("negated", "def _watchdog_probe(peer):\n"
+                    "    p = os.fork()\n"
+                    "    q = os.fork()\n"
+                    "    if not q:\n"
+                    "        _pidfd_handoff_send(peer, p)\n", True),
+        ("else-child", "def _watchdog_probe(peer):\n"
+                       "    p = os.fork()\n"
+                       "    q = os.fork()\n"
+                       "    if q != 0:\n"
+                       "        pass\n"
+                       "    else:\n"
+                       "        _pidfd_handoff_send(peer, p)\n", True),
+        ("truthy-else", "def _watchdog_probe(peer):\n"
+                        "    p = os.fork()\n"
+                        "    q = os.fork()\n"
+                        "    if q:\n"
+                        "        pass\n"
+                        "    else:\n"
+                        "        _pidfd_handoff_send(peer, p)\n", True),
+        ("bare-interleaved", "def _watchdog_probe(peer):\n"
+                             "    p = os.fork()\n"
+                             "    q = os.fork()\n"
+                             "    _pidfd_handoff_send(peer, p)\n", True),
+        ("after-child-pass", "def _watchdog_probe(peer):\n"
+                             "    p = os.fork()\n"
+                             "    q = os.fork()\n"
+                             "    if q == 0:\n"
+                             "        pass\n"
+                             "    _pidfd_handoff_send(peer, p)\n", True),
+        ("fork-bound", "def _watchdog_probe(peer):\n"
+                       "    p = os.fork()\n"
+                       "    if p == 0:\n"
+                       "        os._exit(0)\n"
+                       "    _pidfd_handoff_send(peer, p)\n", False),
+        ("child-branch-fork", "def _watchdog_probe(peer):\n"
+                              "    p = os.fork()\n"
+                              "    if p == 0:\n"
+                              "        r = os.fork()\n"
+                              "        os._exit(0)\n"
+                              "    _pidfd_handoff_send(peer, p)\n", False),
+    )
+    for probe_name, probe_source, must_flag in handoff_probes:
+        probe_faults = []
+        scan_scope(ast.parse(probe_source).body[0],
+                   "handoff-probe:" + probe_name, False, probe_faults)
+        if any("_pidfd_handoff_send" in fault
+               for fault in probe_faults) != must_flag:
+            faults.append(
+                "the handoff-send licence pin mis-judged the {} probe "
+                "(found {}, wanted flagged={}): the QA11 sender tripwire "
+                "is not load-bearing".format(
+                    probe_name, probe_faults, must_flag))
+    return faults
+
+
+def _self_test_runtime_report_channel(tmp):
+    """QA7 claude M1: the supervisor returns its report over a socketpair, a channel /proc/<pid>/fd
+    cannot reopen, never over its stdout. Spawn one real supervisor over a socketpair with the module
+    gated open, try BOTH forge routes a concurrent same-uid run would use -- reopen the supervisor's
+    inherited report write-end through /proc/<sup>/fd/<n>, and reopen this reader's own read-end through
+    /proc/self/fd/<n> -- and require both to fail; then require the genuine report to arrive as exactly
+    one JSON line with nothing on the supervisor's stdout. A pipe (the former channel) would let
+    /proc/<pid>/fd reopen it, so reverting the channel to a pipe turns this red. QA8 adds: the
+    PROBE's own channel is pinned too (a Popen recorder requires every fd the real probe hands a
+    supervisor through pass_fds to be a socket at spawn time, claude m1); while the gated module is
+    live, the supervisor's fd table must be unlistable by this same-uid process (non-dumpable,
+    PR_SET_DUMPABLE 0, so pidfd_getfd is refused even at Yama ptrace_scope 0; skipped for root,
+    whom /proc never refuses, claude m4); and the module's stdout and stderr must be SOCKETS whose
+    /proc entries cannot be reopened (claude M1) -- a mutant restoring pipes for either channel
+    turns this red. Returns the faults."""
+    import json
+    import socket
+    import subprocess
+    import time
+    faults = []
+
+    # QA8 claude m1: pin the PROBE's own report channel, not just this check's.
+    pin_dir = Path(tmp, "chanpin", "opf", "tools")
+    os.makedirs(str(pin_dir))
+    os.makedirs(str(Path(tmp, "chanpin", "boxes")))
+    (pin_dir / "idle.py").write_text("import sys\n\nVALUE = len(sys.argv)\n", encoding="utf-8")
+    handed = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        if argv and _RUNTIME_SUPERVISOR in argv:
+            for each in kwargs.get("pass_fds", ()):
+                handed.append(stat.S_ISSOCK(os.fstat(each).st_mode))
+        return real_popen(*args, **kwargs)
+
+    subprocess.Popen = recording_popen
+    try:
+        pinned = _self_test_runtime_probe(pin_dir, str(Path(tmp, "chanpin", "boxes")),
+                                          table={"idle.py": _DISPATCH_LIBRARY},
+                                          tree=pin_dir, timeout=10, names={"idle.py"})
+    finally:
+        subprocess.Popen = real_popen
+    faults += ["the channel-pin probe named {}".format(miss) for miss in pinned]
+    if not handed:
+        faults.append("the channel-pin probe launched no supervisor with a passed report fd")
+    elif not all(handed):
+        faults.append("the probe handed its supervisor a non-socket report channel: a pipe "
+                      "end could be reopened through /proc/<pid>/fd and drained or forged")
+    directory = Path(tmp, "chan", "opf", "tools")
+    os.makedirs(str(directory))
+    gate = Path(tmp, "chan", "gate")
+    module = directory / "gated.py"
+    module.write_text(
+        "import os\nimport time\n\n"
+        "gate = {!r}\n".format(str(gate))
+        + "bound = time.monotonic() + 30\n"
+        "while not os.path.exists(gate):\n"
+        "    if time.monotonic() >= bound:\n        break\n    time.sleep(0.005)\n",
+        encoding="utf-8")
+    report_r, report_w = socket.socketpair()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+             str(report_w.fileno()), "20", str(_RUNTIME_SETTLE),
+             str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+             sys.executable, "-I", "-B", str(module)],
+            cwd=str(directory),
+            env=dict(PATH=os.defpath, HOME=str(directory), TMPDIR=str(directory),
+                     LC_ALL="C.UTF-8", **{_RUNTIME_MARKER: "chan"}),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, pass_fds=(report_w.fileno(),))
+    except (OSError, subprocess.SubprocessError) as exc:
+        report_r.close()
+        report_w.close()
+        return ["the report-channel supervisor failed to start ({})".format(type(exc).__name__)]
+    write_fd = report_w.fileno()
+    read_fd = report_r.fileno()
+    report_w.close()
+    raw = b""
+
+    def reopens(path, flags):
+        """Whether the /proc fd entry `path` reopens; a reopened descriptor is closed once, here, and a
+        failing close propagates rather than passing for a refused reopen."""
+        try:
+            opened = os.open(path, flags)
+        except OSError:
+            return False
+        os.close(opened)
+        return True
+
+    try:
+        # QA8 claude M1 pin + m4: find the gated module (it waits on the gate for up
+        # to 30 s), then require (a) the supervisor's fd table to be unlistable by
+        # this same-uid process (non-dumpable; root reads /proc regardless and skips
+        # that leg) and (b) the module's stdout and stderr to be SOCKETS that /proc
+        # cannot reopen. A mutant handing the module pipes turns (b) red: the
+        # readlink names a pipe and the reopen succeeds.
+        module_pid = None
+        bound = time.monotonic() + 25
+        wanted = str(module).encode("utf-8")
+        while module_pid is None and time.monotonic() < bound:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit() or int(entry) == proc.pid:
+                    continue
+                try:
+                    argv_raw = Path("/proc", entry, "cmdline").read_bytes()
+                except OSError:
+                    continue
+                if wanted in argv_raw:
+                    module_pid = int(entry)
+                    break
+            if module_pid is None:
+                time.sleep(0.01)
+        if module_pid is None:
+            faults.append("the gated module never appeared for the channel checks")
+        else:
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                try:
+                    os.listdir("/proc/{}/fd".format(proc.pid))
+                    faults.append("the supervisor's fd table is listable by a same-uid "
+                                  "process: it is not non-dumpable (PR_SET_DUMPABLE 0), so "
+                                  "pidfd_getfd could copy its channel ends at ptrace_scope 0")
+                except OSError:
+                    pass
+            for stream_fd in (1, 2):
+                fd_entry = "/proc/{}/fd/{}".format(module_pid, stream_fd)
+                try:
+                    target = os.readlink(fd_entry)
+                except OSError as exc:
+                    faults.append("the module's output fd {} could not be inspected ({})"
+                                  .format(stream_fd, type(exc).__name__))
+                    continue
+                if not target.startswith("socket:"):
+                    faults.append("the module's output fd {} is {}, not a socket: a same-uid "
+                                  "process could reopen it through /proc and drain a failing "
+                                  "module's output into a clean report".format(stream_fd, target))
+                if reopens(fd_entry, os.O_RDONLY):
+                    faults.append("the module's output fd {} could be reopened through /proc"
+                                  .format(stream_fd))
+        if reopens("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY):
+            faults.append("the supervisor report write-end could be reopened through /proc/<pid>/fd, so "
+                          "a concurrent run could forge its report")
+        if reopens("/proc/self/fd/{}".format(read_fd), os.O_RDONLY):
+            faults.append("the report reader end could be reopened through /proc/<pid>/fd, so a "
+                          "concurrent run could drain or forge the report")
+        gate.write_text("go", encoding="ascii")
+        parts = []
+        heard_by = time.monotonic() + 60
+        while True:
+            left = heard_by - time.monotonic()
+            if left <= 0.0:
+                break
+            report_r.settimeout(left)
+            try:
+                chunk = report_r.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            parts.append(chunk)
+        raw = b"".join(parts)
+        try:
+            sup_out, sup_err = proc.communicate(timeout=max(0.0, heard_by - time.monotonic()) + 1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()   # this check's own supervisor child
+            try:
+                proc.communicate(timeout=_RUNTIME_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                return faults + ["the report-channel supervisor did not finish, and was not reaped within "
+                                 "{} s of its kill".format(_RUNTIME_REAP_SECONDS)]
+            return faults + ["the report-channel supervisor did not finish"]
+    finally:
+        report_r.close()
+    if sup_out:
+        faults.append("the report-channel supervisor wrote to stdout ({!r})".format(sup_out[:80]))
+    text = raw.decode("utf-8", "replace")
+    if text.count("\n") != 1 or not text.endswith("\n"):
+        faults.append("the report did not arrive as exactly one line ({} newlines, {} bytes)".format(
+            text.count("\n"), len(raw)))
+        return faults
+    try:
+        report = json.loads(text)
+    except ValueError as exc:
+        return faults + ["the report-channel report did not parse ({})".format(type(exc).__name__)]
+    if not (report.get("subreaper") and report.get("undumpable")
+            and report.get("enumerable") and report.get("pidfd")):
+        return faults  # a host without containment support is not a channel fault
+    if report.get("rc") != 0:
+        faults.append("the gated module did not exit 0 over the report channel (rc {})".format(
+            report.get("rc")))
+    return faults
+
+
+def _self_test_runtime_escape_probe(tmp):
+    """Run _self_test_runtime_probe over a synthetic tree in `tmp` holding _RUNTIME_FIXTURES: the reviewers'
+    reproductions the static checks miss (a variable-guarded main, a constructed flag, a differently named
+    suite, top-level vectors with no `__main__` block, `main` rebound through an alias of the module, and
+    each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
+    alias of sys, os.execv), a write into the fresh cwd, a write into the tree, a timeout, a rewrite that
+    restores the file's size and modification time, a detached (setsid) grandchild that outlives the
+    module, a non-dumpable setsid'd grandchild (PR_SET_DUMPABLE 0, its environ
+    unreadable), a fork-hopping grandchild (each parent exits at once), a hardlink swap over a tracked
+    file and a write into a pre-existing nested `.git` (each restoring the parent mtimes), and an
+    undeclared `--self-test --vectors-only` form spelled in the source. Each red
+    module must be named for its reason and the passing ones not at all. Unless this runs as root (to whom
+    chmod cannot deny a listing), the tree also holds a directory of mode 0111 that locked.py writes into: the
+    probe must name it as a path it cannot evaluate. An absent tree must be unreadable to _runtime_snapshot
+    too. TWO UNRELATED same-uid processes, started outside the probe's subtree with environments
+    carrying _RUNTIME_MARKER (one with a token no run ever uses, spanning the whole probe, and one,
+    started by the probe's spy just before the sleeps.py `--selftest` run's supervisor spawns, carrying
+    that live run's ACTUAL token for that run's whole 5 s window), must survive the whole run
+    unsignalled and unreported: no kill or report is chosen by an environment match, an exact-token
+    match, a name match or uid ownership (a report is matched on a whole `pid <n>` field; each decoy is
+    then killed and reaped within a bound, and one not reaped is a discrepancy, as
+    _self_test_runtime_decoy_unit pins in memory). Direct _runtime_snapshot checks
+    then pin the new coverage: the top-level `.git` stays pruned, a nested `.git` is recorded, a
+    hardlink swap preserving bytes, mode, size and mtime is a change revealed ONLY by the inode
+    identity, and a plant into the nested `.git` with the parent mtimes restored changes nested-`.git`
+    paths alone (the former prune-everywhere snapshot recorded none of them, so it missed the plant).
+    A rerun over a failing module with the caller's SIGCHLD ignored must still name it (the supervisor
+    resets SIGCHLD to SIG_DFL first thing; an inherited SIG_IGN would auto-reap its children and read
+    the module as rc 0 on ECHILD), and _self_test_runtime_supervisor_unit pins the supervisor's census
+    and reap behaviour directly. Then the mutant: the same probe restricted
+    to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
+    must name none of them, so the breadth of the probe, not the static selection, is what catches them. It
+    runs over its own copy of the fixtures, so no write left behind by the main run can land in its window
+    (its spy writes into the main tree during it, which a run over the main tree names). The escaped
+    writers write only into the sibling `late` directory (_RUNTIME_LATE_HOLD), and the case waits, for at
+    most _RUNTIME_LATE_BOUND seconds, until each has exited (a writer of its own with a 1 s life included)
+    before its directory can be removed: a writer still running then, a writer without its late write,
+    a fixture kind with no late write, or a late write in the probed directory is a discrepancy. The case's
+    own writer is its own child, so it alone may be signalled: if it outlives the same bound it is killed
+    and reaped, within a further short bound, and that is a discrepancy too. The case OWNS `tmp` (the
+    caller makes it with tempfile.mkdtemp, never a TemporaryDirectory): it removes `tmp` only once no
+    writer holds its LIVE lock, and otherwise leaves it in place, named in a discrepancy, so no late write
+    can race its removal. The modules are files run as children; nothing is passed to exec or eval.
+    Returns a list of the discrepancies."""
+    import fcntl
+    import shutil
+    import subprocess
+    import time
+
+    late = Path(tmp, "tree", "opf", "late")
+    os.makedirs(str(late))
+    reaped, live = [], None   # `live`: the marks held once the waits are over (None: never established)
+    try:
+        faults = _runtime_escape_cases(tmp)
+    finally:
+        # A writer of the same shape with a known 1 s life pins the wait itself: without the wait, the
+        # checks below find it still holding its LIVE lock and its late write absent.
+        deadline = time.monotonic() + _RUNTIME_LATE_BOUND
+        hold = os.open(str(late / "LIVE-own"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)   # created O_EXCL just above: none can hold it
+            own = subprocess.Popen([sys.executable, "-I", "-B", "-c",
+                                    "import sys\nimport time\n\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
+                                    str(late / "LATE-own-own")], pass_fds=(hold,), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            os.close(hold)
+        try:
+            held = _runtime_late_wait(late, _RUNTIME_LATE_BOUND)
+            names = os.listdir(str(late))   # before `own` is reaped, so only the wait can let it finish first
+            try:
+                own.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                own.kill()   # this case's own child (D-385-CURRENT-CHILD forbids only the escaped writers)
+                try:
+                    own.wait(timeout=5)
+                    reaped.append("the case's own writer was still running {} s after the probe, so it was "
+                                  "killed and reaped".format(_RUNTIME_LATE_BOUND))
+                except subprocess.TimeoutExpired:
+                    reaped.append("the case's own writer was still running {} s after the probe and was not "
+                                  "reaped within 5 s of its kill".format(_RUNTIME_LATE_BOUND))
+            landed = sorted(name for name in os.listdir(str(Path(tmp, "tree", "opf", "tools")))
+                            if name.startswith("LATE-"))
+            live = _runtime_late_wait(late, 0)
+        except BaseException as exc:
+            # An interrupt (or any failure) before `live` was established leaves `tmp` in place: name
+            # it in the propagated exception, then kill and reap, within a bound, the case's own writer.
+            exc.add_note("the escape probe's fixture directory {} is left in place, not removed".format(tmp))
+            if own.returncode is None:
+                _runtime_decoy_reap(own, "the case's own writer")
+            raise
+        finally:
+            if live == []:
+                shutil.rmtree(tmp)
+    faults += reaped
+    if held:
+        faults.append("{} escaped fixture writer(s) still running {} s after the probe (LIVE-{})".format(
+            len(held), _RUNTIME_LATE_BOUND, ", LIVE-".join(held[:4])))
+    if live:
+        faults.append("writer(s) LIVE-{} may still write, so the fixture directory {} is left in place, not "
+                      "removed under them".format(", LIVE-".join(live[:4]), tmp))
+    done = {name.split("-")[2]: name.split("-")[1] for name in names
+            if name.startswith("LATE-") and name.count("-") == 2}
+    unwritten = sorted(name[len("LIVE-"):] for name in names
+                       if name.startswith("LIVE-") and name[len("LIVE-"):] not in done)
+    if unwritten:
+        faults.append("escaped fixture writer(s) LIVE-{} had made no late write when the wait ended".format(
+            ", LIVE-".join(unwritten[:4])))
+    missing = sorted({"detached", "nondumpable", "hopper", "own"} - set(done.values()))
+    if missing:
+        faults.append("no late write from {} reached {}, so the wait did not cover that writer".format(
+            ", ".join(missing), late))
+    if landed:
+        faults.append("an escaped writer's late write landed in the probed fixture directory ({})".format(
+            ", ".join(landed[:4])))
+    return faults
+
+
+def _runtime_late_wait(late, bound):
+    """Poll, for at most `bound` seconds, until no LIVE-<mark> file in `late` is still locked by an escaped
+    writer (_RUNTIME_LATE_HOLD); the lock is released only when the last holder exits. Returns the marks
+    still held when the bound ran out (a bound of 0 polls once)."""
+    import fcntl
+    import time
+    deadline = time.monotonic() + bound
+    while True:
+        held = []
+        for name in sorted(os.listdir(str(late))):
+            if not name.startswith("LIVE-"):
+                continue
+            probe = os.open(str(Path(late, name)), os.O_RDONLY)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(name[len("LIVE-"):])
+            finally:
+                os.close(probe)
+        if not held or time.monotonic() >= deadline:
+            return held
+        time.sleep(0.1)
+
+
+def _runtime_decoy_reap(proc, label, bound=5):
+    """Kill and reap `proc`, a decoy the escape case started itself (so, unlike an escaped writer, it may be
+    signalled), waiting at most `bound` seconds; on expiry it is killed again and waited for once more as
+    long. Returns the discrepancy, or None once it was reaped within the first bound."""
+    import subprocess
+    proc.kill()
+    try:
+        proc.wait(timeout=bound)
+        return None
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    try:
+        proc.wait(timeout=bound)
+    except subprocess.TimeoutExpired:
+        return "{} (pid {}) was not reaped within {} s of two kills".format(label, proc.pid, 2 * bound)
+    return "{} (pid {}) was not reaped within {} s of its kill, only after a second".format(label, proc.pid, bound)
+
+
+def _runtime_names_pid(findings, pid):
+    """The first of `findings` naming `pid` as a whole `pid <n>` field (the supervisor's survivor label), or
+    None. A substring test would let decoy pid 12 match a finding that names only pid 123."""
+    import re
+    for miss in findings:
+        if any(int(field) == pid for field in re.findall(r"\bpid (\d+)\b", miss)):
+            return miss
+    return None
+
+
+def _self_test_runtime_decoy_unit():
+    """Pin the two decoy checks of _runtime_escape_cases in memory. A decoy model whose kill() does not
+    complete and whose wait() never returns must be waited for only with a bound, killed again on expiry and
+    reported; one reaped at once is no discrepancy. Decoy pids 12 and 456 must not match findings naming
+    only survivors pid 123, pid 4567 and ppid 12, and a finding naming pid 12 among others must. Returns the
+    list of discrepancies."""
+    import subprocess
+
+    class Decoy:
+        def __init__(self, stalls):
+            self.pid, self.stalls, self.kills, self.waits = 12, stalls, 0, []
+
+        def kill(self):
+            self.kills += 1
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if timeout is None:
+                raise RuntimeError("an unbounded wait")
+            if self.stalls:
+                raise subprocess.TimeoutExpired("decoy", timeout)
+            return -9
+
+    faults = []
+    stalled, prompt = Decoy(True), Decoy(False)
+    try:
+        stuck, fine = _runtime_decoy_reap(stalled, "decoy", bound=0.01), _runtime_decoy_reap(prompt, "decoy")
+    except RuntimeError as exc:
+        return ["a decoy reap made {} (the waits are {} and {})".format(exc, stalled.waits, prompt.waits)]
+    if not stuck or "pid 12" not in stuck or stalled.kills != 2 or len(stalled.waits) != 2:
+        faults.append("a decoy that is never reaped was not killed twice, waited for twice and reported "
+                      "({!r}, {} kills, waits {})".format(stuck, stalled.kills, stalled.waits))
+    if fine is not None or prompt.kills != 1 or prompt.waits != [5]:
+        faults.append("a decoy reaped at once was not one kill and one bounded wait ({!r}, {} kills, waits {})"
+                      .format(fine, prompt.kills, prompt.waits))
+    survivors = ["detached.py []: left a process running after it exited (pid 123, pid 4567; not signalled)",
+                 "hopper.py []: left a process running after it exited (ppid 12)"]
+    for pid in (12, 456):
+        if _runtime_names_pid(survivors, pid):
+            faults.append("decoy pid {} matched findings naming only pid 123, pid 4567 and ppid 12".format(pid))
+    named = "nondumpable.py []: left a process running after it exited (pid 4567, pid 12; not signalled)"
+    if _runtime_names_pid(survivors + [named], 12) != named:
+        faults.append("a finding naming pid 12 as a whole field was not matched for decoy pid 12")
+    return faults
+
+
+# The functions on the escape probe's and the supervisor unit's paths whose every wait must carry a bound
+# (QA20, class-wide), audited by _runtime_wait_audit and pinned by _self_test_runtime_wait_unit.
+_RUNTIME_WAIT_OWNERS = ("_self_test_runtime_probe", "_self_test_runtime_supervisor_unit",
+                        "_self_test_runtime_report_channel", "_self_test_runtime_escape_probe",
+                        "_runtime_late_wait", "_runtime_decoy_reap", "_runtime_escape_cases",
+                        "_kill_proved_child", "_reap_pidfd", "_bounded_wait", "_watchdog_completion_case",
+                        "_watchdog_overlap_case", "_zombie_survival_control", "_pidfd_handoff_fork_send")
+
+# The closed exemption list of the whole-module audits (QA21, QA22): (file, function or method, the
+# exact call it excuses, reason). An entry excuses only ONE occurrence of that call in that one scope (a
+# second call spelled the same way there is a fault, claude QA22 minor 2), and an entry that excuses
+# nothing is itself a fault. The reasons are REVIEW-PINNED disclosures, not runtime proofs (claude QA25
+# medium 2): _self_test_runtime_wait_unit structurally re-checks only the _FixtureProcess park, the
+# launch-lock holders and the child-scope launch strings; every other reason holds by review of the
+# named site. A wait one of these entries wrongly excuses is still killed by the QA26 outer bound of
+# the unit subprocess that runs it (_run_unit_subprocess, D-385-SUBPROCESS-RUNNER).
+_RUNTIME_WAIT_EXEMPT = (
+    ("_opf_emit.py", "_fixture_wait", "os.waitpid(pid, flags)",
+     "a flags pass-through: the audit's _fixture_wait rule requires os.WNOHANG at every audited caller"),
+    ("_opf_emit.py", "_FixtureProcess._launch", "self._go.wait()",
+     "the parked launcher: it holds only its own daemon thread, released by start() or close(), and "
+     "start() waits for the launch only through a bounded self._launched.wait"),
+    ("_opf_emit.py", "_fixture_abort_launch", "with fixture._launch_lock",
+     "the launch lock (QA24): every holder only reads or writes flags and sets or tests an Event, so an "
+     "acquisition waits only for a few non-blocking statements; re-proved over every holder"),
+    ("_opf_emit.py", "_FixtureProcess._launch", "with self._launch_lock",
+     "the launch lock, the launcher's read of the cancelled flag (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._launch", "with self._launch_lock",
+     "the launch lock, the launcher's recorded result (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._abandon_unfinished_launch", "with self._launch_lock",
+     "the launch lock, close()'s ownership decision (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._close_coordinated", "with self._launch_lock",
+     "the launch lock, close()'s cancellation (QA24): non-blocking holders, re-proved"),
+    ("_journal.py", "reconcile_and_claim_stale", "fcntl.flock(afd, fcntl.LOCK_EX)",
+     "production stale-lock arbitration, outside this test-only bound: its holders are opf processes "
+     "breaking the same stale lock, and a multiply-linked arbitration inode is refused before it"),
+    # QA25: the hits of the completed blocking-API set, each read at its site.
+    ("_opf_adopt_observe.py", "_resolve.worker", "result.put(outcome)",
+     "the one put into the worker's own fresh queue.Queue(maxsize=1), which nothing else fills"),
+    ("_opf_adopt_observe.py", "_runner_check.run_shell",
+     "with subprocess.Popen([bash, '--noprofile', '--norc', '-c', body, str(runner)], cwd=caller_cwd, env=env, "
+     "stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, "
+     "pass_fds=(marker.fileno(),))",
+     "the exit's wait follows communicate(timeout) or, on expiry, a SIGKILL of the shell's own session "
+     "group and a bounded communicate, so the shell has exited or been killed"),
+    ("_opf_pack_manifest.py", "_runner_check.run_shell",
+     "with subprocess.Popen([bash, '--noprofile', '--norc', '-c', body, str(runner)], cwd=tmp, env=env, "
+     "stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, "
+     "pass_fds=(marker.fileno(),))",
+     "the same run_shell shape: communicate(timeout), then a session-group SIGKILL on expiry"),
+    ("_opf_adopt_observe.py", "self_test.Server.serve", "self.listener.accept()",
+     "Server.__init__ sets the listener's settimeout(0.05) before it starts this daemon thread"),
+    ("_opf_adopt_observe.py", "self_test.run_case.tracked_fetch.fetch", "time.sleep(config['delay_before_resolve'])",
+     "a vector's configured delay; the vector table's one delay_before_resolve is 0.60 s"),
+    ("_opf_emit.py", "_FixtureProcess._recv_subject", "socket.recv_fds(self.control, 32, 1)",
+     "runs only after poll(500) reports the control socket readable"),
+    ("_opf_emit.py", "_st_guardian_close_reuse.drive.<lambda>", "sock.sendall(b'G')",
+     "one byte into a fresh socketpair whose buffer nothing else fills"),
+    ("opf.py", "_self_test_dispatch_probe", "with concurrent.futures.ThreadPoolExecutor(max_workers=8)",
+     "the exit joins workers whose one child each is subprocess.run(timeout=120)"),
+    ("opf.py", "_self_test_runtime_probe", "with concurrent.futures.ThreadPoolExecutor(max_workers=8)",
+     "the exit joins workers whose supervisor is collected by communicate(timeout=budget), then a reap bound"),
+    ("opf.py", "_pidfd_handoff_recv", "socket.recv_fds(conn, 256, 8)",
+     "the first receive runs only after poll(30000) returned an event (no event is a refusal)"),
+    ("opf.py", "_pidfd_handoff_recv", "socket.recv_fds(conn, 256, 8)",
+     "the second receive runs only when poll(0) returned an event"),
+)
+
+# Whole functions that run only as a bounded private subprocess (QA25): their child-side parks
+# (`time.sleep(3600)` until the case's own parent kills them) are excused as time.sleep findings
+# only, while the regression runner launches each through run_status_owned with a timeout (re-proved).
+_RUNTIME_WAIT_CHILD_SCOPES = (
+    ("opf.py", "_watchdog_completion_case", "return opf._watchdog_completion_case(",
+     "a completion case runs in a run_status_owned child bounded at 40 s"),
+    ("opf.py", "_watchdog_deadline_case", "return opf._watchdog_deadline_case(",
+     "a deadline case runs in a run_status_owned child bounded at 10 s"),
+)
+
+
+def _runtime_wait_modules(overrides=None):
+    """The source files the `opf --self-test` path imports and runs (QA22), derived from its entry, not
+    listed by hand: this file, the module of every _self_tests() entry, and the transitive closure of
+    their imports that resolve to a `<name>.py` beside this file. A module is RUN when it is this file,
+    an entry's module, or a module whose self_test a run module names (`m.self_test`, or `from m
+    import self_test`); the others are only imported. Returns ({filename: source}, run filenames,
+    faults); an entry whose module has no readable, parseable source is a fault, so a missing module
+    fails the audit instead of shrinking it. Every module is walked exactly once, the entry module
+    included (QA23: this file was loaded to find _self_tests() and then skipped as already loaded, so
+    its own imports, check_opf_init and check_opf_prompt_pack, never joined the set). `overrides`
+    ({filename: source}) stands in for files beside this one, for the unit's mutation vectors only.
+    Residuals: a module brought in only by importlib or __import__, a package directory (the vendored
+    marko), and a module outside this directory."""
+    import ast
+    here = Path(__file__).resolve().parent
+    overrides = overrides or {}
+    faults, trees, sources = [], {}, {}
+
+    def load(name):
+        if name not in trees:
+            try:
+                sources[name + ".py"] = overrides[name + ".py"] if name + ".py" in overrides \
+                    else (here / (name + ".py")).read_text(encoding="utf-8")
+                trees[name] = ast.parse(sources[name + ".py"])
+            except (OSError, SyntaxError, ValueError) as exc:
+                trees[name] = None
+                faults.append("the self-test module {}.py cannot be audited ({})".format(name, exc))
+        return trees[name]
+
+    entry = next((node for node in load("opf").body
+                  if isinstance(node, ast.FunctionDef) and node.name == "_self_tests"), None)
+    roots = {"opf"}
+    for node in ast.walk(entry) if entry is not None else ():
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2 and isinstance(node.elts[1], ast.Attribute):
+            owner = node.elts[1].value
+            roots.add(owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", "?"))
+    if entry is None or len(roots) < 2:
+        faults.append("the self-test entry _self_tests() names no helper module, so no module set derives from it")
+    todo, runs, walked = sorted(roots), {}, set()
+    while todo:
+        name = todo.pop()
+        if name in walked:
+            continue
+        walked.add(name)
+        tree = load(name)
+        if tree is None:
+            continue
+        aliases, imported, runs[name] = {}, set(), set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".")[0])
+                    aliases[alias.asname or alias.name.split(".")[0]] = alias.name.split(".")[0]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+                if any(alias.name.startswith("self_test") for alias in node.names):
+                    runs[name].add(node.module.split(".")[0])
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr.startswith("self_test"):
+                base = getattr(node.value, "id", getattr(node.value, "attr", None))
+                runs[name].add(aliases.get(base, base))
+        todo += sorted(each for each in imported if each not in walked
+                       and (each + ".py" in overrides or (here / (each + ".py")).is_file()))
+    run, grown = set(roots), True
+    while grown:
+        grown = {each for name in run for each in runs.get(name, ()) if each in runs} - run
+        run |= grown
+    return sources, {name + ".py" for name in run if trees.get(name) is not None}, faults
+
+
+# The longest literal time.sleep the bounded-wait audit accepts without a bound of its own (QA25).
+_RUNTIME_SLEEP_CEILING = 5.0
+
+
+def _runtime_wait_audit(source, owners=None):
+    """A parse-tree audit for an UNBOUNDED wait. It visits EVERY ast.Call (and every `with` item) by
+    one ast.walk (QA24: complete by construction, so no syntactic position such as a default, a
+    decorator, an annotation, a class body or a lambda default can be skipped): with None the whole
+    module, with `owners` the whole subtree of each top-level function of `source` so named. Each
+    finding is only ATTRIBUTED, for its name and for _RUNTIME_WAIT_EXEMPT, to the scope that executes
+    it: the innermost function or lambda whose BODY holds it (`Class.method`, `outer.inner`,
+    `outer.<lambda>`), else `<module>`, so a default, decorator or annotation of a function (and a class
+    body) belongs to the scope that defines it, which runs it at definition time.
+
+    THE DEFINING SET (QA25): these calls are what the audit means by a blocking wait. Each is a fault
+    unless bounded by the timeout of its own signature (or a non-blocking flag) as stated, or answered
+    by _RUNTIME_WAIT_EXEMPT or _RUNTIME_WAIT_CHILD_SCOPES:
+      * subprocess.run, call, check_call and check_output: a finite timeout=; subprocess.getoutput and
+        getstatusoutput always (they take no timeout). Popen.wait and .wait()/.join() of anything: a
+        finite slot 0 or timeout=; .communicate: slot 1 or timeout= (communicate(input) is unbounded).
+      * os.wait and os.wait3 always; os.waitpid and os.wait4 options in slot 1, os.waitid options in
+        slot 2, and every _fixture_wait (the exempt pass-through), carrying WNOHANG.
+      * threading: .join and .wait (Thread, Event, Condition, Barrier) as above; Condition.wait_for: a
+        finite slot 1 or timeout=; .acquire: blocking False or a finite timeout (acquire(True) is
+        unbounded); fcntl.flock/lockf carrying LOCK_NB (or LOCK_UN).
+      * queue: .get of a receiver a `*Queue(...)` constructor bound: block False or a finite timeout;
+        .put likewise, unless that queue was built with no arguments (unbounded: put never waits).
+      * select.select: a finite slot-3 timeout; .poll() of a select.poll/epoll/devpoll receiver and
+        .select() of a `*Selector()` receiver (assigned, or bound by `with ... as`): a finite timeout
+        (none, None or a negative constant is unbounded); signal.pause, sigwait and sigwaitinfo always.
+      * socket .recv, .recv_into, .recvfrom, .recvfrom_into, .recvmsg, .accept, .connect, .sendall, and
+        socket.recv_fds(sock, ...): only after a finite settimeout or a setblocking(False) on the SAME
+        receiver (or on the socket a wrap_socket of it returned) that DOMINATES it (codex QA23 minor 2):
+        the bound is its own expression statement in a statement list that also holds, later, a
+        statement enclosing the call, so a bound under an `if`, a loop, a `try` body or a handler does
+        not count after it. A bound never crosses a scope (codex QA24 1): bound and call run in ONE
+        function, lambda or class body, so a parameter, local or class attribute shadowing the receiver
+        cannot inherit it, and a store to the receiver (or its root name) between them in that scope
+        voids it. A method of an imported module (sqlite3.connect, os.path.join) is not a socket.
+      * time.sleep: only a literal, a module constant assigned once to a literal, or a min() holding one,
+        at most _RUNTIME_SLEEP_CEILING seconds, or a sleep in the child branch `if kid == 0:` of
+        `kid = os.fork()` in that scope (a forked kid its parent kills).
+      * context-manager acquisition: a `with` on a lock (a name, attribute, subscript or call whose last
+        part says lock, mutex, sem or cond, or that a threading Lock, RLock, Semaphore,
+        BoundedSemaphore or Condition constructor is bound to; claude QA24 minor 1), and a `with` whose
+        exit waits (a Popen or a *PoolExecutor/Pool constructor, or a name one is bound to).
+    A flag counts only when its expression evaluates, from int constants and os./fcntl. attributes
+    combined by |, &, ^, to a value with that flag's bit set (codex QA22 minor 2: `os.WNOHANG & 0`
+    mentions the flag and is zero); one that cannot be evaluated so (a variable, a bare name) faults.
+    Each fault names the call as spelled. It also
+    pins the production WIRING (codex QA20 minor 3): _kill_proved_child and
+    _self_test_runtime_supervisor_unit reap through _reap_pidfd; _runtime_escape_cases reaps both
+    decoys through _runtime_decoy_reap, the second in the finally of the first, and attributes them only
+    through _runtime_names_pid (no `in` test on a pid); and _self_test_runtime_escape_probe names its
+    retained directory with add_note. Like _runtime_supervisor_signal_audit it is a tripwire over
+    ordinary spellings, NOT a proof of absence, and NOT the hang guarantee: since QA26 (re-grounded
+    by D-385-SUBPROCESS-RUNNER) the guarantee that `opf.py --self-test` cannot hang is the hard
+    outer bound on every registered unit, each run as its OWN `--self-test-unit` subprocess whose
+    whole process group _run_unit_subprocess SIGKILLs at its _UNIT_OUTER_BOUNDS budget (proved live
+    by _unit_bound_self_test), so a wait this audit misses is still killed at its
+    unit's budget (a guarantee against ACCIDENTAL unit faults, D-385-ACCIDENTAL-UNIT: a unit that
+    deliberately stops its runner is a sabotage residual _UNIT_OUTER_BOUNDS discloses); the audit
+    stays as defence-in-depth that names a new unbounded wait at review time rather than at its
+    kill. Disclosed residuals: an alias (`w = os.waitpid`,
+    `import os as o`, `from subprocess import run`), getattr, functools.partial, an unbound method call
+    (`Popen.wait(proc)`), a timeout held in a variable that is None at run time, a settimeout(None)
+    after the settimeout it counts, a rebinding through `global`/`nonlocal` or after the call in a
+    loop, a lock or waiter whose name and constructor say nothing (`with guard:` for `guard =
+    make()`), a call into a module outside the audited set, a huge or infinite literal taken as
+    finite (`proc.wait(1e999)`, `communicate(timeout=float('inf'))`), the os functions reached through
+    another module name (`posix.waitpid`), a queue or selector not bound from its constructor in the
+    same source, and blocking calls outside the defining set (Future.result, os.read on a pipe, a
+    plain socket .send/.sendto/.sendmsg/socket.send_fds into a full buffer, kqueue control, input()).
+    The QA25 reviews added these classes, disclosed here and bounded only by the QA26 outer bound:
+    whole families outside the set (os.system, os.spawn*, os.popen, a blocking os.lockf or fcntl
+    F_SETLKW, a pipe read through a Popen file object, concurrent.futures.wait / as_completed /
+    Executor.shutdown, socket.create_connection, urllib.request.urlopen); a `.wait` or `.join` whose
+    slot-0 argument is not a timeout (concurrent.futures.wait(fs) reads the futures list as a bound);
+    a receiver rebound through a subscript or attribute store (socks[0] = spare, a callee's
+    self.sock = spare); a constructor FACT keyed by its last name across the module rather than by
+    binding (one function's `jobs = queue.Queue()` excusing another function's bounded `jobs`, one's
+    `kid = os.fork()` excusing another's `if kid == 0:` sleep); a parameter shadowing an imported
+    module name (`def qa(socket): return socket.recv(1)` skips the module-function rule); and a
+    deadline-free polling loop (`while proc.poll() is None: time.sleep(0.05)`).
+    Returns the list of faults."""
+    import ast
+    import fcntl
+    import operator
+    import re
+    tree = ast.parse(source)
+    defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+            and (owners is None or node.name in owners)]
+    faults = ["{} is not defined, so its waits are unaudited".format(name)
+              for name in sorted(set(owners or ()) - {node.name for node in defs})]
+    names, up, slots = {tree: "<module>"}, {}, {}
+
+    def name_scopes(node, prefix):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            for index, statement in enumerate(block if isinstance(block, list) else ()):
+                slots[statement] = (id(block), index)
+        for child in ast.iter_child_nodes(node):
+            up[child] = node
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                names[child] = prefix + getattr(child, "name", "<lambda>")
+                name_scopes(child, names[child] + ".")
+            else:
+                name_scopes(child, prefix)
+
+    name_scopes(tree, "")
+
+    def scope_of(node):
+        # Attribution only (QA24): the innermost function or lambda whose BODY holds the node runs it.
+        while node in up:
+            parent = up[node]
+            if (isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and any(node is statement for statement in parent.body)) \
+                    or (isinstance(parent, ast.Lambda) and node is parent.body):
+                return parent
+            node = parent
+        return tree
+
+    def home(node):
+        # The scope a name in node resolves in: scope_of, with a class body its own scope too.
+        scope = scope_of(node)
+        while node in up and up[node] is not scope:
+            parent = up[node]
+            if isinstance(parent, ast.ClassDef) and any(node is statement for statement in parent.body):
+                return parent
+            node = parent
+        return scope
+
+    stores = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Store):
+            stores.setdefault(ast.unparse(node), []).append(node)
+
+    def dominates(bound, node, receiver=None):
+        # The bound's statement precedes, in its own statement list, a statement enclosing node, and
+        # both run in ONE scope (QA24 codex 1: a bound never crosses a function, lambda or class
+        # boundary, so a parameter or local shadowing the receiver cannot inherit it), with no store to
+        # the receiver or to its root name between them in that scope (no rebinding).
+        if home(bound) is not home(node):
+            return False
+        if receiver is not None:
+            root = receiver.split(".")[0].split("[")[0]
+            # Document order by (line, column), not line alone (codex QA25 medium 1): a store that
+            # shares the bound's line (`sock.settimeout(0.01); sock = spare`) still voids the bound.
+            if any((bound.lineno, bound.col_offset) < (store.lineno, store.col_offset)
+                   <= (node.lineno, node.col_offset) and home(store) is home(node)
+                   for store in stores.get(receiver, []) + stores.get(root, [])):
+                return False
+        block, index = slots[bound]
+        while node in up:
+            if node in slots and slots[node][0] == block and slots[node][1] > index:
+                return True
+            node = up[node]
+        return False
+
+    def calls(scope, name):
+        return [node for node in ast.walk(scope) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == name]
+
+    def argument(call, slot, *keywords):
+        if slot is not None and len(call.args) > slot \
+                and not any(isinstance(each, ast.Starred) for each in call.args[:slot + 1]):
+            return call.args[slot]
+        return next((keyword.value for keyword in call.keywords if keyword.arg in keywords), None)
+
+    def finite(value):
+        if value is None or (isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub)):
+            return False
+        return not (isinstance(value, ast.Constant) and (value.value is None or (
+            isinstance(value.value, (int, float)) and value.value < 0)))
+
+    def short(value):
+        # A sleep is short only as a literal (or a min() holding one) within the stated ceiling.
+        if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "min" and not value.keywords:
+            return any(short(each) for each in value.args)
+        if isinstance(value, ast.Name) and constants.get(value.id) is not None:
+            value = constants[value.id]   # a module constant assigned once, to a literal
+        return isinstance(value, ast.Constant) and type(value.value) in (int, float) \
+            and 0 <= value.value <= _RUNTIME_SLEEP_CEILING
+
+    def off(value):
+        return isinstance(value, ast.Constant) and value.value in (False, 0) and value.value is not None
+
+    combine = {ast.BitOr: operator.or_, ast.BitAnd: operator.and_, ast.BitXor: operator.xor}
+
+    def bits(value):
+        if isinstance(value, ast.Constant) and type(value.value) is int:
+            return value.value
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) \
+                and value.value.id in ("os", "fcntl"):
+            found = getattr(os if value.value.id == "os" else fcntl, value.attr, None)
+            return found if type(found) is int else None
+        if isinstance(value, ast.BinOp) and type(value.op) in combine:
+            left, right = bits(value.left), bits(value.right)
+            return None if left is None or right is None else combine[type(value.op)](left, right)
+        return None
+
+    def spells(value, flag):
+        found = bits(value) if value is not None else None
+        return found is not None and bool(found & getattr(os if flag == "WNOHANG" else fcntl, flag))
+
+    bounds = {}
+    for node in ast.walk(tree):
+        call = node.value if isinstance(node, ast.Expr) else None
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and (
+                (call.func.attr == "settimeout" and finite(argument(call, 0, "value")))
+                or (call.func.attr == "setblocking" and isinstance(argument(call, 0, "flag"), ast.Constant)
+                    and not argument(call, 0, "flag").value)):
+            bounds.setdefault(ast.unparse(call.func.value), []).append(node)
+    for node in sorted((node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                        and node.value.func.attr == "wrap_socket" and node.value.args),
+                       key=lambda node: node.lineno):
+        wrapped = ast.unparse(node.value.args[0])
+        if any(dominates(bound, node, wrapped) for bound in bounds.get(wrapped, ())):
+            for target in node.targets:
+                bounds.setdefault(ast.unparse(target), []).append(node)
+    def last(value):
+        # The last name part of a receiver or a callee: `a.b[0]` and `a.b(x)` both give b.
+        while isinstance(value, (ast.Subscript, ast.Call)):
+            value = value.value if isinstance(value, ast.Subscript) else value.func
+        return value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", None)
+
+    # Every binding of a value a constructor made: `x = C()`, `x: T = C()`, `f(x=C())` and `with C() as x`.
+    made = [(target, node.value) for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])]
+    made += [(ast.Name(id=node.arg), node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.keyword) and node.arg and isinstance(node.value, ast.Call)]
+    made += [(item.optional_vars, item.context_expr) for node in ast.walk(tree)
+             if isinstance(node, (ast.With, ast.AsyncWith)) for item in node.items
+             if item.optional_vars is not None and isinstance(item.context_expr, ast.Call)]
+    makers = ("Lock", "RLock", "Semaphore", "BoundedSemaphore", "Condition")
+    locks = {last(target) for target, value in made if last(value.func) in makers}
+    pollers = {ast.unparse(target) for target, value in made if isinstance(value.func, ast.Attribute)
+               and value.func.attr in ("poll", "epoll", "devpoll")
+               and isinstance(value.func.value, ast.Name) and value.func.value.id == "select"}
+    selectors = {ast.unparse(target) for target, value in made
+                 if re.search("Selector$", last(value.func) or "")}
+    queues = {last(target) for target, value in made if re.search("Queue$", last(value.func) or "")}
+    waiters = {last(target) for target, value in made if last(value.func) in ("Popen",)
+               or re.search("PoolExecutor$|^Pool$", last(value.func) or "")}
+    modules = {alias.asname or alias.name.split(".")[0] for node in ast.walk(tree)
+               if isinstance(node, ast.Import) for alias in node.names}
+    sockets = ("recv", "recv_into", "recvfrom", "recvfrom_into", "recvmsg", "accept", "connect", "sendall")
+    unbounded = {last(target) for target, value in made if re.search("Queue$", last(value.func) or "")
+                 and not value.args and not value.keywords}
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                and isinstance(node.value, ast.Constant):
+            constants[node.targets[0].id] = node.value if node.targets[0].id not in constants else None
+    forks = {target.id for target, value in made if isinstance(target, ast.Name) and ast.unparse(value) == "os.fork()"}
+
+    def parked(node):
+        # A sleep in the child branch (`if kid == 0:` for `kid = os.fork()`) of a fork the parent kills.
+        while node in up:
+            parent = up[node]
+            if isinstance(parent, ast.If) and any(node is statement for statement in parent.body) \
+                    and ast.unparse(parent.test) in {"{} == 0".format(kid) for kid in forks}:
+                return True
+            node = parent
+        return False
+    found = []
+    for node in (node for root in ([tree] if owners is None else defs) for node in ast.walk(root)):
+        if not isinstance(node, (ast.Call, ast.With, ast.AsyncWith)):
+            continue
+        scope = scope_of(node)
+        where = "{} line {}".format(names.get(scope, "<lambda>"), getattr(scope, "lineno", 0))
+        for item in node.items if isinstance(node, (ast.With, ast.AsyncWith)) else ():
+            held = item.context_expr
+            named = last(held) or ""
+            if isinstance(held, ast.Call) and (named == "Popen" or named in waiters
+                                               or re.search("PoolExecutor$|^Pool$", named)):
+                found.append((node.lineno, "{}: a with-statement whose exit waits with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+            elif isinstance(held, (ast.Name, ast.Attribute, ast.Subscript)) and named in waiters:
+                found.append((node.lineno, "{}: a with-statement whose exit waits with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+            elif isinstance(held, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)) and (
+                    named in locks or re.search("(?i)lock|mutex|sem|cond", named)):
+                # QA24 claude minor 1: `with h.locks[0]:` and `with h.lock_for(x):` acquire as well.
+                found.append((node.lineno, "{}: a with-statement lock acquisition with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+        if isinstance(node, ast.Call):
+            func, fault = node.func, None
+            label = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            base = func.value if isinstance(func, ast.Attribute) else None
+            module = base.id if isinstance(base, ast.Name) else None
+            if label == "_fixture_wait":
+                if not spells(argument(node, 1, "flags"), "WNOHANG"):
+                    fault = "a _fixture_wait pass-through without WNOHANG"
+            elif base is None:
+                pass
+            elif module == "os":
+                if label in ("wait", "wait3"):
+                    fault = "a blocking os.{}".format(label)
+                elif label in ("waitpid", "wait4", "waitid") and not spells(
+                        argument(node, 2 if label == "waitid" else 1, "options"), "WNOHANG"):
+                    fault = "os.{} without WNOHANG".format(label)
+            elif module == "subprocess" and label in ("getoutput", "getstatusoutput"):
+                fault = "a subprocess.{}, which takes no timeout".format(label)
+            elif module == "subprocess" and label in ("run", "call", "check_call", "check_output") \
+                    and not finite(argument(node, None, "timeout")):
+                fault = "subprocess.{} without a finite timeout".format(label)
+            elif module == "time" and label == "sleep" and not short(argument(node, 0, "secs")) \
+                    and not parked(node):
+                fault = "a time.sleep not provably at most {} s".format(_RUNTIME_SLEEP_CEILING)
+            elif module == "signal" and label in ("pause", "sigwait", "sigwaitinfo"):
+                fault = "a blocking signal.{}".format(label)
+            elif module == "socket" and label == "recv_fds" and node.args and not any(
+                    dominates(bound, node, ast.unparse(node.args[0]))
+                    for bound in bounds.get(ast.unparse(node.args[0]), ())):
+                fault = "a socket.{}() with no settimeout on {} dominating it".format(label, ast.unparse(node.args[0]))
+            elif module == "fcntl" and label in ("flock", "lockf"):
+                operation = argument(node, 1, "operation", "cmd")
+                if not spells(operation, "LOCK_NB") and not spells(operation, "LOCK_UN"):
+                    fault = "fcntl.{} without LOCK_NB".format(label)
+            elif module == "select" and label == "select":
+                if not finite(argument(node, 3, "timeout")):
+                    fault = "select.select without a finite timeout"
+            elif module in modules:
+                pass   # a module function (sqlite3.connect, os.path.join), not a method of a waitable
+            elif label in ("wait", "join") and module != "str" and not isinstance(base, ast.Constant) \
+                    and not finite(argument(node, 0, "timeout")):
+                fault = "an unbounded .{}()".format(label)
+            elif label == "wait_for" and not finite(argument(node, 1, "timeout")):
+                fault = "an unbounded .wait_for()"
+            elif label == "get" and last(base) in queues and not finite(argument(node, 1, "timeout")) \
+                    and not off(argument(node, 0, "block")):
+                fault = "a blocking queue .get()"
+            elif label == "put" and last(base) in queues - unbounded and not finite(argument(node, 2, "timeout")) \
+                    and not off(argument(node, 1, "block")):
+                fault = "a blocking queue .put()"
+            elif label == "select" and ast.unparse(base) in selectors and not finite(argument(node, 0, "timeout")):
+                fault = "a selector's select() without a finite timeout"
+            elif label == "communicate" and not finite(argument(node, 1, "timeout")):
+                fault = "an unbounded .communicate() (its slot 0 is input, not a timeout)"
+            elif label == "acquire" and not finite(argument(node, 1, "timeout")) \
+                    and not off(argument(node, 0, "blocking")):
+                fault = "an unbounded .acquire()"
+            elif label == "poll" and ast.unparse(base) in pollers and not finite(argument(node, 0, "timeout")):
+                fault = "a select poller's poll() without a finite timeout"
+            elif label in sockets and not any(dominates(bound, node, ast.unparse(base))
+                                              for bound in bounds.get(ast.unparse(base), ())):
+                fault = "a .{}() with no settimeout on {} dominating it".format(label, ast.unparse(base))
+            if fault:
+                found.append((node.lineno, "{}: {} `{}` (line {})".format(
+                    where, fault, ast.unparse(node), node.lineno)))
+    faults += [text for _line, text in sorted(found)]
+    for top in defs:
+        if top.name in ("_kill_proved_child", "_self_test_runtime_supervisor_unit") and not calls(top, "_reap_pidfd"):
+            faults.append("{} does not reap through the bounded _reap_pidfd".format(top.name))
+        if top.name == "_self_test_runtime_escape_probe" and not any(
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_note"
+                for handler in ast.walk(top) if isinstance(handler, ast.ExceptHandler) for node in ast.walk(handler)):
+            faults.append("an interrupt in the escape probe's late wait does not name its retained directory")
+        if top.name == "_runtime_escape_cases":
+            reaped = {ast.dump(call.args[0]) for call in calls(top, "_runtime_decoy_reap") if call.args}
+            named = {ast.dump(call.args[1]) for call in calls(top, "_runtime_names_pid") if len(call.args) > 1}
+            for decoy in ("decoy", "tokened"):
+                if ast.dump(ast.Name(id=decoy, ctx=ast.Load())) not in reaped:
+                    faults.append("_runtime_escape_cases does not reap {} through _runtime_decoy_reap".format(decoy))
+                if ast.dump(ast.Attribute(value=ast.Name(id=decoy, ctx=ast.Load()), attr="pid",
+                                          ctx=ast.Load())) not in named:
+                    faults.append("_runtime_escape_cases does not attribute {} through _runtime_names_pid".format(decoy))
+            if not any(isinstance(node, ast.Try) and calls(ast.Module(body=node.body, type_ignores=[]),
+                                                           "_runtime_decoy_reap")
+                       and calls(ast.Module(body=node.finalbody, type_ignores=[]), "_runtime_decoy_reap")
+                       for node in ast.walk(top)):
+                faults.append("_runtime_escape_cases does not reap the second decoy in the finally of the first")
+            for node in ast.walk(top):
+                if isinstance(node, ast.Compare) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops) \
+                        and any(isinstance(part, ast.Attribute) and part.attr == "pid" for part in ast.walk(node)):
+                    faults.append("_runtime_escape_cases attributes a pid by an `in` test (line {})".format(node.lineno))
+    return faults
+
+
+# Revert vectors for _self_test_runtime_wait_unit: (function, committed text, reverted text). Each revert
+# restores one unbounded wait or one bypass of a bounded helper at its PRODUCTION call site.
+_RUNTIME_WAIT_REVERTS = (
+    ("_kill_proved_child", "not _reap_pidfd(fd, bound)", "not os.waitid(os.P_PIDFD, fd, os.WEXITED)"),
+    ("_reap_pidfd", "os.WEXITED | os.WNOHANG", "os.WEXITED"),
+    ("_self_test_runtime_supervisor_unit", "if not _reap_pidfd(kid_fd, _PIDFD_REAP_SECONDS):",
+     "if os.waitpid(probe_kid, 0):"),
+    ("_runtime_escape_cases", 'reaps.append(_runtime_decoy_reap(decoy, "the marker-carrying decoy"))',
+     "decoy.kill()\n            decoy.wait()"),
+    ("_runtime_escape_cases", 'reaps.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))',
+     "tokened.kill()\n                tokened.wait()"),
+    ("_runtime_escape_cases", "        finally:   # an interrupt in the first reap must not skip the second\n",
+     "        except ValueError:\n            pass\n        if True:\n"),
+    ("_runtime_escape_cases", "named = _runtime_names_pid(found, decoy.pid)",
+     "named = next((miss for miss in found if str(decoy.pid) in miss), None)"),
+    ("_runtime_escape_cases", "named = _runtime_names_pid(found, tokened.pid)",
+     "named = next((miss for miss in found if str(tokened.pid) in miss), None)"),
+    ("_self_test_runtime_escape_probe", "own.wait(timeout=max(0.0, deadline - time.monotonic()))", "own.wait()"),
+    ("_self_test_runtime_escape_probe", "fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.LOCK_EX)"),
+    ("_self_test_runtime_escape_probe", "exc.add_note(", "print("),
+    ("_self_test_runtime_probe", "proc.communicate(timeout=_RUNTIME_REAP_SECONDS)", "proc.communicate()"),
+    ("_self_test_runtime_probe", "pump.join(max(0.0, drained_by - time.monotonic()) + 1.0)", "pump.join()"),
+    ("_self_test_runtime_probe", "report_r.settimeout(left)", "pass"),
+    ("_self_test_runtime_report_channel", "report_r.settimeout(left)", "pass"),
+    ("_self_test_runtime_report_channel", "proc.communicate(timeout=_RUNTIME_REAP_SECONDS)", "proc.communicate()"),
+    ("_RUNTIME_SUPERVISOR", "pump.join(max(0.0, deadline - time.monotonic()) + 1.0)", "pump.join()"),
+    ("_RUNTIME_SUPERVISOR", "sock.settimeout(left)", "pass"),
+    ("_bounded_wait", "os.waitpid(pid, os.WNOHANG)", "os.waitpid(pid, 0)"),
+    ("_bounded_wait", "os.WEXITED | os.WNOWAIT | os.WNOHANG", "os.WEXITED | os.WNOWAIT"),
+    ("_watchdog_completion_case", "_bounded_wait(dead, forked=True)", "os.waitpid(dead, 0)"),
+    ("_watchdog_completion_case", "_bounded_wait(interrupted_own, nowait=True, forked=True)",
+     "os.waitid(os.P_PID, interrupted_own, os.WEXITED | os.WNOWAIT)"),
+    ("_watchdog_completion_case", "stolen.append(_bounded_wait(pid, 4.0))", "stolen.append(os.waitpid(pid, 0))"),
+    ("_watchdog_completion_case", "                    _bounded_wait(subject)\n",
+     "                    os.waitpid(subject, 0)\n"),
+    ("_watchdog_overlap_case", "_bounded_wait(pid, nowait=True)", "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)"),
+    ("_zombie_survival_control", "_bounded_wait(zombie, forked=True)", "os.waitpid(zombie, 0)"),
+    ("_pidfd_handoff_fork_send", "_bounded_wait(pid, forked=True)", "os.waitpid(pid, 0)"),
+)
+
+
+# Mutation vectors of the bounded-wait audit (QA22): each statement, placed in a method of a nested
+# class, must make the audit fault (UNBOUNDED) or must leave it silent (BOUNDED, a real timeout of
+# that call's own signature). `other` carries a settimeout before the statement; `sock` does not.
+_RUNTIME_WAIT_UNBOUNDED = (
+    "os.waitpid(pid, 0)", "proc.communicate(b'x')", "lock.acquire(True)", "select.select([fd], [], [], None)",
+    "poller.poll()", "poller.poll(None)", "poller.poll(-1)", "lock.acquire()", "proc.wait()", "worker.join(None)",
+    "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)", "fcntl.flock(fd, fcntl.LOCK_EX)", "sock.recv(1)",
+    "_fixture_wait(pid, 0)", "emit._fixture_wait(pid, 0)", "os.wait()", "select.select([fd], [], [])",
+    "os.waitpid(pid, os.WNOHANG & 0)", "fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB & 0))",
+    "os.waitpid(pid, flags)", "os.waitpid(pid, WNOHANG)", "_fixture_wait(pid, os.WNOHANG ^ os.WNOHANG)",
+    # QA25: one or more of each family the completed defining set added.
+    "subprocess.run(cmd)", "subprocess.call(cmd)", "subprocess.check_call(cmd, timeout=None)",
+    "subprocess.check_output(cmd)", "subprocess.getoutput(cmd)", "subprocess.getstatusoutput(cmd)",
+    "os.wait3(0)", "os.wait4(pid, 0)", "ready.wait()", "lock.wait_for(ready)", "jobs.get()", "jobs.get(True, None)",
+    "jobs.put(1)", "sel.select()", "sel.select(None)", "sock.accept()", "sock.connect(addr)", "sock.sendall(b'x')",
+    "socket.recv_fds(sock, 1, 1)", "time.sleep(60)", "time.sleep(delay)", "signal.pause()",
+    "signal.sigwaitinfo({signal.SIGCHLD})",
+)
+_RUNTIME_WAIT_BOUNDED = (
+    "os.waitpid(pid, os.WNOHANG)", "proc.communicate(b'x', 1.0)", "proc.communicate(timeout=1.0)",
+    "lock.acquire(False)", "lock.acquire(True, 1.0)", "lock.acquire(blocking=False)", "lock.acquire(timeout=1.0)",
+    "select.select([fd], [], [], 0.5)", "poller.poll(10)", "other.recv(1)", "proc.wait(1.0)",
+    "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "worker.join(timeout=1.0)", "_fixture_wait(pid, os.WNOHANG)",
+    "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG)", "fcntl.flock(fd, fcntl.LOCK_UN)",
+    "fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+    "subprocess.run(cmd, timeout=5)", "subprocess.check_output(cmd, timeout=5.0)", "ready.wait(1.0)",
+    "lock.wait_for(ready, 1.0)", "jobs.get(timeout=1.0)", "jobs.get(False)", "jobs.put(1, timeout=1.0)",
+    "jobs.put(1, block=False)", "free.put(1)", "sel.select(0.5)", "other.accept()", "other.connect(addr)",
+    "other.sendall(b'x')", "socket.recv_fds(other, 1, 1)", "time.sleep(0.5)", "time.sleep(min(delay, 0.05))",
+    "os.path.join(cmd, addr)",
+)
+_RUNTIME_WAIT_PROBE = """import fcntl
+import os
+import queue
+import select
+import selectors
+import signal
+import socket
+import subprocess
+import time
+
+
+class Probe:
+    class Inner:
+        def probe(self, pid, proc, lock, fd, sock, other, worker, emit, cmd, addr, delay, ready):
+            poller = select.poll()
+            jobs = queue.Queue(maxsize=4)
+            free = queue.Queue()
+            sel = selectors.DefaultSelector()
+            other.settimeout(1.0)
+            {}
+"""
+
+# Position vectors (QA24): (source, the scope its one fault is attributed to, or None for no fault).
+# A wait in a default, decorator, class body, annotation or lambda default runs where it is defined.
+_RUNTIME_WAIT_POSITIONS = (
+    ("def qa(pid, status=os.waitpid(1, 0)):\n    pass\n", "<module>"),
+    ("@deco(os.waitpid(1, 0))\ndef qa():\n    pass\n", "<module>"),
+    ("class Qa:\n    status = os.waitpid(1, 0)\n", "<module>"),
+    ("def qa(pid: os.waitpid(1, 0)):\n    pass\n", "<module>"),
+    ("def qa() -> os.wait():\n    pass\n", "<module>"),
+    ("qa = lambda pid, status=os.waitpid(1, 0): 0\n", "<module>"),
+    ("qa = lambda pid: os.waitpid(pid, 0)\n", "<lambda>"),
+    ("class Qa:\n    def method(self, status=os.wait()):\n        pass\n", "<module>"),
+    ("def outer(pid):\n    @deco(os.waitpid(pid, 0))\n    def inner():\n        pass\n", "outer"),
+    ("def qa(lock):\n    with lock:\n        pass\n", "qa"),
+    ("def qa(guard):\n    with guard.launch_lock, open(guard.path):\n        pass\n", "qa"),
+    ("guard = threading.Lock()\n\n\ndef qa():\n    with guard:\n        pass\n", "qa"),
+    ("def qa(sock):\n    if False:\n        sock.settimeout(1)\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    for _ in ():\n        sock.settimeout(1)\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    def inner():\n        return sock.recv(1)\n    sock.settimeout(1)\n    return inner\n",
+     "qa.inner"),
+    ("def qa(sock):\n    sock.settimeout(1)\n    if sock:\n        return sock.recv(1)\n", None),
+    # QA25 (codex QA24 1): a bound never crosses a function, lambda or class boundary, nor a rebinding.
+    ("def qa(sock):\n    sock.settimeout(1)\n    def inner():\n        return sock.recv(1)\n    return inner\n",
+     "qa.inner"),
+    ("sock.settimeout(0.01)\n\n\ndef qa(sock):\n    return sock.recv(1)\n", "qa"),
+    ("sock.settimeout(0.01)\n\n\nclass Qa:\n    data = sock.recv(1)\n", "<module>"),
+    ("def qa(sock, spare):\n    sock.settimeout(1)\n    sock = spare\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    sock.settimeout(1)\n    return lambda: sock.recv(1)\n", "qa.<lambda>"),
+    # QA27 (claude QA26 minor 5): the rebinding check orders by (line, column), not line alone. A
+    # same-line store AFTER the bound still voids it; a same-line store BEFORE the bound does not.
+    ("def qa(sock, spare):\n    sock.settimeout(1); sock = spare\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock, spare):\n    sock = spare; sock.settimeout(1)\n    return sock.recv(1)\n", None),
+    # QA25 (claude QA24 minor 1): a lock reached through a subscript or a call; an exit that waits.
+    ("def qa(h):\n    with h.launch_locks[0]:\n        pass\n", "qa"),
+    ("def qa(h):\n    with h.lock_for('x'):\n        pass\n", "qa"),
+    ("def qa(cmd):\n    with subprocess.Popen(cmd) as proc:\n        pass\n", "qa"),
+    ("def qa(cmd):\n    proc = subprocess.Popen(cmd)\n    with proc:\n        pass\n", "qa"),
+    ("def qa():\n    with concurrent.futures.ThreadPoolExecutor() as pool:\n        pass\n", "qa"),
+    ("def qa():\n    kid = os.fork()\n    if kid == 0:\n        time.sleep(60)\n", None),
+    ("def qa():\n    kid = os.fork()\n    if kid != 0:\n        time.sleep(60)\n", "qa"),
+    ("def qa(lock, path):\n    with open(path) as handle:\n        return lock.acquire(timeout=1.0), handle\n", None),
+    ("def qa(pid, status=os.waitpid(1, os.WNOHANG)):\n    pass\n", None),
+)
+
+
+def _runtime_wait_vector_faults():
+    """Each _RUNTIME_WAIT_UNBOUNDED statement in a nested class's method must be one located audit
+    fault naming it, and each _RUNTIME_WAIT_BOUNDED statement none (QA22); each _RUNTIME_WAIT_POSITIONS
+    source must be one fault attributed to its scope, or none (QA24). Returns the faults."""
+    import ast
+    faults = []
+    for source, scope in _RUNTIME_WAIT_POSITIONS:
+        found = _runtime_wait_audit(source)
+        if (scope is None and found) or (scope is not None and not (
+                len(found) == 1 and found[0].startswith(scope + " line "))):
+            faults.append("the bounded-wait audit did not find {} in {!r} (found {})".format(
+                "nothing" if scope is None else "one wait of " + scope, source, found))
+    for statement in _RUNTIME_WAIT_UNBOUNDED + _RUNTIME_WAIT_BOUNDED:
+        found = _runtime_wait_audit(_RUNTIME_WAIT_PROBE.format(statement))
+        spelled = "`{}`".format(ast.unparse(ast.parse(statement)))
+        if statement in _RUNTIME_WAIT_UNBOUNDED and not (
+                len(found) == 1 and found[0].startswith("Probe.Inner.probe ") and spelled in found[0]):
+            faults.append("the bounded-wait audit did not flag {} in a method (found {})".format(statement, found))
+        if statement in _RUNTIME_WAIT_BOUNDED and found:
+            faults.append("the bounded-wait audit took the real bound of {} as unbounded ({})".format(
+                statement, found))
+    return faults
+
+
+# _runtime_wait_audit's findings per module source text: the traversal vectors re-audit mostly
+# unchanged modules, and a source text always yields the same findings.
+_RUNTIME_WAIT_AUDITED = {}
+
+
+def _runtime_wait_unexcused(filename, found):
+    """The audit findings `found` in `filename` that neither a _RUNTIME_WAIT_EXEMPT entry (by file, scope
+    and call as spelled) nor a _RUNTIME_WAIT_CHILD_SCOPES sleep excusal answers (QA25: the owner pass and
+    its revert vectors see the same answers as the whole-module pass, which alone counts each use)."""
+    kept = []
+    for miss in found:
+        scope, spelled = miss.split(" ", 1)[0], miss.split("`")[1] if "`" in miss else None
+        if any(entry[:3] == (filename, scope, spelled) for entry in _RUNTIME_WAIT_EXEMPT):
+            continue
+        if ": a time.sleep not provably" in miss and any(
+                each[:2] == (filename, scope.split(".")[0]) for each in _RUNTIME_WAIT_CHILD_SCOPES):
+            continue
+        kept.append(miss)
+    return kept
+
+
+def _runtime_wait_module_faults(overrides=None):
+    """The whole-module audit (QA22): _runtime_wait_audit over every module _runtime_wait_modules
+    derives from the self-test entry. A fault is excused only by its own _RUNTIME_WAIT_EXEMPT entry,
+    once (a second call it would match is a fault), whose reason is review-pinned (claude QA25 medium 2:
+    only the park, launch-lock and child-scope shapes are re-checked below), or as test-only
+    code: a top-level `_t_*`, `_st_*` or `self_test*` function of a module the entry imports but never
+    runs, whose name is mentioned, in any audited module, only inside other such excused functions or
+    a top-level `if __name__ == '__main__':` block. The excusal is transitive (claude QA22 minor 3):
+    a mention from any other code (a run module, a helper of the unrun module itself, a module body,
+    and, QA24, the decorators, defaults and annotations of an excused function, which run at import, or
+    a `from m import f`, a re-export included) withdraws it, and so does a mention from a function whose
+    own excusal was withdrawn, to a fixed point. Residual: a name reached only through a string
+    (getattr, `__all__` with `import *`). An exemption that excuses nothing is a fault. `overrides` reaches _runtime_wait_modules.
+    Returns the faults."""
+    import ast
+    sources, run, faults = _runtime_wait_modules(overrides)
+    trees = {filename: ast.parse(text) for filename, text in sources.items()}
+    excused = {(filename, node.name) for filename, tree in trees.items() if filename not in run
+               for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name.startswith(("_t_", "_st_", "self_test"))}
+    mentions = set()
+    for filename, tree in trees.items():
+        imports, froms = {}, {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update((alias.asname or alias.name.split(".")[0], alias.name.split(".")[0] + ".py")
+                               for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                froms.update((alias.asname or alias.name, (node.module.split(".")[0] + ".py", alias.name))
+                             for alias in node.names)
+        for top in tree.body:
+            if isinstance(top, ast.If) and ast.unparse(top.test) == "__name__ == '__main__'":
+                continue
+            excusing = (filename, getattr(top, "name", None)) in excused
+            body = {node for statement in top.body for node in ast.walk(statement)} if excusing else set()
+            for node in ast.walk(top):
+                # Only the BODY of an excused function speaks for it (QA24, claude QA23 minor 2): its
+                # decorators, defaults and annotations run at import, as module code. A bare name reaches
+                # its own module's function (or the one it was imported as), `m.f` reaches module m's f (m
+                # imported, or named as an audited module, as _bootstrap binds them; `a.m.f` by its last
+                # part m), any other `x.f` reaches every audited module's f, and `from m import f` (a
+                # re-export too) reaches m's f.
+                owner = (filename, top.name) if node in body else None
+                if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    mentions |= {((node.module.split(".")[0] + ".py", alias.name), owner) for alias in node.names}
+                elif isinstance(node, ast.Name):
+                    mentions |= {((filename, node.id), owner), (froms.get(node.id, (filename, node.id)), owner)}
+                elif isinstance(node, ast.Attribute):
+                    base = getattr(node.value, "id", getattr(node.value, "attr", None))
+                    module = imports.get(base, base + ".py" if base is not None and base + ".py" in trees else None)
+                    mentions.add(((module, node.attr), owner))
+    withdrawn = True
+    while withdrawn:
+        live = {target for target, owner in mentions if owner not in excused}
+        withdrawn = {each for each in excused if each in live or (None, each[1]) in live}
+        excused -= withdrawn
+    used = set()
+    for filename in sorted(sources):
+        if sources[filename] not in _RUNTIME_WAIT_AUDITED:
+            _RUNTIME_WAIT_AUDITED[sources[filename]] = _runtime_wait_audit(sources[filename])
+        for miss in _RUNTIME_WAIT_AUDITED[sources[filename]]:
+            scope, spelled = miss.split(" ", 1)[0], miss.split("`")[1] if "`" in miss else None
+            top = scope.split(".")[0]
+            entry = next((entry for entry in _RUNTIME_WAIT_EXEMPT
+                          if entry[:3] == (filename, scope, spelled) and entry not in used), None)
+            child = next((each for each in _RUNTIME_WAIT_CHILD_SCOPES if each[:2] == (filename, top)), None)
+            if entry is not None:
+                used.add(entry)
+            elif child is not None and ": a time.sleep not provably" in miss:
+                used.add(child)
+            elif (filename, top) not in excused:
+                faults.append("the whole-module bounded-wait audit of {} found: {}".format(filename, miss))
+    faults += ["the bounded-wait exemption {} {} `{}` excuses nothing".format(*entry[:3])
+               for entry in _RUNTIME_WAIT_EXEMPT + _RUNTIME_WAIT_CHILD_SCOPES if entry not in used]
+    for filename, name, launch, _reason in _RUNTIME_WAIT_CHILD_SCOPES:
+        launched = [node for node in ast.walk(trees.get(filename, ast.Module(body=[], type_ignores=[])))
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str) and launch in node.value]
+        # A presence TRIPWIRE only (claude QA25 medium 2): these strings also occur inside this very
+        # check and the child-scope table, so this cannot prove the launch is bounded; a mis-excused
+        # park is bounded by the QA26 outer bound of the unit that runs it.
+        bounded = "run_status_owned(" in sources.get(filename, "") and "timeout=timeout)" in sources.get(filename, "")
+        if not launched or not bounded:
+            faults.append("the child-scope exemption of {} no longer holds: it is not launched as a bounded "
+                          "run_status_owned case".format(name))
+    emit = trees.get("_opf_emit.py")
+    process = next((node for node in ast.walk(emit) if isinstance(node, ast.ClassDef)
+                    and node.name == "_FixtureProcess"), None) if emit is not None else None
+    methods = {node.name: node for node in (process.body if process is not None else ())
+               if isinstance(node, ast.FunctionDef)}
+    parked = any(isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "Thread"
+                 and any(keyword.arg == "target" and ast.unparse(keyword.value) == "self._launch"
+                         for keyword in node.keywords)
+                 and any(keyword.arg == "daemon" and isinstance(keyword.value, ast.Constant)
+                         and keyword.value.value is True for keyword in node.keywords)
+                 for node in ast.walk(methods.get("__init__", ast.Module(body=[], type_ignores=[]))))
+    awaited = any(isinstance(node, ast.Call) and ast.unparse(node.func) == "self._launched.wait" and node.args
+                  for node in ast.walk(methods.get("_start", ast.Module(body=[], type_ignores=[]))))
+    if not (parked and awaited):
+        faults.append("the _FixtureProcess._launch park exemption no longer holds: the launcher is not a daemon "
+                      "thread targeting self._launch ({}) or _start has no bounded self._launched.wait ({})"
+                      .format(parked, awaited))
+    held = [node for node in ast.walk(emit if emit is not None else ast.Module(body=[], type_ignores=[]))
+            if isinstance(node, ast.With) and any(ast.unparse(item.context_expr).endswith("._launch_lock")
+                                                  for item in node.items)]
+    busy = sorted({ast.unparse(node) for holder in held for statement in holder.body
+                   for node in ast.walk(statement) if isinstance(node, ast.Call)
+                   and getattr(node.func, "attr", None) not in ("set", "is_set")})
+    # codex QA24 minor 2: a holder that loops (or awaits) is not proved to finish, so it is a fault too.
+    busy += sorted({"a {} at line {}".format(type(node).__name__, node.lineno) for holder in held
+                    for statement in holder.body for node in ast.walk(statement)
+                    if isinstance(node, (ast.While, ast.For, ast.AsyncFor, ast.Await, ast.With, ast.AsyncWith))})
+    made = {ast.unparse(node.value) for node in ast.walk(emit if emit is not None else ast.Module(body=[], type_ignores=[]))
+            if isinstance(node, ast.Assign)
+            and any(ast.unparse(target).endswith("._launch_lock") for target in node.targets)}
+    if len(held) != 5 or busy or made != {"threading.Lock()"}:
+        faults.append("the _launch_lock exemption no longer holds: {} holders (5 exempt), holder calls other "
+                      "than set/is_set {}, constructed as {}".format(len(held), busy, sorted(made)))
+    journal = next((node for node in ast.walk(trees.get("_journal.py", ast.Module(body=[], type_ignores=[])))
+                    if isinstance(node, ast.FunctionDef) and node.name == "reconcile_and_claim_stale"), None)
+    locks = [node.lineno for node in ast.walk(journal) if isinstance(node, ast.Call)
+             and ast.unparse(node) == "fcntl.flock(afd, fcntl.LOCK_EX)"] if journal is not None else []
+    if not locks or not any(isinstance(node, ast.Compare) and "st_nlink" in ast.unparse(node)
+                            and node.lineno < min(locks) for node in ast.walk(journal)):
+        faults.append("the reconcile_and_claim_stale flock exemption no longer holds: no st_nlink refusal "
+                      "precedes its blocking flock")
+    return faults
+
+
+def _runtime_wait_traversal_faults():
+    """Mutation vectors of the whole-module audit (QA23), each fed through _runtime_wait_modules'
+    overrides so no file is written: every local module this file imports is in the audited set; a new
+    sibling module holding `os.waitpid(pid, 0)`, imported only by this file, is one located fault (the
+    entry module's imports are walked); a second `self._go.wait()` in _FixtureProcess._launch and a
+    second exempt flock in reconcile_and_claim_stale are each one fault (an exemption excuses one call);
+    an unrun module's test-only blocking function is excused while only test code mentions it, and is
+    one fault once a non-test helper of its own module reaches it (the excusal is transitive). QA24:
+    a wait in a default argument of an audited module's function is one fault at `<module>`, and a
+    re-export of a test-only wait and a test-only decorator applied at import each withdraw the
+    excusal. QA25: restoring the unbounded git_input subprocess.run in check_opf_init, or a new
+    subprocess.run without timeout in a run module, is one fault. Returns the faults."""
+    import ast
+    here = Path(__file__).resolve().parent
+    entry = (here / "opf.py").read_text(encoding="utf-8")
+    faults, (sources, _run, _faults) = [], _runtime_wait_modules()
+    local = {(alias.name if isinstance(node, ast.Import) else node.module).split(".")[0]
+             for node in ast.walk(ast.parse(entry)) if isinstance(node, ast.Import)
+             or (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module)
+             for alias in (node.names if isinstance(node, ast.Import) else [None])}
+    missing = sorted(name + ".py" for name in local
+                     if (here / (name + ".py")).is_file() and name + ".py" not in sources)
+    if missing:
+        faults.append("the audited module set omits modules opf.py imports: {}".format(", ".join(missing)))
+
+    def edited(filename, old, new):
+        text = (here / filename).read_text(encoding="utf-8")
+        if text.count(old) != 1:
+            faults.append("the traversal vector's anchor {!r} does not match {} once".format(old, filename))
+        return text.replace(old, new)
+
+    oplock = (here / "_opf_oplock.py").read_text(encoding="utf-8")
+    block = "\n\ndef _st_wait_vector_block(pid):\n    os.waitpid(pid, 0)\n"
+    vectors = (
+        ("a sibling imported only by opf.py", "_wait_vector_sibling.py", "block",
+         {"opf.py": entry + "\n\nimport _wait_vector_sibling\n",
+          "_wait_vector_sibling.py": "import os\n\n\ndef block(pid):\n    os.waitpid(pid, 0)\n"}),
+        ("a second exempt park", "_opf_emit.py", "_FixtureProcess._launch",
+         {"_opf_emit.py": edited("_opf_emit.py", "            self._go.wait()\n",
+                                 "            self._go.wait()\n            self._go.wait()\n")}),
+        ("a second exempt flock", "_journal.py", "reconcile_and_claim_stale",
+         {"_journal.py": edited("_journal.py", "        fcntl.flock(afd, fcntl.LOCK_EX)\n",
+                                "        fcntl.flock(afd, fcntl.LOCK_EX)\n        fcntl.flock(afd, fcntl.LOCK_EX)\n")}),
+        ("a test-only wait reached by its module's helper", "_opf_oplock.py", "_st_wait_vector_block",
+         {"_opf_oplock.py": oplock + block + "\n\ndef wait_vector_helper(pid):\n    return _st_wait_vector_block(pid)\n"}),
+        ("a default argument of an audited module's function (codex QA23 1)", "check_opf_init.py", "<module>",
+         {"check_opf_init.py": edited("check_opf_init.py", '\n\nif __name__ == "__main__":\n',
+                                      "\n\ndef qa_default(value=os.waitpid(123, 0)):\n    pass\n"
+                                      '\n\nif __name__ == "__main__":\n')}),
+        ("a re-export of a test-only wait (claude QA23 minor 2)", "_opf_oplock.py", "_st_wait_vector_block",
+         {"_opf_oplock.py": oplock + block,
+          "_opf_emit.py": (here / "_opf_emit.py").read_text(encoding="utf-8")
+          + "\n\nfrom _opf_oplock import _st_wait_vector_block\n"}),
+        ("a test-only decorator applied at import (claude QA23 minor 2)", "_opf_oplock.py", "_st_wait_vector_deco",
+         {"_opf_oplock.py": oplock + "\n\ndef _st_wait_vector_deco(fn):\n    os.waitpid(-1, 0)\n    return fn\n"
+          "\n\n@_st_wait_vector_deco\ndef _st_wait_vector_decorated():\n    pass\n"}),
+        ("the unbounded git_input subprocess.run restored (claude QA24 1)", "check_opf_init.py",
+         "_suite_isolated.git_input",
+         {"check_opf_init.py": edited("check_opf_init.py", ", timeout=_opf_observe._GIT_TIMEOUT_S)", ")")}),
+        ("a new subprocess.run without timeout in a run module (QA25)", "_opf_check.py", "qa_run",
+         {"_opf_check.py": edited("_opf_check.py", '\n\nif __name__ == "__main__":\n',
+                                  "\n\ndef qa_run(cmd):\n    import subprocess\n    return subprocess.run(cmd)\n"
+                                  '\n\nif __name__ == "__main__":\n')}),
+        ("a test-only wait mentioned only by test code", None, None,
+         {"_opf_oplock.py": oplock + block + "\n\ndef _st_wait_vector_caller(pid):\n    return _st_wait_vector_block(pid)\n"}),
+    )
+    for label, filename, scope, overrides in vectors:
+        found = _runtime_wait_module_faults(overrides)
+        if filename is None and found:
+            faults.append("the whole-module audit did not excuse {} ({})".format(label, found))
+        elif filename is not None and not (len(found) == 1 and "audit of {} found: {} ".format(filename, scope)
+                                           in found[0]):
+            faults.append("the whole-module audit did not flag {} once ({})".format(label, found))
+    return faults
+
+
+def _self_test_runtime_wait_unit():
+    """Pin the bounded waits of the escape probe's and the supervisor unit's paths (QA20, class-wide).
+    WIRING: _runtime_wait_audit over this file's committed _RUNTIME_WAIT_OWNERS and _RUNTIME_SUPERVISOR
+    finds nothing, and finds each _RUNTIME_WAIT_REVERTS revert applied to its production function, so
+    reverting a call site (not only a helper) turns this red. BEHAVIOUR (codex's reproduction): with
+    os.waitid and os.waitpid replaced by models in which the child is never reaped and any blocking
+    call is recorded and refused, and pidfd_send_signal by a recorder, _kill_proved_child on this
+    process's own declared fork must send one SIGKILL, make no blocking call, return within its bound
+    and name the pid as unreaped; the real route then kills and reaps it. QA21/QA22 (class-wide over
+    the whole self-test path): the audit also runs over EVERY function, method and lambda of every
+    module _runtime_wait_modules derives from the self-test entry (_runtime_wait_module_faults), and
+    only the closed _RUNTIME_WAIT_EXEMPT list (each reason re-proved there) or the test-only code of an
+    imported-but-unrun module may answer; every _RUNTIME_WAIT_UNBOUNDED vector in a nested class's
+    method must fault and every _RUNTIME_WAIT_BOUNDED one must not (_runtime_wait_vector_faults);
+    _bounded_wait on this process's own wedged fork must fault within its bound,
+    SIGKILL and reap it only when declared forked, and never signal it otherwise; _reap_pidfd must
+    report a waitid failure other than ECHILD as un-reaped. Returns the faults."""
+    import ast
+    import signal
+    import time
+    faults = []
+    source = Path(__file__).read_text(encoding="utf-8")
+    found = _runtime_wait_unexcused("opf.py", _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS)) \
+        + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
+    faults += ["the bounded-wait audit of the committed source found: {}".format(miss) for miss in found]
+    faults += _runtime_wait_module_faults()
+    faults += _runtime_wait_traversal_faults()
+    faults += _runtime_wait_vector_faults()
+    segments = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
+                if isinstance(node, ast.FunctionDef) and node.name in _RUNTIME_WAIT_OWNERS}
+    segments["_RUNTIME_SUPERVISOR"] = _RUNTIME_SUPERVISOR
+    for owner, committed, reverted in _RUNTIME_WAIT_REVERTS:
+        segment = segments.get(owner) or ""
+        if segment.count(committed) != 1:
+            faults.append("the revert vector for {} does not match its source once ({!r})".format(owner, committed))
+        elif not _runtime_wait_unexcused("opf.py", _runtime_wait_audit(segment.replace(committed, reverted))):
+            faults.append("the bounded-wait audit missed a revert in {} ({!r} to {!r})".format(
+                owner, committed, reverted))
+    kid = os.fork()
+    if kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    real_waitid, real_waitpid, real_send = os.waitid, os.waitpid, signal.pidfd_send_signal
+    blocking, sent, unreaped = [], [], []
+
+    def stuck_waitid(idtype, ident, options):
+        if not options & os.WNOHANG:
+            blocking.append("waitid")
+            raise ChildProcessError("a blocking waitid, refused by the model")
+        return real_waitid(idtype, ident, options) if options & os.WNOWAIT else None
+
+    def stuck_waitpid(pid, options):
+        if not options & os.WNOHANG:
+            blocking.append("waitpid")
+            raise ChildProcessError("a blocking waitpid, refused by the model")
+        return (0, 0)
+
+    begin = time.monotonic()
+    os.waitid, os.waitpid = stuck_waitid, stuck_waitpid
+    signal.pidfd_send_signal = lambda fd, sig: sent.append(sig)
+    try:
+        signalled = _kill_proved_child(kid, forked=True, reap_bound=0.3, unreaped=unreaped)
+    finally:
+        os.waitid, os.waitpid, signal.pidfd_send_signal = real_waitid, real_waitpid, real_send
+    took = time.monotonic() - begin
+    if blocking:
+        faults.append("_kill_proved_child made a blocking {} reap".format(" and ".join(blocking)))
+    if signalled is not True or sent != [signal.SIGKILL] or len(unreaped) != 1 \
+            or "pid {} ".format(kid) not in unreaped[0]:
+        faults.append("a never-reaped SIGKILL target was not one signal and one named unreaped pid "
+                      "(returned {}, sent {}, unreaped {})".format(signalled, sent, unreaped))
+    if took > 2.0:
+        faults.append("the never-reaped SIGKILL target held _kill_proved_child {:.1f} s past a 0.3 s bound".format(took))
+    leftover = []
+    if not _kill_proved_child(kid, forked=True, unreaped=leftover) or leftover:
+        faults.append("the real route did not kill and reap this process's own child ({})".format(leftover))
+    for declared in (False, True):
+        wedged = os.fork()
+        if wedged == 0:
+            time.sleep(60)
+            os._exit(1)
+        begin = time.monotonic()
+        try:
+            _bounded_wait(wedged, 0.3, forked=declared)
+            message = None
+        except AssertionError as exc:
+            message = str(exc)
+        took = time.monotonic() - begin
+        alive = os.waitid(os.P_PID, wedged, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None if not declared else None
+        if message is None or "pid {} ".format(wedged) not in message or took > 2.0:
+            faults.append("a wedged own fork did not fault a 0.3 s bounded wait in time (forked={}, {!r}, "
+                          "{:.1f} s)".format(declared, message, took))
+        if declared and "SIGKILLed through its pidfd and reaped" not in (message or ""):
+            faults.append("a declared own fork was not SIGKILLed and reaped on expiry ({!r})".format(message))
+        if not declared and (alive is not True or "not signalled" not in (message or "")):
+            faults.append("an undeclared target was signalled on expiry ({!r}, alive {})".format(message, alive))
+        if not declared:
+            _kill_proved_child(wedged, forked=True, unreaped=faults)
+    quick = os.fork()
+    if quick == 0:
+        os._exit(7)
+    waited = _bounded_wait(quick, forked=True)
+    if waited[0] != quick or os.waitstatus_to_exitcode(waited[1]) != 7:
+        faults.append("a prompt own fork's bounded wait lost its status ({})".format(waited))
+    bad = os.open(os.devnull, os.O_RDONLY)
+    os.close(bad)
+    if _reap_pidfd(bad, 0.2) is not False:
+        faults.append("_reap_pidfd took a waitid EBADF as nothing to reap (only ECHILD means that)")
+    stranger = os.pidfd_open(os.getpid(), 0)
+    try:
+        if _reap_pidfd(stranger, 0.2) is not True:
+            faults.append("_reap_pidfd did not take ECHILD (not this process's child) as nothing to reap")
+    finally:
+        os.close(stranger)
+    return faults
+
+
+def _runtime_escape_cases(tmp):
+    """The cases of _self_test_runtime_escape_probe, which then waits for their escaped writers; returns
+    the list of discrepancies."""
+    import subprocess
+
+    import _optlevel
+    directory = Path(tmp, "tree", "opf", "tools")
+    os.makedirs(str(directory))
+    os.makedirs(str(Path(tmp, "boxes")))
+    selected = set()
+    for name, source, _want in _RUNTIME_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        tree = _optlevel.parse(source.encode("utf-8"), name)
+        if _self_test_entry_gap(tree)[0] or _dispatch_targets(tree):
+            selected.add(name)
+    (directory / "same.txt").write_text("0" * 16, encoding="utf-8")
+    (directory / "pin.txt").write_text("0" * 16, encoding="utf-8")
+    os.makedirs(str(directory / "sub" / ".git"))
+    os.makedirs(str(directory / "locked"))
+    (directory / "locked" / "payload").write_text("BEFORE", encoding="utf-8")
+    locks = hasattr(os, "geteuid") and os.geteuid() != 0   # chmod cannot hide a listing from root
+    table = {name: _DISPATCH_LIBRARY for name, _source, _want in _RUNTIME_FIXTURES}
+    decoy = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                             env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: "run-decoy"}),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    token_decoy = {}
+
+    def spy(name, argv, token):
+        # Round-6 codex 3 / claude F5: a decoy whose marker carries the ACTUAL token of a live run,
+        # started just before that run's supervisor spawns. The sleeps.py `--selftest` run lasts its
+        # whole 5 s timeout, so the decoy is alive and execed for the whole window in which a restored
+        # exact-token environ kill would select it (the old killer's predicate never matched the fixed
+        # `run-decoy` token).
+        if name == "sleeps.py" and argv == ["--selftest"] and "proc" not in token_decoy:
+            token_decoy["proc"] = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: token}),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                         names={name for name, _source, _want in _RUNTIME_FIXTURES}
+                                         - {"locked.py"}, spy=spy)
+    finally:
+        signalled = decoy.poll()
+        tokened = token_decoy.get("proc")
+        token_signalled = tokened.poll() if tokened is not None else None
+        reaps = []
+        try:
+            reaps.append(_runtime_decoy_reap(decoy, "the marker-carrying decoy"))
+        finally:   # an interrupt in the first reap must not skip the second
+            if tokened is not None:
+                reaps.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))
+    faults = [fault for fault in reaps if fault]
+    if signalled is not None:
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "signalled (rc {})".format(signalled))
+    named = _runtime_names_pid(found, decoy.pid)
+    if named:
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "reported by the probe (pid {} in: {})".format(decoy.pid, named[:200]))
+    if tokened is None:
+        faults.append("the exact-token decoy never started: the spy saw no sleeps.py `--selftest` run")
+    else:
+        if token_signalled is not None:
+            faults.append("the unrelated same-uid process carrying the actual run token was signalled "
+                          "(rc {})".format(token_signalled))
+        named = _runtime_names_pid(found, tokened.pid)
+        if named:
+            faults.append("the unrelated same-uid process carrying the actual run token was reported "
+                          "by the probe (pid {} in: {})".format(tokened.pid, named[:200]))
+    if locks:
+        (directory / "locked").chmod(0o111)
+        try:
+            blind = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                             names={"locked.py"})
+        finally:
+            (directory / "locked").chmod(0o755)
+        if not any(miss.startswith("cannot evaluate") and "locked" in miss for miss in blind):
+            faults.append("the unlistable directory locked/ was not named as a path the probe cannot evaluate "
+                          "({})".format("; ".join(blind) or "nothing"))
+    if not _runtime_snapshot(Path(tmp, "absent"))[1]:
+        faults.append("an absent tree was not reported unreadable by _runtime_snapshot")
+    for name, _source, want in _RUNTIME_FIXTURES:
+        mine = [miss for miss in found if miss.startswith(name + " ")]
+        if want is None and mine:
+            faults.append("passing runtime fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("runtime fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    if selected != {"clean_lib.py"}:
+        faults.append("the static selection of the runtime fixtures is {}, not clean_lib.py alone".format(
+            sorted(selected)))
+    # The main run's escaped writers are left running (D-385-CURRENT-CHILD), so the restricted run gets
+    # its own copy of the fixtures: nothing left behind by the main run can land in its window. `stray`
+    # writes into the main tree during that window; a restricted run over `directory` names it.
+    alone = Path(tmp, "restricted", "opf", "tools")
+    os.makedirs(str(alone))
+    for name, source, _want in _RUNTIME_FIXTURES:
+        (alone / name).write_text(source, encoding="utf-8")
+
+    def stray(name, argv, token):
+        (directory / "STRAY-restricted").write_text(token, encoding="utf-8")
+
+    restricted = _self_test_runtime_probe(alone, str(Path(tmp, "boxes")), table=table, names=selected,
+                                          timeout=5, spy=stray)
+    faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
+    # Round-6 codex blocker 1 / claude F2: a caller-inherited ignored SIGCHLD must not blind the probe.
+    # Popen does not restore SIGCHLD, so without the supervisor's own SIG_DFL reset the kernel would
+    # auto-reap its children and the failing module below would read as rc 0 on ECHILD, a clean pass.
+    import signal
+    chld = Path(tmp, "chld")
+    os.makedirs(str(chld))
+    (chld / "fails.py").write_text("import sys\n\nsys.exit(1)\n", encoding="utf-8")
+    previous = signal.getsignal(signal.SIGCHLD)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        ignored = _self_test_runtime_probe(chld, str(Path(tmp, "boxes")),
+                                           table={"fails.py": _DISPATCH_LIBRARY}, tree=chld,
+                                           timeout=5, names={"fails.py"})
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    if not any(miss.startswith("fails.py") and "rc 1" in miss for miss in ignored):
+        faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
+                      .format("; ".join(ignored[:3]) or "nothing"))
+    faults += _self_test_runtime_decoy_unit()
+    faults += _self_test_runtime_wait_unit()
+    faults += _self_test_runtime_supervisor_unit(tmp)
+    faults += _self_test_runtime_report_channel(tmp)
+    unit = Path(tmp, "snapunit")
+    os.makedirs(str(unit / "sub" / ".git"))
+    os.makedirs(str(unit / ".git"))
+    (unit / ".git" / "config").write_text("top-level, pruned", encoding="utf-8")
+    (unit / "sub" / "data.txt").write_text("same bytes", encoding="utf-8")
+    key, nest = os.path.join("sub", "data.txt"), os.path.join("sub", ".git")
+    first, unread = _runtime_snapshot(unit)
+    if unread:
+        faults.append("the snapshot unit tree was unreadable ({})".format("; ".join(unread)))
+    if any(path == ".git" or path.startswith(".git" + os.sep) for path in first):
+        faults.append("the top-level .git was not pruned from the snapshot")
+    if nest not in first:
+        faults.append("a nested .git directory was not recorded by the snapshot")
+    st = os.lstat(str(unit / "sub" / "data.txt"))
+    dir_st = os.lstat(str(unit / "sub"))
+    outside = Path(tmp, "outside.bin")
+    outside.write_bytes((unit / "sub" / "data.txt").read_bytes())
+    os.chmod(str(outside), st.st_mode & 0o7777)
+    os.utime(str(outside), ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.link(str(outside), str(unit / "sub" / "data.lnk"))
+    os.rename(str(unit / "sub" / "data.lnk"), str(unit / "sub" / "data.txt"))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    second, unread = _runtime_snapshot(unit)
+    if unread or first.get(key) == second.get(key):
+        faults.append("a hardlink swap preserving bytes, mode, size and mtime was not a snapshot change")
+    elif first.get(key) and second.get(key) and (
+            tuple(first[key][index] for index in (0, 1, 2, 6))
+            != tuple(second[key][index] for index in (0, 1, 2, 6))):
+        faults.append("the hardlink swap was revealed by mode, size, mtime or content rather than by the"
+                      " inode identity alone, so the check does not pin the identity fields")
+    nest_st = os.lstat(str(unit / "sub" / ".git"))
+    (unit / "sub" / ".git" / "config").write_text("PLANTED", encoding="utf-8")
+    os.utime(str(unit / "sub" / ".git"), ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    third, unread = _runtime_snapshot(unit)
+    planted = sorted(path for path in set(second) | set(third) if second.get(path) != third.get(path))
+    if unread or not planted:
+        faults.append("a write into a nested .git with the parent mtimes restored was not a snapshot change")
+    elif [path for path in planted if path != nest and not path.startswith(nest + os.sep)]:
+        faults.append("the nested .git plant changed paths outside the nested .git ({}), so the top-level-"
+                      "only pruning is not what catches it".format(planted))
+    return faults
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
-    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
+    OUTSIDE the {0,1,2} int vocabulary must fail its unit CLOSED (a non-zero worst), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
-    0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
+    0.0 == 0): the mapping rides with the unit in _unit_child_code (D-385-SUBPROCESS-RUNNER), pinned
+    here in-process, and run_self_tests's worst-of aggregation is pinned over a stubbed unit runner.
+    Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
     the F-SELFTEST-NO-MAIN class empty by static form (_self_test_entry_gaps, which runs no module code): every
     module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
@@ -944,6 +4676,15 @@ def _aggregator_self_test():
     gaps, exposers = _self_test_entry_gaps(here, required)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
         missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-dispatch-") as tmp:
+        missed += _self_test_dispatch_probe(here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-escape-") as tmp:
+        missed += _self_test_dispatch_escape_probe(tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-") as tmp:
+        missed += _self_test_runtime_probe(here, tmp)
+    # The escape probe owns its directory and removes it only once no escaped writer can still write
+    # into it; a TemporaryDirectory would remove it under a writer that outlived the probe's bound.
+    missed += _self_test_runtime_escape_probe(tempfile.mkdtemp(prefix="opf-entry-runtime-escape-"))
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(
@@ -951,18 +4692,39 @@ def _aggregator_self_test():
                   "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
         return EXIT_FINDING
     ok = True
-    # A helper returning False (bool, == 0) must NOT aggregate to clean.
-    if run_self_tests((("synthetic-false", lambda: False),)) == EXIT_OK:
-        ok = False
-    # A helper returning 0.0 (float, == 0) must NOT aggregate to clean.
-    if run_self_tests((("synthetic-zero-float", lambda: 0.0),)) == EXIT_OK:
-        ok = False
-    # An out-of-range int (3) must NOT aggregate to clean.
-    if run_self_tests((("synthetic-three", lambda: 3),)) == EXIT_OK:
-        ok = False
-    # A genuine clean int (0) still aggregates to clean: the check does not over-reject.
-    if run_self_tests((("synthetic-zero", lambda: 0),)) != EXIT_OK:
-        ok = False
+    # The fail-closed return-vocabulary mapping rides with the unit, in its child entry
+    # (_unit_child_code, D-385-SUBPROCESS-RUNNER); these vectors pin the mapping itself, in-process.
+    import contextlib
+    import io
+    import unittest.mock
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        # A helper returning False (bool, == 0) must NOT map to clean.
+        if _unit_child_code("synthetic-false", lambda: False, False) == EXIT_OK:
+            ok = False
+        # A helper returning 0.0 (float, == 0) must NOT map to clean.
+        if _unit_child_code("synthetic-zero-float", lambda: 0.0, False) == EXIT_OK:
+            ok = False
+        # An out-of-range int (3) must NOT map to clean.
+        if _unit_child_code("synthetic-three", lambda: 3, False) == EXIT_OK:
+            ok = False
+        # A genuine clean int (0) still maps to clean: the check does not over-reject.
+        if _unit_child_code("synthetic-zero", lambda: 0, False) != EXIT_OK:
+            ok = False
+    # The aggregate is the WORST unit outcome, never masked by a later clean unit: the committed
+    # run_self_tests loop itself, driven over real registered labels with the unit runner stubbed
+    # to scripted codes (the seam under test is the aggregation, not the subprocesses).
+    codes = {"opf-store": EXIT_FINDING, "opf-schema": EXIT_OK, "opf-release": EXIT_MALFORMED}
+    quiet = io.StringIO()
+    with unittest.mock.patch.object(sys.modules[__name__], "_run_unit_subprocess",
+                                    lambda label, bound, argv=None: codes[label]):
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            if run_self_tests(("opf-store", "opf-schema")) != EXIT_FINDING:
+                ok = False
+            if run_self_tests(("opf-store", "opf-release", "opf-schema")) != EXIT_MALFORMED:
+                ok = False
+            if run_self_tests(("opf-schema",)) != EXIT_OK:
+                ok = False
     if not ok:
         print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
               file=sys.stderr)
@@ -971,6 +4733,522 @@ def _aggregator_self_test():
           "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
               len(exposers), len(required)))
     return EXIT_OK
+
+
+def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False, reap_bound=None, unreaped=None):
+    """The ONE route for a self-test signal whose target pid came from a file, an earlier
+    /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
+    blocker; shared-uid pool rule): signal `pid` only through a pidfd whose target a
+    waitid(P_PIDFD, ..., WEXITED | WNOHANG | WNOWAIT) has JUST proved is this process's own
+    un-reaped child. The former ADOPTION license is retired (D-385-PIDFD-HANDOFF as read by
+    the D-385-CURRENT-CHILD ruling): a fixture orphan reparented here under
+    PR_SET_CHILD_SUBREAPER (_case_subreaper) was never forked by this process and is NEVER
+    signalled -- current waitability cannot prove forking parentage -- so without one of the
+    two licenses below the call REFUSES: no pidfd is opened, nothing is signalled, False is
+    returned, and the caller reports the target by name as not signalled (the disclosed
+    orphan-escape residual). The licenses: (1) a caller-supplied `pidfd`, for which the call
+    site answers -- the descriptor the target's FORKING PARENT opened and handed off over
+    SCM_RIGHTS (_pidfd_handoff_recv, the guardian's subject receipt), or one this process
+    opened on its own direct fork -- a static code-review boundary, the same class as the
+    raw-send_fds residual, not a runtime proof; (2) `forked=True`, the call site's
+    declaration that `pid` is this process's OWN direct, un-reaped fork (fork-bound at the
+    site; the same review boundary), which alone licenses the local pidfd_open here. Either
+    way the waitid proof still gates the send: ECHILD or any other pidfd or waitid failure
+    means NOTHING is signalled and False is returned, so a forged or recycled pid can never
+    redirect a self-test signal to an unrelated same-uid process. `sig` defaults to SIGKILL;
+    a SIGKILL target is then reaped through the SAME pidfd (race-free against pid reuse) by
+    _reap_pidfd, for at most `reap_bound` seconds (default _PIDFD_REAP_SECONDS), never a
+    blocking waitid: a target still un-reaped then is named in the caller's `unreaped` list
+    when one is given (the self-test callers pass their faults), and the call still returns
+    True, since the signal was sent. A caller-supplied `pidfd` stays owned (and closed) by
+    the caller; otherwise the fd is opened and closed here. Returns True only when the
+    signal was sent."""
+    import signal as signal_module
+    if sig is None:
+        sig = signal_module.SIGKILL
+    if not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT")
+            and hasattr(signal_module, "pidfd_send_signal")):
+        return False
+    fd, opened = pidfd, False
+    if fd is None:
+        if not forked:
+            # D-385-CURRENT-CHILD: no handoff descriptor and no own-fork
+            # declaration -- an adopted current child stays unsignalled.
+            return False
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except OSError:
+            return False
+        opened = True
+    try:
+        try:
+            os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except OSError:
+            return False
+        try:
+            signal_module.pidfd_send_signal(fd, sig)
+        except OSError:
+            return False
+        bound = _PIDFD_REAP_SECONDS if reap_bound is None else reap_bound
+        if sig == signal_module.SIGKILL and not _reap_pidfd(fd, bound) and unreaped is not None:
+            unreaped.append("pid {} was not reaped within {} s of its SIGKILL through its pidfd".format(
+                pid, bound))
+        return True
+    finally:
+        if opened:
+            os.close(fd)
+
+
+_PIDFD_REAP_SECONDS = 5.0
+
+
+def _reap_pidfd(fd, bound):
+    """Reap the child behind pidfd `fd`, waiting at most `bound` seconds: waitid(P_PIDFD, ...,
+    WEXITED | WNOHANG) polls, slept between on a poll() of the pidfd (readable once the child
+    exits) bounded by what is left, never a blocking waitid or waitpid, which a traced or
+    wedged child could hold past every outer bound. Returns True once the child is reaped or
+    is no longer this process's to reap (ECHILD only), False when the bound ran out with it
+    un-reaped or when waitid failed any other way (EBADF, EINVAL and the like: the reap's
+    state is unknown, so the caller's fault names the child rather than calling it reaped)."""
+    import select
+    import time
+    deadline = time.monotonic() + bound
+    while True:
+        try:
+            if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is not None:
+                return True
+        except ChildProcessError:
+            return True
+        except OSError:
+            return False
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return False
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        poller.poll(min(left, 0.1) * 1000.0)
+
+
+_CASE_WAIT_SECONDS = 15.0
+
+
+def _bounded_wait(pid, bound=None, *, nowait=False, forked=False):
+    """The ONE wait route of the completion cases and their fixtures (QA21, class-wide; audited by
+    _runtime_wait_audit and pinned by _self_test_runtime_wait_unit): wait for this process's child
+    `pid` for at most `bound` seconds (default _CASE_WAIT_SECONDS, under the 40 s bound of each
+    completion case) by WNOHANG polls, never a blocking os.waitpid or os.waitid, which a wedged,
+    stopped or traced child could hold past every outer bound. With `nowait` the child is left
+    un-reaped (waitid WEXITED | WNOWAIT) and waitid's result is returned; otherwise it is reaped and
+    os.waitpid's (pid, status) pair is returned. os.waitpid and os.waitid are looked up at each
+    poll, so a case's patch of either still applies, and ECHILD propagates as before. On expiry the
+    child is SIGKILLed ONLY when the call site declares `forked=True` (the site's own direct
+    fork-bound name, pinned like a numeric kill by _self_test_runtime_supervisor_unit) and then only
+    through _kill_proved_child, whose waitid proof and bounded pidfd reap apply; an undeclared
+    target (an adopted orphan under _case_subreaper included) is never signalled
+    (D-385-CURRENT-CHILD). Either way AssertionError names the pid: the case's fault."""
+    import time
+    bound = _CASE_WAIT_SECONDS if bound is None else bound
+    deadline = time.monotonic() + bound
+    pause = 0.001
+    while True:
+        if nowait:
+            ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            if ended is not None:
+                return ended
+        else:
+            waited = os.waitpid(pid, os.WNOHANG)
+            if waited[0] != 0:
+                return waited
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            break
+        time.sleep(min(pause, left, 0.05))
+        pause = min(pause * 2.0, 0.05)
+    import signal
+    unreaped = []
+    if not forked:
+        disposal = "not signalled: the call site does not declare it its own fork"
+    elif not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT")
+              and hasattr(signal, "pidfd_send_signal")):
+        disposal = "not signalled: pidfd signalling is unsupported here, so no kill can be proved safe"
+    elif _kill_proved_child(pid, forked=True, unreaped=unreaped):
+        disposal = "; ".join(unreaped) or "SIGKILLed through its pidfd and reaped"
+    else:
+        disposal = "not signalled: it is no longer proved this process's own un-reaped child"
+    raise AssertionError("child pid {} did not {} within {} s ({})".format(
+        pid, "exit" if nowait else "exit and get reaped", bound, disposal))
+
+
+def _child_subreaper_flag():
+    """Read PR_GET_CHILD_SUBREAPER (prctl option 37, Linux). Returns True
+    when this process is a child subreaper, False when it is not, None when
+    the flag cannot be read; the caller that needs the NEGATIVE (the
+    handoff sender) treats None as a refusal, never as proof."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        flag = ctypes.c_int(0)
+        if libc.prctl(37, ctypes.byref(flag), 0, 0, 0) != 0:
+            return None
+        return bool(flag.value)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _close_every(closes):
+    """Run EVERY close step even when an earlier one raises (QA12 codex
+    major 2: a multi-descriptor cleanup whose first close fails must not
+    strand the later descriptors). Each step runs in its own try; the FIRST
+    failure is re-raised only after every step ran, so one raising close
+    can neither skip nor hide a later one. Census-exception leg 1n probes
+    every position with a release-then-raise close and requires the first
+    of two injected failures to be the one re-raised.
+    Cancellation keeps priority over an ordinary failure (QA13 codex 3 /
+    claude m3: a cancellation raised by a later close must not be lost
+    behind an earlier ordinary failure). Every step still runs -- the
+    contract is that no descriptor is stranded -- but if any close raised a
+    pending cancellation (TimeoutError, InterruptedError or
+    KeyboardInterrupt), the FIRST such cancellation is the one re-raised,
+    with the first ordinary failure kept reachable beneath it as its
+    context; otherwise the first ordinary failure is re-raised. This
+    helper must close every descriptor, so it defers the re-raise to the
+    end while preserving that priority."""
+    first = None
+    cancellation = None
+    for close in closes:
+        try:
+            close()
+        except BaseException as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError,
+                                KeyboardInterrupt)):
+                if cancellation is None:
+                    cancellation = exc
+            elif first is None:
+                first = exc
+    if cancellation is not None:
+        if first is not None and cancellation.__context__ is None:
+            cancellation.__context__ = first
+        raise cancellation
+    if first is not None:
+        raise first
+
+
+def _pidfd_handoff_pair():
+    """One SOCK_SEQPACKET socketpair per handoff (D-385-PIDFD-HANDOFF, QA11
+    codex major): datagram framing makes one message one handoff -- stream
+    interleaving can no longer split or merge payloads -- and
+    _pidfd_handoff_recv refuses any other transport."""
+    import socket
+    return socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+
+
+def _pidfd_handoff_misuse_send(peer, messages):
+    """DELIBERATELY malformed wire shapes for the handoff self-tests
+    (census-exception leg 1j). Each message is (buffers, fds) and is sent
+    raw with socket.send_fds; every receiver of these messages is required
+    by its leg to REFUSE them, so this helper proves nothing and licenses
+    nothing. It exists so the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit can require that raw descriptor
+    sends appear ONLY here and in _pidfd_handoff_send (QA12 orchestrator
+    ruling 1): a raw send_fds elsewhere in these files is refused by that
+    sweep, while a raw send from code OUTSIDE the swept files remains
+    possible -- that residual is disclosed in the handoff docstrings, not
+    closed."""
+    import socket
+    for buffers, fds in messages:
+        socket.send_fds(peer, buffers, fds)
+
+
+def _pidfd_handoff_send(conn, pid):
+    """Sender side of the pidfd handoff (D-385-PIDFD-HANDOFF): call
+    IMMEDIATELY after os.fork() returned `pid`, before ANY wait on it. An
+    un-reaped child's pid cannot be reused, so the pidfd opened HERE is bound
+    to that child, and SCM_RIGHTS preserves that binding across the
+    socketpair. What this sender ENFORCES is exactly what the kernel can
+    prove, no stronger (QA12 orchestrator ruling 1). Two checks run before
+    anything is sent:
+    (1) this process must NOT be a child subreaper (PR_GET_CHILD_SUBREAPER
+    zero; an unreadable flag refuses too): a subreaper ADOPTS orphaned
+    descendants, so a waitable child of a subreaper may be an adopted
+    process it never forked (QA12 codex blocker 1, the adopted-child
+    reproduction);
+    (2) waitid(P_PIDFD, fd, WEXITED|WNOHANG|WNOWAIT), the same proof
+    _kill_proved_child uses, must answer for the descriptor (QA11 codex
+    blocker). ECHILD means the target is NOT even a waitable child (a
+    parent, a sibling, a reaped or foreign pid).
+    Together these establish that the target is a CURRENT waitable child of
+    a process whose subreaper flag is clear AT SEND TIME -- in the senders
+    these files run, a process the sender forked itself (every caller of
+    THIS helper sends BEFORE ever setting the flag; the _opf_emit.py
+    guardian's receipt send runs with the flag already set, through the
+    separately licensed raw sender _fixture_send_subject, and is sound
+    because its target is the os.fork() it performed immediately before)
+    -- with three residuals the kernel cannot exclude, DISCLOSED here.
+    (a) waitid also answers for a ptrace TRACEE, so a sender tracing a
+    non-child would pass both checks (nothing in these files calls
+    ptrace). (b) The flag check is a POINT-IN-TIME read, not history: the
+    kernel keeps no "was ever a subreaper" state, so a sender that WAS a
+    subreaper, ADOPTED an orphan, and then CLEARED the flag (prctl) still
+    holds that orphan as a waitable child and passes both checks --
+    current waitability cannot prove historical forking parentage (QA13
+    codex 2). (c) CLONE_PARENT: a child of the sender can clone a sibling
+    with CLONE_PARENT, making the SENDER its parent without the sender
+    ever forking it or ever having been a subreaper (QA14 claude M2, with
+    the round-13 kernel reproduction: the clone passed both checks on a
+    never-subreaper sender), so a CURRENT waitable child of a clear-flag
+    process is still not proof of forking parentage. Nothing in these
+    files clears the flag, calls ptrace or spells CLONE_PARENT, and every
+    fixture child these senders fork runs only code written here, so
+    reaching (b) or (c) requires code outside these files to drive this
+    helper: the same static code-review boundary as the raw-send_fds
+    residual below, not a runtime adversary this sender can exclude. A
+    holder of the sending endpoint can also skip this helper entirely
+    with a raw socket.send_fds: the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit refuses that spelling anywhere in
+    the swept files outside this function, the leg-1j misuse fixture and
+    _opf_emit._fixture_send_subject (the guardian's receipt send), and
+    beyond those files the endpoints of every handoff are the test's OWN
+    fixture processes -- a static code-review boundary, not a runtime
+    adversary. On either refused check the handoff is
+    REFUSED: the descriptor is closed, NOTHING is sent, and the refusal is a
+    loud AssertionError, so a misbehaving holder of the sending endpoint
+    cannot launder an arbitrary number into a descriptor THROUGH THIS
+    HELPER. An un-reaped
+    zombie child still passes the proof on purpose: its pid is still pinned
+    and the RECEIVER refuses the exited target loudly. The numeric pid rides
+    along as DISCLOSURE (for /proc state reads and messages); the receiver
+    never signals the number. On a host without pidfd support the payload is
+    sent descriptor-less and the receiver fails closed (returns False here,
+    True when a descriptor was sent)."""
+    import socket
+    payload = str(int(pid)).encode("ascii")
+    if not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD")
+            and hasattr(os, "WNOWAIT")):
+        conn.send(payload)
+        return False
+    if _child_subreaper_flag() is not False:
+        raise AssertionError(
+            "pidfd handoff refused at the sender: this process is (or cannot "
+            "prove it is not) a child subreaper, so a waitable child may be "
+            "an ADOPTED orphan it never forked (QA12 codex blocker 1); "
+            "nothing is sent")
+    fd = os.pidfd_open(int(pid), 0)
+    try:
+        try:
+            os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except OSError as exc:
+            raise AssertionError(
+                "pidfd handoff refused at the sender: pid {} is not this "
+                "process's own un-reaped child (waitid: {}); nothing is "
+                "sent".format(int(pid), exc)) from None
+        socket.send_fds(conn, [payload], [fd])
+    finally:
+        os.close(fd)
+    return True
+
+
+def _pidfd_handoff_fork_send(conn, child_main):
+    """Fork-and-send (D-385-PIDFD-HANDOFF, QA11 codex blocker): the ONLY pid
+    this helper hands to _pidfd_handoff_send is the one its own os.fork()
+    just returned, so a call site cannot route an arbitrary, stale or
+    file-read number into a handoff. `child_main` runs in the child and
+    never returns (it must end the process itself; a fall-through or raise
+    exits 125). The parent sends the descriptor immediately -- before any
+    wait could unpin the number -- and returns the child's pid, which the
+    AST pin licences exactly like a fork-bound name. A send that refuses or
+    fails must not leave the child this helper just forked running with no
+    owner (QA12 claude m4): `pid` is fork-bound and un-waited exactly here,
+    so the numeric SIGKILL is licensed, and the child is reaped before the
+    send failure propagates."""
+    import signal
+    pid = os.fork()
+    if pid == 0:
+        try:
+            child_main()
+        finally:
+            os._exit(125)
+    try:
+        _pidfd_handoff_send(conn, pid)
+    except BaseException:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        finally:
+            _bounded_wait(pid, forked=True)
+        raise
+    return pid
+
+
+def _pidfd_handoff_recv(conn, note):
+    """Receiving side of the pidfd handoff (D-385-PIDFD-HANDOFF, which
+    retires the /proc-ancestry walk _pidfd_proved_descendant: the walk
+    pinned only the TARGET, so an intermediate /proc hop could exit, be
+    reaped and have its number recycled beneath the anchor mid-walk,
+    splicing an unrelated target into an accepted chain -- QA10 codex
+    blocker / claude m1). The ONLY sanctioned route by which a self-test
+    accepts a signal target it did not fork itself is a descriptor passed
+    here with SCM_RIGHTS over a SOCK_SEQPACKET socketpair
+    (_pidfd_handoff_pair), whose datagram framing makes one message one
+    handoff. What each side establishes is stated at kernel strength and no
+    stronger (QA12 orchestrator ruling 1): THIS receiver validates the
+    DESCRIPTOR's identity (a pidfd, naming the disclosed pid, its process
+    still alive), never who opened or sent it; the SENDER's own checks
+    (_pidfd_handoff_send: not a child subreaper, and waitid answering for
+    the descriptor) establish that its target was a current waitable child
+    of a clear-flag process AT SEND TIME -- current waitability does not
+    prove forking parentage, so that reads as its own fork only up to the
+    THREE residuals disclosed there: a ptrace tracee, an orphan adopted
+    while the sender WAS a subreaper and held past the flag's clearing,
+    and a CLONE_PARENT sibling. A holder of the sending endpoint that bypasses
+    _pidfd_handoff_send with a raw socket.send_fds is NOT detected here:
+    inside the swept files the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit refuses that spelling, and beyond
+    them the endpoints of every handoff are the test's OWN fixture
+    processes -- a static code-review boundary, not a runtime adversary.
+    Returns (pid, fd); the pid is disclosure only -- /proc state
+    reads and messages -- NEVER a signal target. The receiver OWNS `conn`:
+    it is closed exactly once, in a finally, on every path, refusals
+    included, and a close that itself raises can no longer strand what was
+    received (QA11 codex major: every received descriptor is closed before
+    the failure propagates). Fails closed with AssertionError naming
+    `note`, every received descriptor closed and NOTHING signalled, when:
+    the transport is not SOCK_SEQPACKET; no message arrives within the
+    bound; the sender closed without a message; the sender's first message
+    was EMPTY while the peer was still open (QA12 codex minor 3: an empty
+    SEQPACKET record from a live peer is a MESSAGE, refused as one; once
+    POLLHUP is set this kernel leaves an empty record queued before the
+    close and plain EOF indistinguishable -- recv answers zero bytes with
+    no flags for both, and AF_UNIX SOCK_SEQPACKET sets no MSG_EOR -- so
+    that shape reads as EOF, a disclosed residual); the message was truncated
+    in data or control (descriptors past the receive room included --
+    MSG_CTRUNC is REFUSED, never ignored, QA11 codex major); the message
+    carries any descriptor count but exactly one; the payload is not a
+    pid, or is over-long for one; the descriptor is not a pidfd, or its
+    /proc/self/fdinfo `Pid:` does not name the payload's pid (the payload
+    may disclose only the handed-off process's own number); the
+    descriptor's process has ALREADY EXITED (the pidfd polls readable) --
+    a dead target takes no signal and the refusal is loud, never
+    swallowed; or a SECOND message is already queued behind the first --
+    an EMPTY one from a still-open peer included (QA12 codex minor 3),
+    with the same POLLHUP-set residual as above -- (one message is one
+    handoff; only EOF may follow, and the socket is closed here, so a
+    later message can never be read)."""
+    import select
+    import socket
+
+    received = []
+
+    def refuse(reason):
+        raise AssertionError("pidfd handoff refused ({}): {}; nothing is "
+                             "signalled".format(note, reason))
+
+    try:
+        try:
+            if conn.type != socket.SOCK_SEQPACKET:
+                refuse("the handoff transport is not a SOCK_SEQPACKET "
+                       "socketpair (one message is one handoff)")
+            poller = select.poll()
+            poller.register(conn.fileno(), select.POLLIN)
+            events = poller.poll(30000)
+            if not events:
+                refuse("no handoff message arrived within the bound")
+            message, fds, flags, _addr = socket.recv_fds(conn, 256, 8)
+            received.extend(fds)
+            if flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC):
+                refuse("the handoff message was truncated (control or data): "
+                       "it carried more than one message's room for "
+                       "descriptors or payload")
+            if not message and not received:
+                # QA12 codex minor 3: with the peer still open (no POLLHUP)
+                # a zero-byte read is a genuine EMPTY message and is refused
+                # as one. With POLLHUP set this kernel cannot tell an empty
+                # record queued before the close from plain EOF (no MSG_EOR
+                # on AF_UNIX SOCK_SEQPACKET), so that shape reads as the
+                # sender closing -- the disclosed residual.
+                if events[0][1] & select.POLLHUP:
+                    refuse("the forking parent closed without a handoff "
+                           "message")
+                refuse("the forking parent sent an EMPTY handoff message")
+            if len(received) != 1:
+                refuse("the forking parent passed {} descriptors, not exactly "
+                       "one".format(len(received)))
+            if len(message) > 16:
+                refuse("the handoff payload is over-long for a pid")
+            if not message.isdigit():
+                refuse("the handoff payload is not a pid")
+            pid = int(message)
+            fd = received[0]
+            owner = None
+            try:
+                fdinfo = Path("/proc/self/fdinfo", str(fd)).read_text(
+                    encoding="ascii", errors="replace")
+            except OSError:
+                fdinfo = ""
+            for line in fdinfo.splitlines():
+                if line.startswith("Pid:"):
+                    owner = line.split(":", 1)[1].strip()
+                    break
+            if owner is None:
+                refuse("the handed-off descriptor is not a pidfd")
+            if owner != str(pid):
+                refuse("the handoff payload names pid {} but the "
+                       "descriptor's process is {}".format(pid, owner))
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            if poller.poll(0):  # readable: the handed-off target has already exited
+                refuse("the handed-off target (pid {}) has already "
+                       "exited".format(pid))
+            poller = select.poll()
+            poller.register(conn.fileno(), select.POLLIN)
+            events = poller.poll(0)
+            if events:
+                more, more_fds, _mflags, _maddr = socket.recv_fds(conn, 256, 8)
+                received.extend(more_fds)
+                if more or more_fds or not events[0][1] & select.POLLHUP:
+                    # QA12 codex minor 3: an empty read with the peer still
+                    # open (no POLLHUP) is a second MESSAGE, refused like
+                    # any other; with POLLHUP set an empty read is EOF (or
+                    # the indistinguishable empty-record-then-close
+                    # residual the docstring discloses).
+                    refuse("a second handoff message followed the first; "
+                           "one message is one handoff")
+        except BaseException:
+            while received:
+                try:
+                    os.close(received.pop())
+                except OSError:
+                    pass
+            raise
+        finally:
+            conn.close()
+    except BaseException:
+        # QA11 codex major: a conn.close() that itself raises must not
+        # strand the received descriptor.
+        while received:
+            try:
+                os.close(received.pop())
+            except OSError:
+                pass
+        raise
+    return pid, fd
+
+
+def _case_subreaper():
+    """Make THIS process a child subreaper (PR_SET_CHILD_SUBREAPER, prctl option 36, Linux),
+    so a fixture orphan whose guardian has died reparents HERE, where it can be OBSERVED
+    and, once it exits, reaped. Adoption licenses NO signal (D-385-CURRENT-CHILD: the
+    retired reading let _kill_proved_child's waitid proof own an adopted orphan); an
+    orphan's cleanup is its forking parent's handoff descriptor, or a release the fixture
+    itself answers to (an EOF on a pipe this case holds), never a signal to a pid this
+    process did not fork. Process-scoped by design: each caller is a dedicated fixture
+    process under _watchdog_regression_self_test. Returns True when the flag was set; on a
+    host without the flag the ownership proofs fail closed (nothing is signalled) and the
+    fixtures' own completion waits name the leftover loudly."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _watchdog_timer_case(label, mode):
@@ -1209,6 +5487,7 @@ def _watchdog_deadline_case(mode):
 
     def census():
         if mode == "transient-census":
+            record(["census", time.monotonic()])
             if empty_since[0] is None:
                 empty_since[0] = time.monotonic()
             if time.monotonic() - empty_since[0] < 1.6:
@@ -1243,14 +5522,21 @@ def _watchdog_deadline_case(mode):
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
                       and finished <= cleanup_limit + 1)
         if mode == "transient-census":
-            # The old combined 1.5 s assertion rejects this passing cleanup.
-            assert elapsed > 1.5 and drains, (elapsed, rows)
+            # D-385-CURRENT-CHILD: the drain neither signals nor WAITS ON
+            # the census -- completion is kernel ECHILD, so the transiently
+            # empty census neither stalls this cleanup (the retired drain
+            # polled it for kill targets; the old elapsed > 1.5 assertion
+            # pinned exactly that wait) nor is consulted at all on this
+            # passing path: it is read only to NAME survivors in a refusal.
+            assert drains, (elapsed, rows)
+        census_unconsulted = (mode != "transient-census"
+                              or not any(row[0] == "census" for row in rows))
         # The helper owns cleanup. A diagnostic never sends another signal.
         reaped = _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
         reached = os.read(started_r, 200) == b"started"
         ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
-              and reached and reaped)
+              and reached and reaped and census_unconsulted)
     finally:
         os.close(started_r)
         os.close(started_w)
@@ -1464,6 +5750,31 @@ def _watchdog_launcher_case(label, disposition):
     return EXIT_OK if ok else EXIT_FINDING
 
 
+def _live_not_zombie(pid):
+    """Survival predicate for the named-and-left legs (QA16 codex 1): True only while /proc/<pid>/stat
+    reads a state other than zombie. /proc/<pid> also exists for an exited but unreaped child, so mere
+    existence proves a retained process entry, never survival."""
+    try:
+        stat = Path("/proc", str(pid), "stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return stat.rsplit(b")", 1)[1].split()[0] != b"Z"
+
+
+def _zombie_survival_control():
+    """Zombie fixture for _live_not_zombie: an exited, unreaped own fork keeps its /proc entry, and the
+    survival predicate must still refuse it. The fork is reaped before returning."""
+    zombie = os.fork()
+    if zombie == 0:
+        os._exit(0)
+    try:
+        _bounded_wait(zombie, nowait=True, forked=True)
+        assert Path("/proc", str(zombie)).exists(), "the zombie fixture left no /proc entry"
+        assert not _live_not_zombie(zombie), "the survival predicate accepted a zombie"
+    finally:
+        _bounded_wait(zombie, forked=True)
+
+
 def _watchdog_completion_case(mode):
     """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
     import json
@@ -1474,6 +5785,19 @@ def _watchdog_completion_case(mode):
     from unittest.mock import patch
     import _opf_emit as emit
     import _optlevel
+
+    # QA8 (codex blocker class) as narrowed by D-385-CURRENT-CHILD: arm
+    # PR_SET_CHILD_SUBREAPER so a fixture orphan (its guardian dead and
+    # collected) reparents to THIS case process, where it can be OBSERVED
+    # and, once it exits, reaped. Adoption licenses NO signal: every hygiene
+    # below signals only this process itself, a Popen-managed child, a
+    # directly forked child the site declares (forked=True), or a target
+    # whose FORKING PARENT handed its pidfd off over SCM_RIGHTS; an adopted
+    # orphan is refused by name and released through its own fixture (a
+    # pipe EOF or file gate), never signalled. The flag is process-scoped
+    # by design: each completion case runs in its own dedicated fixture
+    # process under _watchdog_regression_self_test.
+    _case_subreaper()
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
@@ -1573,12 +5897,12 @@ def _watchdog_completion_case(mode):
                 bound = real_budget(execution_deadline)
                 append(json.dumps([execution_deadline, bound]))
                 return bound
-            def retry(subject, subject_fd=None, *, deadline=None):
-                attempts.append(deadline)
-                append(repr(deadline))
+            def retry(subject, subject_fd=None, **kwargs):
+                attempts.append(kwargs["deadline"])
+                append(repr(kwargs["deadline"]))
                 if len(attempts) == 1:
                     raise OSError(5, "QA15-RETRY")
-                return real_drain(subject, subject_fd, deadline=deadline)
+                return real_drain(subject, subject_fd, **kwargs)
             with patch.object(emit, "_fixture_drain", retry), \
                     patch.object(emit, "_fixture_cleanup_deadline", budget):
                 refuses(emit.ChildStatusUnavailable, launch)
@@ -1586,14 +5910,48 @@ def _watchdog_completion_case(mode):
                       for line in log_path.read_text(encoding="ascii").splitlines()]
             assert len(bounds) == 3 and bounds[0][0] is not None, bounds
             assert bounds[0][1] == bounds[1] == bounds[2], bounds
-        # Empty census never licenses completion, even when its budget expires.
+        # Empty census never licenses completion, even when its budget expires:
+        # waitid still answers for a live child and waitpid reaps nothing, so
+        # the expiry refuses -- and the refusal STATES the census miss rather
+        # than naming an empty adopted-descendant list (QA15 claude M2).
         with patch.object(os, "waitid", return_value=None), \
+                patch.object(os, "waitpid", return_value=(0, 0)), \
                 patch.object(emit, "_fixture_signal", return_value=True), \
                 patch.object(emit, "_fixture_children", return_value=[]), \
                 patch.object(time, "monotonic", side_effect=[100, 102]), \
                 patch.object(time, "sleep"):
-            refuses(emit.ChildStatusUnavailable,
-                    lambda: emit._fixture_drain(123, deadline=101))
+            try:
+                emit._fixture_drain(123, deadline=101)
+            except emit.ChildStatusUnavailable as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+        assert "census missed" in message and "NOT" in message, message
+        assert "[]" not in message, \
+            ("the refusal named an empty list over a waitable child", message)
+        # QA16 claude m2: the census excludes the subject, so a still-bound,
+        # unreaped subject is itself the waitable child; any further unnamed
+        # child is possible but unproven, never asserted as a census miss.
+        assert ("the subject 123 is still unreaped and is itself the "
+                "waitable child" in message
+                and "possible but unproven" in message), message
+        assert "identity the census missed" not in message, message
+        # With the holder already cleared, nothing explains the answer but a
+        # child the census missed, and the refusal says exactly that.
+        with patch.object(os, "waitid", return_value=None), \
+                patch.object(os, "waitpid", return_value=(0, 0)), \
+                patch.object(emit, "_fixture_signal", return_value=True), \
+                patch.object(emit, "_fixture_children", return_value=[]), \
+                patch.object(time, "monotonic", side_effect=[100, 102]), \
+                patch.object(time, "sleep"):
+            try:
+                emit._fixture_drain(123, deadline=101, subject_ref=[None])
+            except emit.ChildStatusUnavailable as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+        assert ("a waitable child remains whose identity the census missed"
+                in message and "123" not in message), message
     elif mode == "deadline-flips":
         real_run = emit.run_bounded
         def late(thunk, **kwargs):
@@ -1715,7 +6073,7 @@ def _watchdog_completion_case(mode):
 
             def compete(pid, flags):
                 if not stolen:
-                    worker = threading.Thread(target=lambda: stolen.append(os.waitpid(pid, 0)))
+                    worker = threading.Thread(target=lambda: stolen.append(_bounded_wait(pid, 4.0)))
                     worker.start()
                     worker.join(5)
                     assert not worker.is_alive(), "reaper fixture exceeded its bound"
@@ -1774,6 +6132,13 @@ def _watchdog_completion_case(mode):
         import time
         with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
             markers = [Path(directory, name) for name in ("subject", "descendant")]
+            # The descendant parks on a FILE GATE this case holds (its own
+            # 60 s bound is the self-limit the drain refusal disclosure
+            # names): unlinking the gate releases it, so the named-and-left
+            # survivor never outlives this case and cleanup needs no signal
+            # to a process this case never forked (D-385-CURRENT-CHILD).
+            gate = Path(directory, "gate")
+            gate.write_text("hold", encoding="ascii")
             # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
             subject = ("import os, time; from pathlib import Path; "
                        "pid = os.fork(); "
@@ -1782,7 +6147,11 @@ def _watchdog_completion_case(mode):
                        "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
                        "scratch.write_text(str(os.getpid()), encoding='ascii'); "
                        "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
-                       "time.sleep(60)")
+                       "bound = time.monotonic() + 60; "
+                       "[time.sleep(0.05) for _ in iter(lambda: "
+                       "os.path.exists(" + repr(str(gate)) + ")"
+                       " and time.monotonic() < bound, False)]; "
+                       "os._exit(0)")
             # Writer half: a tripwire against an accidental edit of the marker
             # lines above, not a proof of atomic publication. It requires the
             # name + '.tmp' scratch path, the prefix scratch.write_text( and the
@@ -1829,26 +6198,104 @@ def _watchdog_completion_case(mode):
             assert not observed, "an empty marker was read as a started subject"
             for path in markers:
                 path.unlink()
+            # D-385-CURRENT-CHILD: the guardian's drain kills and reaps ONLY
+            # the subject -- its own direct fork -- and REFUSES the adopted
+            # session-escaped descendant by name, so the launch surfaces the
+            # drain refusal as ChildStatusUnavailable, never a clean timeout
+            # or cancel verdict, and the descendant SURVIVES, named and left
+            # (the disclosed orphan-escape residual), until this case
+            # releases it through its file gate and reaps its exit.
+            def chain(exc):
+                entries = []
+                while exc is not None and exc not in entries:
+                    entries.append(exc)
+                    exc = exc.__cause__ or exc.__context__
+                return entries
+
             with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
-                        lambda: emit.run_status_owned(
-                            [*command[:4], subject], fixture_id="tree/" + mode,
-                            process_fixture=True, timeout=2))
+                try:
+                    emit.run_status_owned(
+                        [*command[:4], subject], fixture_id="tree/" + mode,
+                        process_fixture=True, timeout=2)
+                except (emit.ChildStatusUnavailable, Cancelled) as exc:
+                    chained = chain(exc)
+                else:
+                    raise AssertionError("fixture was accepted: " + mode)
             assert len(observed) == 2, "nested subject never started"
-            for pid in observed:
-                assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+            spid, dpid = observed
+            refusal = " | ".join(str(entry) for entry in chained)
+            assert any(isinstance(entry, emit.ChildStatusUnavailable)
+                       for entry in chained), refusal
+            assert "NOT signalled" in refusal, refusal
+            assert "D-385-CURRENT-CHILD" in refusal, refusal
+            if mode == "nested-cancel":
+                assert any(isinstance(entry, Cancelled) for entry in chained), (
+                    "the cancel stimulus was lost behind the drain refusal",
+                    refusal)
+            # The refusal NAMES the guardian's still-live adopted
+            # descendant(s) -- the process-fixture hop that reparented to it
+            # when its subject died -- by pid.
+            import re
+            named = sorted(set(
+                int(number)
+                for group in re.findall(
+                    r"adopted descendants \[([0-9, ]+)\] NOT", refusal)
+                for number in group.split(",")))
+            assert named, ("the refusal named no adopted descendant", refusal)
+            # Named-and-left: every named survivor and the session-escaped
+            # setsid descendant are ALIVE after the refusal; adoption
+            # licenses NO signal. The subject python (spid) is NOT asserted
+            # either way: it dies under its own forking parent's licensed
+            # timeout kill, whose timing depends on the mode's stimulus.
+            # Survival is a live NON-ZOMBIE state, never a mere /proc entry
+            # (QA16 codex 1): the zombie control first proves the predicate
+            # refuses an exited, unreaped process.
+            _zombie_survival_control()
+            for pid in (*named, dpid):
+                assert _live_not_zombie(pid), (
+                    "a named-and-left process did not survive "
+                    "(D-385-CURRENT-CHILD)", pid, refusal)
+            for pid in named:
+                assert not _kill_proved_child(pid), (
+                    "an adopted current child was signalled "
+                    "(D-385-CURRENT-CHILD)")
+                assert _live_not_zombie(pid), (
+                    "the refused hygiene still ended the survivor")
+            # File-gate release: every parked member exits on its own; the
+            # exited adopted children are then REAPED (collection, never a
+            # signal).
+            gate.unlink()
+            bound = time.monotonic() + 30
+            targets = sorted(set([*named, spid, dpid]))
+            while any(Path("/proc", str(pid)).exists() for pid in targets):
+                try:
+                    os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                assert time.monotonic() < bound, (
+                    "the released fixture tree kept running",
+                    [pid for pid in targets
+                     if Path("/proc", str(pid)).exists()])
+                time.sleep(0.05)
     elif mode == "no-signal-echild":
         import time
         # The immediately-exiting subject leaves the exited guardian as the raw
         # zombie stimulus for the ownership boundary.
         child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
         pid = child.start()
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
-        # Positive control: an owned leader permits signalling.
+        _bounded_wait(pid, nowait=True)
+        # Positive control: an owned leader with the caller's own-fork
+        # declaration permits signalling; WITHOUT the declaration the
+        # numeric boundary refuses even this live owned leader, because
+        # current waitability alone cannot prove fork provenance
+        # (QA15 codex blocker / claude m1).
         with patch.object(os, "kill") as kill:
-            assert emit._fixture_signal(pid, signal.SIGKILL, group=False)
+            assert emit._fixture_signal(pid, signal.SIGKILL, group=False) is False
+            assert not kill.called
+            assert emit._fixture_signal(pid, signal.SIGKILL, group=False,
+                                        forked=True)
             assert kill.called
-        os.waitpid(pid, 0)
+        _bounded_wait(pid)
         child.collected = True  # deliberate external collection of the guardian
         child.close()
         # Negative control covers numeric, group AND pidfd paths after real ECHILD.
@@ -1880,7 +6327,7 @@ def _watchdog_completion_case(mode):
         import time
         child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
         pid = child.start()                   # deliberate zombie stimulus, not a test verdict
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        _bounded_wait(pid, nowait=True)
         with patch.object(os, "kill") as kill:
             assert emit._fixture_child_reaped(pid) is False
         child.collected = True  # the assertion above deliberately consumed its status
@@ -1903,10 +6350,12 @@ def _watchdog_completion_case(mode):
             release = Path(directory, "release")
             guardian_file = Path(directory, "guardian")
             recorded = []
+            fixtures = []
             real_init = emit._FixtureProcess.__init__
 
             def record_init(child, deadline, **kwargs):
                 recorded.append(deadline)
+                fixtures.append(child)
                 return real_init(child, deadline, **kwargs)
 
             real_ack = emit._fixture_ack_subject
@@ -1978,7 +6427,21 @@ def _watchdog_completion_case(mode):
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
                     subject = int(children.read_text(encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
-                    os.kill(gpid, signal.SIGCONT)
+                    # QA15 claude M1: the signal target's pid and descriptor
+                    # come from the _FixtureProcess that LAUNCHED the
+                    # guardian (its own fork), never from the number the
+                    # guardian published through a file -- that file pid is
+                    # observation only (the await_state reads above) and is
+                    # CROSS-CHECKED against the launcher's record here.
+                    owned = fixtures[-1]
+                    assert owned.pid == gpid, (
+                        "the published guardian pid disagrees with the "
+                        "launcher's own fork record", gpid, owned.pid)
+                    assert owned.pidfd is not None, \
+                        "the launcher holds no guardian pidfd"
+                    assert _kill_proved_child(owned.pid, signal.SIGCONT,
+                                              pidfd=owned.pidfd), \
+                        "the resume refused: the launcher's own guardian was not provable"
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
                 finally:
                     gate.set()
@@ -2067,8 +6530,10 @@ def _watchdog_completion_case(mode):
         except ChildProcessError:
             leaked = False
         if leaked:
-            os.kill(leaked_pid, signal.SIGKILL)  # hygiene for the demonstrated leak
-            os.waitpid(leaked_pid, 0)
+            # Hygiene through the ownership proof alone: _kill_proved_child re-proves
+            # the un-reaped child through a pidfd before SIGKILL and reaps through it.
+            assert _kill_proved_child(leaked_pid, forked=True), \
+                "the leaked fork child could not be proved and killed"
         assert leaked, "the inline flip did not reproduce the interruptible window"
         flip_child.close()
     elif mode == "launch-cancel":
@@ -2650,8 +7115,14 @@ def _watchdog_completion_case(mode):
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
-            # callable: the QA18 codex F3 defect, reproduced.
-            with patch.object(emit, "_fixture_check_parent", lambda expected: None):
+            # callable: the QA18 codex F3 defect, reproduced. The ownership ack is
+            # disarmed too, as in subject-ack's flip: launch_held proves only that
+            # the receipt was SENT, so this leg's SIGKILL can land between the
+            # guardian's receipt send and its ack write, and a subject still gated
+            # on the ack would read EOF and refuse for a reason this flip does not
+            # test (the intermittent completion-subject-orphan failure).
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None), \
+                    patch.object(emit, "_fixture_await_ack", lambda fd: None):
                 child, subject = launch_held(arm=False)
                 os.kill(child.pid, signal.SIGKILL)
                 await_state(child.pid, ("Z",), "the killed guardian did not exit")
@@ -2665,6 +7136,25 @@ def _watchdog_completion_case(mode):
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
 
+            # Leg A-iso (QA7 codex 4 vs claude): isolate the parent check. The
+            # positive Flip-A leg disarms the ack, so a removed _fixture_check_parent
+            # could otherwise hide behind the ack EOF on the kill-before-ack race
+            # (the guardian may die before writing the ack). Here the ack is disarmed
+            # but the REAL parent check stays, so an orphaned subject must refuse on
+            # the parent check ALONE: removing that check turns this leg red whatever
+            # the ack schedule, which the ack-enabled leg 1 cannot do deterministically.
+            with patch.object(emit, "_fixture_await_ack", lambda fd: None):
+                child, subject = launch_held()
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                await_state(subject, (None, "Z"), "the orphaned subject kept running")
+                assert not marker.exists(), \
+                    "an orphaned subject ran its callable with the ack disarmed and the parent check live"
+                failures = []
+                cancel(child, failures)
+                assert failures, "a SIGKILLed guardian was read as clean"
+
             # Flip B: without the close-side subject kill, a live subject survives
             # a guardian failure and close() names the surviving pid.
             child, subject = launch_held()
@@ -2676,22 +7166,297 @@ def _watchdog_completion_case(mode):
             assert failures and "could not confirm subject exit" in failures[0], failures
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without its kill"
-            os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: the orphan reparented to this subreaper case
+            # process, but adoption licenses NO signal -- the helper must refuse
+            # the undeclared target (the retired proof killed it right here, so
+            # this refusal is the revert flip) and the orphan is RELEASED through
+            # its own file gate instead: the released subject arms, sees its
+            # changed parent and refuses to run (leg 1), exiting on its own.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(subject) not in (None, "Z"), \
+                "the refused hygiene still ended the subject"
+            release.write_text("go", encoding="ascii")
+            await_state(subject, (None, "Z"), "the released orphan kept running")
+    elif mode == "drain-adopted":
+        import time
+        # D-385-CURRENT-CHILD (the fail-closed drain flip): _fixture_drain
+        # kills ONLY the subject it was handed -- this case's own direct
+        # fork, through the forking parent's descriptor -- and an ADOPTED
+        # descendant is never signalled: the deadline refusal NAMES it as
+        # NOT signalled and it survives, the disclosed orphan-escape
+        # residual. The retired drain SIGKILLed every /proc-census pid here
+        # as a proved current child: on a revert the adoption-refusal
+        # assert, the survival assert and the refusal-naming assert below
+        # all go red. The orphan parks on a pipe this case holds and is
+        # released by EOF, so the cleanup itself crosses no signal boundary.
+        def state(target):
+            try:
+                stat = Path("/proc", str(target), "stat").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+        def await_state(target, wanted, note):
+            bound = time.monotonic() + 30
+            while state(target) not in wanted:
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        emit._fixture_subreaper()
+        release_r, release_w = os.pipe()
+        disclose_r, disclose_w = os.pipe()
+        subject = os.fork()
+        if subject == 0:
+            try:
+                os.close(release_w)
+                os.close(disclose_r)
+                orphan = os.fork()
+                if orphan == 0:
+                    os.close(disclose_w)
+                    os.read(release_r, 1)
+                    os._exit(0)
+                os.write(disclose_w, str(orphan).encode("ascii"))
+                os._exit(0)  # exits at once: the orphan reparents to this case
+            except BaseException:
+                os._exit(125)
+        os.close(disclose_w)
+        subject_fd = os.pidfd_open(subject)  # the forking parent's descriptor
+        orphan = int(os.read(disclose_r, 16))  # DISCLOSURE, never a target
+        os.close(disclose_r)
+        # Wait for the adoption: the orphan's parent must become this case.
+        bound = time.monotonic() + 30
+        while True:
+            fields = Path("/proc", str(orphan), "stat").read_bytes()
+            if int(fields.rsplit(b")", 1)[1].split()[1]) == os.getpid():
+                break
+            assert time.monotonic() < bound, "the orphan was never adopted"
+            time.sleep(0.005)
+        # The adoption license is retired: the live adopted child is refused.
+        assert not _kill_proved_child(orphan), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert state(orphan) not in (None, "Z"), \
+            "the refused hygiene still ended the orphan"
+        try:
+            emit._fixture_drain(subject, subject_fd,
+                                deadline=time.monotonic() + 1.5)
+        except emit.ChildStatusUnavailable as exc:
+            named = str(exc)
+        else:
+            raise AssertionError(
+                "the drain claimed completion over a live adopted descendant")
+        assert "NOT signalled" in named and str(orphan) in named, named
+        assert state(orphan) not in (None, "Z"), \
+            "the drain signalled an adopted descendant (D-385-CURRENT-CHILD)"
+        # EOF release: the orphan exits on its own and a second drain then
+        # reaches ECHILD cleanly.
+        os.close(release_w)
+        os.close(release_r)
+        await_state(orphan, (None, "Z"), "the EOF release did not complete")
+        emit._fixture_drain(subject, subject_fd,
+                            deadline=time.monotonic() + 10.0)
+        os.close(subject_fd)
+    elif mode == "reaped-subject-retry":
+        import time
+        # QA15 codex blocker (the descriptor-less host): once the drain has
+        # REAPED its subject, the subject's number is reusable, so no later
+        # drain retry may send to it -- an adopted process could now answer
+        # to that number and waitid(P_PID) would prove only CURRENT
+        # waitability, not historical identity. The holder (subject_ref)
+        # binds the subject across retries and is cleared at the reap; the
+        # numeric boundary itself refuses a send without the caller's
+        # same-call own-fork declaration (QA15 claude m1). The recorder
+        # model below drives both paths with a REAL adopted child standing
+        # in for the reused number; os.kill is replaced, so nothing is ever
+        # signalled.
+        emit._fixture_subreaper()
+        release = os.pipe()
+        disclose = os.pipe()
+        subject = os.fork()
+        if subject == 0:
+            try:
+                os.close(release[1])
+                os.close(disclose[0])
+                orphan = os.fork()
+                if orphan == 0:
+                    os.close(disclose[1])
+                    os.read(release[0], 1)
+                    os._exit(0)
+                os.write(disclose[1], str(orphan).encode("ascii"))
+                os._exit(0)  # exits at once: the orphan reparents to this case
+            except BaseException:
+                os._exit(125)
+        os.close(disclose[1])
+        orphan = int(os.read(disclose[0], 16))  # DISCLOSURE, never a target
+        os.close(disclose[0])
+        # Wait for the adoption: the orphan's parent must become this case.
+        bound = time.monotonic() + 30
+        while True:
+            fields = Path("/proc", str(orphan), "stat").read_bytes()
+            if int(fields.rsplit(b")", 1)[1].split()[1]) == os.getpid():
+                break
+            assert time.monotonic() < bound, "the orphan was never adopted"
+            time.sleep(0.005)
+        # Survival is a live NON-ZOMBIE state, never a mere /proc entry
+        # (QA16 codex 1), checked before and after the refusals.
+        _zombie_survival_control()
+        assert _live_not_zombie(orphan), "the adopted child was not live"
+        sends = []
+        holder = [subject]
+        with patch.object(os, "kill",
+                          lambda pid, signum: sends.append((pid, signum))):
+            # First drain (pidfd-less model): the entry send is the OWN
+            # subject, declared; the subject is reaped, the holder cleared,
+            # and the live adopted child is refused by name.
+            try:
+                emit._fixture_drain(subject, None,
+                                    deadline=time.monotonic() + 1.0,
+                                    subject_ref=holder)
+            except emit.ChildStatusUnavailable as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+            assert "NOT signalled" in named and str(orphan) in named, named
+            assert holder == [None], (
+                "the reap did not clear the subject binding", holder)
+            # The guardian's failure-path RETRY shares the holder: with the
+            # subject reaped, no numeric send may reach its number again.
+            refuses(emit.ChildStatusUnavailable,
+                    lambda: emit._fixture_drain(subject, None,
+                                                deadline=time.monotonic() + 0.5,
+                                                subject_ref=holder))
+            # The codex round-15 reuse model: the retained number now
+            # identifies the REAL adopted child; a cleared holder refuses
+            # the send and the refusal still NAMES the survivor.
+            try:
+                emit._fixture_drain(orphan, None,
+                                    deadline=time.monotonic() + 0.5,
+                                    subject_ref=[None])
+            except emit.ChildStatusUnavailable as exc:
+                retried = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+            assert str(orphan) in retried and "NOT signalled" in retried, retried
+            # The boundary itself: a numeric send to an adopted CURRENT
+            # child without the own-fork declaration is refused outright.
+            assert emit._fixture_signal(orphan, signal.SIGKILL) is False
+        assert sends == [(subject, signal.SIGKILL)], (
+            "a numeric send reached a pid other than the declared own "
+            "subject (D-385-CURRENT-CHILD)", sends)
+        assert _live_not_zombie(orphan), \
+            "the refused retry still ended the adopted child"
+        # QA16 claude m1: the reap and the holder clear are atomic with
+        # respect to the caller's cancellation signals. A REAL SIGINT raised
+        # by the wrapped waitpid right after it reaps the subject must stay
+        # pending until the drain's mask restore, so the KeyboardInterrupt
+        # arrives with the holder already cleared; unmasked, it lands
+        # between the reap and the clear and leaves the holder bound to a
+        # reaped number.
+        interrupted_own = os.fork()
+        if interrupted_own == 0:
+            os._exit(0)
+        _bounded_wait(interrupted_own, nowait=True, forked=True)
+        real_waitpid = os.waitpid
+
+        def interrupting_waitpid(pid, flags):
+            waited, raw = real_waitpid(interrupted_own, flags)
+            if waited == interrupted_own:
+                signal.raise_signal(signal.SIGINT)
+            return waited, raw
+
+        holder = [interrupted_own]
+        prior_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with patch.object(os, "waitpid", interrupting_waitpid), \
+                    patch.object(os, "kill", lambda pid, signum: None):
+                emit._fixture_drain(interrupted_own, None,
+                                    deadline=time.monotonic() + 1.0,
+                                    subject_ref=holder)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt raised inside the reap was lost")
+        finally:
+            signal.signal(signal.SIGINT, prior_int)
+        assert holder == [None], (
+            "a cancellation between the reap and the clear left the holder "
+            "bound to a reaped number", holder)
+        # QA17 claude m1: _FixtureProcess._start's reap of a guardian that
+        # failed before READY and its `collected` mark are one step too. A
+        # REAL SIGINT raised by the wrapped wait right after it reaps must
+        # stay pending until _start's mask restore, so the KeyboardInterrupt
+        # arrives with `collected` already set; unmasked, it lands between
+        # them and close() would treat the reaped number as an uncollected
+        # guardian. The object is built without its launcher: the guardian
+        # is a real child that exited at once, and its control channel holds
+        # a failure byte in place of READY.
+        import socket
+        failed = os.fork()
+        if failed == 0:
+            os._exit(0)
+        starting = object.__new__(emit._FixtureProcess)
+        starting._go, starting._launched = threading.Event(), threading.Event()
+        starting._launched.set()
+        starting._launch_error = None
+        starting.deadline = time.monotonic() + 5
+        starting.subject = lambda: None
+        starting.pid, starting.collected = failed, False
+        # With the mask restore dropped the SIGINT stays pending and _start runs on to its report read: a
+        # no-op here, so that mutant fails on the lost-interrupt assertion below.
+        starting._read_report = lambda raw: None
+        starting.control, starting.peer = socket.socketpair()
+        real_fixture_wait = emit._fixture_wait
+
+        def interrupting_wait(pid, flags):
+            # QA18 claude m2: the masked reap must be a WNOHANG poll; a blocking one could hang with
+            # SIGINT and SIGTERM masked if the number were reaped and reused between it and the waitid.
+            if pid == failed and not flags & os.WNOHANG:
+                raise AssertionError("the masked startup reap is a blocking wait (no os.WNOHANG)")
+            waited, raw = real_fixture_wait(pid, flags)
+            if waited == failed:
+                signal.raise_signal(signal.SIGINT)
+            return waited, raw
+
+        mask_before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        prior_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+        with starting.control, starting.peer:
+            try:
+                starting.peer.send(b"F")
+                with patch.object(emit, "_fixture_wait", interrupting_wait):
+                    starting._start()
+            except KeyboardInterrupt:
+                pass
+            except emit.ChildStatusUnavailable as exc:
+                raise AssertionError("the interrupt raised inside the startup reap was lost ({})".format(exc))
+            else:
+                raise AssertionError("the interrupt raised inside the startup reap was lost")
+            finally:
+                signal.signal(signal.SIGINT, prior_int)
+        assert starting.collected is True, (
+            "a cancellation between the startup reap and its mark left a "
+            "reaped guardian uncollected")
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask_before, (
+            "the startup reap did not restore the caller's mask")
+        # EOF release: the adopted child exits on its own and is reaped.
+        os.close(release[1])
+        bound = time.monotonic() + 30
+        while Path("/proc", str(orphan)).exists():
+            try:
+                os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            assert time.monotonic() < bound, "the released orphan kept running"
+            time.sleep(0.005)
+        os.close(release[0])
     elif mode == "escalation-subject":
         import time
-        # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
-        # and observes the receipt-identified subject tree -- freeze the guardian,
-        # then the subject's group and pidfd, then the guardian -- never a stranded
-        # sleeper the test has to clean up. The same-group descendant must die with
-        # the subject; descendants that LEAVE the group are the documented
-        # wedged-guardian residual, out of contract here.
-        def subject_tree():
-            import time as clock
-            if os.fork() == 0:
-                clock.sleep(3600)          # same-group descendant
-            clock.sleep(3600)              # subject: outlives everything unless cancelled
-
+        # QA16 MINOR-2 + QA17 F1, as narrowed by D-385-CURRENT-CHILD: cancelling a
+        # wedged guardian is bounded, kills the receipt-identified SUBJECT through
+        # its held pidfd, and the member census is REPORT-ONLY -- no handoff exists
+        # for the subject's own fork, so the same-group descendant is SKIPPED and
+        # NAMED, survives the escalation, and is released by this case's pipe EOF,
+        # exiting on its own (the retired census delivered the kill here). The
+        # parked tree is never a stranded sleeper this test has to clean up.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -2722,7 +7487,28 @@ def _watchdog_completion_case(mode):
 
         def exercise(flip):
             from contextlib import ExitStack
+            # The tree parks on a pipe this case holds (keep_fds threads the
+            # read end through the guardian): closing the write end releases
+            # every surviving member by EOF, so cleanup needs no signal to a
+            # process this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
+
+            def subject_tree():
+                if os.fork() == 0:
+                    os.read(release_r, 1)  # same-group descendant
+                    os._exit(0)
+                os.read(release_r, 1)      # subject: outlives everything unless cancelled
+
+            try:
+                return exercise_held(flip, release_r, release_w, subject_tree)
+            except BaseException:
+                os.close(release_w)
+                raise
+
+        def exercise_held(flip, release_r, release_w, subject_tree):
+            from contextlib import ExitStack
             with ExitStack() as stack:
+                stack.callback(os.close, release_r)  # the tree holds its own copy
                 stack.enter_context(patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0))
                 if flip:
                     # Flip: no-op the escalation's subject-kill step (and the
@@ -2734,13 +7520,30 @@ def _watchdog_completion_case(mode):
                         lambda subject, fd, **license: None))
                     stack.enter_context(patch.object(
                         emit, "_fixture_pdeathsig", lambda: None))
-                child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
+                child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             keep_fds=(release_r,),
+                                             subject=subject_tree)
                 pid = child.start()
+                # Hold OUR OWN duplicate of the launcher's guardian pidfd
+                # for the whole exercise: the launcher opened child.pidfd on
+                # its own direct child immediately after the fork (the
+                # forking-parent descriptor, D-385-PIDFD-HANDOFF), close()
+                # runs in the worker thread below and can reap the guardian
+                # (and close the original descriptor) concurrently, so the
+                # freeze and the recovery SIGCONT both go through the
+                # ownership proof on this held duplicate, never a bare
+                # numeric pid a concurrent reap could free for reuse (QA9
+                # codex blocker 2 / claude F2).
+                assert child.pidfd is not None, \
+                    "the launcher holds no guardian pidfd"
+                held_fd = os.dup(child.pidfd)
+                stack.callback(os.close, held_fd)
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
                 # A stopped guardian models a cleanup that cannot make progress: it
                 # can never exit, so an unbounded close() would block until resumed.
-                os.kill(pid, signal.SIGSTOP)
+                assert _kill_proved_child(pid, signal.SIGSTOP, pidfd=held_fd), \
+                    "the guardian freeze was refused"
                 bound = time.monotonic() + 30
                 while state(pid) != "T":
                     assert time.monotonic() < bound, "the guardian did not stop"
@@ -2761,9 +7564,9 @@ def _watchdog_completion_case(mode):
                     raise AssertionError(
                         "numeric killpg is banned: " + repr((pgid, signum)))
 
-                def rec_members(group, signum, anchors, leader=None):
+                def rec_members(group, signum, handoffs, leader=None):
                     delivered, skipped, unverifiable = real_members(
-                        group, signum, anchors, leader=leader)
+                        group, signum, handoffs, leader=leader)
                     sequence.append(("members", group, signum, tuple(delivered),
                                      tuple(skipped or ()) + tuple(unverifiable),
                                      leader))
@@ -2793,19 +7596,25 @@ def _watchdog_completion_case(mode):
                     worker.join(20)
                     blocked = worker.is_alive()
                     if blocked:
-                        os.kill(pid, signal.SIGCONT)  # unwedge the leak before failing
+                        # Unwedge the leak before failing: proof-routed, since
+                        # the worker may reap the guardian between the sample
+                        # above and this signal (QA9 codex blocker 2).
+                        _kill_proved_child(pid, signal.SIGCONT, pidfd=held_fd)
                         worker.join(30)
                 elapsed = time.monotonic() - begun
                 assert not blocked, "close() blocked past its bounded cleanup budget"
                 assert failures and "escalat" in failures[0], failures
                 assert emit._fixture_child_reaped(pid) is True
                 assert elapsed < 15, elapsed
-                return pid, guardian_fd, subject, descendant, sequence, failures
+                return (pid, guardian_fd, subject, descendant, sequence,
+                        failures, release_w)
 
-        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
-        # Kill order: freeze first, then the subject's tree (per-member
-        # verified pidfds -- the banned-killpg recorder proves no numeric
-        # group kill ran, QA21 codex F3), then the guardian.
+        (pid, guardian_fd, subject, descendant, sequence, failures,
+         release_w) = exercise(flip=False)
+        # Kill order: freeze first, then the subject census (report-only at
+        # runtime -- the banned-killpg recorder proves no numeric group kill
+        # ran, QA21 codex F3, and no handoff exists for the subject's own
+        # fork), then the guardian.
         assert sequence and sequence[0][0] == "pidfd" and sequence[0][2] == signal.SIGSTOP, sequence
         subject_kills = [index for index, entry in enumerate(sequence)
                          if entry[0] == "members" and entry[1] == subject
@@ -2814,31 +7623,55 @@ def _watchdog_completion_case(mode):
                           if entry[0] == "pidfd" and entry[1] == guardian_fd
                           and entry[2] == signal.SIGKILL]
         assert subject_kills, (sequence, subject)
-        assert descendant in sequence[subject_kills[0]][3], (sequence, descendant)
-        # Fix 2y (codex F1/F2): the census is licensed by the frozen
-        # guardian's subreaper ownership, EXCLUDES the leader (members die
-        # first; the leader dies LAST through its held pidfd), and accounts
-        # every member -- the leader never appears as a census delivery and
-        # nothing was skipped.
-        assert subject not in sequence[subject_kills[0]][3], sequence
-        assert sequence[subject_kills[0]][4] == (), sequence
+        # D-385-PIDFD-HANDOFF (fail-closed): the runtime escalation holds NO
+        # member handoffs, so the census DELIVERS nothing -- the observed
+        # live descendant is SKIPPED and named, the refusal discloses it,
+        # and the descendant survives as the documented residual. The
+        # retired ancestry census delivered the descendant here through a
+        # locally opened pidfd: the two asserts below are the revert flip.
+        assert sequence[subject_kills[0]][3] == (), sequence
+        assert descendant in sequence[subject_kills[0]][4], (sequence, descendant)
         assert sequence[subject_kills[0]][5] == subject, sequence
         assert not guardian_kills or subject_kills[0] < guardian_kills[0], sequence
-        # The whole tree is observed dead: no manual sleeper hygiene remains in
-        # this test. A dead orphan reparents to the nearest subreaper ancestor
-        # (the outer guardian, under the regression runner) and lingers as a
-        # zombie until that ancestor's drain: Z is dead, not surviving.
+        assert "members [{}] unaddressed".format(descendant) in failures[0], \
+            failures
         dead = (None, "Z")
         bound = time.monotonic() + 30
-        while state(subject) not in dead or state(descendant) not in dead:
-            assert time.monotonic() < bound, (state(subject), state(descendant))
+        while state(subject) not in dead:
+            assert time.monotonic() < bound, state(subject)
+            time.sleep(0.005)
+        assert state(descendant) not in dead, \
+            "the no-handoff census killed the descendant (D-385)"
+        # D-385-CURRENT-CHILD: the DISCLOSED survivor reparented to this
+        # subreaper case process, but adoption licenses NO signal -- the
+        # helper refuses the undeclared target (the retired adoption proof
+        # killed it right here: this refusal is the revert flip) and the
+        # survivor is released by the pipe EOF, exiting on its own.
+        assert not _kill_proved_child(descendant), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert state(descendant) not in dead, \
+            "the refused hygiene still ended the descendant"
+        os.close(release_w)
+        bound = time.monotonic() + 30
+        while state(descendant) not in dead:
+            assert time.monotonic() < bound, state(descendant)
             time.sleep(0.005)
         # Flip: with the subject-kill step removed the subject tree survives and
         # close() itself names the surviving pid.
-        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=True)
+        (pid, guardian_fd, subject, descendant, sequence, failures,
+         release_w) = exercise(flip=True)
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
-        os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
+        # D-385-CURRENT-CHILD: both orphans reparented to this subreaper case
+        # process, and adoption licenses NO signal -- the helper refuses each
+        # undeclared target (the retired adoption proof killed them right
+        # here) and ONE pipe EOF releases the whole parked tree, each member
+        # exiting on its own.
+        assert not _kill_proved_child(subject), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert not _kill_proved_child(descendant), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        os.close(release_w)
         bound = time.monotonic() + 30
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
@@ -2857,29 +7690,35 @@ def _watchdog_completion_case(mode):
             wedged = Path(directory, "wedged")
             grandchild_file = Path(directory, "grandchild")
 
+            # The descendant parks on a pipe this case holds (keep_fds
+            # threads the read end through the guardian): closing the write
+            # end releases it by EOF, so cleanup needs no signal to a process
+            # this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
+
             def subject_body():
                 # Fork a same-group descendant, then exit: the guardian reaps this
                 # subject while the descendant lives on.
                 pid = os.fork()
                 if pid == 0:
-                    import time as clock
-                    clock.sleep(3600)
+                    os.read(release_r, 1)
+                    os._exit(0)
                 scratch = Path(directory, "grandchild.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(grandchild_file)  # atomic: never a partial PID
 
             real_drain = emit._fixture_drain
 
-            def reap_then_wedge(subject, subject_fd=None, *, deadline=None):
+            def reap_then_wedge(subject, subject_fd=None, **kwargs):
                 # Guardian-side: reap the exited subject, then wedge BEFORE any
                 # group kill: the state a drain stalled mid-cleanup leaves behind.
                 if os.getpid() != caller:
-                    os.waitpid(subject, 0)
+                    _bounded_wait(subject)
                     scratch = Path(directory, "wedged.tmp")
                     scratch.write_text(str(os.getpid()), encoding="ascii")
                     scratch.rename(wedged)  # atomic: never a partial PID
                     os.kill(os.getpid(), signal.SIGSTOP)
-                return real_drain(subject, subject_fd, deadline=deadline)
+                return real_drain(subject, subject_fd, **kwargs)
 
             def state(target):
                 try:
@@ -2894,13 +7733,15 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            def exercise(flip):
+            def exercise():
                 wedged.unlink(missing_ok=True)
                 grandchild_file.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             keep_fds=(release_r,),
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_drain", reap_then_wedge):
                     child.start()
+                os.close(release_r)  # the fixture tree holds its own copy
                 bound = time.monotonic() + 30
                 while not (wedged.exists() and grandchild_file.exists()):
                     assert time.monotonic() < bound, "the drain wedge was not reached"
@@ -2914,29 +7755,38 @@ def _watchdog_completion_case(mode):
                 with ExitStack() as stack:
                     stack.enter_context(
                         patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0))
-                    if flip:
-                        # Flip: skip the group kill for the already-reaped subject
-                        # (the old probe-gated early return): the descendant must
-                        # survive again.
-                        stack.enter_context(patch.object(
-                            emit, "_fixture_escalate_subject",
-                            lambda subject, fd, **license: None))
                     try:
                         child.close()
                     except emit.ChildStatusUnavailable as exc:
                         failures.append(str(exc))
                 assert failures and "escalat" in failures[0], failures
                 assert child.subject_pid is not None, "the subject receipt was lost"
-                return child.subject_pid, grandchild
+                return child.subject_pid, grandchild, failures[0]
 
-            subject, grandchild = exercise(flip=False)
-            await_state(grandchild, (None, "Z"),
-                        "escalation stranded the reaped subject's same-group descendant")
-            subject, grandchild = exercise(flip=True)
+            subject, grandchild, message = exercise()
+            # D-385 fail-closed: the frozen subreaper guardian still pins the
+            # group, so the census RUNS and OBSERVES the descendant -- but no
+            # forking parent handed off its pidfd, so it is skipped, NAMED in
+            # the refusal, and SURVIVES as the disclosed residual. The
+            # retired ancestry census killed the descendant right here and
+            # claimed the tree: on a revert the survival assert and the
+            # tree-claim assert below both go red -- this run IS the flip.
             assert state(grandchild) not in (None, "Z"), \
-                "flip: the descendant died without the group kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
-            await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
+                "a member with no forking-parent handoff was killed (D-385)"
+            assert "members [{}] unaddressed".format(grandchild) in message, \
+                message
+            assert "tree killed" not in message, message
+            # D-385-CURRENT-CHILD: the surviving descendant reparented to this
+            # subreaper case process, but adoption licenses NO signal -- the
+            # helper refuses the undeclared target (the retired adoption proof
+            # killed it right here: this refusal is the revert flip) and the
+            # survivor is released by the pipe EOF, exiting on its own.
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(grandchild) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_w)
+            await_state(grandchild, (None, "Z"), "the EOF release did not complete")
     elif mode == "poll-collected":
         import time
         # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
@@ -2946,17 +7796,7 @@ def _watchdog_completion_case(mode):
         # close() re-raises it after addressing the subject. pdeathsig is
         # disarmed so only close()'s own kill can end the orphaned subject tree.
         with tempfile.TemporaryDirectory(prefix="opf-pollfail-") as directory:
-            descendant_file = Path(directory, "descendant")
-
-            def subject_body():
-                import time as clock
-                pid = os.fork()
-                if pid == 0:
-                    clock.sleep(3600)          # same-group descendant
-                scratch = Path(directory, "descendant.tmp")
-                scratch.write_text(str(pid), encoding="ascii")
-                scratch.rename(descendant_file)  # atomic: never a partial PID
-                clock.sleep(3600)              # the subject outlives its guardian
+            held = {}
 
             def state(target):
                 try:
@@ -2974,16 +7814,33 @@ def _watchdog_completion_case(mode):
             def launch_killed():
                 # Launch, wait for the running subject tree, then SIGKILL the
                 # guardian and collect it through poll(), never through close().
-                descendant_file.unlink(missing_ok=True)
+                # The descendant's FORKING PARENT (the subject) hands off its
+                # pidfd over SCM_RIGHTS (D-385-PIDFD-HANDOFF), the only
+                # delivery license, and the tree parks on a pipe this case
+                # holds, so one EOF releases whatever a leg leaves running
+                # without a signal (D-385-CURRENT-CHILD).
+                release_r, release_w = os.pipe()
+                member_handoff, member_peer = _pidfd_handoff_pair()
+
+                def subject_body():
+                    def descendant_main():
+                        os.read(release_r, 1)  # same-group descendant
+                        os._exit(0)
+                    _pidfd_handoff_fork_send(member_peer, descendant_main)
+                    os.read(release_r, 1)      # the subject outlives its guardian
+
                 with patch.object(emit, "_fixture_pdeathsig", lambda: None):
                     child = emit._FixtureProcess(time.monotonic() + 3600,
+                                                 keep_fds=(release_r,
+                                                           member_peer.fileno()),
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
-                while not descendant_file.exists():
-                    assert time.monotonic() < bound, "the subject tree never appeared"
-                    time.sleep(0.005)
-                descendant = int(descendant_file.read_text(encoding="ascii"))
+                os.close(release_r)  # the fixture tree holds its own copy
+                member_peer.close()
+                descendant, descendant_fd = _pidfd_handoff_recv(
+                    member_handoff, "the poll-collected descendant")
+                held["descendant"] = descendant
+                held["descendant_fd"] = descendant_fd
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
@@ -3001,9 +7858,9 @@ def _watchdog_completion_case(mode):
                     time.sleep(0.005)
                 assert child.collected, "poll() did not record the collection"
                 assert "guardian failed" in polled[0], polled
-                return child, subject, descendant
+                return child, subject, descendant, descendant_fd, release_w
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, descendant_fd, release_w = launch_killed()
             # Fix 2y (D2): the guardian is DEAD when poll() collects, so the
             # collection-time receipt kill is SUBJECT-ONLY through the held
             # pidfd -- NO member census, NO new pidfds. The surviving
@@ -3036,27 +7893,74 @@ def _watchdog_completion_case(mode):
                         "close() left the poll-collected failure's subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            # D-385-CURRENT-CHILD: the residual reparented to this subreaper
+            # case process, but adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof
+            # killed it right here: this refusal is the revert flip) -- and
+            # the cleanup kill runs through the descriptor the descendant's
+            # FORKING PARENT handed off, the one licensed route.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(descendant) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            assert _kill_proved_child(descendant, pidfd=descendant_fd), \
+                "the handoff hygiene refused the descendant"
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the handoff hygiene did not complete")
+            os.close(descendant_fd)
+            os.close(release_w)
 
             # Flip (red-on-revert, D2): reintroduce the removed no-guardian
-            # census -- a member kill anchored on the subject's bare numeric
-            # pid after one freeze probe -- and the orphaned descendant dies
-            # through a freshly opened pidfd on this guardian-dead path,
-            # exactly the unowned kill fix 2y removed.
+            # member kill -- the pre-fix census killed every /proc-discovered
+            # group member on this guardian-dead path -- and the orphaned
+            # descendant dies, exactly the unowned kill fix 2y removed. The
+            # committed census cannot model it any more (under
+            # D-385-PIDFD-HANDOFF it delivers only through forking-parent
+            # handoffs), and a bare pidfd_open on a /proc-read number is
+            # itself refused by the aggregator's AST probe, so the model
+            # reproduces the pre-fix OUTCOME through the sanctioned
+            # licensed delivery: kill the subject through the held receipt
+            # pidfd, then each observed member through the descriptor its
+            # FORKING PARENT handed off, once it reparents to this subreaper
+            # case process (D-385-PIDFD-HANDOFF; a declared-fork or bare
+            # adoption kill is refused).
             def census_kill(target, fd, **license):
+                members = []
+                for name in os.listdir("/proc"):
+                    if not name.isdecimal() or int(name) == int(target):
+                        continue
+                    fields = emit._fixture_stat_fields(int(name))
+                    if (fields is None
+                            or fields is emit._FIXTURE_UNREADABLE
+                            or int(fields[2]) != int(target)
+                            or fields[0] == b"Z"):
+                        continue
+                    members.append(int(name))
                 signal.pidfd_send_signal(fd, signal.SIGSTOP)
-                emit._fixture_kill_group_members(
-                    target, signal.SIGKILL, {target}, leader=target)
                 signal.pidfd_send_signal(fd, signal.SIGKILL)
+                bound = time.monotonic() + 30
+                for member in members:
+                    assert member == held["descendant"], member
+                    while True:
+                        fields = emit._fixture_stat_fields(member)
+                        if fields is not emit._FIXTURE_UNREADABLE and (
+                                fields is None or fields[0] == b"Z"
+                                or (int(fields[1]) == os.getpid()
+                                    and _kill_proved_child(
+                                        member, pidfd=held["descendant_fd"]))):
+                            break
+                        assert time.monotonic() < bound, member
+                        time.sleep(0.005)
                 return ("subject-only", None)
 
             with patch.object(emit, "_fixture_escalate_subject", census_kill):
-                child, subject, descendant = launch_killed()
+                child, subject, descendant, descendant_fd, release_w = \
+                    launch_killed()
             await_state(subject, (None, "Z"), "the flip subject survived")
             await_state(descendant, (None, "Z"),
                         "flip: the reintroduced census did not reach the descendant")
+            os.close(descendant_fd)
+            os.close(release_w)
             with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
                 try:
                     child.close()
@@ -3069,7 +7973,8 @@ def _watchdog_completion_case(mode):
             # and the subject tree survives.
             with patch.object(emit._FixtureProcess, "_address_failed_subject",
                               lambda fixture: None):
-                child, subject, descendant = launch_killed()
+                child, subject, descendant, descendant_fd, release_w = \
+                    launch_killed()
             child._failure = None
             child.status = 0
             child.unresolved = False
@@ -3084,9 +7989,19 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without close()'s kill"
             assert state(descendant) not in (None, "Z"), \
                 "flip: the descendant died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: both orphans reparented to this subreaper
+            # case process, and adoption licenses NO signal -- the helper
+            # refuses each undeclared target (the retired adoption proof
+            # killed them right here) and ONE pipe EOF releases the whole
+            # parked tree, each member exiting on its own.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
+            os.close(descendant_fd)
     elif mode == "close-cancel":
         import time
         # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
@@ -3440,7 +8355,7 @@ def _watchdog_completion_case(mode):
             assert emit._fixture_child_reaped(child.pid) is False, \
                 "the flip did not reproduce the owner-less guardian"
             os.kill(child.pid, signal.SIGKILL)  # hygiene for the demonstrated leak
-            os.waitpid(child.pid, 0)
+            _bounded_wait(child.pid, forked=True)
             emit._fixture_abort_launch(child)   # hygiene: releases control/peer/report
             if child.pidfd is not None:
                 os.close(child.pidfd)
@@ -3579,16 +8494,6 @@ def _watchdog_completion_case(mode):
         with tempfile.TemporaryDirectory(prefix="opf-pollmask-") as directory:
             descendant_file = Path(directory, "descendant")
 
-            def subject_body():
-                import time as clock
-                pid = os.fork()
-                if pid == 0:
-                    clock.sleep(3600)          # same-group descendant
-                scratch = Path(directory, "descendant.tmp")
-                scratch.write_text(str(pid), encoding="ascii")
-                scratch.rename(descendant_file)  # atomic: never a partial PID
-                clock.sleep(3600)              # the subject outlives its guardian
-
             def state(target):
                 try:
                     stat = Path("/proc", str(target), "stat").read_bytes()
@@ -3605,16 +8510,36 @@ def _watchdog_completion_case(mode):
             def launch_killed(patches=()):
                 # Launch, wait for the running subject tree, then SIGKILL the
                 # guardian; the caller collects through poll(), never close().
+                # The tree parks on a pipe this case holds (keep_fds threads
+                # the read end through the guardian): one EOF releases
+                # whatever a leg leaves running, so no leg ever signals a
+                # process this case never forked (D-385-CURRENT-CHILD); the
+                # descendant pid file is DISCLOSURE only, never a signal
+                # target.
                 from contextlib import ExitStack
                 descendant_file.unlink(missing_ok=True)
+                release_r, release_w = os.pipe()
+
+                def subject_body():
+                    pid = os.fork()
+                    if pid == 0:
+                        os.read(release_r, 1)  # same-group descendant
+                        os._exit(0)
+                    scratch = Path(directory, "descendant.tmp")
+                    scratch.write_text(str(pid), encoding="ascii")
+                    scratch.rename(descendant_file)  # atomic: never a partial PID
+                    os.read(release_r, 1)      # the subject outlives its guardian
+
                 with ExitStack() as stack:
                     stack.enter_context(
                         patch.object(emit, "_fixture_pdeathsig", lambda: None))
                     for target, name, value in patches:
                         stack.enter_context(patch.object(target, name, value))
                     child = emit._FixtureProcess(time.monotonic() + 3600,
+                                                 keep_fds=(release_r,),
                                                  subject=subject_body)
                     child.start()
+                os.close(release_r)  # the fixture tree holds its own copy
                 bound = time.monotonic() + 30
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
@@ -3623,7 +8548,7 @@ def _watchdog_completion_case(mode):
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
-                return child, subject, descendant
+                return child, subject, descendant, release_w
 
             def poll_failure(child):
                 refusals = []
@@ -3648,10 +8573,12 @@ def _watchdog_completion_case(mode):
                 return closed
 
             # Leg 1: a SIGINT raised INSIDE the recording step stays pending:
-            # poll() still records the failure, kills the subject tree
-            # pin-first at collection time, and the interrupt lands only after
+            # poll() still records the failure, SIGKILLs the receipt-identified
+            # subject pin-first through its held pidfd at collection time (the
+            # subject's descendants hold no handoff: NOT signalled, named and
+            # left, D-385-CURRENT-CHILD), and the interrupt lands only after
             # the masked step restored the caller's mask.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             captured = []
             real_read = emit._FixtureProcess._read_report
 
@@ -3702,9 +8629,15 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "guardian failed" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(descendant) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the EOF release did not complete")
 
             # Leg 2: a validation that dies BETWEEN collection and recording
             # (the pre-mask-flag residual, modeled with a synthetic
@@ -3726,7 +8659,7 @@ def _watchdog_completion_case(mode):
                             break
                         time.sleep(0.005)
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_cancelled(child)
             assert child.collected and child._failure is None \
                 and child.status is None and child.unresolved, \
@@ -3743,13 +8676,17 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "supervision unresolved" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the EOF release did not complete")
 
             # Flip: forge a VALIDATED status (the state the pre-fix close
             # believed blindly) -> close() is silent, the tree survives.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_cancelled(child)
             child.status = 0
             child.unresolved = False
@@ -3757,9 +8694,15 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Leg 2b (QA21 claude F2): an asynchronous exception landing
             # BETWEEN poll()'s two collection-state writes -- after the reap,
@@ -3807,7 +8750,7 @@ def _watchdog_completion_case(mode):
                     sys.settrace(None)
                 assert cancelled, "the trace injection never fired"
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_trace_cancelled(child)
             assert child.unresolved and not child.collected, \
                 ("the interrupted state writes lost close()'s ownership",
@@ -3830,29 +8773,39 @@ def _watchdog_completion_case(mode):
                         "the lost-ownership refusal left the subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the lost-ownership path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
-            await_state(descendant, (None, "Z"), "the 2b hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(descendant, (None, "Z"), "the 2b EOF release did not complete")
 
             # Flip: forge the pre-fix write order's post-interruption state
             # (collected recorded, unresolved lost, nothing else) -> close()
             # is silent and the subject tree survives.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_trace_cancelled(child)
             child.collected, child.unresolved = True, False
             closed = close_grace(child)
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Leg 3 (QA20 claude F3): pidfd-absent host -- a pid-only receipt's
             # poll-collected failure re-raises through close() NAMING the
             # unverifiable cleanup, and the known subject pid is never
             # group-killed unpinned: the surviving tree is the documented
             # residual, cleaned here by hygiene.
-            child, subject, descendant = launch_killed(
+            child, subject, descendant, release_w = launch_killed(
                 patches=((emit, "_fixture_pidfd", lambda pid: None),))
             refusals = poll_failure(child)
             assert refusals and "guardian failed" in refusals[0], refusals
@@ -3865,15 +8818,21 @@ def _watchdog_completion_case(mode):
             assert "subject tree killed" not in closed[0], closed
             assert state(subject) not in (None, "Z"), \
                 "an unpinned pid-only subject was signalled anyway"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the documented residual
-            await_state(subject, (None, "Z"), "the residual hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the residual hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Flip: the pre-fix bare re-raise names nothing.
             def bare(fixture, failure):
                 raise failure
 
-            child, subject, descendant = launch_killed(
+            child, subject, descendant, release_w = launch_killed(
                 patches=((emit, "_fixture_pidfd", lambda pid: None),))
             refusals = poll_failure(child)
             assert refusals, refusals
@@ -3885,26 +8844,34 @@ def _watchdog_completion_case(mode):
                 except emit.ChildStatusUnavailable as exc:
                     closed.append(str(exc))
             assert closed and "subject cleanup unverified" not in closed[0], closed
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated blindness
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
     elif mode == "unpinned-kill":
+        import socket
         import time
-        # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
-        # whose ownership is not pinned -- a held pidfd does not pin the
-        # NUMBER once the process is reaped, and SIGSTOP delivery to a ZOMBIE
-        # leader cannot stop its parent reaping it and the freed pgid being
-        # recycled. The layer therefore issues NO numeric killpg at all (the
-        # recorder below turns any into a loud failure): group members are
-        # addressed one by one through per-member pidfds, each verified
-        # against /proc (group AND an anchored parent chain) AFTER the pidfd
-        # is opened. Pin-first: only a leader frozen ALIVE (its pidfd
-        # unreadable after the freeze) or a frozen subreaper guardian still
-        # parenting a member (the census pin, QA18 gemini F1) anchors the
-        # member kill; a reaped or ZOMBIE leader with no census license is
-        # reported unpinned and its group members are left disclosed, never
-        # guessed at. The subject's own pidfd SIGKILL always runs against the
-        # pinned identity.
+        # QA20 claude F1 + QA21 codex F3 + D-385-PIDFD-HANDOFF: NEVER
+        # signal a numeric pid or pgid whose ownership is not pinned, and
+        # NEVER a group member whose pidfd its forking parent did not hand
+        # off -- a held pidfd does not pin the NUMBER once the process is
+        # reaped, SIGSTOP delivery to a ZOMBIE leader cannot stop its parent
+        # reaping it and the freed pgid being recycled, and a /proc parent
+        # chain is a retired delivery license. The layer issues NO numeric
+        # killpg at all (the recorder below turns any into a loud failure):
+        # a member is signalled ONLY through the descriptor its FORKING
+        # PARENT opened and handed off over SCM_RIGHTS; /proc only OBSERVES
+        # which members are live. A frozen subreaper guardian still
+        # parenting a member (the census pin, QA18 gemini F1) licenses only
+        # RUNNING the census; an observed live member with no handoff is
+        # reported skipped -- the fail-closed disclosure -- and a reaped or
+        # ZOMBIE leader licenses no census at all. The subject's own pidfd
+        # SIGKILL always runs against the pinned identity.
         recorded = []
         real_pidfd_signal = signal.pidfd_send_signal
 
@@ -3940,20 +8907,26 @@ def _watchdog_completion_case(mode):
         # orphan-escape residual. The pre-fix layer took one freeze probe as
         # a pin, anchored a census on the subject's bare NUMERIC pid (the
         # recycled-anchor class) and killed the descendant here.
-        def banned_census(group, signum, anchors, leader=None):
+        def banned_census(group, signum, handoffs, leader=None):
             raise AssertionError(
                 "the no-guardian path ran a member census: "
-                + repr((group, signum, anchors, leader)))
+                + repr((group, signum, handoffs, leader)))
 
         with tempfile.TemporaryDirectory(prefix="opf-noguardian-") as directory:
             descendant_file = Path(directory, "descendant")
+            # The descendant parks on a pipe this case holds: one EOF releases
+            # it, so no hygiene ever signals a process this case never forked
+            # (D-385-CURRENT-CHILD); the pid file is DISCLOSURE only.
+            release_r, release_w = os.pipe()
             leader = os.fork()
             if leader == 0:
                 os.setsid()
                 pid = os.fork()
                 if pid == 0:
-                    time.sleep(3600)           # same-group descendant
+                    os.close(release_w)
+                    os.read(release_r, 1)      # same-group descendant
                     os._exit(0)
+                os.close(release_w)
                 scratch = Path(directory, "descendant.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(descendant_file)  # atomic: never a partial PID
@@ -3978,15 +8951,20 @@ def _watchdog_completion_case(mode):
                        if entry[0] == "pidfd"), \
                 ("a descriptor other than the held subject pidfd was "
                  "signalled", recorded)
-            waited, status_raw = os.waitpid(leader, 0)
+            waited, status_raw = _bounded_wait(leader, forked=True)
             assert waited == leader and os.WIFSIGNALED(status_raw) \
                 and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
             os.close(fd)
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_r)
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the leg-1 hygiene did not complete")
+                        "the leg-1 EOF release did not complete")
 
         # Leg 2: REAPED leader -> nothing pins the freed number against
         # reuse: the member kill is SKIPPED and reported unpinned; the pidfd
@@ -3995,7 +8973,7 @@ def _watchdog_completion_case(mode):
         if leader == 0:
             os._exit(0)
         fd = os.pidfd_open(leader)
-        os.waitpid(leader, 0)  # reaped: the number is free to be recycled
+        _bounded_wait(leader, forked=True)  # reaped: the number is free to be recycled
         recorded.clear()
         with patch.object(os, "killpg", rec_killpg), \
                 patch.object(signal, "pidfd_send_signal", rec_pidfd):
@@ -4005,7 +8983,6 @@ def _watchdog_completion_case(mode):
             ("an unpinned group was signalled", recorded)
         assert ("pidfd", fd, signal.SIGKILL) in recorded, recorded
         os.close(fd)
-        reaped_leader = leader
 
         # Leg 3 (QA21 codex F3): a ZOMBIE leader accepts the pidfd SIGSTOP --
         # delivery proves only that it exists unreaped NOW -- but its parent
@@ -4018,12 +8995,16 @@ def _watchdog_completion_case(mode):
         # firing and the descendant dying without a pin.
         with tempfile.TemporaryDirectory(prefix="opf-zombie-") as directory:
             descendant_file = Path(directory, "descendant")
+            # Pipe-parked descendant again: EOF release, never a signal to a
+            # process this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
             leader = os.fork()
             if leader == 0:
                 os.setsid()
                 pid = os.fork()
                 if pid == 0:
-                    time.sleep(3600)           # same-group descendant
+                    os.close(release_w)
+                    os.read(release_r, 1)      # same-group descendant
                     os._exit(0)
                 scratch = Path(directory, "descendant.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
@@ -4047,16 +9028,24 @@ def _watchdog_completion_case(mode):
             assert recorded and recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
             assert state(descendant) not in (None, "Z"), \
                 "an unpinned zombie-leader group was signalled anyway"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
-            os.waitpid(leader, 0)
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_r)
+            os.close(release_w)
+            _bounded_wait(leader, forked=True)
             os.close(fd)
             await_state(descendant, (None, "Z"),
-                        "the zombie-leg hygiene did not complete")
+                        "the zombie-leg EOF release did not complete")
 
-        # Leg 4: the per-member census itself refuses foreign parentage: a
-        # live group whose members' parent chains reach NO anchor is never
-        # signalled (a recycled pgid names exactly such a group), while the
-        # same member dies once the true owner anchors the census.
+        # Leg 4 (D-385-PIDFD-HANDOFF): the per-member census delivers ONLY
+        # through a forking-parent handoff. A live member with no handoff is
+        # SKIPPED and accounted -- ([], [decoy], []) (fix 2y codex F2: never
+        # read a refused member as an addressed tree) -- and an OLD-STYLE
+        # ancestry anchor (this very process, the decoy's real parent) in
+        # the map's KEYS licenses nothing: the retired chain walk killed the
+        # decoy here, so the two survival asserts below are the revert flip.
         decoy = os.fork()
         if decoy == 0:
             os.setsid()
@@ -4071,61 +9060,103 @@ def _watchdog_completion_case(mode):
                 pass
             assert time.monotonic() < bound, "the decoy never took its group"
             time.sleep(0.005)
-        # Fix 2y (codex F2): the census ACCOUNTS the live member it refused
-        # to signal -- ([], [decoy]) -- so no caller can read a refused
-        # member as an addressed tree.
         assert emit._fixture_kill_group_members(
-            decoy, signal.SIGKILL, {reaped_leader}) == ([], [decoy], []), \
-            "an unanchored group member was signalled or unaccounted"
+            decoy, signal.SIGKILL, {}) == ([], [decoy], []), \
+            "an unhanded group member was signalled or unaccounted"
+        assert emit._fixture_kill_group_members(
+            decoy, signal.SIGKILL, {os.getpid(): None}) \
+            == ([], [decoy], []), \
+            "an ancestry-style anchor licensed a member kill (D-385)"
         assert state(decoy) not in (None, "Z"), \
-            "the census killed a member outside its anchors"
-        delivered, skipped, unverifiable = emit._fixture_kill_group_members(
-            decoy, signal.SIGKILL, {os.getpid()})
+            "the census killed a member it held no handoff for"
+        # The positive path: this process IS the decoy's forking parent, so
+        # the pidfd it opens is exactly the handoff a forking parent may
+        # supply; the census must deliver through THAT descriptor -- never
+        # one it opened itself (the banned opener turns a local open into a
+        # loud failure) -- and must leave the caller-owned descriptor open.
+        decoy_fd = os.pidfd_open(decoy)
+        handoff_sends = []
+
+        def rec_handoff_send(target_fd, signum, *args):
+            handoff_sends.append((target_fd, signum))
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        def banned_open(target):
+            raise AssertionError(
+                ("the census opened a member pidfd locally (D-385)",
+                 target))
+
+        with patch.object(emit, "_fixture_pidfd", banned_open), \
+                patch.object(signal, "pidfd_send_signal",
+                             rec_handoff_send):
+            delivered, skipped, unverifiable = \
+                emit._fixture_kill_group_members(
+                    decoy, signal.SIGKILL, {decoy: decoy_fd})
         assert decoy in delivered and skipped == [] and unverifiable == [], \
             (delivered, skipped, unverifiable)
-        waited, status_raw = os.waitpid(decoy, 0)
+        assert handoff_sends == [(decoy_fd, signal.SIGKILL)], handoff_sends
+        waited, status_raw = _bounded_wait(decoy, forked=True)
         assert waited == decoy and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
+        os.close(decoy_fd)  # EBADF here would mean the census closed it
 
-        # Leg 5: reaped leader, frozen-guardian census -> a surviving
-        # same-group descendant, adopted by the stopped subreaper guardian,
-        # pins the group and the member kill still reaches it through its own
-        # verified pidfd (QA18 gemini F1 preserved under the pin rule).
+        # Leg 5 (D-385-PIDFD-HANDOFF, the fail-closed integration flip):
+        # reaped leader, frozen-guardian census -> the surviving same-group
+        # descendant, adopted by the stopped subreaper guardian, still pins
+        # the group, so the census RUNS -- but no forking parent handed off
+        # the descendant's pidfd, so it is SKIPPED and NAMED, never
+        # signalled: the outcome is ("partial", ([grandchild], [])), the
+        # descendant survives as the disclosed residual, and every pidfd
+        # send of the run goes through the held subject descriptor. The
+        # retired ancestry census killed the descendant here through a
+        # locally opened pidfd; a revert turns the survival assert red.
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             opened = Path(directory, "opened")
 
+            handoff, handoff_peer = _pidfd_handoff_pair()
+            # The grandchild parks on a pipe this case holds: one EOF
+            # releases it, so the hygiene never signals a process this case
+            # never forked (D-385-CURRENT-CHILD); its pid file is DISCLOSURE.
+            release_r, release_w = os.pipe()
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-                    leader = os.fork()
-                    if leader == 0:
+                    def leader_main():
                         os.setsid()
                         grandchild = os.fork()
                         if grandchild == 0:
-                            time.sleep(3600)  # same-group descendant
+                            os.close(release_w)
+                            os.read(release_r, 1)  # same-group descendant
                             os._exit(0)
+                        os.close(release_w)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # until the guardian kills it
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+
+                    # Fork-and-send (QA11 codex blocker): only the pid the
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader, forked=True)
+                        os._exit(125)
                     bound = time.monotonic() + 30
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
                             os._exit(125)
                         time.sleep(0.005)
                     os.kill(leader, signal.SIGKILL)
-                    os.waitpid(leader, 0)       # REAPED: the number is unpinned
+                    _bounded_wait(leader, forked=True)       # REAPED: the number is unpinned
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4140,32 +9171,66 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
-            await_file(grandchild_file, "the model grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            scratch = Path(directory, "opened.tmp")
-            scratch.write_text("y", encoding="ascii")
-            scratch.rename(opened)
-            await_file(frozen_file, "the model guardian never froze")
-            await_state(guardian, ("T",), "the model guardian did not stop")
-            assert state(grandchild) not in (None, "Z"), "the descendant died early"
+            handoff_peer.close()
+            # The signal target arrives as a DESCRIPTOR from its forking
+            # parent (D-385-PIDFD-HANDOFF): the guardian opened the pidfd on
+            # its own un-reaped child immediately after the fork and passed
+            # it with SCM_RIGHTS; the numeric pid is disclosure only, never
+            # a signal target.
+            fd = None
+            try:
+                leader, fd = _pidfd_handoff_recv(handoff, "the model leader")
+                await_file(grandchild_file, "the model grandchild never appeared")
+                grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                scratch = Path(directory, "opened.tmp")
+                scratch.write_text("y", encoding="ascii")
+                scratch.rename(opened)
+                await_file(frozen_file, "the model guardian never froze")
+                await_state(guardian, ("T",), "the model guardian did not stop")
+                assert state(grandchild) not in (None, "Z"), \
+                    "the descendant died early"
+            except BaseException:
+                # QA11 claude m3: a failing await after the handoff closes
+                # the received descriptor and the socket instead of
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later one.
+                closes = []
+                if fd is not None:
+                    closes.append(lambda held=fd: os.close(held))
+                closes.append(handoff.close)
+                _close_every(closes)
+                raise
             recorded.clear()
             with patch.object(os, "killpg", rec_killpg), \
                     patch.object(signal, "pidfd_send_signal", rec_pidfd):
                 assert emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian) == ("tree", []), \
-                    "the frozen-guardian census did not address the group"
+                    leader, fd, guardian_pid=guardian) \
+                    == ("partial", ([grandchild], [])), \
+                    ("the unhanded member was not reported skipped "
+                     "(D-385 fail-closed)")
             assert not [entry for entry in recorded if entry[0] == "killpg"], recorded
-            assert [entry for entry in recorded
-                    if entry[0] == "pidfd" and entry[2] == signal.SIGKILL], \
-                ("the census-pinned member kill never ran", recorded)
-            await_state(grandchild, (None, "Z"),
-                        "the census-pinned kill stranded the descendant")
+            assert all(entry[1] == fd for entry in recorded
+                       if entry[0] == "pidfd"), \
+                ("a descriptor other than the held subject pidfd was "
+                 "signalled (D-385: no handoff, no member send)", recorded)
+            assert state(grandchild) not in (None, "Z"), \
+                "the census killed the descendant without a handoff (D-385)"
             os.close(fd)
             os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian, forked=True)
+            # D-385-CURRENT-CHILD: with the guardian collected the DISCLOSED
+            # survivor reparents to this subreaper case process, but adoption
+            # licenses NO signal -- the helper refuses the undeclared target
+            # (the retired adoption proof killed it right here) and the
+            # survivor is released by the pipe EOF, exiting on its own.
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(grandchild) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_r)
+            os.close(release_w)
+            await_state(grandchild, (None, "Z"),
+                        "the leg-5 EOF release did not complete")
 
         # Leg 6 (fix 2y, claude Finding 1): the escalation contract must hold
         # with a subject pidfd AT OR ABOVE FD_SETSIZE (1024). The layer polls
@@ -4200,7 +9265,7 @@ def _watchdog_completion_case(mode):
                 "the high-fd escalation lost its contract"
         assert recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
         assert ("pidfd", fd, signal.SIGKILL) in recorded, recorded
-        waited, status_raw = os.waitpid(leader, 0)
+        waited, status_raw = _bounded_wait(leader)
         assert waited == leader and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
         os.close(fd)
@@ -4221,43 +9286,63 @@ def _watchdog_completion_case(mode):
         refuses(ValueError, lambda: legacy_escalate(leader, fd))
         await_state(leader, ("T",),
                     "the reverted probe did not strand the frozen leader")
-        os.kill(leader, signal.SIGKILL)  # hygiene for the demonstrated strand
-        os.waitpid(leader, 0)
+        # Hygiene for the demonstrated strand, through the ownership proof on
+        # the held pidfd (QA9 claude F1): the helper SIGKILLs and reaps race-free.
+        assert _kill_proved_child(leader, pidfd=fd), \
+            "the strand hygiene refused the frozen leader"
         os.close(fd)
 
-        # Leg 7 (fix 2y, codex F1/F2 on the GUARDIAN path): with a frozen
-        # subreaper guardian and a LIVE leader, the census is anchored on the
-        # GUARDIAN alone (never the subject's bare numeric pid), EXCLUDES the
-        # leader (members die first; the leader dies LAST through its held
-        # pidfd), addresses the descendant, and accounts nothing skipped --
-        # only then may the outcome claim the tree ("tree", []).
+        # Leg 7 (fix 2y codex F1/F2 on the GUARDIAN path, under
+        # D-385-PIDFD-HANDOFF): with a frozen subreaper guardian pinning the
+        # group and a LIVE leader, a member whose FORKING PARENT (the
+        # leader) handed off its pidfd is delivered THROUGH THAT descriptor
+        # -- never one the census opened -- the census EXCLUDES the leader
+        # (handed-off members die first; the leader dies LAST through its
+        # held pidfd), and with nothing skipped the outcome may claim the
+        # tree ("tree", []). The retired ancestry census signalled a
+        # DIFFERENT, locally opened descriptor here: the recorded-send
+        # assert on the handed-off fd is the revert flip.
         with tempfile.TemporaryDirectory(prefix="opf-order-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
 
+            handoff, handoff_peer = _pidfd_handoff_pair()
+            member_handoff, member_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-                    leader = os.fork()
-                    if leader == 0:
+                    def leader_main():
                         os.setsid()
-                        grandchild = os.fork()
-                        if grandchild == 0:
+
+                        def grandchild_main():
                             time.sleep(3600)  # same-group descendant
                             os._exit(0)
+
+                        # The MEMBER arrives as a descriptor its forking
+                        # parent (this leader) opened immediately after the
+                        # fork and handed off (D-385-PIDFD-HANDOFF); the
+                        # file below is disclosure only.
+                        grandchild = _pidfd_handoff_fork_send(
+                            member_peer, grandchild_main)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+
+                    # Fork-and-send (QA11 codex blocker): only the pid the
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader, forked=True)
+                        os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4272,19 +9357,39 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the leg-7 leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
-            await_file(grandchild_file, "the leg-7 grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
-            await_file(frozen_file, "the leg-7 guardian never froze")
-            await_state(guardian, ("T",), "the leg-7 guardian did not stop")
+            handoff_peer.close()
+            member_peer.close()
+            fd, gfd = None, None
+            try:
+                leader, fd = _pidfd_handoff_recv(handoff, "the leg-7 leader")
+                await_file(grandchild_file, "the leg-7 grandchild never appeared")
+                grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                member_pid, gfd = _pidfd_handoff_recv(
+                    member_handoff, "the leg-7 member")
+                assert member_pid == grandchild, (member_pid, grandchild)
+                await_file(frozen_file, "the leg-7 guardian never froze")
+                await_state(guardian, ("T",), "the leg-7 guardian did not stop")
+            except BaseException:
+                # QA11 claude m3: a failing await after the handoff closes
+                # the received descriptors and the sockets instead of
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later ones.
+                closes = []
+                if fd is not None:
+                    closes.append(lambda held=fd: os.close(held))
+                if gfd is not None:
+                    closes.append(lambda held=gfd: os.close(held))
+                closes.append(handoff.close)
+                closes.append(member_handoff.close)
+                _close_every(closes)
+                raise
             member_calls = []
             real_members = emit._fixture_kill_group_members
 
-            def rec_members(group, signum, anchors, leader=None):
-                result = real_members(group, signum, anchors, leader=leader)
-                member_calls.append((group, signum, set(anchors), leader, result))
+            def rec_members(group, signum, handoffs, leader=None):
+                result = real_members(group, signum, handoffs, leader=leader)
+                member_calls.append((group, signum, dict(handoffs), leader,
+                                     result))
                 return result
 
             recorded.clear()
@@ -4293,24 +9398,30 @@ def _watchdog_completion_case(mode):
                     patch.object(emit, "_fixture_kill_group_members",
                                  rec_members):
                 assert emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian) == ("tree", []), \
-                    "the live-leader guardian census did not address the tree"
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd}) == ("tree", []), \
+                    "the handed-off member census did not address the tree"
             assert len(member_calls) == 1, member_calls
-            group, signum, anchors, excluded, result = member_calls[0]
+            group, signum, handoffs, excluded, result = member_calls[0]
             assert group == leader and signum == signal.SIGKILL, member_calls
-            assert anchors == {guardian}, \
-                ("the census took a bare numeric subject anchor", member_calls)
+            assert handoffs == {grandchild: gfd}, \
+                ("the member handoffs were not passed through", member_calls)
             assert excluded == leader, member_calls
             delivered, skipped, unverifiable = result
             assert grandchild in delivered and leader not in delivered \
                 and skipped == [] and unverifiable == [], member_calls
-            # The leader dies LAST, through the held pidfd, after the census.
+            # The member died through the HANDED-OFF descriptor (the retired
+            # ancestry census signalled a locally opened one instead) ...
+            assert ("pidfd", gfd, signal.SIGKILL) in recorded, recorded
+            # ... and the leader dies LAST, through the held pidfd, after
+            # the census (the verification census observes, never sends).
             assert recorded[-1] == ("pidfd", fd, signal.SIGKILL), recorded
             await_state(leader, (None, "Z"), "the leg-7 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-7 descendant survived")
             os.close(fd)
+            os.close(gfd)  # caller-owned: EBADF would mean the census closed it
             os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian, forked=True)
 
         # Leg 8 (fix 2y, codex F3): TimeoutError/InterruptedError -- OSError
         # subclasses carrying deadline/cancellation semantics -- PROPAGATE
@@ -4341,7 +9452,7 @@ def _watchdog_completion_case(mode):
 
         with patch.object(os, "listdir", raising_listdir):
             refuses(TimeoutError, lambda: emit._fixture_kill_group_members(
-                sentinel, signal.SIGKILL, {os.getpid()}))
+                sentinel, signal.SIGKILL, {}))
             refuses(TimeoutError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
 
@@ -4356,13 +9467,14 @@ def _watchdog_completion_case(mode):
 
         with patch.object(os, "open", raising_open):
             refuses(InterruptedError, lambda: emit._fixture_kill_group_members(
-                sentinel, signal.SIGKILL, {os.getpid()}))
+                sentinel, signal.SIGKILL, {}))
             refuses(InterruptedError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
         os.kill(sentinel, signal.SIGKILL)
-        os.waitpid(sentinel, 0)
-        os.waitpid(zombie, 0)
+        _bounded_wait(sentinel, forked=True)
+        _bounded_wait(zombie, forked=True)
     elif mode == "census-verify":
+        import socket
         import time
         import types
         # Fix 2z (premise change) + maintainer ruling
@@ -4400,47 +9512,71 @@ def _watchdog_completion_case(mode):
         def frozen_tree(directory, forker):
             # Frozen subreaper guardian -> setsid leader -> one same-group
             # grandchild; with `forker`, the grandchild forks one more
-            # same-group child when cued through the cue file.
-            leader_file = Path(directory, "leader")
+            # same-group child when cued through the cue file. The leader --
+            # the signal target -- is handed out as a DESCRIPTOR its forking
+            # guardian opened immediately after fork (D-385-PIDFD-HANDOFF),
+            # never as a number published through a file -- and so is the
+            # GRANDCHILD: its forking parent is the leader, which hands its
+            # pidfd off the same way, the only license the member census
+            # accepts for delivery; the grandchild file is disclosure only.
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             cue = Path(directory, "cue")
             forked_file = Path(directory, "forked")
+            handoff, handoff_peer = _pidfd_handoff_pair()
+            member_handoff, member_peer = _pidfd_handoff_pair()
+            # The raced fork's own FORKING PARENT (the grandchild) hands its
+            # pidfd off the same way (D-385-PIDFD-HANDOFF): the hygiene kill
+            # of the raced survivor runs through THAT descriptor, never an
+            # adoption proof; its pid file stays disclosure only.
+            forked_handoff, forked_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-                    leader = os.fork()
-                    if leader == 0:
+                    def leader_main():
                         os.setsid()
-                        grandchild = os.fork()
-                        if grandchild == 0:
+
+                        def grandchild_main():
                             if forker:
                                 bound = time.monotonic() + 30
                                 while not cue.exists():
                                     if time.monotonic() >= bound:
                                         os._exit(125)
                                     time.sleep(0.002)
-                                forked = os.fork()
-                                if forked == 0:
+
+                                def forked_main():
                                     time.sleep(3600)  # forked past the snapshot
                                     os._exit(0)
+
+                                forked = _pidfd_handoff_fork_send(
+                                    forked_peer, forked_main)
                                 scratch = Path(directory, "forked.tmp")
                                 scratch.write_text(str(forked), encoding="ascii")
                                 scratch.rename(forked_file)
                             time.sleep(3600)          # same-group descendant
                             os._exit(0)
+
+                        grandchild = _pidfd_handoff_fork_send(
+                            member_peer, grandchild_main)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
                         time.sleep(3600)              # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+
+                    # Fork-and-send (QA11 codex blocker): only the pid the
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader, forked=True)
+                        os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4448,18 +9584,45 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
-            await_file(grandchild_file, "the model grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            await_file(frozen_file, "the model guardian never froze")
-            await_state(guardian, ("T",), "the model guardian did not stop")
-            assert state(grandchild) not in (None, "Z"), "the descendant died early"
-            return guardian, leader, grandchild, cue, forked_file
+            handoff_peer.close()
+            member_peer.close()
+            forked_peer.close()
+            leader_fd, grandchild_fd = None, None
+            try:
+                leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+                await_file(grandchild_file, "the model grandchild never appeared")
+                grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                member_pid, grandchild_fd = _pidfd_handoff_recv(
+                    member_handoff, "the model grandchild")
+                assert member_pid == grandchild, (member_pid, grandchild)
+                await_file(frozen_file, "the model guardian never froze")
+                await_state(guardian, ("T",), "the model guardian did not stop")
+                assert state(grandchild) not in (None, "Z"), \
+                    "the descendant died early"
+            except BaseException:
+                # QA11 claude m3: a failing await after the handoff closes
+                # the received descriptors and the sockets instead of
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later ones.
+                closes = []
+                if leader_fd is not None:
+                    closes.append(lambda held=leader_fd: os.close(held))
+                if grandchild_fd is not None:
+                    closes.append(lambda held=grandchild_fd: os.close(held))
+                closes.append(handoff.close)
+                closes.append(member_handoff.close)
+                closes.append(forked_handoff.close)
+                _close_every(closes)
+                raise
+            return (guardian, leader, leader_fd, grandchild, grandchild_fd,
+                    cue, forked_file, forked_handoff)
 
         def release(guardian):
-            os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            # Proof-routed resume (QA9 claude F1): the frozen guardian is this
+            # process's own un-reaped child; never trust the bare number.
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
+                "the release refused the frozen guardian"
+            _bounded_wait(guardian)
 
         # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
         # NEVER proof of exit: the member is accounted (named), unsignalled,
@@ -4467,9 +9630,9 @@ def _watchdog_completion_case(mode):
         # PermissionError as an exited process and claimed ("tree", []) with
         # the member alive.
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
-                Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
+            (guardian, leader, fd, grandchild, gfd, _cue, _forked,
+             forked_handoff) = frozen_tree(Path(directory), forker=False)
+            forked_handoff.close()
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
@@ -4478,9 +9641,13 @@ def _watchdog_completion_case(mode):
                     raise PermissionError(13, "injected unreadable census entry")
                 return real_os_open(path, flags, *args, **kwargs)
 
+            # Even WITH the member's handoff supplied, an unreadable entry
+            # is accounted unverifiable BEFORE any handoff lookup and never
+            # signalled (D-385: unverifiable beats delivery).
             with patch.object(os, "open", unreadable):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             assert outcome == ("partial", ([], [grandchild])), (
                 "an unreadable entry was read as exited, or accounted as an "
                 "established member (round 24, claude F1)", outcome)
@@ -4506,18 +9673,29 @@ def _watchdog_completion_case(mode):
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
             os.close(fd)
-            os.kill(grandchild, signal.SIGKILL)  # hygiene for the NAMED member
-            await_state(grandchild, (None, "Z"),
-                        "the leg-1 hygiene did not complete")
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # member then reparents from it to this subreaper case process.
+            # D-385-CURRENT-CHILD: adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof killed
+            # it right here) -- and the hygiene kill runs through the HELD
+            # handoff descriptor its forking parent opened, the one licensed
+            # route.
             release(guardian)
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(grandchild, pidfd=gfd), \
+                "the leg-1 handoff hygiene refused the member"
+            await_state(grandchild, (None, "Z"),
+                        "the leg-1 handoff hygiene did not complete")
+            os.close(gfd)
         # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
         # ProcessLookupError NAMES the surviving leader and never claims the
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
-                Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
+            (guardian, leader, fd, grandchild, gfd, _cue, _forked,
+             forked_handoff) = frozen_tree(Path(directory), forker=False)
+            forked_handoff.close()
             real_pidfd_signal = signal.pidfd_send_signal
 
             def failing_leader_kill(target_fd, signum, *args):
@@ -4527,7 +9705,8 @@ def _watchdog_completion_case(mode):
 
             with patch.object(signal, "pidfd_send_signal", failing_leader_kill):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             assert outcome == ("partial", ([leader], [])), (
                 "the failed leader kill was not named", outcome)
             assert state(leader) == "T", (
@@ -4537,6 +9716,7 @@ def _watchdog_completion_case(mode):
             signal.pidfd_send_signal(fd, signal.SIGKILL)  # hygiene: the real kill
             await_state(leader, (None, "Z"), "the leg-2 hygiene did not complete")
             os.close(fd)
+            os.close(gfd)
             release(guardian)
 
         # Leg 3 (claude F1, the fix-2z premise change): a member FORKED
@@ -4548,9 +9728,8 @@ def _watchdog_completion_case(mode):
         # "every member addressed" -- with the forked member alive and
         # unaccounted.
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
-            guardian, leader, grandchild, cue, forked_file = frozen_tree(
-                Path(directory), forker=True)
-            fd = os.pidfd_open(leader)
+            (guardian, leader, fd, grandchild, gfd, cue, forked_file,
+             forked_handoff) = frozen_tree(Path(directory), forker=True)
             real_listdir = os.listdir
             proc_listings = []
 
@@ -4576,8 +9755,15 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0), (
                     patch.object(os, "listdir", stale_listdir)):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             forked = int(forked_file.read_text(encoding="ascii"))
+            # The raced member arrives as the descriptor its FORKING PARENT
+            # (the grandchild) handed off before dying; the pid file is
+            # disclosure and must agree.
+            sent_pid, forked_fd = _pidfd_handoff_recv(
+                forked_handoff, "the leg-3 raced member")
+            assert sent_pid == forked, (sent_pid, forked)
             assert (outcome[0] == "partial" and outcome[1]
                     and forked in outcome[1][0]), (
                 "the fork-raced member was not observed and named",
@@ -4587,9 +9773,21 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"), "the leg-3 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-3 grandchild survived")
             os.close(fd)
-            os.kill(forked, signal.SIGKILL)  # hygiene for the NAMED survivor
-            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
+            os.close(gfd)
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # survivor then reparents to this subreaper case process.
+            # D-385-CURRENT-CHILD: adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof killed
+            # it right here) -- and the hygiene kill runs through the handoff
+            # descriptor its forking parent sent, the one licensed route.
             release(guardian)
+            assert not _kill_proved_child(forked), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(forked, pidfd=forked_fd), \
+                "the leg-3 handoff hygiene refused the raced survivor"
+            await_state(forked, (None, "Z"),
+                        "the leg-3 handoff hygiene did not complete")
+            os.close(forked_fd)
 
         # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
         # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
@@ -4632,8 +9830,93 @@ def _watchdog_completion_case(mode):
         assert state(survivor) not in (None, "Z"), (
             "the observation-only verifier signalled the survivor")
         os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
-        os.waitpid(survivor, 0)
+        _bounded_wait(survivor, forked=True)
+
+        # Leg 5 (D-385-PIDFD-HANDOFF, the unit flip): on a MODELLED /proc
+        # (patched stat reads) the census licenses delivery by the handoff
+        # map ALONE. A live group member outside the map is SKIPPED with
+        # nothing signalled and NO pidfd opened (the banned opener below
+        # turns any local open into a loud failure); an OLD-STYLE ancestry
+        # anchor -- the caller's own pid, which the retired chain walk
+        # accepted after opening the member's pidfd locally -- licenses
+        # nothing when it appears among the map's keys. The retired census
+        # opened the member's pidfd FIRST, so either call turns red on a
+        # revert at the banned opener before any signal could be weighed.
+        member = 4194301
+        group = member
+
+        def member_stat_fields(target):
+            target = int(target)
+            if target == member:
+                return [b"S", str(os.getpid()).encode("ascii"),
+                        str(group).encode("ascii")]
+            return None
+
+        def banned_member_pidfd(target):
+            raise AssertionError(
+                ("the handoff-only census opened a member pidfd locally "
+                 "(D-385)", target))
+
+        modelled_sent = []
+        with patch.object(emit, "_fixture_stat_fields",
+                          member_stat_fields), \
+                patch.object(emit, "_fixture_pidfd", banned_member_pidfd), \
+                patch.object(os, "listdir",
+                             lambda path=".": [str(member)]), \
+                patch.object(signal, "pidfd_send_signal",
+                             lambda target_fd, signum, *args:
+                                 modelled_sent.append(
+                                     (target_fd, signum))):
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {})
+            assert outcome == ([], [member], []) and modelled_sent == [], (
+                "a live member with no handoff was not skipped: nothing "
+                "may be signalled (D-385 fail-closed)",
+                outcome, modelled_sent)
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {os.getpid(): None})
+            assert outcome == ([], [member], []) and modelled_sent == [], (
+                "an ancestry-style anchor key licensed a member kill "
+                "(D-385: the parent-chain license is retired)",
+                outcome, modelled_sent)
+
+        # Leg 6 (D-385-PIDFD-HANDOFF, the delivery flip): a member IN the
+        # handoff map is signalled through EXACTLY the handed-off
+        # descriptor -- never one the census opened (the banned opener
+        # stays armed) -- and the caller-owned descriptor is not closed by
+        # the census (the recording close below must stay silent for it).
+        handed_fd = 987009
+        closed_by_census = []
+        real_close = os.close
+
+        def recording_close(target_fd):
+            if target_fd == handed_fd:
+                closed_by_census.append(target_fd)
+                return None
+            return real_close(target_fd)
+
+        with patch.object(emit, "_fixture_stat_fields",
+                          member_stat_fields), \
+                patch.object(emit, "_fixture_pidfd", banned_member_pidfd), \
+                patch.object(os, "listdir",
+                             lambda path=".": [str(member)]), \
+                patch.object(os, "close", recording_close), \
+                patch.object(signal, "pidfd_send_signal",
+                             lambda target_fd, signum, *args:
+                                 modelled_sent.append(
+                                     (target_fd, signum))):
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {member: handed_fd})
+        assert outcome == ([member], [], []), (
+            "the handed-off member was not delivered", outcome)
+        assert modelled_sent == [(handed_fd, signal.SIGKILL)], (
+            "delivery did not go through the handed-off descriptor "
+            "(D-385)", modelled_sent)
+        assert closed_by_census == [], (
+            "the census closed the caller-owned handoff descriptor",
+            closed_by_census)
     elif mode == "census-exception":
+        import socket
         import time
         import types
         # Fix 2z (codex BLOCKER 3): cleanup is exception-safe. The subject's
@@ -4681,24 +9964,40 @@ def _watchdog_completion_case(mode):
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
-        def frozen_pair(directory):
-            leader_file = Path(directory, "leader")
+        def frozen_pair(directory, release=None):
+            # `release` -- an (r, w) pipe this case holds -- parks the model
+            # leader on a read instead of a sleep: the unwind legs (1k, 1m)
+            # end it by EOF, never by a signal to an adopted current child
+            # (D-385-CURRENT-CHILD).
             frozen_file = Path(directory, "frozen")
+            handoff, handoff_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
+                    def leader_main():
+                        os.setsid()
+                        if release is not None:
+                            os.close(release[1])
+                            os.read(release[0], 1)
+                        else:
+                            time.sleep(3600)
+                        os._exit(0)
+
+                    # Fork-and-send (QA11 codex blocker): only the pid the
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    if release is not None:
+                        os.close(release[1])
                     import ctypes
                     libc = ctypes.CDLL(None, use_errno=True)
                     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader, forked=True)
                         os._exit(125)
-                    leader = os.fork()
-                    if leader == 0:
-                        os.setsid()
-                        time.sleep(3600)
-                        os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4706,11 +10005,13 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
-            await_file(frozen_file, "the model guardian never froze")
-            await_state(guardian, ("T",), "the model guardian did not stop")
-            # The guardian publishes the leader pid at fork, but the
-            # leader runs its own setsid: the caller's subject freeze
+            # The forking-parent descriptor on the GUARDIAN -- opened on
+            # this test's own direct child immediately after its fork, well
+            # before any reap (D-385-PIDFD-HANDOFF).
+            guardian_fd = os.pidfd_open(guardian)
+            # The LEADER arrives as the descriptor its forking guardian
+            # handed off with SCM_RIGHTS; the pid rides along as disclosure.
+            # The leader runs its own setsid: the caller's subject freeze
             # could land FIRST, pinning the leader in this test
             # process's group for good, so the guardian-anchored
             # census found no group member, no census ran, and the
@@ -4718,16 +10019,38 @@ def _watchdog_completion_case(mode):
             # intermittent "fixture was accepted" flake (fix 16,
             # QA37 claude). Hand the pair out only once the leader
             # holds its own group.
-            leader = int(leader_file.read_text(encoding="ascii"))
-            await_pgid(leader, "the model leader never took its own group")
-            return guardian, leader
+            leader_fd = None
+            try:
+                handoff_peer.close()
+                await_file(frozen_file, "the model guardian never froze")
+                await_state(guardian, ("T",),
+                            "the model guardian did not stop")
+                leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+                await_pgid(leader, "the model leader never took its own group")
+            except BaseException:
+                # QA11 codex major 3: EVERY wait after the guardian pidfd
+                # opened sits inside this cleanup try -- a failing await, a
+                # refused handoff, or a leader that never took its group:
+                # every descriptor this pair holds is closed once, here,
+                # and an un-received handoff is released with its socket.
+                # QA12 codex major 2: the closes run through _close_every,
+                # so one close that raises can no longer skip the later
+                # ones; legs 1k and 1m census this unwind on both sides of
+                # the receive (pidfds AND the handoff socket).
+                closes = []
+                if leader_fd is not None:
+                    closes.append(lambda held=leader_fd: os.close(held))
+                closes.append(lambda: os.close(guardian_fd))
+                closes.append(handoff.close)
+                _close_every(closes)
+                raise
+            return guardian, guardian_fd, leader, leader_fd
 
         # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
         # the census exception still propagates. The pre-fix escalation
         # propagated BEFORE the kill and stranded the frozen leader.
         with tempfile.TemporaryDirectory(prefix="opf-cexc-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             with patch.object(emit, "_fixture_kill_group_members",
                               side_effect=RuntimeError("injected census failure")):
                 refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
@@ -4735,8 +10058,758 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"),
                         "the raising census stranded the frozen subject")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            os.close(guardian_fd)
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
+                "the leg-1 release refused the frozen guardian"
+            _bounded_wait(guardian)
+
+        # Leg 1f (QA9 codex blocker 1 / claude F3; reshaped by
+        # D-385-PIDFD-HANDOFF after QA10 codex blocker / claude m1): a pid a
+        # FIXTURE FILE names is NEVER read for a signal target. Forge the
+        # file with a live, UNRELATED group leader -- a decoy whose parent
+        # chain never reaches the guardian -- while the REAL target arrives
+        # as the descriptor its forking guardian handed off: the committed
+        # path never consults the file, every pidfd signal of the run goes
+        # through the handed-off descriptor, and the decoy is never
+        # signalled -- not stopped, not killed. A caller reverted to reading
+        # the file and opening a bare os.pidfd_open on the number is caught
+        # by the AST pin; one that signals the file-named number freezes or
+        # kills the decoy and turns this red.
+        with tempfile.TemporaryDirectory(prefix="opf-forged-") as directory:
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
+            decoy = os.fork()
+            if decoy == 0:
+                os.setsid()
+                time.sleep(3600)
+                os._exit(0)
+            await_pgid(decoy, "the decoy never took its own group")
+            scratch = Path(directory, "leader.tmp")
+            scratch.write_text(str(decoy), encoding="ascii")
+            scratch.rename(Path(directory, "leader"))
+            assert leader != decoy, "the decoy collided with the real leader"
+            sent = []
+            real_pidfd_signal = signal.pidfd_send_signal
+
+            def rec_send(target_fd, signum, *args):
+                sent.append((target_fd, signum))
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(signal, "pidfd_send_signal", rec_send):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            assert outcome == ("tree", []), (
+                "the forged-file run did not address the real tree", outcome)
+            assert sent and all(entry[0] == fd for entry in sent), (
+                "a descriptor other than the handed-off leader pidfd was "
+                "signalled", sent)
+            await_state(leader, (None, "Z"), "the real leader survived")
+            assert state(decoy) in ("S", "R"), (
+                "the forged file's number was signalled: the decoy did not "
+                "stay running untouched", state(decoy))
+            os.close(fd)
+            os.close(guardian_fd)
+            assert _kill_proved_child(decoy, forked=True), \
+                "the leg-1f hygiene refused the decoy"
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
+                "the leg-1f release refused the frozen guardian"
+            _bounded_wait(guardian)
+
+        # Leg 1g (D-385-PIDFD-HANDOFF, fail closed): a forking parent that
+        # sends NO descriptor is refused -- the receiver fails closed with a
+        # named reason, signals nothing, and the pid named in the payload (a
+        # live bystander here) survives untouched. There is no fallback from
+        # the missing descriptor to the number.
+        bystander = os.fork()
+        if bystander == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff_peer.send(str(bystander).encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pid, proofless_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1g proofless handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(proofless_fd)
+                raise AssertionError("a descriptor-less handoff was accepted")
+        assert "passed 0 descriptors" in named and "leg-1g" in named, named
+        assert sent == [], ("the descriptor-less handoff was signalled", sent)
+        waited, raw = _bounded_wait(sender, forked=True)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        assert state(bystander) in ("S", "R"), (
+            "the payload-named bystander did not survive the refusal",
+            state(bystander))
+        assert _kill_proved_child(bystander, forked=True), \
+            "the leg-1g hygiene refused the bystander"
+
+        # Leg 1h (D-385-PIDFD-HANDOFF, fail closed; reshaped by QA12 codex
+        # blocker 1: this case process is a child SUBREAPER, from which the
+        # sender now refuses, so a dedicated NON-subreaper sender child --
+        # the fork subreaper flag is not inherited -- forks the departed
+        # target itself and pins its zombie until the receiver has
+        # refused): a handed-off descriptor whose process has ALREADY
+        # EXITED is refused loudly -- no signal is sent through it and the
+        # refusal is a named error, never a swallowed one. The zombie's pid
+        # stays pinned by its un-reaped state for the whole receive.
+        hold_read, hold_write = os.pipe()
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                os.close(hold_write)
+                departed = os.fork()
+                if departed == 0:
+                    os._exit(0)
+                await_state(departed, ("Z",),
+                            "the departed child never became a zombie")
+                if not _pidfd_handoff_send(handoff_peer, departed):
+                    os._exit(123)
+                handoff_peer.close()
+                os.read(hold_read, 1)  # hold the zombie until the refusal
+                _bounded_wait(departed, forked=True)
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        os.close(hold_read)
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pid, departed_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1h exited target")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(departed_fd)
+                raise AssertionError("an exited handoff target was accepted")
+        assert "already exited" in named and "leg-1h" in named, named
+        assert sent == [], ("the exited handoff target was signalled", sent)
+        os.write(hold_write, b"g")
+        os.close(hold_write)
+        waited, raw = _bounded_wait(sender, forked=True)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+
+        # Leg 1i (QA11 codex BLOCKER): the SENDER proves, in the kernel,
+        # that the pid it was handed is its OWN un-reaped child before
+        # anything is sent. A forked sender aims the handoff at a SIBLING
+        # (codex's uncle-target reproduction: a live process that is not
+        # the sender's child) and at its PARENT: waitid(P_PIDFD, ...,
+        # WNOWAIT) answers ECHILD for both, the send refuses with the
+        # descriptor closed and NOTHING on the wire, and the receiver sees
+        # only EOF and fails closed. The alias dodges the AST pin ON
+        # PURPOSE (the pin is a tripwire over ordinary spellings): this
+        # leg exercises the kernel proof that no spelling dodges.
+        uncle = os.fork()
+        if uncle == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                unproved = _pidfd_handoff_send
+                for target in (uncle, os.getppid()):
+                    try:
+                        unproved(handoff_peer, target)
+                    except AssertionError:
+                        continue
+                    os._exit(125)  # a foreign target was sent
+                handoff_peer.close()
+                os._exit(0)
+            except BaseException:
+                os._exit(124)
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pid, foreign_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1i foreign-target handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(foreign_fd)
+                raise AssertionError("a foreign-target handoff was accepted")
+        assert "closed without a handoff message" in named \
+            and "leg-1i" in named, named
+        assert sent == [], ("the foreign-target handoff was signalled", sent)
+        waited, raw = _bounded_wait(sender, forked=True)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        assert state(uncle) in ("S", "R"), (
+            "the refused handoff's target did not survive untouched",
+            state(uncle))
+        assert _kill_proved_child(uncle, forked=True), \
+            "the leg-1i hygiene refused the uncle"
+
+        # Leg 1j (QA11 codex major 2 / claude m1): one message is one
+        # handoff. Every malformed wire shape is refused with a named
+        # reason, every received descriptor closed, nothing signalled: two
+        # and three descriptors in one message; more descriptors than the
+        # receive room (control truncation); a descriptor that is not a
+        # pidfd (a pipe, a socket); a payload that does not name the
+        # descriptor's own process; an over-long payload; a data-only
+        # message queued BEFORE the descriptor message (SEQPACKET framing:
+        # the first message is judged alone and refused, never
+        # concatenated); a SECOND complete handoff queued behind an
+        # accepted first one; an empty payload riding a real descriptor;
+        # and -- QA12 codex minor 3 -- an EMPTY message from a still-open
+        # peer, first and second, each a refused MESSAGE, never EOF. Every
+        # raw wire shape goes through _pidfd_handoff_misuse_send, the one
+        # scope besides the sender the SCM_RIGHTS sweep licences.
+        probe_kid = os.fork()
+        if probe_kid == 0:
+            time.sleep(3600)
+            os._exit(0)
+        other_kid = os.fork()
+        if other_kid == 0:
+            time.sleep(3600)
+            os._exit(0)
+        payload = str(probe_kid).encode("ascii")
+
+        def crafted(send, fragment):
+            pair_recv, pair_send = _pidfd_handoff_pair()
+            try:
+                send(pair_send)
+            finally:
+                pair_send.close()
+            crafted_sent = []
+            with patch.object(signal, "pidfd_send_signal",
+                              lambda target_fd, signum, *args:
+                                  crafted_sent.append((target_fd, signum))):
+                try:
+                    _pid, crafted_fd = _pidfd_handoff_recv(
+                        pair_recv, "the leg-1j crafted handoff")
+                except AssertionError as exc:
+                    named = str(exc)
+                else:
+                    os.close(crafted_fd)
+                    raise AssertionError(
+                        "a crafted handoff was accepted: " + fragment)
+            assert fragment in named and "leg-1j" in named, (fragment, named)
+            assert crafted_sent == [], (fragment, crafted_sent)
+
+        first = os.pidfd_open(probe_kid)
+        second = os.pidfd_open(other_kid)
+        third = os.pidfd_open(probe_kid)
+        pipe_read, pipe_write = os.pipe()
+        plain_a, plain_b = socket.socketpair()
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first, second])]), "passed 2 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first, second, third])]),
+            "passed 3 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first] * 9)]), "truncated")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [pipe_read])]), "is not a pidfd")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [plain_a.fileno()])]), "is not a pidfd")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([str(other_kid).encode("ascii")], [first])]),
+            "but the descriptor's process is")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([b"9" * 24], [first])]), "over-long for a pid")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([b""], [first])]), "is not a pid")
+        crafted(lambda peer: (peer.send(b"999"), _pidfd_handoff_misuse_send(
+            peer, [([payload], [first])])), "passed 0 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first]), ([payload], [third])]),
+            "a second handoff message followed the first")
+
+        def refused_open_peer(prime, fragment, note):
+            # QA12 codex minor 3: the peer stays OPEN across the receive,
+            # so a zero-byte read cannot be EOF -- it is an empty MESSAGE
+            # and must be refused as one, nothing signalled and no
+            # descriptor stranded. (Queued ahead of a CLOSE instead, an
+            # empty record and EOF are indistinguishable on this kernel --
+            # the docstring's disclosed residual -- so these two cases are
+            # exactly the distinguishable ones.)
+            pair_recv, pair_send = _pidfd_handoff_pair()
+            prime(pair_send)
+            pair_send.send(b"")
+            empty_sent = []
+            with patch.object(signal, "pidfd_send_signal",
+                              lambda target_fd, signum, *args:
+                                  empty_sent.append((target_fd, signum))):
+                try:
+                    _pid, empty_fd = _pidfd_handoff_recv(pair_recv, note)
+                except AssertionError as exc:
+                    named = str(exc)
+                else:
+                    os.close(empty_fd)
+                    raise AssertionError(
+                        "an empty message from a still-open peer was "
+                        "accepted as EOF: " + note)
+            assert fragment in named and note in named, (fragment, named)
+            assert empty_sent == [], (note, empty_sent)
+            pair_send.close()
+
+        refused_open_peer(lambda peer: None,
+                          "sent an EMPTY handoff message",
+                          "the leg-1j empty first message")
+        refused_open_peer(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first])]),
+            "a second handoff message followed the first",
+            "the leg-1j empty second message")
+        os.close(first)
+        os.close(second)
+        os.close(third)
+        os.close(pipe_read)
+        os.close(pipe_write)
+        plain_a.close()
+        plain_b.close()
+        assert _kill_proved_child(probe_kid, forked=True), \
+            "the leg-1j hygiene refused its first child"
+        assert _kill_proved_child(other_kid, forked=True), \
+            "the leg-1j hygiene refused its second child"
+
+        # Leg 1k (QA11 codex major 3): an await failing AFTER the guardian
+        # pidfd is open unwinds frozen_pair with EVERY descriptor closed --
+        # the waits sit inside the cleanup try now. The fault fires on the
+        # first sight of the frozen file, so the guardian provably reached
+        # its freeze protocol; live pidfds are enumerated before and after
+        # the unwind and must match exactly.
+        def live_pidfds():
+            found = []
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    if os.readlink("/proc/self/fd/" + name) \
+                            == "anon_inode:[pidfd]":
+                        found.append(int(name))
+                except OSError:
+                    continue  # the listing's own descriptor, or a racing close
+            return sorted(found)
+
+        real_exists = Path.exists
+
+        def frozen_await_fault(self):
+            outcome = real_exists(self)
+            if outcome and self.name == "frozen":
+                raise RuntimeError("injected frozen-file await failure")
+            return outcome
+
+        # Earlier legs' model leaders die under their guardians and
+        # reparent HERE as zombies once each guardian exits (this case
+        # process is a subreaper); collect them so the model guardian
+        # below is this process's only child.
+        while True:
+            try:
+                collected, _raw = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if collected == 0:
+                break
+
+        # QA12 claude m4 / codex major 2: hold references to BOTH handoff
+        # socket ends across the unwind -- without a held reference a
+        # dropped handler close is hidden by reference-count collection
+        # the moment the unwound frame dies (the round-12 MA mutant
+        # survived exactly that way) -- and require both closed: the peer
+        # end by frozen_pair's own try, the receiver end by the HANDLER,
+        # because this leg's fault fires BEFORE the receive, so
+        # _pidfd_handoff_recv never owned the socket.
+        held_pairs = []
+        real_pair = _pidfd_handoff_pair
+
+        def holding_pair():
+            pair = real_pair()
+            held_pairs.append(pair)
+            return pair
+
+        baseline = live_pidfds()
+        with tempfile.TemporaryDirectory(prefix="opf-fdleak-") as directory:
+            leak_release = os.pipe()
+            pair_globals = _pidfd_handoff_fork_send.__globals__
+            pair_globals["_pidfd_handoff_pair"] = holding_pair
+            forked = []
+            real_fork, fork_owner = os.fork, os.getpid()
+
+            def recording_fork():
+                child = real_fork()
+                if child and os.getpid() == fork_owner:
+                    forked.append(child)
+                return child
+
+            try:
+                with patch.object(Path, "exists", frozen_await_fault), \
+                        patch.object(os, "fork", recording_fork):
+                    refuses(RuntimeError,
+                            lambda: frozen_pair(Path(directory), leak_release))
+            finally:
+                pair_globals["_pidfd_handoff_pair"] = real_pair
+            assert held_pairs, "the holder saw no handoff pair"
+            assert all(end.fileno() == -1
+                       for pair in held_pairs for end in pair), (
+                "the pre-receive unwind left a handoff socket open",
+                [[end.fileno() for end in pair] for pair in held_pairs])
+            assert live_pidfds() == baseline, (
+                "the failing await stranded a descriptor",
+                live_pidfds(), baseline)
+            # Hygiene: the model guardian froze with its leader alive. Its
+            # children are read while it is stopped -- DISCLOSURE only. The
+            # guardian is this process's own declared fork; the reparented
+            # leader is an ADOPTED current child, which licenses NO signal
+            # (D-385-CURRENT-CHILD: the retired adoption proof killed it
+            # right here, so the refusals below are the revert flip) -- it
+            # is released by the pipe EOF and exits on its own.
+            # QA15 claude M1: the hygiene target is the fork this case
+            # itself just recorded (fork-bound provenance), never a number
+            # read back from a /proc census; the census below is a
+            # CROSS-CHECK and disclosure only.
+            assert len(forked) == 1, (
+                "the leak leg expected exactly one recorded own fork", forked)
+            guardian = forked[0]
+            mine = Path("/proc/self/task", str(os.getpid()),
+                        "children").read_text(encoding="ascii").split()
+            assert mine == [str(guardian)], (
+                "the census disagrees with the recorded own fork",
+                mine, guardian)
+            orphans = Path("/proc", str(guardian), "task", str(guardian),
+                           "children").read_text(encoding="ascii").split()
+            assert _kill_proved_child(guardian, forked=True), \
+                "the leg-1k hygiene refused the frozen guardian"
+            for orphan in orphans:
+                assert not _kill_proved_child(int(orphan)), \
+                    "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(leak_release[1])
+            for orphan in orphans:
+                await_state(int(orphan), (None, "Z"),
+                            "the leg-1k EOF release did not complete")
+            os.close(leak_release[0])
+
+        # Leg 1l (QA11 codex major 3, receiver path; reshaped by QA12 codex
+        # blocker 1: the send comes from a dedicated NON-subreaper sender
+        # child, which forks the victim itself, sends, DISCLOSES the
+        # victim's pid over a pipe for the hygiene kill below -- never for
+        # a signal: the hygiene routes through _kill_proved_child once the
+        # victim has reparented to this subreaper case process -- and
+        # exits): a conn.close() that
+        # itself raises after a successful receive must not strand the
+        # received pidfd: every received descriptor is closed before the
+        # close failure propagates, pinned by the same live-pidfd census.
+        victim_read, victim_write = os.pipe()
+        # The victim parks on a pipe this case holds: the hygiene below ends
+        # it by EOF, never by a signal to an adopted current child
+        # (D-385-CURRENT-CHILD); the pid written over victim_write is
+        # DISCLOSURE only.
+        victim_release = os.pipe()
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                os.close(victim_read)
+                victim = os.fork()
+                if victim == 0:
+                    os.close(victim_release[1])
+                    os.read(victim_release[0], 1)
+                    os._exit(0)
+                if not _pidfd_handoff_send(handoff_peer, victim):
+                    os._exit(123)
+                handoff_peer.close()
+                os.write(victim_write, str(victim).encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        os.close(victim_write)
+        handoff_peer.close()
+        waited, raw = _bounded_wait(sender, forked=True)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        victim = int(os.read(victim_read, 16))
+        os.close(victim_read)
+
+        class _CloseFault:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def close(self):
+                self._inner.close()
+                raise OSError(9, "injected close failure")
+
+        baseline = live_pidfds()
+        refuses(OSError, lambda: _pidfd_handoff_recv(
+            _CloseFault(handoff), "the leg-1l close fault"))
+        assert live_pidfds() == baseline, (
+            "the raising close stranded the received pidfd",
+            live_pidfds(), baseline)
+        # D-385-CURRENT-CHILD: the victim reparented to this subreaper case
+        # process when its sender exited, but adoption licenses NO signal --
+        # the helper refuses the undeclared target (the retired adoption
+        # proof killed it right here) and the victim is released by EOF.
+        assert not _kill_proved_child(victim), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        os.close(victim_release[1])
+        await_state(victim, (None, "Z"),
+                    "the leg-1l EOF release did not complete")
+        os.close(victim_release[0])
+
+        # Leg 1m (QA12 claude m4): an await failing AFTER the leader
+        # descriptor was received unwinds frozen_pair with EVERY resource
+        # closed -- the received leader pidfd and the handoff SOCKET
+        # included, the two closes leg 1k's pre-receive fault never
+        # reaches (its fault fires before the receive, so the socket and
+        # leader closes there were untested). This census counts open
+        # sockets as well as pidfds, so a frozen_pair cleanup that drops
+        # EITHER close turns it red.
+        def live_handoff_resources():
+            found = []
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    link = os.readlink("/proc/self/fd/" + name)
+                except OSError:
+                    continue  # the listing's own descriptor, or a racing close
+                if link == "anon_inode:[pidfd]" or link.startswith("socket:["):
+                    found.append(int(name))
+            return sorted(found)
+
+        # Earlier legs' model leaders reparent HERE once their guardians
+        # exit (this case process is a subreaper); collect them so the
+        # model guardian below is this process's only child.
+        while True:
+            try:
+                collected, _raw = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if collected == 0:
+                break
+
+        def pgid_await_fault(target):
+            raise RuntimeError("injected pgid await failure")
+
+        # The pair is created through a recorder that KEEPS a reference to
+        # both socket objects: a dropped handoff.close() would otherwise be
+        # hidden by reference-count collection the moment the unwound frame
+        # dies (QA12 claude m4: the round-12 MA mutant survived exactly
+        # that way), so the closed state is asserted on the held objects
+        # (fileno() == -1) as well as by the /proc census.
+        created_pairs = []
+        real_pair = _pidfd_handoff_pair
+
+        def recording_pair():
+            pair = real_pair()
+            created_pairs.append(pair)
+            return pair
+
+        baseline = live_handoff_resources()
+        with tempfile.TemporaryDirectory(prefix="opf-fdleak2-") as directory:
+            leak_release = os.pipe()  # a pipe: outside the pidfd/socket census
+            pair_globals = _pidfd_handoff_fork_send.__globals__
+            pair_globals["_pidfd_handoff_pair"] = recording_pair
+            forked = []
+            real_fork, fork_owner = os.fork, os.getpid()
+
+            def recording_fork():
+                child = real_fork()
+                if child and os.getpid() == fork_owner:
+                    forked.append(child)
+                return child
+
+            try:
+                with patch.object(os, "getpgid", pgid_await_fault), \
+                        patch.object(os, "fork", recording_fork):
+                    refuses(RuntimeError,
+                            lambda: frozen_pair(Path(directory), leak_release))
+            finally:
+                pair_globals["_pidfd_handoff_pair"] = real_pair
+            assert created_pairs, "the recorder saw no handoff pair"
+            assert all(end.fileno() == -1
+                       for pair in created_pairs for end in pair), (
+                "the post-receive unwind left a handoff socket open",
+                [[end.fileno() for end in pair] for pair in created_pairs])
+            assert live_handoff_resources() == baseline, (
+                "the post-receive unwind stranded a descriptor or socket",
+                live_handoff_resources(), baseline)
+            # Hygiene, exactly as in leg 1k: the guardian is this process's
+            # own declared fork; the reparented leader is an ADOPTED current
+            # child -- refused (D-385-CURRENT-CHILD) and released by EOF.
+            # QA15 claude M1, exactly as in leg 1k: fork-bound provenance
+            # from this case's own recorded fork; the census is a
+            # CROSS-CHECK and disclosure only.
+            assert len(forked) == 1, (
+                "the post-receive leak leg expected exactly one recorded "
+                "own fork", forked)
+            guardian = forked[0]
+            mine = Path("/proc/self/task", str(os.getpid()),
+                        "children").read_text(encoding="ascii").split()
+            assert mine == [str(guardian)], (
+                "the census disagrees with the recorded own fork",
+                mine, guardian)
+            orphans = Path("/proc", str(guardian), "task", str(guardian),
+                           "children").read_text(encoding="ascii").split()
+            assert _kill_proved_child(guardian, forked=True), \
+                "the leg-1m hygiene refused the frozen guardian"
+            for orphan in orphans:
+                assert not _kill_proved_child(int(orphan)), \
+                    "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(leak_release[1])
+            for orphan in orphans:
+                await_state(int(orphan), (None, "Z"),
+                            "the leg-1m EOF release did not complete")
+            os.close(leak_release[0])
+
+        # Leg 1n (QA12 codex major 2): _close_every -- the one route for
+        # every multi-descriptor cleanup above -- closes EVERY descriptor
+        # even when an earlier close RELEASES its number and then RAISES
+        # (a probe at each position), and with TWO failures it re-raises
+        # the FIRST only after all closes ran.
+        for fault_positions in ((0,), (1,), (2,), (0, 2)):
+            probe_reads = []
+            probe_writes = []
+            for _ in range(3):
+                read_end, write_end = os.pipe()
+                probe_reads.append(read_end)
+                probe_writes.append(write_end)
+            probe_closed = []
+
+            def releasing_close(target_fd, fault):
+                os.close(target_fd)
+                probe_closed.append(target_fd)
+                if fault:
+                    raise OSError(
+                        5, "release-then-raise close at " + str(target_fd))
+
+            try:
+                _close_every([
+                    (lambda held=target_fd, fault=(position in
+                                                   fault_positions):
+                        releasing_close(held, fault))
+                    for position, target_fd in enumerate(probe_reads)])
+            except OSError as exc:
+                first_faulted = probe_reads[fault_positions[0]]
+                assert str(first_faulted) in str(exc), (
+                    "the FIRST close failure was not the one re-raised",
+                    fault_positions, str(exc))
+            else:
+                raise AssertionError(
+                    "the probe's close failure did not propagate")
+            assert probe_closed == probe_reads, (
+                "a raising close skipped a later close",
+                fault_positions, probe_closed, probe_reads)
+            for write_end in probe_writes:
+                os.close(write_end)
+
+        # Leg 1n-cancel (QA13 codex 3 / claude m3): a cancellation raised by
+        # a LATER close keeps priority over an ordinary earlier failure,
+        # while EVERY close still runs (no descriptor is stranded). The
+        # first step raises an ordinary OSError, the second raises
+        # KeyboardInterrupt, the third returns: _close_every must re-raise
+        # the CANCELLATION (never the earlier OSError) and keep that OSError
+        # reachable beneath it as context. A revert that re-raises the first
+        # failure alone surfaces the OSError and drops the cancellation. No
+        # real descriptor is used here -- the helper only runs callbacks, and
+        # leg 1n above already pins the no-descriptor-stranded property on
+        # real pidfds -- so the close sweep sees no new open/close site.
+        cancel_ran = []
+
+        def cancel_step(tag, raises):
+            cancel_ran.append(tag)
+            if raises is not None:
+                raise raises
+        try:
+            _close_every([
+                lambda: cancel_step(
+                    "a", OSError(5, "release-then-raise ordinary close")),
+                lambda: cancel_step(
+                    "b", KeyboardInterrupt("release-then-raise cancel close")),
+                lambda: cancel_step("c", None)])
+        except KeyboardInterrupt as exc:
+            assert isinstance(exc.__context__, OSError) and (
+                "ordinary close" in str(exc.__context__)), (
+                "the earlier ordinary failure was not kept beneath the "
+                "cancellation", repr(exc.__context__))
+        except BaseException as exc:
+            raise AssertionError(
+                "an ordinary failure displaced the later cancellation "
+                "(QA13 codex 3 / claude m3)", repr(exc))
+        else:
+            raise AssertionError(
+                "the later cancellation did not propagate")
+        assert cancel_ran == ["a", "b", "c"], (
+            "a raising step skipped a later step under cancellation",
+            cancel_ran)
+
+        # Leg 1o (QA12 codex blocker 1): the sender REFUSES from a child
+        # SUBREAPER outright -- this case process is one (QA8), and a
+        # subreaper's waitable child may be an ADOPTED orphan it never
+        # forked (codex's adopted-child reproduction), which waitid alone
+        # cannot distinguish from its own fork. The child here IS this
+        # process's own fork, and the sender still refuses: the licence
+        # rests on the provable negative, never on the lucky case. Nothing
+        # reaches the wire, the receiver fails closed on EOF, and the
+        # child survives untouched for the hygiene kill.
+        own = os.fork()
+        if own == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pidfd_handoff_send(handoff_peer, own)
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                raise AssertionError(
+                    "a child-subreaper sender was allowed to hand off")
+            assert "child subreaper" in named, named
+            handoff_peer.close()
+            try:
+                _pid, own_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1o subreaper-sender handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(own_fd)
+                raise AssertionError("the refused handoff still delivered")
+        assert "closed without a handoff message" in named \
+            and "leg-1o" in named, named
+        assert sent == [], ("the refused handoff was signalled", sent)
+        assert state(own) in ("S", "R"), (
+            "the refused handoff's child did not survive untouched",
+            state(own))
+        assert _kill_proved_child(own, forked=True), \
+            "the leg-1o hygiene refused its child"
+
+        # Leg 1p (QA12 claude m4): a send that refuses must not leave the
+        # child _pidfd_handoff_fork_send just forked running (or rotting)
+        # with no owner. From this subreaper case process the send refuses
+        # outright (leg 1o), so the helper must kill AND reap its own fork
+        # before the refusal propagates: the children census is identical
+        # before and after.
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        before = Path("/proc/self/task", str(os.getpid()),
+                      "children").read_text(encoding="ascii").split()
+        refuses(AssertionError, lambda: _pidfd_handoff_fork_send(
+            handoff_peer, lambda: os._exit(0)))
+        after = Path("/proc/self/task", str(os.getpid()),
+                     "children").read_text(encoding="ascii").split()
+        assert after == before, (
+            "the refused fork-and-send stranded its child", before, after)
+        handoff_peer.close()
+        handoff.close()
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
         # same failure, the kill that DID run is recorded ("partial",
@@ -4744,9 +10817,8 @@ def _watchdog_completion_case(mode):
         # The pre-fix tier propagated before the guardian SIGKILL and
         # recorded nothing.
         with tempfile.TemporaryDirectory(prefix="opf-cexc2-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -4820,7 +10892,7 @@ def _watchdog_completion_case(mode):
         else:
             raise AssertionError("the recorded failure was not re-raised")
         finally:
-            os.waitpid(dead, 0)
+            _bounded_wait(dead, forked=True)
         assert "subject tree killed" in relabel, (
             "the recorded census kill was not disclosed", relabel)
         assert "subject-only kill" not in relabel, (
@@ -4847,8 +10919,7 @@ def _watchdog_completion_case(mode):
         # SIGKILL. The pre-fix freeze sat before the try: the exception
         # skipped the kill and stranded the live subject.
         with tempfile.TemporaryDirectory(prefix="opf-freeze-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             real_pidfd_signal = signal.pidfd_send_signal
 
             def freeze_fault(target_fd, signum, *args):
@@ -4863,8 +10934,10 @@ def _watchdog_completion_case(mode):
                         "the freeze exception skipped the held-pidfd "
                         "subject SIGKILL")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            os.close(guardian_fd)
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
+                "the leg-4 release refused the frozen guardian"
+            _bounded_wait(guardian)
 
         # Leg 5 (round 24, codex boundary): at the _escalate tier the same
         # subject-freeze fault records only what actually ran -- the
@@ -4903,7 +10976,7 @@ def _watchdog_completion_case(mode):
         await_state(subject, (None, "Z"),
                     "the recorded subject kill never ran (round 24: the "
                     "freeze fault skipped the held-pidfd SIGKILL)")
-        os.waitpid(subject, 0)
+        _bounded_wait(subject, forked=True)
         bound = time.monotonic() + 30
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
@@ -4961,7 +11034,7 @@ def _watchdog_completion_case(mode):
         assert state(subject) not in (None, "Z"), (
             "the subject was addressed by a cleanup that never ran")
         os.kill(subject, signal.SIGKILL)  # hygiene: the retry owns this subject
-        os.waitpid(subject, 0)
+        _bounded_wait(subject, forked=True)
         os.close(guardian_fd)
         os.close(subject_fd)
 
@@ -5002,7 +11075,7 @@ def _watchdog_completion_case(mode):
         # Both kill paths were injected to fail: the frozen guardian remains
         # for this hygiene kill.
         os.kill(guardian, signal.SIGKILL)
-        os.waitpid(guardian, 0)
+        _bounded_wait(guardian, forked=True)
         os.close(guardian_fd)
 
         # Leg 8 (round 24, claude F2): under a double fault -- the member
@@ -5012,9 +11085,8 @@ def _watchdog_completion_case(mode):
         # the send failed and the frozen subject survives. The pre-fix
         # wording claimed "subject SIGKILL sent".
         with tempfile.TemporaryDirectory(prefix="opf-dfault-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -5057,10 +11129,20 @@ def _watchdog_completion_case(mode):
             assert ("subject SIGKILL attempted through its held "
                     "pidfd") in named, named
             assert "SIGKILL sent" not in named, named
-            os.kill(leader, signal.SIGKILL)  # hygiene for the surviving subject
+            # Collect the guardian FIRST (SIGKILLed by the escalate finally;
+            # its delivery is asynchronous): the surviving frozen subject then
+            # reparents to this subreaper case process. D-385-CURRENT-CHILD:
+            # adoption licenses NO signal -- the helper refuses the undeclared
+            # target (the retired adoption proof killed it right here) -- and
+            # the hygiene kill runs through the HELD handoff descriptor its
+            # forking guardian sent, the one licensed route.
+            _bounded_wait(guardian)
+            assert not _kill_proved_child(leader), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(leader, pidfd=leader_fd), \
+                "the leg-8 handoff hygiene refused the subject"
             await_state(leader, (None, "Z"),
-                        "the leg-8 hygiene did not complete")
-            os.waitpid(guardian, 0)  # SIGKILLed by the escalate finally
+                        "the leg-8 handoff hygiene did not complete")
             os.close(guardian_fd)
             os.close(leader_fd)
 
@@ -5192,7 +11274,8 @@ def _watchdog_completion_case(mode):
                     raise InterruptedError("backstop cancellation")
                 return None
 
-            def stub_helper(pid, signum, pidfd=None, *, group=True):
+            def stub_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 if helper_kind == "ordinary":
                     raise RuntimeError("helper ordinary")
                 if helper_kind == "cancellation":
@@ -5376,7 +11459,7 @@ def _watchdog_completion_case(mode):
         # Every guardian-directed signal was stubbed, none delivered: the
         # guardian survives for this hygiene kill.
         os.kill(guardian, signal.SIGKILL)
-        waited, raw = os.waitpid(guardian, 0)
+        waited, raw = _bounded_wait(guardian, forked=True)
         assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
 
@@ -6124,11 +12207,15 @@ def _watchdog_completion_case(mode):
         # A resolution regression that silently SHRINKS the computed
         # scope must go red, never pass vacuously: these members are
         # known reachable today.
+        # f:_fixture_pidfd left this closure with D-385-PIDFD-HANDOFF:
+        # the member census opens no pidfd (its targets arrive as handed-off
+        # descriptors), and the remaining openers (_launch_fork,
+        # _fixture_drain) are guardian-side, outside the close lifecycle.
         assert {"f:_fixture_escalate_subject",
                 "f:_fixture_kill_group_members",
                 "f:_fixture_group_pinned", "f:_fixture_verify_group_kill",
                 "f:_fixture_signal", "f:_fixture_stat_fields",
-                "f:_fixture_pidfd", "f:_fixture_mask_cancellation",
+                "f:_fixture_mask_cancellation",
                 "m:_FixtureProcess.close",
                 "m:_FixtureProcess._close_masked",
                 "m:_FixtureProcess._close_coordinated",
@@ -7896,7 +13983,8 @@ def _watchdog_completion_case(mode):
             assert signum == signal.SIGKILL, signum
             raise RuntimeError("subject kill failure")
 
-        def record_helper(pid, signum, pidfd=None, *, group=True):
+        def record_helper(pid, signum, pidfd=None, *, group=True,
+                          forked=False):
             helper_kills.append((pid, signum))
             return True
 
@@ -8029,7 +14117,7 @@ def _watchdog_completion_case(mode):
                 raise RuntimeError("backstop failure")
 
             def borne_helper(pid, signum, pidfd=None, *, group=True,
-                             _born=born):
+                             forked=False, _born=born):
                 raise _born("cleanup-born cancellation")
 
             with patch.object(signal, "pidfd_send_signal",
@@ -8054,19 +14142,22 @@ def _watchdog_completion_case(mode):
                     and fake._subject_skipped is None), (
                 born.__name__, fake._subject_kill, fake._subject_skipped)
 
-        # Leg 17 (fix 7, QA28 codex BLOCKER 2 / claude BLOCKER 1): the
-        # member census's per-pidfd close is an escalation-path cleanup
-        # too. A cancellation raised at the member SIGKILL send crosses
-        # that close, so a failing os.close must attach beneath it, never
-        # replace it. The pre-fix close was a bare finally outside both
-        # the boundary and the structural scope: the close failure became
-        # the outward exception (reproduced at b4e42add).
+        # Leg 17 (fix 7, QA28 codex BLOCKER 2 / claude BLOCKER 1; reshaped
+        # by D-385-PIDFD-HANDOFF): the member census owns NO cleanup step
+        # any more -- its targets arrive as handed-off descriptors the
+        # CALLER owns, so a cancellation raised at the member SIGKILL send
+        # propagates with nothing that could displace it, the census opens
+        # NO pidfd, and it closes NO descriptor (the caller's handoff fd
+        # must survive the call). The pre-D-385 census opened a pidfd per
+        # member and routed its close through the boundary; both sites are
+        # gone, and this leg pins their absence behaviourally.
         member_fields = [b"S", b"11888", b"11999"]
         real_close = os.close
 
         def member_close(fd):
-            if fd == 4242:
-                raise InterruptedError("member close failure")
+            assert fd != 4242, (
+                "the census closed the caller-owned handoff descriptor "
+                "(D-385-PIDFD-HANDOFF)", fd)
             return real_close(fd)
 
         def member_send(target_fd, signum, *args):
@@ -8074,79 +14165,69 @@ def _watchdog_completion_case(mode):
                 target_fd, signum)
             raise TimeoutError("pending cancellation")
 
+        def banned_member_open(target):
+            raise AssertionError(
+                ("the census opened a member pidfd locally "
+                 "(D-385-PIDFD-HANDOFF)", target))
+
         with patch.object(os, "listdir", lambda path: ["7001"]), (
                 patch.object(emit, "_fixture_stat_fields",
                              lambda target: list(member_fields))), (
-                patch.object(emit, "_fixture_pidfd", lambda pid: 4242)), (
+                patch.object(emit, "_fixture_pidfd", banned_member_open)), (
                 patch.object(signal, "pidfd_send_signal", member_send)), (
                 patch.object(os, "close", member_close)):
             try:
                 emit._fixture_kill_group_members(
-                    11999, signal.SIGKILL, {11888}, leader=11999)
+                    11999, signal.SIGKILL, {7001: 4242}, leader=11999)
             except TimeoutError as exc:
-                assert type(exc.__cause__) is InterruptedError, (
-                    "the member close failure was not kept beneath the "
-                    "pending cancellation", repr(exc.__cause__))
+                assert exc.__cause__ is None and exc.__context__ is None, (
+                    "the handed-off member send's cancellation picked up "
+                    "a cleanup chain no step should exist to raise",
+                    repr(exc.__cause__), repr(exc.__context__))
             except BaseException as exc:
                 raise AssertionError(
-                    "the member pidfd close displaced the pending "
-                    "cancellation (fix 7, QA28 codex BLOCKER 2)",
-                    repr(exc))
+                    "the member-send cancellation was displaced "
+                    "(D-385-PIDFD-HANDOFF: no cleanup step may exist "
+                    "here)", repr(exc))
             else:
                 raise AssertionError("the member census did not propagate")
 
-        # The same displacement at the _escalate tier ALSO mis-recorded
-        # "partial" for a cleanup a cancellation had interrupted, gating
-        # the interrupt owner's idempotent retry: now the cancellation
-        # propagates with the close failure beneath it and NOTHING is
-        # recorded, while the guardian cleanup still runs.
+        # The same property at the _escalate tier -- which at runtime holds
+        # NO member handoffs: a live group member observed by the census is
+        # SKIPPED and recorded ("partial", naming it), never signalled
+        # through a locally opened pidfd. The pre-D-385 tier opened a pidfd
+        # on the /proc-discovered number and delivered the kill; a revert
+        # does so again and turns the banned-open recorder below red.
         helper_kills = []
         fake = types.SimpleNamespace(
             pid=11888, pidfd=1098, subject_pid=11999, subject_pidfd=1099,
             _subject_kill=None, _subject_skipped=None)
 
-        def close_oserror(fd):
-            if fd == 4242:
-                raise OSError(5, "member close failure")
-            return real_close(fd)
+        def owned_sends_only(target_fd, signum, *args):
+            assert target_fd in (1098, 1099), (
+                ("a member was signalled without a forking-parent "
+                 "handoff (D-385-PIDFD-HANDOFF)"), target_fd, signum)
+            return None  # freezes and held-pidfd kills succeed
 
-        def census_sequence(target_fd, signum, *args):
-            if target_fd in (1098, 1099):
-                return None  # freezes and held-pidfd kills succeed
-            assert target_fd == 4242 and signum == signal.SIGKILL, (
-                target_fd, signum)
-            raise TimeoutError("pending cancellation")
-
-        def census_helper(pid, signum, pidfd=None, *, group=True):
+        def census_helper(pid, signum, pidfd=None, *, group=True,
+                          forked=False):
             helper_kills.append((pid, signum))
             return True
 
         with patch.object(os, "listdir", lambda path: ["7001"]), (
                 patch.object(emit, "_fixture_stat_fields",
                              lambda target: list(member_fields))), (
-                patch.object(emit, "_fixture_pidfd", lambda pid: 4242)), (
+                patch.object(emit, "_fixture_pidfd", banned_member_open)), (
                 patch.object(emit, "_fixture_group_pinned",
                              lambda group, guardian_pid: True)), (
                 patch.object(signal, "pidfd_send_signal",
-                             census_sequence)), (
-                patch.object(os, "close", close_oserror)), (
+                             owned_sends_only)), (
                 patch.object(emit, "_fixture_signal", census_helper)):
-            try:
-                emit._FixtureProcess._escalate(fake)
-            except TimeoutError as exc:
-                assert type(exc.__cause__) is OSError, (
-                    "the member close failure was not kept beneath the "
-                    "pending cancellation", repr(exc.__cause__))
-            except BaseException as exc:
-                raise AssertionError(
-                    "the member pidfd close displaced the pending "
-                    "cancellation at the _escalate tier (fix 7, QA28 "
-                    "codex BLOCKER 2)", repr(exc))
-            else:
-                raise AssertionError("the escalation did not propagate")
-        assert (fake._subject_kill is None
-                and fake._subject_skipped is None), (
-            "a cancellation-interrupted member cleanup was recorded",
+            emit._FixtureProcess._escalate(fake)
+        assert (fake._subject_kill == "partial"
+                and fake._subject_skipped == ([7001], [])), (
+            "the unhanded live member was not reported skipped "
+            "(D-385-PIDFD-HANDOFF fail-closed)",
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
@@ -8172,7 +14253,7 @@ def _watchdog_completion_case(mode):
             assert signum == signal.SIGKILL, signum
             return None  # the held-pidfd subject SIGKILL succeeds
 
-        def ki_helper(pid, signum, pidfd=None, *, group=True):
+        def ki_helper(pid, signum, pidfd=None, *, group=True, forked=False):
             helper_kills.append((pid, signum))
             return True
 
@@ -8668,38 +14749,6 @@ def _watchdog_completion_case(mode):
                     patch.object(os, "close", fake_close)):
                 emit._fixture_stat_fields(4321)
 
-        def member_close_driver(cancellation, fault, state):
-            # pending point: the verified member send; cleanup: that
-            # member's pidfd close.
-            def fake_listdir(path):
-                assert str(path) == "/proc", path
-                return ["4242"]
-
-            def fake_stat_fields(target):
-                return [b"S", b"7777", b"6060"]
-
-            def fake_pidfd(target):
-                return 987002
-
-            def fake_send(fd, signum, *args):
-                assert fd == 987002, (fd, signum)
-                raise cancellation
-
-            def fake_close(fd):
-                assert fd == 987002, fd
-                raise fault
-
-            with patch.object(os, "listdir", fake_listdir), (
-                    patch.object(emit, "_fixture_stat_fields",
-                                 fake_stat_fields)), (
-                    patch.object(emit, "_fixture_pidfd",
-                                 fake_pidfd)), (
-                    patch.object(signal, "pidfd_send_signal",
-                                 fake_send)), (
-                    patch.object(os, "close", fake_close)):
-                emit._fixture_kill_group_members(6060, signal.SIGKILL,
-                                                 set([7777]))
-
         def subject_kill_driver(cancellation, fault, state):
             # pending point: the subject freeze; cleanup: the
             # held-pidfd SIGKILL (the leg 12 shape, all three types).
@@ -8739,7 +14788,8 @@ def _watchdog_completion_case(mode):
                 assert signum == signal.SIGKILL, signum
                 raise fault
 
-            def fake_helper(pid, signum, pidfd=None, *, group=True):
+            def fake_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 raise cancellation
 
             with patch.object(signal, "pidfd_send_signal",
@@ -8759,7 +14809,8 @@ def _watchdog_completion_case(mode):
                 assert signum == signal.SIGKILL, signum
                 return None  # the direct backstop succeeds
 
-            def fake_helper(pid, signum, pidfd=None, *, group=True):
+            def fake_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 raise fault
 
             with patch.object(signal, "pidfd_send_signal",
@@ -9014,9 +15065,10 @@ def _watchdog_completion_case(mode):
         behavioural_drivers[
             ("f:_fixture_stat_fields",
              "stat descriptor close", 0)] = stat_close_driver
-        behavioural_drivers[
-            ("f:_fixture_kill_group_members",
-             "member pidfd close", 0)] = member_close_driver
+        # _fixture_kill_group_members carries NO boundary site any more
+        # (D-385-PIDFD-HANDOFF): it opens and closes no descriptor, so a
+        # member-send cancellation propagates with no cleanup step that
+        # could displace it (leg 17 pins that behaviour directly).
         behavioural_drivers[
             ("f:_fixture_escalate_subject",
              "held-pidfd subject SIGKILL", 0)] = subject_kill_driver
@@ -10969,7 +17021,7 @@ def _watchdog_completion_case(mode):
         assert fake.subject_pidfd is not None, "the receipt pidfd was lost"
         os.close(fake.subject_pidfd)
         os.kill(subject, signal.SIGKILL)
-        waited, raw = os.waitpid(subject, 0)
+        waited, raw = _bounded_wait(subject, forked=True)
         assert (waited == subject and os.WIFSIGNALED(raw)
                 and os.WTERMSIG(raw) == signal.SIGKILL), (waited, raw)
         os.close(subject_fd)
@@ -11005,7 +17057,7 @@ def _watchdog_overlap_case(mode):
                 if mode == "success":
                     # A's entire tree has exited successfully, with bytes buffered,
                     # but its caller still holds wfd. B must fork in this window.
-                    ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+                    ended = _bounded_wait(pid, nowait=True)
                     assert ended.si_code == os.CLD_EXITED and ended.si_status == 0
                 paused.set()
                 assert resume.wait(10), "A was not resumed"
@@ -11102,6 +17154,7 @@ def _watchdog_regression_self_test():
                         "fd-hygiene-total", "nested-keep", "fd-census",
                         "subject-gc", "guardian-preload", "subject-receipt",
                         "subject-ack", "subject-orphan", "pdeathsig",
+                        "drain-adopted", "reaped-subject-retry",
                         "escalation-subject", "escalate-reaped",
                         "poll-collected", "close-cancel",
                         "escalate-degraded", "poll-masked",
@@ -13386,7 +19439,8 @@ def _cli_self_test():
     """Guard the dispatcher's render, doctor, import, record, adopt, and source-only init routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
     and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
-    Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
+    Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare or
+    overfull `--self-test-unit` and an unknown unit label fail closed (exit 2); a bare `render`,
     both flags together, an unrecognized render flag, a `--root` with no value, and an empty `--root` are usage
     errors (exit 2); `render --check` and `render --write` FORWARD to the U4 engine -- a NOT-ADOPTED root
     returns 0 for each (the wiring discriminator: reverting the render wiring routes it to the fail-closed
@@ -13429,6 +19483,11 @@ def _cli_self_test():
         # Routing cases that need no store on disk.
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
+        # The suite's own child entry (D-385-SUBPROCESS-RUNNER): a wrong arity and an unknown
+        # label refuse (exit 2) before any unit runs or any completion record is written.
+        expect(["--self-test-unit"], EXIT_MALFORMED)                        # the label is required
+        expect(["--self-test-unit", "no-such-unit"], EXIT_MALFORMED)        # an unregistered label
+        expect(["--self-test-unit", "opf-store", "extra"], EXIT_MALFORMED)  # one label exactly
         for verb in KNOWN_VERBS:
             if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record", "adopt"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
@@ -16002,9 +22061,11 @@ def _self_tests():
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
+    ("opf-child-contract", _child_contract.self_test),  # the shared fail-closed child contract
     ("opf-watchdog-isolation", _watchdog_isolation_self_test),
     ("opf-watchdog-regressions", _watchdog_regression_self_test),
     ("opf-aggregator", _aggregator_self_test),
+    ("opf-unit-bound", _unit_bound_self_test),
     ("opf-retained-close-offpath", _retained_close_offpath_self_test),
     ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
     ("opf-cli", _cli_self_test),
@@ -16020,62 +22081,3141 @@ KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync",
 _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz"})
 
 
-def run_self_tests(tests=None):
-    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+# The INTERNAL budget of the aggregator unit, ENFORCED inside its own dedicated process by
+# _unit_internal_watchdog (armed in _cmd_self_test_unit). QA27 codex finding 8 / claude M1 showed the
+# aggregator's theoretical per-formula worst case runs to tens of hours (the serial named-writer
+# repeat of every runtime-probe run); the maintainer's D-385-SUBPROCESS-RUNNER ruling prefers
+# LOWERING AND ENFORCING the internal budget over deriving a 57-hour outer bound: at this budget the
+# unit gives itself up with a NAMED, located failure instead of running on, so its _UNIT_OUTER_BOUNDS
+# row can sit just above this value and the kill-timeout rule holds by construction. The measured
+# normal aggregator runtime is about 250-290 s; 3600 s leaves an order-of-magnitude margin for load,
+# and a changed tree that legitimately needs more fails NAMED here, for review, never anonymously at
+# an outer kill hours later.
+_AGGREGATOR_INTERNAL_BUDGET = 3600.0
+
+# D-385-SUBPROCESS-RUNNER (the QA26 hard outer bound, re-grounded after rounds 26 and 27 each broke
+# the in-process forked runner's machinery: its relay pipes, its SIGCHLD holding, its pre-fork bound
+# derivation). THREAT MODEL (D-385-ACCIDENTAL-UNIT): the runner defends against ACCIDENTAL unit
+# faults -- a crash, a hang, an early exit, stray or excess output, leftover children, a stale or
+# missing completion record, a box left full. Deliberate SABOTAGE by a unit is outside that contract
+# and is disclosed below as residuals S1 to S5; S6, a descendant that LEFT the unit's group, is
+# disclosed whether it escaped by accident or on purpose (only the box's removal is bounded, never
+# the escapee, see there): units are the repository's own reviewed code, running as
+# the same user as the runner, and a same-user process can reach the runner in ways no check inside
+# the runner closes. Every guarantee stated here holds against that model, not against a unit
+# written to defeat it. Against accidental faults, the GUARANTEE that `opf.py --self-test` cannot
+# hang is BY CONSTRUCTION, not by audit:
+# run_self_tests runs every registered unit as its OWN `python3 -I -B opf.py --self-test-unit
+# <label>` subprocess (_run_unit_subprocess) in its OWN session and process group, with stdout and
+# stderr on temporary FILES (never a pipe this parent must drain) and stdin on the null device; the
+# parent holds SIGCHLD at SIG_DFL from before the launch until the leader is reaped (no handler: an
+# inherited SIG_IGN would let the kernel auto-reap the leader and lose its real exit, QA28), forks
+# nothing in-process for units and relays nothing while waiting; it polls
+# os.waitid(WEXITED|WNOWAIT|WNOHANG), so the leader's exit is OBSERVED WITHOUT REAPING and its exit
+# status is taken from that observation itself (QA29 codex B1: a competing reap cannot launder the
+# real status away), and on every completion path that leaves the leader un-reaped -- a clean exit,
+# a failing exit, the budget expiry, an interrupting exception --
+# it SIGKILLs the unit's whole process group FIRST, while the un-reaped leader still pins the group
+# id, then reaps (never on the lost path and never after any reap: a reaped pid is unpinned, may be
+# reused, and licences no group kill); at the unit's budget below it records a named exit-2 failure, whatever the unit
+# was doing, and each unit child also starts under RLIMIT_FSIZE (_UNIT_FSIZE_LIMIT: capture
+# growth is bounded at the source, a write past it failing the unit closed by name) and, on Linux,
+# PR_SET_PDEATHSIG (a killed parent takes the leader with it).
+# An accidental early exit cannot pass either: the unit's verdict is its exit code AND the one-line
+# completion record `<label> <code> <pid>` its child entry writes from an exit handler registered
+# FIRST, before the unit runs, so it runs LAST -- after every cleanup handler the unit registered
+# (_cmd_self_test_unit; merge train 2 QA r2: a cleanup that ends the child early prevents the
+# record, and a passing exit must also end its captured stderr at the child's cleanup boundary
+# line, so a cleanup or shutdown fault written after it -- a frameless `Exception ignored` line
+# included -- fails closed; merge train 2 QA r3: the record handler collects pending finalizers
+# BEFORE the record and ends the child with os._exit AT the record, so no interpreter
+# finalization runs after it, guards the reporting machinery with an audit hook, and the scan
+# refuses every CPython fault marker anywhere in the stream; what stays open is residual (m)),
+# pid-BOUND to the leader; a missing, mismatched or wrong-pid record fails closed (a deliberately
+# forged record is residual S2). The record and capture files are read back by RE-OPENING THEIR
+# PATHS after the leader ends: the runner's launch descriptors on the captures are closed as soon
+# as the child has started, and nothing is read through them. Each re-open is
+# O_NOFOLLOW|O_NONBLOCK, required regular by fstat on the newly opened descriptor -- each capture
+# also required to still be the very file the runner created, by device and inode against the
+# fstat the runner took of its launch descriptor (QA30: a substituted regular file is a named
+# failure, unless it reuses the freed inode number, S4) -- and every read is bounded (a planted
+# FIFO is a named failure, never a hang); the path lookup itself is not bounded, and O_NOFOLLOW
+# guards only its LAST component (S5: a mount, or the box itself swapped for a symlink); a
+# platform lacking O_NOFOLLOW or O_NONBLOCK is refused by name, fail closed, never an unguarded
+# name-based open (QA30 gemini). What the kill reaches, exactly:
+# everything the unit runs in-process or forks WITHOUT leaving its process group dies with the
+# group, on every completion path; a descendant that leaves the group on purpose does not -- the
+# _FixtureProcess guardian (its os.setpgid(0, 0)) and its subject (its os.setsid()), every
+# start_new_session=True launch (the runtime-probe supervisors and the run_shell checks), the escape
+# probe's setsid writers -- and none of those is ever signalled (the disclosed escaped-writer
+# residual). Through the descriptors the runner gives the unit, an escapee holds at most the
+# unit's output FILES, which the parent copies bounded and capped (_UNIT_OUTPUT_CAP; past the cap
+# the copy is truncated with a note, the disclosed truncation residual), so an ACCIDENTAL escapee
+# neither holds the suite's stdout or stderr nor blocks this parent. A unit that sets out to do
+# either can (S3, S5). The SABOTAGE residuals (D-385-ACCIDENTAL-UNIT; QA31 codex reproduced S1 to
+# S3), each out of contract and none defended: (S1) a unit can SIGSTOP or SIGKILL its runner --
+# its own session and process group do not stop a same-user kill() such as
+# os.kill(os.getppid(), signal.SIGSTOP); a stopped runner enforces no deadline until something
+# resumes it, and a killed one ends the suite by that signal, never with a pass; (S2) a unit can
+# FORGE its completion record -- the record authenticates TEXT, not its writer, so any process
+# holding the result path and the leader pid (a fork of the leader inherits both) can write the
+# matching line, after which the leader's os._exit(0) passes; (S3) a unit can open the runner's
+# own stdout or stderr through /proc/<runner-pid>/fd (same user, so the access check passes) and
+# hand it to an escapee, which then holds the suite's real stream open past the runner's exit (a
+# reader waiting for EOF waits on it) or writes into it; (S4) a unit can rewrite or truncate a
+# capture through its own still-open descriptor before it exits, and, the launch descriptors
+# being closed, a unit that unlinks a capture and closes every descriptor still open on it (its
+# own and every descendant's) frees its inode, so a file it plants at that path
+# can receive the SAME device and inode numbers on a filesystem that reuses them (ext4 and xfs
+# can) and pass the identity check (not reproduced: the probing hosts' tmpfs and btrfs allocated
+# increasing numbers); (S5) the by-path read-backs can be parked or redirected: an escapee can
+# mount a filesystem it controls (FUSE, where host policy lets the unit's user mount) over the
+# capture directory, and the LEADER ALONE, with no mount and no escapee, can rename the box away
+# and leave a symlink at its name -- O_NOFOLLOW guards only the last path component, so every
+# re-open then resolves through that symlink (QA31 claude MINOR 3; reproduced in QA32: the runner
+# read back through it and returned 0, both names left behind), and a target slow to resolve
+# (an automount, a FUSE path) parks the lookup (not reproduced); the box's removal no longer
+# follows that symlink or passes it: a box path that no longer opens as the directory the runner
+# made is the named cannot-evaluate (QA33); (S6) a descendant that LEFT the unit's group, by
+# accident or on purpose, is never killed: the box's removal itself is BOUNDED (_unit_remove_box:
+# depth, entry and time caps, after the group kill; a box it cannot clear is the named
+# cannot-evaluate, its remnant left in place), but that bound covers only what is IN the box when
+# it is removed -- a chain or flood left there, an entry an escapee adds while the walk runs. The
+# escapee itself stays unbounded until it ends, out of this runner's reach without OS isolation:
+# its CPU and memory, its writes anywhere its user may write, and the box's own pathname, which it
+# can RECREATE after the removal and write into (it holds the path through OPF_SELF_TEST_RESULT,
+# and the caller's TMPDIR is writable by its user; QA34, reproduced: a detached worker resuming
+# after a passing run recreated the box and wrote a file there, the run having returned 0)
+# (S1 to S6 are _run_unit_subprocess's residuals (g) to (l)).
+# Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
+# rule), stated per row from the unit's committed timeouts, windows and worker counts; the
+# aggregator's internal budget is ENFORCED inside the bounded child itself
+# (_AGGREGATOR_INTERNAL_BUDGET), and NOTHING -- no derivation, no source scan -- runs in the parent
+# before the unit's bound starts (QA27 codex blocker 2). A label without its own row is refused by
+# run_self_tests by name, exit 2, without running (and _unit_bound_self_test requires every
+# registered label to carry one).
+_UNIT_OUTER_BOUNDS = {
+    "opf-store": 180.0,
+    "opf-schema": 180.0,
+    "opf-release": 180.0,
+    "opf-worklog": 180.0,
+    "opf-changelog": 180.0,
+    "opf-emit": 600.0,
+    "opf-views": 180.0,
+    "opf-observe": 300.0,
+    "opf-absorb": 180.0,
+    "opf-record": 180.0,
+    "opf-adopt-apply": 300.0,
+    "opf-fuzz": 300.0,
+    "opf-check": 300.0,
+    "opf-journal": 180.0,
+    # opf-child-contract: sixteen quick seeded children, each its own `python3 -I -B -c`
+    # interpreter under the suite's 120 s subprocess timeout; the slowest (the unsettled chain)
+    # runs the bounded repeated collection in a near-empty child. Generous headroom over that.
+    "opf-child-contract": 600.0,
+    "opf-watchdog-isolation": 6000.0,      # its blocked matrix budgets 31 * 180 s internally
+    "opf-watchdog-regressions": 10800.0,   # the sum of its per-case bounds dominates (blocked-isolation alone 5610 s)
+    # The aggregator's row sits just above its ENFORCED internal budget (_AGGREGATOR_INTERNAL_BUDGET,
+    # 3600 s, plus the child's bootstrap and record margin), never above a derived theoretical
+    # formula (QA27 codex finding 8: the retired _aggregator_outer_bound derivation reached 57
+    # hours and itself scanned sources BEFORE the bound started).
+    "opf-aggregator": 4200.0,
+    "opf-retained-close-offpath": 300.0,
+    "opf-close-exc-safe-vectors": 600.0,
+    "opf-cli": 600.0,
+    # opf-unit-bound, re-derived for the subprocess vectors: four bounded unit subprocesses (a 2 s
+    # or 1 s bound each, a 5 s expiry reap, a 10 s bounded copy per stream and two 10 s /proc
+    # ended() scans at most: under 50 s each worst), three quick record vectors (10 s bounds), the
+    # flipped-bound pair (a 3 s sleeping unit twice), the in-process vocabulary and table checks,
+    # and the QA28 vectors (seven more quick bounded subprocesses under 10-15 s bounds each, the
+    # 1 s bounded-deliver probe, the 30 s-capped wrapper probe and two signalled drivers with 15 s
+    # waits and 10 s ended() scans), and the QA29 vectors (six more quick bounded subprocesses
+    # under 10-15 s bounds, two sub-second watchdog probes -- one waiting out a 6 s sibling --
+    # and an in-process delivery probe: about 40 s more worst), and the QA30 vectors (four more
+    # quick bounded subprocesses under 10 s bounds, a blocked-stderr watchdog probe bounded by a
+    # 10 s record wait and a 10 s cleanup reap, and a modelled in-reap interrupt: about 60 s more
+    # worst): about 500 s through the QA30 vectors. Re-derived for QA33 and QA34 (QA34 claude
+    # MINOR 4): the bounded box removal now follows every in-process runner call the unit makes (28
+    # removals, counted at run time; the platform-refusal leg makes no box), each up to
+    # _UNIT_BOX_REMOVAL_BOUND (30 s) plus its 10 s not-removed delivery: about 1120 s more worst
+    # (the signalled drivers' own removals sit inside the unit's bounded 15 s waits on them,
+    # counted above); the QA33 vector (28) adds six quick bounded subprocesses under 10 s bounds (a
+    # 5 s reap, two 10 s copies and a 10 s delivery each, their removals counted above): about
+    # 270 s more worst; and the QA34 listing-deadline leg one direct removal under a modelled
+    # clock (30 s worst); and the merge-train r2 leg (30) three more quick bounded subprocesses
+    # under 30 s bounds (each imports the module in its child), with their removals: about
+    # 320 s more worst; and the merge-train r3 legs six more of those (about 640 s more worst)
+    # plus an in-process scan of one small capture per fault marker; and the merge-train r4
+    # legs five more bounded child-entry subprocesses under 30 s bounds, one of them running a
+    # quick grandchild (about 540 s more worst). About 3420 s end to end worst, so 3600 holds
+    # the kill-timeout rule (the measured run takes well under 200 s).
+    "opf-unit-bound": 3600.0,
+}
+
+# Test-only flip (QA26): True removes the outer deadline (the runner's wait gets no timeout: the
+# bounded-wait audit's disclosed variable-timeout residual, deliberate here), so the bound stops
+# being enforced. _unit_bound_self_test proves the committed value is False and that flipping it True
+# lets the SAME unit a committed 1 s bound kills run past that bound to its own clean exit -- the
+# deadline branch is the live mechanism, masked by nothing -- while the flipped check itself stays
+# bounded (its unit exits by itself). Even a COMMITTED True cannot leave the suite's output held: a
+# hung unit and its leftovers hold only their own output FILES, never the caller's streams.
+_UNIT_BOUND_DISABLED = False
+
+
+def _unit_child_code(label, fn, guard_idlimit):
+    """Run one unit IN ITS CHILD and map the outcome to the exit vocabulary. The int-limit sentinel
+    guard (finding 8-4) and the fail-closed return-vocabulary check (MAJOR 3) moved here with the
+    unit, unchanged in meaning: a dropped int-limit restore or an out-of-vocabulary return is named
+    on stderr and maps to 2, and the parent forwards the child's exit as the unit's code."""
+    if guard_idlimit:
+        _idlimit_orig = sys.get_int_max_str_digits()
+        _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # != 4300 AND != ambient
+        sys.set_int_max_str_digits(_idlimit_sentinel)
+        try:
+            code = fn()
+        finally:
+            _idlimit_after = sys.get_int_max_str_digits()
+            sys.set_int_max_str_digits(_idlimit_orig)   # restore the real ambient regardless of outcome
+        if _idlimit_after != _idlimit_sentinel:
+            print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
+                  "dropped int-limit restore is a hermeticity leak, failing closed (finding 8-4)".format(
+                      label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
+            return EXIT_MALFORMED
+    else:
+        code = fn()
+    if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
+        # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed.
+        # `type(code) is int` deliberately EXCLUDES bool (False == 0, True == 1) and float (0.0 == 0),
+        # so a helper returning False or 0.0 can never be admitted as a clean pass.
+        print("opf self-test: {} returned out-of-range code {!r}; failing closed".format(label, code),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+    return code
+
+
+# The copy cap: at most this many bytes of a unit's captured stdout (and, separately, stderr) are
+# copied back to the caller's streams; the rest is dropped with a note naming the unit and the cap
+# (the disclosed truncation residual). The verdict never depends on the copy.
+_UNIT_OUTPUT_CAP = 4 << 20
+
+# The at-source capture bound (QA28): every unit subprocess starts with RLIMIT_FSIZE at this many
+# bytes -- soft AND hard, set between the fork and the exec, so the unit cannot raise it back --
+# and no single file it writes, its captured stdout and stderr included, can grow past it: a write
+# beyond the limit fails the writer with EFBIG (OSError) under Python, which ignores SIGXFSZ at
+# startup, and with the fatal default SIGXFSZ (its core dump following the system's core policy) in
+# a non-Python descendant. The BOUND is the guarantee; the resulting failure is usually a nonzero
+# exit, a killed-by-SIGXFSZ leader or a missing completion record, but it is NOT always named after
+# the limit (QA29 claude MINOR 4: the observed spellings are `exited 120`, a signal kill, or the
+# record failure), and a unit that CATCHES its own EFBIG and still exits 0 with its record intact
+# passes -- bounded, not failed.
+# _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate,
+# and aggregate storage is NOT bounded while the unit runs: many files can consume it within the
+# outer bound (a box left holding more than _UNIT_BOX_ENTRY_CAP entries is then the named
+# cannot-evaluate, QA33, a bound on what is in the box when it is removed, nothing more), and an
+# escaped descendant -- never killed, at the outer bound or after -- can keep writing new files for
+# as long as it runs, past the runner's return, anywhere its user may write, the box's own
+# pathname included: it can recreate the box after the removal and write there (residual (l) of
+# _run_unit_subprocess); a unit legitimately needing a larger single file fails here, for review.
+_UNIT_FSIZE_LIMIT = 256 << 20
+
+# The environment a unit subprocess starts from: ONLY these caller variables pass through (where to
+# find executables and temporary space, and locale/zone), GIT_CONFIG_NOSYSTEM is forced on, and the
+# runner adds the one result-file path. Everything else -- the caller's HOME and XDG included -- is
+# scrubbed; the child pins its own fresh HOME/XDG around the unit (_cmd_self_test_unit), so no caller
+# configuration reaches a fixture read.
+_UNIT_ENV_KEEP = ("PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+
+
+def _unit_scrubbed_env():
+    """The scrubbed explicit environment of one unit subprocess (_UNIT_ENV_KEEP and the git-config
+    scrub); the caller adds OPF_SELF_TEST_RESULT, the completion-record path."""
+    env = dict((name, os.environ[name]) for name in _UNIT_ENV_KEEP if name in os.environ)
+    env.setdefault("PATH", os.defpath)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
+def _unit_guard_flags():
+    """O_NOFOLLOW|O_NONBLOCK where the platform has BOTH, else None (QA30 gemini): the name-based
+    read-backs REQUIRE both guards -- a planted symlink must not be followed, a planted FIFO must
+    not block the open -- and a platform lacking either offers no race-free containment primitive
+    for them, so every caller fails CLOSED by name instead of falling back to an unguarded
+    name-based resolution."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        return None
+    return nofollow | nonblock
+
+
+def _unit_deliver(stream, data, bound):
+    """Write `data` (bytes) to a caller stream without letting this parent block past `bound` seconds,
+    WITHOUT any helper thread (QA26/QA27 codex B1; QA28 codex B3: the retired bounded-join daemon
+    writer, once abandoned on a blocked stream, kept the stream's buffer lock and either wedged or
+    SIGABRTed interpreter shutdown inside _enter_buffered_busy) and WITHOUT touching the stream's
+    O_NONBLOCK flag (QA29 claude MEDIUM 1: that flag lives on the OPEN FILE DESCRIPTION, shared by
+    every process holding the same pipe, tty or file -- the shell that launched this suite, its
+    pipeline siblings, the gates that run after it -- so flipping it starves those writers with
+    EAGAIN while delivery runs, and a SIGKILL mid-delivery would leave it flipped for all of them).
+    An OS-backed stream is written through its own descriptor in rounds gated by poll(POLLOUT)
+    under the remaining time, each round writing at most select.PIPE_BUF bytes -- the size poll's
+    readiness guarantees a pipe accepts without blocking -- so the description's flags are never
+    changed and a blocking descriptor never blocks this parent past the bound. The stream's pending
+    Python-level text is flushed first, and only when poll reports the descriptor writable NOW
+    (a flush into a pipe with no room would block; skipped, the text stays buffered and can still
+    arrive out of order -- the exit code and completion record, never the delivered text, are the
+    suite's contract; a flush whose pending text overruns the room poll vouched for can still block,
+    the caller's-own-buffered-text residual, disclosed). Whatever the stream has not accepted by
+    the deadline is DROPPED, with one best-effort note, again only when writable now, saying how
+    many bytes were given up. A stream with no usable descriptor (the self-test's in-memory
+    redirects) is written directly: an in-process memory writer cannot block on the kernel (a
+    hostile write() that never returns is outside this bound, disclosed -- it would be this suite's
+    own in-process code). Where select.poll is missing the rounds run ungated (each write may block;
+    the poll-free-platform residual, disclosed). Every failure is swallowed: a write failure cannot
+    change a unit's verdict."""
+    import select
+    import time
+    fd = None
+    try:
+        sink = getattr(stream, "buffer", None) or stream
+        fd = sink.fileno()
+    except Exception:
+        fd = None
+    if fd is None:
+        try:
+            stream.write(data.decode("utf-8", "replace"))
+            stream.flush()
+        except Exception:
+            pass
+        return
+    deadline = time.monotonic() + bound
+    chunk = getattr(select, "PIPE_BUF", 512)
+    try:
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+    except (AttributeError, OSError, ValueError):
+        poller = None
+
+    def writable_now():
+        # POLLOUT at this instant; an error-only event (no reader left) reads as not writable.
+        if poller is None:
+            return True
+        try:
+            events = poller.poll(0)
+        except OSError:
+            return False
+        return bool(events) and bool(events[0][1] & select.POLLOUT)
+
+    if writable_now():
+        try:
+            stream.flush()   # the caller's own pending text first, so the copy cannot overtake it
+        except Exception:
+            pass
+    view = memoryview(data)
+    undelivered = False
+    while len(view) and not undelivered:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            undelivered = True
+            break
+        if poller is not None:
+            try:
+                events = poller.poll(max(int(min(remaining, 0.2) * 1000), 1))
+            except OSError:
+                break
+            if not events:
+                continue   # not writable yet; the deadline is re-checked at the top
+            if not events[0][1] & select.POLLOUT:
+                break      # POLLERR and kin: nothing will drain this pipe, a write could only fail
+        try:
+            view = view[os.write(fd, view[:chunk]):]
+        except (BlockingIOError, InterruptedError):
+            time.sleep(0.01)   # the descriptor was already non-blocking (the caller's choice)
+        except OSError:
+            break
+    if undelivered:
+        note = ("\n[opf self-test: a caller stream accepted no more output within {} s; {} "
+                "bytes were dropped]\n".format(bound, len(view)).encode("utf-8"))
+        if writable_now():
+            try:
+                os.write(fd, note)
+            except OSError:
+                pass
+
+
+# The child's cleanup boundary (merge train 2 QA r2): _cmd_self_test_unit writes this line, with
+# the unit's label and the child's own pid, to the captured stderr as the child's LAST expected
+# output, after the unit has returned and the streams are flushed and before the exit handlers
+# run. On a passing exit the parent requires the captured error stream to END at that line, so
+# any bytes a cleanup handler or interpreter shutdown writes after it -- a frameless
+# `Exception ignored` line from a builtin cleanup hook included -- fail the unit closed.
+_UNIT_BOUNDARY = "opf-unit-cleanup-boundary"
+# How many final bytes of a capture _unit_copy_capped keeps for the boundary check (far above the
+# boundary line's own length).
+_UNIT_TAIL_KEEP = 512
+# The fault markers CPython itself writes to stderr (merge train 2 QA r3, codex MAJOR: a frameless
+# fault BEFORE the cleanup boundary -- a grandchild's builtin cleanup hook raising onto the
+# inherited stream -- passed, because the scan knew only the traceback header). Each is fixed text
+# the interpreter writes on a fault, named with the CPython source that writes it:
+#   `Traceback (most recent call last):` -- an uncaught exception's report (Python/traceback.c;
+#     Lib/traceback.py);
+#   `Exception ignored` -- the unraisable-exception report: a failing exit handler, finalizer,
+#     __del__ or cleanup hook (Python/errors.c, the default sys.unraisablehook);
+#   `Fatal Python error` -- an abort (Python/pylifecycle.c, fatal_error; Modules/faulthandler.c);
+#   `Error in sys.excepthook`, `sys.excepthook is missing` and `lost sys.stderr` -- a failing or
+#     absent reporting machinery (Python/pythonrun.c);
+#   `Exception in thread` -- a thread's uncaught exception (Lib/threading.py, the default
+#     threading.excepthook; Modules/_threadmodule.c);
+#   `Error in atexit._run_exitfuncs` and `Unhandled exception in thread started by` -- the
+#     wording of older interpreters for an exit-handler fault (Modules/atexitmodule.c, to 3.11)
+#     and a thread fault (Modules/_threadmodule.c, to 3.7).
+# Since merge train 2 QA r4 (codex MAJOR: a frameless fault message this list does not know --
+# asyncio's `Future exception was never retrieved` for one -- still passed) the marker scan
+# DECIDES NOTHING ALONE: a list of known fault messages can never be complete, so a passing
+# unit's error stream must be EMPTY apart from the child's cleanup boundary line and the unit's
+# exactly declared expected lines (_UNIT_STDERR_ALLOWED), and the first marker found is kept only
+# as an extra explanation inside that failure message.
+_UNIT_FAULT_MARKERS = (
+    b"Traceback (most recent call last):",
+    b"Exception ignored",
+    b"Fatal Python error",
+    b"Error in sys.excepthook",
+    b"sys.excepthook is missing",
+    b"lost sys.stderr",
+    b"Exception in thread",
+    b"Error in atexit._run_exitfuncs",
+    b"Unhandled exception in thread started by",
+)
+
+
+def _unit_fault_marker(data):
+    """The first of _UNIT_FAULT_MARKERS that `data` (bytes) carries, as text, or None."""
+    for marker in _UNIT_FAULT_MARKERS:
+        if marker in data:
+            return marker.decode("ascii")
+    return None
+
+
+# How long one line of a captured error stream may be before the line scan refuses it unseen
+# (merge train 2 QA r4): every allowed line -- the cleanup boundary line and every declared row
+# below -- is far shorter, so a longer line is foreign by construction, and the cap bounds the
+# scan's per-line carry memory.
+_UNIT_LINE_CAP = 4096
+
+# The EXACT stderr lines each unit legitimately writes on a CLEAN PASS, measured by running
+# every registered unit at this revision and recording its complete captured error stream
+# (merge train 2 QA r4, codex MAJOR). Each row is the exact BYTES of one expected line
+# (escaped in _unit_allowed_stderr_lines, so a row is never a pattern); a passing unit's
+# every stderr line must equal one of its rows or be the child's cleanup boundary line,
+# and anything else fails closed. Every unit NOT listed here was measured to write NOTHING
+# but its boundary line. A unit whose legitimate diagnostics change fails closed by name
+# until its rows are re-declared here, reviewed: that is the fail-closed direction (secfcl),
+# never a widened pattern. The match is exact PER LINE, and the rows form a SET: how often and
+# in what order a declared row or a boundary line appears is not checked (merge train 2 QA r5,
+# claude MINOR; no CPython fault message equals a row, and the tail check still requires the
+# stream to END at the leader's exact boundary line), so a row printed from two sites is
+# declared once.
+_UNIT_STDERR_ALLOWED = {
+    # opf-absorb: its changelog-drafter legs print the draft banner, the undeclared-done
+    # note, the NOT APPLICABLE refusal and the named parse refusal to stderr on a
+    # clean pass (measured).
+    "opf-absorb": (
+        b"opf absorb: DRAFT candidate entry for 'unreleased' on stdout -- a machine draft for human curation, NOT authoritative; edit it into CHANGELOG.md and publish through the recorded freeze flow (the tool writes nothing)",
+        b'opf absorb: note: the `done` type is not declared in the manifest; drafting from the worklog only (done completion receipts are not incorporated)',
+        b'opf absorb: NOT APPLICABLE (not an OPFiles adopter (no store found (.working/ is absent); opf init is the remedy); the changelog drafter does not apply)',
+        b'opf absorb: cannot evaluate:',
+        b"  - cannot parse .working/toml/version.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))",
+    ),
+    # opf-views: its renderer refusal legs print each named cannot-evaluate, usage refusal
+    # and store-integrity line to stderr on a clean pass (measured).
+    "opf-views": (
+        b"opf render: cannot evaluate: VERSION deliverable declared but the version ledger has no release to render (spec 6.1: VERSION is the latest release's SemVer bytes); fail-closed, never a zero-byte write",
+        b"opf render: cannot evaluate: declared source .working/toml/block.index.toml is missing (a view declares type 'block', so its index must exist; an empty type is an empty index, not an absent one)",
+        b"opf render: cannot evaluate: .working/toml/finding.index.toml: record #1 (FN-1) is malformed: status: status state 'not-a-state' is not a finding state ['accepted', 'fixed', 'open', 'refuted', 'routed']",
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema 2 is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema True is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema None is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml has unknown top-level key(s): bogus_table',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml: [[record]] is not an array of tables',
+        b"opf render: cannot evaluate: view 'DONE.md' declares duplicate source(s) done (spec 10.2)",
+        b"opf render: cannot evaluate: view 'TODO.md' declares target 'README.md' but its spec destination is '.working/TODO.md'; a manifest cannot rebind a view off its spec destination (fail-closed, spec 5.8/9)",
+        b'opf render: cannot evaluate: refusing to write .working/TODO.md: destination is not a regular file (a symlink or special file is never followed; fail-closed)',
+        b"opf render: cannot evaluate: view 'DONE.md' declared sources ['done', 'finding'] do not equal its required set ['done'] (missing [], extra ['finding']; spec 10.2)",
+        b"opf render: cannot evaluate: view 'DONE.md' declared sources ['done', 'finding'] do not equal its required set ['done'] (missing [], extra ['finding']; spec 10.2)",
+        b'opf render: cannot evaluate: decision resolution graph forks: PD-1 superseded by more than one decision (spec 8.5 requires one current effective resolution per chain); fail-closed',
+        b'opf render: cannot evaluate: decision resolution graph has a supersedes cycle at PD-1 (spec 8.5: a supersession chain is acyclic); fail-closed',
+        b'opf render: cannot evaluate: store machine-directory name is not valid UTF-8 (OPF store paths are UTF-8 by convention); render refused',
+        b'opf render: cannot evaluate: per-record layout not yet supported by U4 views; deferred',
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200B outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200C outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200D outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+2060 outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+FEFF outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: bidirectional control character U+202E outside any allowance); refusing rather than emitting or silently altering owner text",
+        b'opf render: give exactly one of --check / --write',
+        b'opf render: --root requires a directory argument',
+        b"opf render: unrecognized argument '--bogus'",
+        b"opf render: unrecognized argument '--chek'",
+        b"opf render: --root requires a non-empty directory argument, not ''",
+        b"opf render: --root requires a non-empty directory argument, not '--bogus'",
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b'  FINDING: C-TRACKED: the resolved store is not under version control (spec 5.1)',
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b'  CANNOT-EVALUATE: C-TRACKED: no `tracked` observation was supplied; the tracked-store requirement (spec 5.1) is not evaluable by a parse-only engine',
+        b'  CANNOT-EVALUATE: C-HISTORY-APPEND-ONLY: no prior committed snapshot was supplied; across-time release immutability (spec 6.1/13) is not evaluated',
+        b'  CANNOT-EVALUATE: C-HISTORY-COUNTERS: no prior committed snapshot was supplied; counter non-regression (spec 8.2) is not evaluated',
+        b'  CANNOT-EVALUATE: C-HISTORY-RESURRECTION: no prior committed snapshot was supplied; no-resurrection across time (spec 8.4) is not evaluated',
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b"  FINDING: C-ID-SPACE: duplicate id 'BI-2': IDs are never reused (spec 8.2)",
+        b"opf render: cannot evaluate: C-CHANGELOG-GATES: CHANGELOG.md is not valid UTF-8 ('utf-8' codec can't decode byte 0xff in position 12: invalid start byte)",
+        b"opf render: CHANGELOG.md could not be evaluated; fix the named input above, then re-run 'opf doctor' (render does not generate the curated changelog)",
+        b'opf render: cannot evaluate: refusing to write .working/BACKLOG.md: store-integrity gate (U6 validate_store) not composed; a mutating render is refused at the write boundary as a defence-in-depth backstop (fail-closed, spec 5.7/5.8/11)',
+    ),
+}
+
+
+def _unit_allowed_stderr_lines(label):
+    """The anchored patterns every line of a PASSING `label` unit's complete captured error
+    stream must fullmatch (merge train 2 QA r4, codex MAJOR: the asyncio report `Future exception
+    was never retrieved` carries no marker _UNIT_FAULT_MARKERS knew, and a list of known fault
+    messages can never be complete, so the runner now requires an EMPTY error stream apart from
+    these): the child's own cleanup boundary line -- any pid here; the tail check separately
+    requires the LEADER's exact pid -- plus the unit's declared rows in _UNIT_STDERR_ALLOWED."""
+    import re
+    boundary = re.escape("{} {}".format(_UNIT_BOUNDARY, label).encode("utf-8"))
+    return tuple([re.compile(boundary + b" [0-9]{1,10}")]
+                 + [re.compile(re.escape(row))
+                    for row in _UNIT_STDERR_ALLOWED.get(label, ())])
+
+
+def _unit_copy_capped(stream, path, label, kind, ident, allowed=None):
+    """Copy a unit's captured output file to a caller stream: at most _UNIT_OUTPUT_CAP bytes, the
+    rest dropped with the named truncation note, delivered through _unit_deliver's bounded,
+    thread-free writer. The capture path lives in the runner's private box, but the unit held it
+    open as its own descriptor and can reach it through /proc. The runner closed its own launch
+    descriptor on the capture once the child started, so the read-back RE-OPENS THE PATH,
+    O_NOFOLLOW|O_NONBLOCK, and requires BY FSTAT ON THE NEWLY OPENED DESCRIPTOR that it still be a
+    regular file (QA28 codex B2: a FIFO planted there made the old open block past every bound) AND
+    still be the very file this runner created: `ident` is the fstat the runner took of its launch
+    descriptor before closing it, and a device/inode mismatch is a NAMED failure (QA30 codex
+    MAJOR / claude MINOR 1: a unit that unlinked its capture and planted a fresh regular file at
+    the same path laundered a tainted error stream into a pass; `replaced` now includes a planted
+    REGULAR file, not only a symlink or FIFO).
+    Where the platform lacks O_NOFOLLOW or O_NONBLOCK the read-back
+    fails closed by name instead of opening unguarded (QA30 gemini; _unit_guard_flags). The
+    DELIVERED copy is bounded by the cap; the SCAN is not: it covers the COMPLETE stream, in
+    bounded memory, through a rolling window that carries the marker's length minus one across
+    chunks, so a marker anywhere in the capture -- the cap boundary straddled included -- is
+    seen (merge train 2 QA, codex MAJOR: a shutdown traceback wholly past the 4 MiB cap escaped
+    the old prefix-only scan into a pass; the fail-closed rule, secfcl, forbids a fault-to-pass
+    channel that is merely disclosed, so the scan now reads to the end). The scan's work is
+    bounded by the capture's fstat size at open: a capture holding more bytes than that (still
+    growing under some live writer) is a NAMED anomaly, cannot-evaluate, never a pass over an
+    unscanned tail. Returns (anomaly, tainted, tail): `tail` is the stream's final bytes (at
+    most _UNIT_TAIL_KEEP of them), kept so the runner can require a passing unit's error stream
+    to END at its cleanup boundary line (merge train 2 QA r2); `anomaly` is None, or the NAMED reason
+    this capture cannot stand -- replaced by a symlink, a non-regular file or a different file at
+    its path, grown past its fstat size mid-scan, or NOT READABLE back
+    (QA29 codex MAJOR 5: a unit that unlinked or broke its capture used to pass with the open
+    error swallowed; a passing verdict requires a readable, complete capture, so the runner fails
+    the unit closed with the anomaly). `tainted` names the first CPython fault marker
+    (_UNIT_FAULT_MARKERS: an uncaught-exception traceback, an `Exception ignored` report, a fatal
+    error, and the rest; merge train 2 QA r3, codex MAJOR) the COMPLETE stream carries, or is
+    None -- since merge train 2 QA r4 (codex MAJOR) the marker decides nothing alone and is kept
+    only as an extra explanation in the runner's failure message. `foreign`, the DECIDING scan,
+    is None, or the first line of the COMPLETE stream (truncated for display) that fullmatches
+    none of the anchored patterns in `allowed` (None skips the line scan entirely, the stdout
+    copy's case; a line longer than _UNIT_LINE_CAP, or a final unterminated one, is foreign too)
+    -- the runner refuses a PASSING exit over a foreign line: a passing unit's error stream is
+    EMPTY apart from its boundary line and its declared rows, because a list of known fault
+    messages can never be complete
+    (a unit that rewrites or truncates the stream through its OWN still-open
+    descriptor
+    before exiting stays disclosed: while it lives the capture is the unit's own output,
+    indistinguishable from
+    output never written, so the identity check defends the READ-BACK, not the unit's own pen).
+    The path lookup behind the re-open is not bounded, and O_NOFOLLOW guards only its last
+    component: a filesystem a unit's escapee mounted over the box, or a symlink the unit left at
+    the box's own name, can park or redirect it (_run_unit_subprocess (k)); and the identity check
+    cannot tell apart a planted file that received the freed capture's inode number
+    (_run_unit_subprocess (j)).
+    A write failure of the copy itself is still swallowed (the exit code, the completion record and
+    the readable captures, never the delivered text, are the unit's verdict).
+    Returns (anomaly, tainted, tail, foreign)."""
+    import errno
+    guard = _unit_guard_flags()
+    if guard is None:
+        return ("its {} capture cannot be read back on this platform, which lacks O_NOFOLLOW or "
+                "O_NONBLOCK: with no race-free guard against a planted symlink or FIFO the "
+                "read-back fails closed rather than opening unguarded (QA30 gemini)".format(kind),
+                False, b"", None)
+    try:
+        fd = os.open(path, os.O_RDONLY | guard)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return ("its {} capture path was replaced by a symlink (not followed, not read)".format(kind),
+                    False, b"", None)
+        return ("its {} capture could not be opened for reading back (errno {}); a passing verdict "
+                "requires a readable, complete capture".format(kind, exc.errno), False, b"", None)
+    with os.fdopen(fd, "rb") as handle:
+        try:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return ("its {} capture path is no longer a regular file (mode {:o}); a FIFO or "
+                        "device there is never opened blocking, never read".format(kind, info.st_mode),
+                        False, b"", None)
+            if (info.st_dev, info.st_ino) != (ident.st_dev, ident.st_ino):
+                return ("its {} capture path no longer names the capture file this runner created "
+                        "(device/inode {}:{} against {}:{} at launch): the original capture was "
+                        "unlinked or renamed away and another file planted at its path, so the "
+                        "stream cannot be read back complete (QA30 codex MAJOR)".format(
+                            kind, info.st_dev, info.st_ino, ident.st_dev, ident.st_ino), False, b"", None)
+            span = max(len(marker) for marker in _UNIT_FAULT_MARKERS)
+            pending = [b""]
+            foreign = [None]
+
+            def scan_lines(chunk, final=False):
+                # The DECIDING per-line scan (merge train 2 QA r4, codex MAJOR): every complete
+                # line must fullmatch one of `allowed`; the carry between chunks is one partial
+                # line, bounded by _UNIT_LINE_CAP (every allowed line is far shorter, so a longer
+                # one is foreign unread). A final unterminated line is still a line.
+                if allowed is None or foreign[0] is not None:
+                    return
+                window = pending[0] + chunk
+                lines = window.split(b"\n")
+                pending[0] = lines.pop()
+                if final and pending[0]:
+                    lines.append(pending[0])
+                    pending[0] = b""
+                for line in lines:
+                    if not any(pattern.fullmatch(line) for pattern in allowed):
+                        foreign[0] = line[:200]
+                        return
+                if len(pending[0]) > _UNIT_LINE_CAP:
+                    foreign[0] = pending[0][:200]
+                    pending[0] = b""
+
+            data = handle.read(_UNIT_OUTPUT_CAP)
+            tainted = _unit_fault_marker(data)
+            scan_lines(data)
+            tail = data[-_UNIT_TAIL_KEEP:]
+            # The delivered copy stops at the cap; the SCAN goes on to the END of the stream in
+            # bounded memory (merge train 2 QA, codex MAJOR: a traceback wholly past the cap
+            # escaped the old prefix-only scan into a pass). `carry` rolls the last
+            # span - 1 bytes (span: the longest fault marker) across chunks so a marker
+            # straddling any boundary is seen,
+            # and the scan's work is bounded by the fstat size taken above: a capture that still
+            # grows past it mid-scan cannot be scanned complete and is a named anomaly.
+            carry = data[max(len(data) - span + 1, 0):]
+            scanned = len(data)
+            scan_bound = max(info.st_size, scanned) + span
+            truncated = False
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    break
+                truncated = True
+                scanned += len(chunk)
+                tail = (tail + chunk)[-_UNIT_TAIL_KEEP:]
+                if scanned > scan_bound:
+                    return ("its {} capture held more bytes than its fstat size when opened for "
+                            "reading back ({} read against {}): a capture still growing under "
+                            "some live writer cannot be scanned complete, and a passing verdict "
+                            "requires a complete scan of the stream (merge train 2 QA, codex "
+                            "MAJOR)".format(kind, scanned, info.st_size), False, b"", None)
+                if (foreign[0] is not None) if allowed is not None else bool(tainted):
+                    break   # the verdict is settled and the truncation known; nothing more to learn
+                scan_lines(chunk)
+                if not tainted:
+                    marker_window = carry + chunk
+                    tainted = _unit_fault_marker(marker_window)
+                    carry = marker_window[max(len(marker_window) - span + 1, 0):]
+            scan_lines(b"", final=True)
+            if truncated:
+                extra = max(info.st_size - _UNIT_OUTPUT_CAP, 1)
+                data += ("\n[opf self-test: {} {} exceeded the {}-byte copy cap; about {} more bytes "
+                         "were truncated]\n".format(label, kind, _UNIT_OUTPUT_CAP, extra)
+                         .encode("utf-8"))
+        except OSError as exc:
+            return ("its {} capture could not be read back (errno {}); a passing verdict requires "
+                    "a readable, complete capture".format(kind, exc.errno), False, b"", None)
+    if data:
+        _unit_deliver(stream, data, 10.0)
+    return (None, tainted, tail, foreign[0])
+
+
+def _unit_open_record():
+    """Open the completion record's file, the result path the runner named in OPF_SELF_TEST_RESULT,
+    for _cmd_self_test_unit at register time, BEFORE any unit code runs, and return the descriptor
+    (None when the variable is absent, the unit entry run by hand, so there is nothing to write).
+    The open is O_WRONLY|O_CREAT|O_TRUNC, mode 0600 (the watchdog's record convention), guarded by
+    _unit_guard_flags() (a symlink is not followed, a FIFO never blocks the open) and required
+    regular by fstat on the opened descriptor, so this child writes nothing there until the seal
+    is written after the contract's final check (merge train 2 QA r10; another writer holding the
+    path is _unit_write_record's case). An open that fails, or a
+    path that is not a regular file, is a named line on stderr and None: no record is ever
+    written, and the parent's missing-record check fails the unit closed. The descriptor is held
+    until the record handler's os._exit ends the child (or, on a path that never reaches the
+    handler, interpreter exit), never closed by this module."""
+    path = os.environ.get("OPF_SELF_TEST_RESULT")
+    if not path:
+        return None
+    guard = _unit_guard_flags()
+    if guard is None:
+        print("opf --self-test-unit: the completion record cannot be opened guarded on this "
+              "platform (no O_NOFOLLOW or O_NONBLOCK); no record will be written, failing closed",
+              file=sys.stderr)
+        return None
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | guard, 0o600)
+    except OSError as exc:
+        print("opf --self-test-unit: the completion record could not be opened ({}); no record "
+              "will be written, failing closed".format(exc), file=sys.stderr)
+        return None
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        os.close(fd)
+        print("opf --self-test-unit: the completion record path is not a regular file; no record "
+              "will be written, failing closed", file=sys.stderr)
+        return None
+    return fd
+
+
+def _unit_write_record(label, code, fd):
+    """The child half's completion record: ONE line, `<label> <code> <pid>`, for the result file
+    the runner named in OPF_SELF_TEST_RESULT, RETURNED as the seal [(fd, bytes)] (fd from
+    _unit_open_record, opened before any unit code ran; nothing, (), when fd is None) and NEVER
+    written here. _cmd_self_test_unit's record callback returns it to _child_contract's record
+    handler, which writes it with os.write only AFTER its final check and its disarming of the
+    interpreter callbacks pass (QA r10) and then ends the
+    child with os._exit (contract step 6; merge train 2 QA r10: this function used to open and
+    write the file inside the callback, BEFORE the final check, whose own stream flushes run a
+    wrapper the unit left installed, so a stdout wrapper whose flush called os._exit(0) there
+    ended the child with exit 0 over a matching record, and the parent passed it). Until the seal
+    is written the file is EMPTY (_unit_open_record truncated it), so a run that ends before the
+    seal -- an os._exit anywhere in the unit, its cleanup or the final check, a fault that kills
+    the process, a signal -- leaves no record. The handler is _cmd_self_test_unit's
+    FIRST-registered exit handler, which runs LAST among the exit handlers -- after every cleanup
+    handler the unit registered (merge train 2 QA r2, codex MAJOR: written inline before
+    interpreter shutdown, the record let an exit that interrupted later cleanup pass). The pid is
+    this writer's own, and the parent requires label,
+    code AND pid to match its direct child's exit and pid exactly (QA28: the record is BOUND to the
+    leader), so an ACCIDENTAL early end of the child -- an os._exit(0) inside a unit included --
+    cannot pass, and neither can a stale record or one carrying another process's pid. The record
+    authenticates its TEXT, not its writer: a unit that deliberately writes the leader's matching
+    line from any process -- a fork of the leader knows the path and the pid -- ends its captured
+    stderr with the matching cleanup boundary line and then exits 0
+    early passes (the disclosed forged-record sabotage residual, D-385-ACCIDENTAL-UNIT, QA31 codex;
+    _run_unit_subprocess (h)). The r10 seal does NOT narrow that residual: such a unit writes the
+    line through the path itself, after the register-time truncation, and the parent reads the
+    path; the seal closes only the ACCIDENTAL end after the record (this child never puts the
+    record on disk before the final check). A seal write that fails is the contract's named
+    fail_code exit, and a missing or empty record the parent's missing-record check (fail closed).
+    Before it returns the seal it truncates the file and rewinds the descriptor (os.ftruncate,
+    os.lseek; no unit code runs in either): a process the unit launched inherits
+    OPF_SELF_TEST_RESULT and may have written there meanwhile (the opf-unit-bound watchdog vectors
+    do), bytes the retired truncating open used to replace. The truncation empties the file at
+    that moment only: a writer that still holds the path (such a process, or a wrapper the unit
+    left that writes there during the contract's final check) can add bytes after it, and the seal
+    then writes the record from offset 0 over whatever lies there, so the file is exactly the
+    record only when no such bytes lie past its end; bytes that do are left trailing, and the
+    parent's exact match of the record line refuses the file (fail closed). A truncate that fails
+    raises in the callback: the contract's named fail_code exit."""
+    if fd is None:
+        return ()
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return [(fd, "{} {} {}\n".format(label, code, os.getpid()).encode("utf-8"))]
+
+
+def _unit_internal_watchdog(label, budget):
+    """Arm a unit's INTERNAL budget inside its own dedicated process (the aggregator's: QA27 codex
+    finding 8 / claude M1 retired the 57-hour derived outer bound; the maintainer's
+    D-385-SUBPROCESS-RUNNER ruling prefers a LOWERED, ENFORCED internal budget) WITHOUT borrowing
+    any process-global timer (QA28: the retired SIGALRM itimer discarded a caller's armed real
+    timer on release -- the elapsed-aware-restore rule forbids that verbatim restore -- and a unit
+    re-arming SIGALRM muted it; a helper THREAD would mark every fork the unit then makes as
+    multi-threaded and could deadlock a forked child on another thread's locks). The watchdog is
+    its own helper PROCESS, launched into this unit's process group: at `budget` seconds it
+    SIGKILLs this unit FIRST (QA29 codex MAJOR 4: the retired blocking report -- a plain open of
+    the result path -- could be parked forever by a FIFO planted there, deferring the kill past the
+    unit's release and defeating the budget; the watchdog kills before it reports and never blocks
+    in its own lifetime -- the stderr report included, QA30 codex MEDIUM / claude MINOR 4: the
+    retired sys.stderr.write could park the helper for its whole remaining lifetime on a full
+    pipe, so the report now goes out in poll-gated chunks of at most PIPE_BUF bytes under a 2 s
+    bound, DROPPED past that bound or where select.poll is missing, with the shared O_NONBLOCK
+    flag never touched; the record, not the stderr text, is the durable report. That bound holds
+    only while the helper is the pipe's ONLY writer: each chunk's os.write is a blocking write made
+    after a POLLOUT poll, so a co-writer on the same pipe that fills it between the poll and the
+    write parks the helper, and with it the record write and the closing group kill, until a
+    reader drains the pipe -- possible only when the unit entry is run by hand with stderr on a
+    pipe, since under the runner descriptor 2 is a regular file; QA31 claude MINOR 4, not
+    reproduced), then writes the
+    NAMED internal-budget failure to this unit's captured
+    stderr (its inherited descriptor) and a fail-closed completion record carrying this unit's pid,
+    the record re-opened O_NOFOLLOW|O_NONBLOCK and required regular by fstat on the opened
+    descriptor (a planted FIFO or symlink is skipped, never a blocking open; where the platform
+    lacks O_NOFOLLOW or O_NONBLOCK the record write fails closed by name instead of opening
+    unguarded, QA30 gemini -- the parent's missing-record check already fails the unit), and
+    SIGKILLs ONLY
+    this unit's own processes, never another group's (QA28 claude MEDIUM 1: the `--self-test-unit`
+    entry run by hand inside a launcher's group must never take the launcher down): when this
+    process leads its own group AND its own session (the runner's start_new_session launch,
+    pgid == pid == sid; a shell job-control pipeline head also has pgid == pid but SHARES its
+    session and its group with its pipeline siblings, QA29 claude MINOR 1, and must not match) the
+    expiry finishes by killing that whole group, the helper itself included; otherwise it kills
+    this unit process alone and exits. The
+    helper watches its parent and exits on its own the moment the unit ends first, and the returned
+    zero-argument release (called when the unit ends, before the real record is written, so a
+    finished unit is never overwritten) kills and reaps it. No signal handler, itimer or mask is
+    touched: a caller's armed timer and handlers are left exactly as they were, and a unit that
+    re-arms SIGALRM cannot mute the helper. Best effort by design: a helper that cannot start is a
+    NAMED stderr note, and the OUTER _UNIT_OUTER_BOUNDS row, which sits ABOVE this enforced budget
+    (the kill-timeout rule, by construction), is the hard stop either way. Under the runner the
+    leader's SIGKILL is itself the durable verdict: the runner observes the death and SIGKILLs the
+    whole group, this helper included, which can cut the helper off before its report or its record
+    (QA31 codex MEDIUM), so a runner-driven expiry is guaranteed to show the runner's own named
+    `killed by signal 9` failure, not this helper's text. Proved live by _unit_bound_self_test's
+    watchdog vectors, the named text by a direct launch nothing else kills."""
+    import subprocess
+    unit_pid = os.getpid()
+    pgid = os.getpgrp()
+    own_group = pgid == unit_pid and os.getsid(0) == unit_pid
+    source = (
+        "import os, signal, stat, sys, time\n"
+        "label, budget, unit_pid, pgid, own_group, result = sys.argv[1:7]\n"
+        "budget, unit_pid, pgid = float(budget), int(unit_pid), int(pgid)\n"
+        "def report(text):\n"
+        "    # Poll-gated, bounded chunks on the inherited descriptor 2 (QA30 codex MEDIUM /\n"
+        "    # claude MINOR 4: a plain sys.stderr.write could block this helper for its whole\n"
+        "    # remaining lifetime on a full pipe); past the 2 s bound, or without select.poll,\n"
+        "    # the text is DROPPED -- the record, not this text, is the durable report -- and\n"
+        "    # the shared O_NONBLOCK flag is never touched.\n"
+        "    data = text.encode('utf-8', 'replace')\n"
+        "    try:\n"
+        "        import select\n"
+        "        poller = select.poll()\n"
+        "        poller.register(2, select.POLLOUT)\n"
+        "    except Exception:\n"
+        "        return\n"
+        "    chunk = getattr(select, 'PIPE_BUF', 512)\n"
+        "    until = time.monotonic() + 2.0\n"
+        "    while data:\n"
+        "        left = until - time.monotonic()\n"
+        "        if left <= 0:\n"
+        "            return\n"
+        "        try:\n"
+        "            events = poller.poll(max(int(min(left, 0.2) * 1000), 1))\n"
+        "        except OSError:\n"
+        "            return\n"
+        "        if not events:\n"
+        "            continue\n"
+        "        if not events[0][1] & select.POLLOUT:\n"
+        "            return\n"
+        "        try:\n"
+        "            data = data[os.write(2, data[:chunk]):]\n"
+        "        except OSError:\n"
+        "            return\n"
+        "deadline = time.monotonic() + budget\n"
+        "while time.monotonic() < deadline:\n"
+        "    time.sleep(0.05)\n"
+        "    if os.getppid() != unit_pid:\n"
+        "        os._exit(0)   # the unit ended first: nothing to enforce\n"
+        "if os.getppid() != unit_pid:\n"
+        "    os._exit(0)   # the unit ended at the deadline: still nothing to enforce\n"
+        "try:\n"
+        "    os.kill(unit_pid, signal.SIGKILL)   # the kill comes FIRST (QA29 codex MAJOR 4);\n"
+        "except OSError:\n"
+        "    pass                                # the report below can fail but never defer it\n"
+        "report('opf self-test: ' + label + ' exceeded its ' + str(budget)\n"
+        "       + ' s INTERNAL budget (_AGGREGATOR_INTERNAL_BUDGET); the unit gives'\n"
+        "       + ' itself up rather than run toward a multi-hour theoretical worst'\n"
+        "       + ' case (D-385-SUBPROCESS-RUNNER)\\n')\n"
+        "if result and not (hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_NONBLOCK')):\n"
+        "    # No race-free guard on this platform: the record write fails CLOSED by name,\n"
+        "    # never an unguarded open that could follow a planted symlink or block on a\n"
+        "    # FIFO (QA30 gemini); the parent's missing-record check fails the unit closed.\n"
+        "    report('opf self-test: ' + label + ' watchdog record write fails closed: this'\n"
+        "           + ' platform lacks O_NOFOLLOW or O_NONBLOCK (QA30 gemini)\\n')\n"
+        "elif result:\n"
+        "    try:\n"
+        "        fd = os.open(result, os.O_WRONLY | os.O_CREAT\n"
+        "                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)\n"
+        "        try:\n"
+        "            if stat.S_ISREG(os.fstat(fd).st_mode):\n"
+        "                os.ftruncate(fd, 0)\n"
+        "                os.write(fd, (label + ' 2 ' + str(unit_pid) + '\\n').encode('utf-8'))\n"
+        "        finally:\n"
+        "            os.close(fd)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "if own_group == '1':\n"
+        "    try:\n"
+        "        os.killpg(pgid, signal.SIGKILL)   # this unit's OWN group, this helper included\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "os._exit(2)\n")
+    try:
+        helper = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", source, label, str(float(budget)), str(unit_pid),
+             str(pgid), "1" if own_group else "0", os.environ.get("OPF_SELF_TEST_RESULT", "")],
+            stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        _unit_deliver(sys.stderr, "opf self-test: {} could not arm its internal-budget watchdog "
+                      "({}); the outer _UNIT_OUTER_BOUNDS row remains the hard stop\n"
+                      .format(label, exc).encode("utf-8", "replace"), 10.0)
+        return lambda: None
+
+    def release():
+        try:
+            helper.kill()
+        except OSError:
+            pass
+        try:
+            helper.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+    return release
+
+
+# The child half of the fail-closed child contract -- the first-registered record handler, the
+# bounded repeated collection that settles only on a pass that CHANGES NOTHING, the guarded
+# reporting machinery and the ending os._exit -- is implemented ONCE, in the sibling
+# _child_contract module (merge train 2 QA r6: this runner, the hook-scripts parity child and the
+# next train's release-delta children each carried a drifting copy; _child_contract's docstring
+# states the contract and discloses, once, the channels it cannot close). _cmd_self_test_unit
+# below wires that contract to this runner's record, fault line and boundary.
+
+
+def _cmd_self_test_unit(label):
+    """The child half of the subprocess unit runner (D-385-SUBPROCESS-RUNNER): run ONE registered
+    unit in THIS dedicated process and exit with its code. The completion record's file is opened
+    (and truncated, _unit_open_record) right after that handler is registered, before any unit code
+    runs, and the record is the handler's SEAL: the record callback returns its bytes and the
+    handler writes them with os.write only after its FINAL check, then os._exit (contract step 6;
+    merge train 2 QA r10: the callback used to write the record before the final check, whose
+    stream flushes run a stdout wrapper the unit left installed, so a wrapper calling os._exit(0)
+    there passed). The completion record is written by an
+    exit handler registered FIRST, before any unit code runs: exit handlers run
+    last-registered-first, so the record write comes AFTER every cleanup handler the unit
+    registered, and a unit whose cleanup ends the process early -- an os._exit, a fault that kills
+    the process, a signal -- prevents the record, so the parent sees no record and fails the unit
+    closed (merge train 2 QA r2, codex MAJOR: the record used to be written before interpreter
+    shutdown, so an exit that interrupted later cleanup still passed). Once the unit has returned
+    and the streams are flushed, the cleanup BOUNDARY line `opf-unit-cleanup-boundary <label>
+    <pid>` goes to the captured stderr as this child's LAST expected output: on a passing exit the
+    parent requires the captured error stream to END at that line, so any bytes a cleanup handler
+    or interpreter shutdown writes after it -- a frameless `Exception ignored` line from a builtin
+    cleanup hook included -- are a fault (merge train 2 QA r2, claude MAJOR: a builtin cleanup
+    hook that raises writes no `Traceback` header and used to pass). The record handler makes the
+    record TRULY LAST (merge train 2 QA r3, codex MEDIUM: a cyclic-garbage finalizer that ran in
+    interpreter finalization, after the record, and ended the child with os._exit(0) passed): it
+    collects the cyclic garbage FIRST -- repeatedly, until a pass CHANGES NOTHING (frees no
+    object and leaves the identity set of tracked objects unchanged), within
+    _child_contract.GC_PASS_BOUND passes, past which it fails
+    closed (merge train 2 QA r4, codex MEDIUM: a collected finalizer may create new cyclic
+    cleanup work, which one collection left for the os._exit to skip; QA r5, codex MEDIUM: a
+    finalizer that resurrects its object while creating that work makes a pass free nothing;
+    QA r6, codex MEDIUM: one that also RELEASES other tracked objects while creating that work
+    kept the tracked count equal or lower, so both count rules settled over its pending work,
+    where the identity comparison sees the released and created objects themselves) -- so
+    pending finalizers run before
+    the record, flushes the
+    streams, re-runs the same checks after the record callback (the final check), disarms every
+    interpreter callback the unit left armed and refuses one it finds (contract step 6, QA r10),
+    only then writes the sealed record and then ends the process ITSELF with os._exit(code), so no
+    interpreter finalization runs after it (an object still reachable then is never finalized,
+    so its finalizer neither runs nor faults). The child half of this contract is implemented
+    ONCE in the sibling _child_contract module (shared with the hook-scripts parity child) and
+    wired here to this runner's record, fault line and boundary. It is checked to be the FIRST exit handler
+    registered (registered before this entry imports anything that registers one; another one
+    already registered would be skipped by that os._exit, so that refuses by name, exit 2). The
+    reporting machinery is guarded too (merge train 2 QA r3, claude MINORs 1 and 2: a unit that
+    left sys.stderr replaced or closed, or sys.unraisablehook silenced, passed a cleanup fault):
+    when the unit returns, sys.stderr, sys.excepthook, sys.unraisablehook and threading.excepthook
+    are put back to the objects this child started with (a unit's replacement never reaches its
+    cleanup), and an audit hook is armed that sees every `sys.unraisablehook` and `sys.excepthook`
+    event -- CPython raises them before it calls whatever hook is installed, so a silenced hook or
+    a replaced stream cannot hide a cleanup fault from it; any such event, any piece of that
+    machinery replaced again by cleanup code (found and restored in the record handler, before
+    and after the garbage collection), or the original stderr closed, makes the record and the
+    exit 2, with a named fault line on the error stream. The fail-closed
+    return-vocabulary and int-limit sentinel checks stayed with
+    the unit (_unit_child_code); the unit runs under its own fresh temporary HOME/XDG, so a caller's
+    configuration never reaches a fixture read; an exception escaping the unit is printed and fails
+    closed (2). An unknown label refuses by name, exit 2, BEFORE the record handler is registered
+    (so an
+    in-process probe of this entry -- the CLI suite's -- can never clobber a real unit's record). The
+    aggregator additionally arms its INTERNAL budget here (_unit_internal_watchdog), inside this
+    bounded child, never in the parent before the bound starts (QA27 codex blocker 2)."""
+    import _child_contract
+    fn = dict(_self_tests()).get(label)
+    if fn is None:
+        print("opf --self-test-unit: {!r} is not a registered unit".format(label), file=sys.stderr)
+        return EXIT_MALFORMED
+
+    def unit_record(code):
+        # The seal (merge train 2 QA r10): the record bytes are RETURNED, and the contract writes
+        # them on the descriptor opened below only after its final check, then os._exit.
+        return _unit_write_record(label, code, record_fd[0])
+
+    def unit_fault_line(faults):
+        return ("opf-unit-cleanup-fault {} {}: {}; failing closed (secfcl)\n".format(
+            label, os.getpid(), "; ".join(faults)[:1000])).encode("utf-8", "replace")
+
+    # The record handler, the settling collection, the guarded reporting machinery and the ending
+    # os._exit are _child_contract.FailClosedChild's (the shared fail-closed child contract);
+    # register() refuses when another exit handler came first (its os._exit would skip it).
+    record_fd = [None]
+    contract = _child_contract.FailClosedChild(
+        record=unit_record, fault_line=unit_fault_line, fail_code=EXIT_MALFORMED)
+    if not contract.register():
+        print("opf --self-test-unit: {!r}: another exit handler was registered before the "
+              "completion record's, and the record's os._exit would skip it; refusing, exit 2 "
+              "(merge train 2 QA r3)".format(label), file=sys.stderr)
+        return EXIT_MALFORMED
+    # Opened (and truncated) BEFORE any unit code runs, held until the handler's os._exit: the file
+    # stays EMPTY unless the final check passes and the seal is written (merge train 2 QA r10).
+    record_fd[0] = _unit_open_record()
+    import tempfile
+    from unittest.mock import patch
+    code = EXIT_MALFORMED
+    release = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+            with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
+                if label == "opf-aggregator":
+                    release = _unit_internal_watchdog(label, _AGGREGATOR_INTERNAL_BUDGET)
+                code = _unit_child_code(label, fn, label in _INT_LIMIT_SELF_TESTS)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        code = EXIT_MALFORMED
+    finally:
+        if release is not None:
+            release()   # the unit ended: the watchdog may no longer write or kill
+    if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
+        code = EXIT_MALFORMED
+    # The unit has returned: its cleanup reports through the machinery this child started with (a
+    # replacement the unit left is put back silently, since a unit's replacement never reaches its
+    # cleanup, but a closed original stderr is a fault), and the audit hook sees every cleanup
+    # fault whatever hook is installed (merge train 2 QA r3).
+    if "sys.stderr (closed)" in contract.restore_reporting():
+        contract.faults.append("the unit closed sys.stderr, so a cleanup fault could not be reported")
+    contract.arm_audit()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception as exc:
+        # A fault, never swallowed (merge train 2 QA r7: a flush that fails here and succeeds at
+        # the record handler's own flush would otherwise leave the unit's code standing).
+        contract.faults.append("the streams could not be flushed when the unit returned ({})".format(
+            type(exc).__name__))
+    try:
+        os.write(2, "{} {} {}\n".format(_UNIT_BOUNDARY, label, os.getpid()).encode("utf-8"))
+    except OSError:
+        pass   # an unwritable stderr leaves no boundary; a passing exit then fails closed
+    contract.settle(code)
+    return code
+
+
+# The bounded box removal (QA33 codex MAJOR / gemini, residual (l) of _run_unit_subprocess): the box
+# a unit ran in is removed by _unit_remove_box's iterative walk, never by an unbounded recursive
+# cleanup, and the walk stops at the FIRST of these bounds, leaving the remnant in place and failing
+# the unit cannot-evaluate by name: at most this many directory levels (one descriptor held per
+# level, so the depth also bounds the descriptors), at most this many entries listed in all (each
+# name at most NAME_MAX bytes, so the entries bound the memory), and at most this many seconds. A
+# box holds three files when a unit leaves it alone (its stdout and stderr captures and its
+# completion record).
+_UNIT_BOX_DEPTH_CAP = 64
+_UNIT_BOX_ENTRY_CAP = 20000
+_UNIT_BOX_REMOVAL_BOUND = 30.0
+
+
+def _unit_remove_box(box, ident):
+    """Remove a unit's box, BOUNDED (QA33): an iterative walk relative to directory descriptors that
+    never follows a symlink (every open is O_NOFOLLOW|O_DIRECTORY|O_NONBLOCK, every unlink and
+    rmdir is relative to its parent's descriptor), holding one descriptor per level plus one
+    listing at a time, and stopping -- the remnant left where it is -- at the first of
+    _UNIT_BOX_DEPTH_CAP levels, _UNIT_BOX_ENTRY_CAP entries listed in all, or
+    _UNIT_BOX_REMOVAL_BOUND seconds, the deadline checked before every entry it acts on and
+    after every entry it lists (QA34 codex MINOR: a long listing had run past it unchecked, and
+    the walk then acted on one entry before the next check). `ident` is the
+    box's (st_dev, st_ino) when it was made: a box path that no longer opens as that very
+    directory (renamed away, a symlink left at its name) is not walked at all. An entry that
+    appears while the walk runs (a descendant that left the unit's group writing on) makes the
+    final rmdir fail, which is reported too. The bound covers the box as it stands when removed,
+    never what follows: an escapee can recreate the path afterwards (residual (l) of
+    _run_unit_subprocess). Returns None once the box is gone, else the reason
+    the removal stopped. A single filesystem call that itself blocks (a FUSE mount over the box)
+    is not bounded by the deadline (residual (k))."""
+    import time
+    deadline = time.monotonic() + _UNIT_BOX_REMOVAL_BOUND
+    expired = "the removal reached its {} s bound".format(_UNIT_BOX_REMOVAL_BOUND)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | (_unit_guard_flags() or 0)
+    stack = []   # one [descriptor, names left to remove or None, name in the parent] per level
+    listed = 0
+    try:
+        try:
+            stack.append([os.open(box, flags), None, None])
+        except OSError as exc:
+            return "it no longer opens as a directory ({})".format(exc)
+        info = os.fstat(stack[0][0])
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != ident:
+            return "its path no longer names the directory the runner made"
+        while stack:
+            if time.monotonic() >= deadline:
+                return expired
+            frame = stack[-1]
+            if frame[1] is None:
+                names = []
+                with os.scandir(frame[0]) as listing:
+                    for entry in listing:
+                        if time.monotonic() >= deadline:
+                            return expired
+                        listed += 1
+                        if listed > _UNIT_BOX_ENTRY_CAP:
+                            return "it holds more than {} entries".format(_UNIT_BOX_ENTRY_CAP)
+                        names.append((entry.name, entry.is_dir(follow_symlinks=False)))
+                frame[1] = names
+                continue   # the deadline is checked again before the listing is acted on
+            if frame[1]:
+                name, is_dir = frame[1].pop()
+                if not is_dir:
+                    os.unlink(name, dir_fd=frame[0])
+                elif len(stack) >= _UNIT_BOX_DEPTH_CAP:
+                    return "it nests directories deeper than {} levels".format(_UNIT_BOX_DEPTH_CAP)
+                else:
+                    stack.append([os.open(name, flags, dir_fd=frame[0]), None, name])
+                continue
+            done = stack.pop()
+            os.close(done[0])
+            if stack:
+                os.rmdir(done[2], dir_fd=stack[-1][0])
+        os.rmdir(box)
+        return None
+    except OSError as exc:
+        return "the removal failed ({})".format(exc)
+    finally:
+        for frame in stack:
+            os.close(frame[0])
+
+
+def _run_unit_subprocess(label, bound, argv=None):
+    """Run ONE registered self-test unit as its OWN `python3 -I -B opf.py --self-test-unit <label>`
+    subprocess under the hard outer deadline `bound` seconds (D-385-SUBPROCESS-RUNNER, replacing the
+    QA26/QA27 in-process forked runner). THREAT MODEL (D-385-ACCIDENTAL-UNIT): this runner defends
+    against ACCIDENTAL unit faults -- a crash, a hang, an early exit, stray or excess output,
+    leftover children, a stale or missing completion record, a box left full; deliberate sabotage
+    by a unit is a disclosed residual, (g) to (k) below, and a descendant that left the unit's
+    group, by accident or on purpose, is the disclosed residual (l) (only the box's removal is
+    bounded, never the escapee), because units are the repository's own reviewed code
+    running as the same user, and every guarantee stated here holds against that model only. The
+    child starts with start_new_session=True (it leads its
+    own session and process group, so its pgid equals its pid), stdin from the null device, stdout
+    and stderr to temporary FILES this parent creates (never a pipe this parent must drain), a
+    scrubbed explicit environment (_unit_scrubbed_env) carrying the one result-file path the child's
+    completion record comes back on, and -- set between the fork and the exec -- RLIMIT_FSIZE at
+    _UNIT_FSIZE_LIMIT, soft and hard, bounding capture growth AT THE SOURCE (QA28: a write past
+    it is EFBIG under Python's ignored SIGXFSZ, the fatal signal in other writers -- the unit fails
+    closed by name either way), plus, on Linux,
+    PR_SET_PDEATHSIG SIGKILL with a post-prctl parent re-check, so a parent killed outright takes
+    the unit LEADER with it. For the whole window from before the fork until the leader is reaped,
+    this parent holds SIGCHLD at SIG_DFL, restored after (QA28 codex B1 / claude MAJOR 1: an
+    inherited SIG_IGN made the kernel auto-reap the leader, reducing the verdict to the record alone
+    AND voiding the killpg licence; only the MAIN thread can displace the disposition -- a
+    non-main-thread caller runs under the inherited one, residual (f) below). The parent waits by polling os.waitid(WEXITED|WNOWAIT|WNOHANG):
+    the leader's exit is OBSERVED WITHOUT REAPING, its exit status is taken from that observation
+    ITSELF (QA29 codex B1: a competing reap after the observation can no longer launder the real
+    status into Popen.wait's ECHILD fallback of 0), and on every completion path that leaves the
+    leader un-reaped -- a clean exit, a failing exit, expiry, an interrupting exception -- the
+    unit's whole process group is SIGKILLed FIRST, while the un-reaped leader still pins
+    pgid == pid (the killpg licence), and only then is the leader reaped (QA28 codex MAJOR 4 /
+    claude MINOR 3: a descendant that stayed in the group no longer survives any completion). The
+    group is NEVER killed on the lost path and never after any reap (QA29 claude MINOR 2 / gemini:
+    a reaped leader's pid is unpinned and may already name an unrelated group); the licence is
+    DERIVED from the leader's recorded reap state at the instant of each kill, never from a flag
+    assigned after the reaping call (QA30 claude MINOR 2: a KeyboardInterrupt surfacing between
+    the reap and a later flag assignment could license a kill on a reaped pid; the one window
+    left is inside Popen.wait itself, between the kernel reap and Popen recording it -- CPython's
+    own gap, not this runner's -- with the same pid-wrap-only exposure, disclosed). On expiry the kill
+    is followed by a short bounded reap and the named exit-2 failure; an interrupted parent
+    (KeyboardInterrupt, SystemExit, anything raised out of the wait) kills -- only while the leader
+    still pins its group -- and reaps in its cleanup and lets the interruption propagate (QA28
+    claude MEDIUM 2). The unit's verdict is its exit code AND the one-line completion record
+    `<label> <code> <pid>` the child's FIRST-registered exit handler writes AFTER every cleanup
+    handler the unit registered (_cmd_self_test_unit; merge train 2 QA r2, codex MAJOR: a record
+    written before interpreter shutdown let an exit that interrupted later cleanup pass -- now
+    anything that ends the child before the exit handlers finish, an os._exit from a cleanup
+    handler, a fault that kills the process or a signal, prevents the record and the unit fails
+    closed on the missing record), the pid BINDING the record
+    to the leader (QA28 claude MINOR 2): a missing, mismatched or wrong-pid record fails closed
+    (exit 2); the binding checks the record's TEXT, not its writer (a forged record is residual
+    (h)). A box removed from OUTSIDE while the unit runs -- another process sweeping the caller's
+    TMPDIR -- leaves the unit writing into unlinked captures and failing its record open
+    silently, so a passing unit ends exit 0 with no record and no output: the record failure,
+    which then also names the unreadable capture and the box the removal no longer finds
+    (QA33 claude MEDIUM 1: that signature was reproduced by removing a running unit's box; it
+    fails closed, never a pass). An outside removal is the LEADING HYPOTHESIS for the historical
+    intermittent exit 0 with no record and no output, not an established cause: a unit that
+    unlinks its own captures and writes no record gives the same signature (QA34 codex).
+    After the leader ends, the result and capture files are read back by RE-OPENING THEIR
+    PATHS (the launch descriptors on the captures are closed as soon as the child has started, and
+    nothing is read through them), O_NOFOLLOW|O_NONBLOCK; each must still be a regular file by
+    fstat on the newly opened descriptor, every read bounded (QA28 codex B2: a FIFO or
+    symlink planted at a child-reachable path is a NAMED exit-2 failure, never a hang); where the
+    platform lacks O_NOFOLLOW or O_NONBLOCK the runner REFUSES to run at all, by name, rather
+    than fall back to unguarded name-based opens (QA30 gemini; _unit_guard_flags). Afterwards
+    the unit's output files are copied to the caller's streams through _unit_copy_capped's bounded,
+    capped, thread-free writer, and the verdict REQUIRES those captures (QA29 codex MAJOR 5): a
+    capture that is unreadable, replaced or non-regular is a named exit-2 failure -- `replaced`
+    judged by DEVICE AND INODE against the fstat this runner took of its own launch descriptors
+    before closing them (a by-path re-open plus that identity check, never a read through the
+    launch descriptors), so a
+    fresh regular file planted at a capture's path is rejected too (QA30 codex MAJOR / claude
+    MINOR 1: a unit that unlinked its stderr capture and planted an empty regular file there
+    laundered a tainted stream into a pass), unless it received the freed capture's inode number
+    (residual (j)) -- and a unit
+    exiting 0 whose captured error stream carries any UNDECLARED line is refused -- a
+    passing verdict requires a readable, complete capture and an error stream EMPTY apart from
+    the child's cleanup boundary line and the unit's exactly declared expected lines
+    (_UNIT_STDERR_ALLOWED: the measured fixture diagnostics a unit legitimately prints on a
+    pass; merge train 2 QA r4, codex MAJOR: a frameless fault message the marker list did not
+    know -- asyncio's `Future exception was never retrieved` -- passed the r3 marker scan, and a
+    list of known fault messages can never be complete, so the line scan DECIDES and the first
+    CPython fault marker found is only an extra explanation in the failure -- the scan covers
+    the COMPLETE capture, before the cleanup boundary and after it, past the delivery cap to the
+    end of the stream, merge train 2 QA, codex MAJOR) AND, past that, requires the
+    captured error stream to END at the child's cleanup boundary line `opf-unit-cleanup-boundary
+    <label> <pid>` (_cmd_self_test_unit writes it once the unit has returned and the streams are
+    flushed, as the child's last expected output): any bytes after it -- an exit handler's
+    traceback, a frameless `Exception ignored` line from a builtin cleanup hook, a finalizer's
+    write -- are a cleanup or shutdown fault, never a pass (merge train 2 QA r2, claude MAJOR).
+    An ordinary write failure of the
+    copy itself cannot change the unit's verdict.
+    Disclosed residuals, each named with why it sits outside this runner's contract
+    (D-385-RESCOPE: a hostile or instrumented CALLER is that process's own business, (a) to (f);
+    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k); (l), a
+    descendant that left the unit's group, by accident or on purpose: no check here reaches it,
+    and the bounded box removal covers only what is in the box when it runs; and (m), the fault
+    reports the child's guards cannot see):
+    (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
+    library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
+    observation and this runner's kill and reap unpins the leader's pid, so the group kill can
+    miss or hit a reused id; the verdict itself stays right (the status is the observation's);
+    caller-side because only code already inside this process can reap its children.
+    (b) the caller's own buffered text into its own full pipes at shutdown (QA29 codex B2):
+    interpreter finalization flushes the CALLER's pending stream text into the caller's blocked
+    pipe after this runner has returned; _unit_deliver skips its flush when the descriptor has no
+    room, but text the caller itself buffered belongs to the caller's shutdown, not to any unit.
+    (c) a threaded or instrumented caller blocking in preexec_fn (QA29 codex B3): an audit hook or
+    a lock another caller thread holds across fork can stall child_setup before the deadline or
+    the PDEATHSIG tether exists; only the caller's own threads and hooks can hold that lock.
+    (d) a parent killed by a signal it leaves unhandled -- SIGTERM or SIGHUP, for which Python
+    installs no handler, so no finally runs (QA29 claude MEDIUM 2) -- or by uncatchable SIGKILL:
+    PDEATHSIG takes the leader, but in-group descendants run to their own exits unsupervised;
+    installing handlers here would displace the CALLER's process-wide dispositions, which are the
+    caller's own to set.
+    (e) a SIGCHLD disposition the caller set natively (ctypes or C sigaction, bypassing Python's
+    signal table; QA29 claude MINOR 3): the save-and-restore here goes through Python's cached
+    table, so a natively set disposition is restored to what that table last knew, not to the
+    kernel's value; caller-side because only the caller can bypass its own interpreter.
+    (f) a non-main-thread caller under an inherited SIGCHLD=SIG_IGN (QA30 claude MINOR 3): the
+    disposition is not displaceable off the main thread, the kernel then auto-reaps the leader,
+    so the WNOWAIT poll observes NOTHING and every unit fails closed on the named lost path
+    (exit 2, never a wrong pass), and an expiry-path group kill racing that automatic reap has
+    the same pid-wrap-only exposure as (a); caller-side because the disposition and the thread
+    are both the caller's own.
+    (g) a unit can SIGSTOP or SIGKILL this runner (QA31 codex BLOCKER, reproduced): its own
+    session and process group do not stop a same-user kill() such as
+    os.kill(os.getppid(), signal.SIGSTOP); a stopped runner enforces no deadline until something
+    resumes it (the no-hang guarantee does not hold), and a killed one ends the suite by that
+    signal, never with a pass.
+    (h) a unit can FORGE its completion record and its cleanup boundary (QA31 codex MAJOR,
+    reproduced; the boundary since merge train 2 QA r2): the comparison authenticates each line's
+    text, not its writer, so any process holding the result path and the leader pid -- a fork of
+    the leader inherits both -- can write the matching `<label> 0 <pid>` record, end the captured
+    stderr with the matching boundary line, and the leader's early os._exit(0) then passes; the
+    binding rejects an accidental stale, missing or foreign-pid record only.
+    (i) a unit can hold or write the SUITE's own streams (QA31 codex MAJOR, reproduced): it can
+    open this runner's stdout or stderr through /proc/<runner-pid>/fd (same user, so the access
+    check passes) and hand it to an escapee, which keeps the stream open past this runner's exit
+    (a reader waiting for EOF waits on it) or writes into it, past every bound and cap here.
+    (j) a unit can rewrite or truncate a capture through its own still-open descriptor before it
+    exits; while it lives the capture is its own output (_unit_copy_capped). And because this
+    runner's launch descriptors are closed once the child starts, a unit that unlinks a capture
+    and closes every descriptor still open on it -- its own inherited one and every descendant's
+    (QA33 codex MINOR: an unlink alone, the descriptor kept, left the inode allocated) -- frees
+    its inode, so a file it then plants at that path can receive the SAME device and inode
+    numbers on a filesystem that reuses them (ext4 and xfs can) and pass the identity check: the
+    `never a laundered pass` of a planted file holds only where the number is not reused (QA31
+    claude MINOR 2, not reproduced -- the probing hosts' tmpfs and btrfs allocated increasing
+    numbers).
+    (k) the by-path read-backs, which re-open PATHS under the box after the outer bound, can be
+    PARKED or REDIRECTED: an escapee that MOUNTS a filesystem it controls over the box (FUSE,
+    where host policy lets the unit's uid mount at all) can park them, O_NOFOLLOW|O_NONBLOCK
+    bounding neither a FUSE path lookup nor the open behind it (QA30 claude MINOR 5, not
+    reproduced -- the probing host refused the mount); and the LEADER ALONE, with no mount and no
+    escapee, can rename the box away and leave a symlink at its name, since O_NOFOLLOW guards only
+    the LAST path component: every re-open then resolves through that symlink to wherever it
+    points (QA31 claude MINOR 3; reproduced in QA32: the leader renamed the box to `<box>.real`
+    and symlinked the box name to it, the runner read back through it and returned 0, and both
+    names were left behind, the box removal not following the symlink; since QA33 the bounded
+    removal refuses a box path that no longer opens as the directory this runner made, so that
+    case is the named cannot-evaluate, both names left in place, never a pass, though the
+    read-backs still resolve through the symlink first), and a target slow to resolve (an
+    automount, a FUSE path) parks the lookup the same way (not reproduced).
+    (l) the box's removal is BOUNDED (QA33 codex MAJOR / gemini; it was an unbounded recursive
+    cleanup through QA32): after the verdict, with every in-group process already SIGKILLed
+    (except on the lost path and the no-waitid fallback, which licence no group kill),
+    _unit_remove_box walks the box iteratively, never following a symlink, and stops at the
+    first of _UNIT_BOX_DEPTH_CAP levels, _UNIT_BOX_ENTRY_CAP entries or _UNIT_BOX_REMOVAL_BOUND
+    seconds; a box it cannot clear -- a chain or a flood left there, an entry added while it ran,
+    a removal error, a box path that no longer names the directory made -- turns ANY verdict
+    into the named cannot-evaluate (exit 2, never a pass), naming the remnant, which stays in
+    place. That bounds only what is IN the box when it is removed -- a chain or a flood left
+    there, an entry an escapee adds while the walk runs (QA31 claude: a 90,000-deep chain had cost
+    a MemoryError past a 10 s bound, and a host OOM kill with no memory cap). What stays out of
+    reach, by accident or on purpose, is a descendant that
+    LEFT the unit's process group (its own setsid or setpgid, a start_new_session launch): the
+    group kill addresses the group alone, this runner never learns the escapee's pid, and once
+    its parent dies the kernel reparents it to init or a subreaper, so nothing short of OS
+    isolation the CALLER owns (a cgroup to kill, a PID namespace, a subreaper) can find and end
+    it. Until it ends by itself it can run on, use CPU and memory, write new files anywhere its
+    user may write (each under RLIMIT_FSIZE), keep an unlinked capture's storage while it holds
+    a descriptor on it, signal or reach this runner as (g) and (i) say, and RECREATE the box's
+    pathname after the removal and write there: it holds the path through OPF_SELF_TEST_RESULT,
+    and the caller's TMPDIR is writable by its user (QA34 codex and claude, reproduced: a detached
+    worker resuming after a passing run recreated the box and wrote a file there, the run having
+    returned 0), so the removal bounds the box as it stands when removed, never what an escapee
+    does afterwards. The repository's own escaping launches -- the
+    _FixtureProcess guardian and subject, the runtime-probe supervisors, the run_shell checks,
+    the escape probe's writers -- are ended by their own units' code, not by this runner; a
+    fault that leaves one running is disclosed here, and a DELIBERATE escape is sabotage
+    (D-385-ACCIDENTAL-UNIT).
+    (m) the fault reports the child's guards cannot see (merge train 2 QA r3; the r2 residual,
+    interpreter finalization after the record, is CLOSED: the record handler collects pending
+    finalizers before the record and ends the child with os._exit at it, so a finalizer that
+    ends the child silently leaves no record and fails closed). The guards are the shared
+    fail-closed child contract's (merge train 2 QA r6: the sibling _child_contract module is the
+    ONE implementation, and its docstring states the contract and discloses, once, the channels
+    it cannot close: a thread's uncaught exception raising no audit event; the window while
+    cleanup code has DELETED sys.unraisablehook with sys.stderr replaced, both restored before
+    the record, QA r5 codex MEDIUM, reproduced; an object still reachable at the record, never
+    finalized; and the address-reuse edge of the identity-set settle comparison, QA r6). Specific
+    to this runner: WHILE
+    THE UNIT RUNS, before it returns, its own reviewed, pinned code may redirect its error
+    stream (units capture fixture output with contextlib.redirect_stderr), and a fault reported
+    into that redirect is the unit's own to judge -- the guards begin when the unit returns.
+    Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
+    setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
+    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note (the error-stream
+    taint scan still reads the complete capture); _UNIT_FSIZE_LIMIT
+    bounds each file, not the aggregate; and where os.waitid is unavailable the wait falls back to
+    REAP-FIRST (the WNOWAIT observation needs waitid) and, the leader reaped, no group kill
+    follows (a reaped pid licences nothing), so a descendant that stayed in the group survives
+    there. `argv` overrides the child command for _unit_bound_self_test's synthetic vectors only.
+    _UNIT_BOUND_DISABLED is the test-only flip (the wait audit's disclosed variable-timeout
+    residual, deliberate here) that removes the deadline; _unit_bound_self_test proves it committed
+    False and live."""
+    import tempfile
+    if _unit_guard_flags() is None:
+        _unit_deliver(sys.stderr, "opf self-test: {} cannot run on this platform, which lacks "
+                      "O_NOFOLLOW or O_NONBLOCK: the record and capture read-backs would fall "
+                      "back to unguarded name-based opens that follow a planted symlink or block "
+                      "on a planted FIFO, so the runner fails closed by name instead (QA30 "
+                      "gemini)\n".format(label).encode("utf-8", "replace"), 10.0)
+        return EXIT_MALFORMED
+    # The box is made here and removed here, BOUNDED (residual (l), QA33): the verdict is settled
+    # inside it first, and a box the bounded removal cannot clear turns any verdict into the named
+    # cannot-evaluate, the remnant left in place. On an interrupt the removal still runs, bounded,
+    # and the interruption propagates.
+    box = tempfile.mkdtemp(prefix="opf-unit-")
+    made = os.lstat(box)
+    code = EXIT_MALFORMED
+    try:
+        code = _unit_run_in_box(label, bound, argv, box)
+    finally:
+        stopped = _unit_remove_box(box, (made.st_dev, made.st_ino))
+        if stopped is not None:
+            _unit_deliver(sys.stderr, "opf self-test: {} box {} was not removed: {}; whatever "
+                          "remains stays in place and the unit cannot be evaluated (exit 2, never "
+                          "a pass; the bounded removal, residual (l))\n".format(label, box, stopped)
+                          .encode("utf-8", "replace"), 10.0)
+            code = EXIT_MALFORMED
+    return code
+
+
+def _unit_run_in_box(label, bound, argv, box):
+    """The launch, wait, group kill, reap and verdict of _run_unit_subprocess, whose docstring
+    states the contract, inside the box it made; its caller then removes the box, bounded
+    (_unit_remove_box), so every in-group process is already SIGKILLed when the removal starts
+    (except on the lost path and the no-waitid fallback, which licence no group kill)."""
+    import errno
+    import resource
+    import signal
+    import subprocess
+    import time
+    out_path = os.path.join(box, "out")
+    err_path = os.path.join(box, "err")
+    result_path = os.path.join(box, "result")
+    env = _unit_scrubbed_env()
+    env["OPF_SELF_TEST_RESULT"] = result_path
+    if argv is None:
+        argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                "--self-test-unit", label]
+    fsize = _UNIT_FSIZE_LIMIT
+    hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    if hard != resource.RLIM_INFINITY:
+        fsize = min(fsize, hard)
+    libc = None
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+        except Exception:
+            libc = None
+    parent_pid = os.getpid()
+
+    def child_setup():
+        # Runs in the forked child, before the exec: the at-source capture bound. SIGXFSZ
+        # is restored to default and unblocked first so a non-Python descendant inheriting the
+        # limit dies at it (the exec'd Python re-ignores SIGXFSZ for itself, so a Python unit
+        # sees EFBIG and fails closed instead); then (Linux) the parent-death tether, with the
+        # re-check closing the already-dead-parent race.
+        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGXFSZ})
+        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
+        if libc is not None:
+            libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)   # PR_SET_PDEATHSIG
+            if os.getppid() != parent_pid:
+                os._exit(EXIT_MALFORMED)
+
+    previous_chld = None
+    try:
+        previous_chld = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    except (OSError, RuntimeError, ValueError):
+        previous_chld = None   # not displaceable here (a non-main thread): the inherited
+        #                        disposition stands, and under an inherited SIG_IGN the kernel
+        #                        auto-reaps the leader, so the waitid poll observes NOTHING and
+        #                        the unit fails closed on the named lost path (residual (f))
+    try:
+        try:
+            with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
+                # The captures' identity at launch (QA30 codex MAJOR): the read-back later
+                # requires the SAME device and inode, so a unit that unlinks a capture and
+                # plants another file at its path is a named failure, unless the planted
+                # file received the freed inode's number (residual (j)).
+                out_ident = os.fstat(out_file.fileno())
+                err_ident = os.fstat(err_file.fileno())
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_file,
+                                         stderr=err_file, env=env, start_new_session=True,
+                                         preexec_fn=child_setup)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            _unit_deliver(sys.stderr, "opf self-test: {} could not start its unit process ({}); "
+                          "failing closed\n".format(label, exc).encode("utf-8", "replace"), 10.0)
+            return EXIT_MALFORMED
+        failure = None
+        status = None
+        settled = False
+        observed = None
+        lost = False
+
+        def leader_pinned():
+            # The killpg licence, DERIVED at the instant of use (QA30 claude MINOR 2): an
+            # un-reaped leader pins pgid == pid (QA29). Popen records a reap inside wait()
+            # itself, so an interrupt surfacing after a reap can never leave a stale True
+            # behind the way the retired flag -- assigned a line after the call -- could.
+            return not lost and child.returncode is None
+        try:
+            deadline = None if _UNIT_BOUND_DISABLED else time.monotonic() + bound
+            outcome = "exited"
+            if getattr(os, "waitid", None) is None:
+                # No WNOWAIT observation on this platform: the disclosed REAP-FIRST fallback.
+                # The reap unpins the leader's pid, so no group kill may follow it (QA29).
+                try:
+                    status = child.wait(timeout=(None if deadline is None else bound))
+                except subprocess.TimeoutExpired:
+                    outcome = "timeout"
+            else:
+                while True:
+                    try:
+                        observed = os.waitid(os.P_PID, child.pid,
+                                             os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                    except OSError:
+                        outcome = "lost"
+                        lost = True   # reaped outside this runner: the pid licences nothing
+                        break
+                    if observed is not None:
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        outcome = "timeout"
+                        break
+                    time.sleep(0.01)
+            # The group, on every completion path WHILE the un-reaped leader still pins
+            # pgid == pid (WNOWAIT observed it, or a timed-out wait reaped nothing): the
+            # numeric killpg licence. Never on the lost path and never after any reap (QA29
+            # claude MINOR 2 / gemini: a reaped leader's pid may already name an unrelated
+            # group). A descendant that stayed in the group dies here even after a clean exit.
+            if leader_pinned():
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if outcome == "exited" and status is None:
+                # The exit status is the WNOWAIT observation's OWN (QA29 codex B1): a competing
+                # in-process reap between observation and this reap can no longer launder the
+                # real status into Popen.wait's ECHILD fallback of 0.
+                status = (observed.si_status if observed.si_code == os.CLD_EXITED
+                          else -observed.si_status)
+                try:
+                    child.wait(timeout=5.0)   # clear the zombie; the verdict keeps the observed status
+                except subprocess.TimeoutExpired:
+                    failure = ("opf self-test: {} was observed exited but its leader could not "
+                               "be reaped within 5.0 s; failing closed".format(label))
+            elif outcome == "timeout":
+                reaped = True
+                try:
+                    child.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    reaped = False
+                failure = ("opf self-test: {} exceeded its {} s outer bound; its process group "
+                           "was SIGKILLed (D-385-SUBPROCESS-RUNNER hard outer bound{})".format(
+                               label, bound,
+                               "" if reaped else "; its leader was not reaped within 5.0 s"))
+            elif outcome == "lost":
+                try:
+                    child.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                failure = ("opf self-test: {} leader was reaped outside this runner (an "
+                           "inherited SIGCHLD reaper this parent could not displace, or an "
+                           "in-process wait); its real exit status is lost, failing closed"
+                           .format(label))
+            settled = True
+        finally:
+            if not settled:
+                # An interrupted parent (QA28 claude MEDIUM 2): kill the unit's whole group --
+                # only while the un-reaped leader still pins it (QA29) -- and reap the leader
+                # on the way out, then let the interruption propagate.
+                if leader_pinned():
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                try:
+                    child.wait(timeout=5.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+    finally:
+        if previous_chld is not None:
+            try:
+                signal.signal(signal.SIGCHLD, previous_chld)
+            except (OSError, RuntimeError, ValueError):
+                pass
+    if failure is None:
+        record = None
+        anomaly = None
+        fd = None
+        guard = _unit_guard_flags()
+        if guard is None:
+            # Unreachable past the entry refusal above unless a flag vanished mid-run; the
+            # same fail-closed stance either way (QA30 gemini).
+            anomaly = ("its completion record cannot be read back on this platform, which "
+                       "lacks O_NOFOLLOW or O_NONBLOCK; failing closed rather than an "
+                       "unguarded name-based open (QA30 gemini)")
+        else:
+            try:
+                fd = os.open(result_path, os.O_RDONLY | guard)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    anomaly = "its result path was replaced by a symlink (not followed)"
+        if fd is not None:
+            with os.fdopen(fd, "rb") as handle:
+                try:
+                    info = os.fstat(handle.fileno())
+                    if stat.S_ISREG(info.st_mode):
+                        record = handle.read(256).decode("utf-8", "replace")
+                    else:
+                        anomaly = ("its result path is no longer a regular file (mode {:o}); a "
+                                   "FIFO there is never opened blocking".format(info.st_mode))
+                except OSError:
+                    record = None
+        if status < 0:
+            failure = ("opf self-test: {} unit process was killed by signal {}; failing closed"
+                       .format(label, -status))
+        elif status not in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+            failure = ("opf self-test: {} unit process exited {}; failing closed"
+                       .format(label, status))
+        elif anomaly is not None:
+            failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
+                       .format(label, anomaly))
+        elif record != "{} {} {}\n".format(label, status, child.pid):
+            failure = ("opf self-test: {} ended (exit {}) without a matching completion record "
+                       "bound to its leader pid {} (got {!r}); a unit whose child exits before "
+                       "its record is written -- an early os._exit(0) included -- and a record "
+                       "carrying any pid but the leader's fail closed".format(
+                           label, status, child.pid, (record or "")[:80]))
+    copy_anomaly, _out_tainted, _out_tail, _out_foreign = _unit_copy_capped(
+        sys.stdout, out_path, label, "stdout", out_ident)
+    err_anomaly, err_tainted, err_tail, err_foreign = _unit_copy_capped(
+        sys.stderr, err_path, label, "stderr", err_ident,
+        allowed=_unit_allowed_stderr_lines(label))
+    copy_anomaly = err_anomaly or copy_anomaly
+    if failure is None and copy_anomaly is not None:
+        failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
+                   .format(label, copy_anomaly))
+    elif failure is not None and copy_anomaly is not None:
+        # QA33 claude MEDIUM 1: a missing record over an exit 0 whose captures are gone too is
+        # CONSISTENT WITH a box removed from outside while the unit ran -- the leading hypothesis for
+        # the historical intermittent, not an established cause (evidence: before this the copy
+        # anomaly was dropped whenever a failure was already set, and an outside removal of a
+        # running unit's box reproduces the signature; but a unit that unlinks its own captures and
+        # writes no record gives the same one, QA34 codex). Naming the capture state reports what
+        # was observed, never who removed anything.
+        failure = "{}; and {}".format(failure, copy_anomaly)
+    if failure is None and status == EXIT_OK and err_foreign is not None:
+        extra = ""
+        if err_tainted:
+            extra = (", and the stream carries the CPython fault marker {!r} (an explanation "
+                     "only: a list of known fault messages can never be complete)"
+                     .format(err_tainted))
+        failure = ("opf self-test: {} exited 0 but its error stream carries the undeclared line "
+                   "{!r}{}; a passing verdict requires an error stream EMPTY apart from the "
+                   "child's cleanup boundary line and the unit's exactly declared expected lines "
+                   "(_UNIT_STDERR_ALLOWED; QA29 codex MAJOR 5; merge train 2 QA r3 and r4, codex "
+                   "MAJORs), failing closed".format(
+                       label, err_foreign.decode("utf-8", "replace"), extra))
+    if failure is None and status == EXIT_OK and not err_tail.endswith(
+            "{} {} {}\n".format(_UNIT_BOUNDARY, label, child.pid).encode("utf-8")):
+        failure = ("opf self-test: {} exited 0 but its captured error stream does not end at its "
+                   "cleanup boundary line ({} {} {}): bytes after the child's last expected "
+                   "output -- a frameless 'Exception ignored' line included -- are a cleanup or "
+                   "shutdown fault, and a missing boundary means the child never reached its "
+                   "orderly end; failing closed (merge train 2 QA r2, codex and claude MAJORs)"
+                   .format(label, _UNIT_BOUNDARY, label, child.pid))
+    if failure is not None:
+        _unit_deliver(sys.stderr, (failure + "\n").encode("utf-8", "replace"), 10.0)
+        return EXIT_MALFORMED
+    return status
+
+
+def _unit_bound_self_test():
+    """D-385-SUBPROCESS-RUNNER: the hard outer bound and the completion-record contract are the LIVE
+    hang and early-exit guarantees; these vectors drive the REAL _run_unit_subprocess, each with an
+    argv override standing in for a registered unit's child entry. Vectors: (1) a HUNG unit (it parks
+    an inner fork in its group and sleeps) under a 2 s bound is killed AT the bound: exit 2, the
+    failure names the unit and its outer bound, and the unit's whole process group -- the park
+    included -- is gone; (2) a unit that os._exit(0)s early, writing no completion record, is exit 2
+    with the named record failure, never a pass; (3) a unit whose record contradicts its exit (record
+    says 0, exit says 1) is exit 2, and a unit whose record MATCHES its clean exit still passes (no
+    over-rejection); (4) a unit writing stdout endlessly cannot delay the deadline (its output goes to
+    a FILE, never a pipe this parent drains) and the copied output is truncated at the cap with the
+    named note (run under a 64 KiB test cap, restored in a finally); (5) the committed
+    _UNIT_BOUND_DISABLED flip is False, and flipping it True (in-process, restored in a finally) lets
+    the SAME sleeping unit a 1 s bound kills when committed run past that bound and return its own
+    clean exit: the deadline branch is the live mechanism, masked by nothing, and the flipped check
+    stays bounded because its unit exits by itself after 3 s; (6) a unit returning the
+    out-of-vocabulary int 3 is exit 2 WITH the named 'returned out-of-range code' failure
+    (_unit_child_code: the child's _exit mapping masks a removed check, so the message is required,
+    not only the code); (7) every registered unit has its own _UNIT_OUTER_BOUNDS row (a float), and
+    run_self_tests refuses a label without one by name, exit 2, without running it; (8) the
+    internal watchdog (_unit_internal_watchdog, the aggregator's enforced budget) armed at 1 s in a
+    sleeping unit process SIGKILLs the unit well before the outer bound, the runner's named
+    `killed by signal 9` failure (QA31 codex MEDIUM: the runner's group kill on the leader's death
+    can take the helper before its own report, so a runner-driven vector asserts the diagnostic the
+    runner itself always produces), and, launched directly where nothing kills the helper, it
+    writes its NAMED internal-budget text before its record. The QA28 vectors: (9) under an
+    inherited SIGCHLD=SIG_IGN the mismatched record still fails closed (the runner holds
+    SIG_DFL); (10) a descendant that stays in the unit's group dies on a clean completion (the
+    every-path group kill before the reap);
+    (11) a FIFO planted at the result path and (12) one replacing the stdout capture are quick
+    NAMED failures, never hangs; (13) delivery into a full unread pipe is bounded, thread-free and
+    restores the descriptor's blocking mode; (14) a unit writing past _UNIT_FSIZE_LIMIT is stopped at
+    the source and fails closed by name, with the capture bounded; (15) the watchdog
+    neither disturbs a caller's armed real timer, nor is muted by a unit re-arming SIGALRM (the
+    runner's `killed by signal 9` failure, never the unit's own record and exit 0), nor --
+    run inside a launcher's group -- kills anything but the unit; (16) a SIGINTed driver kills and
+    reaps its running unit, and a SIGKILLed driver's unit leader dies with it (PDEATHSIG). The
+    QA29 vectors: (17) a competing reaper right after the WNOWAIT observation cannot launder a
+    nonzero exit into a pass (the verdict keeps the observed status); (18) the lost path -- a
+    leader reaped before the runner observed it -- issues NO group kill and is the named
+    reaped-outside exit 2; (19) the no-waitid fallback reaps first and then kills no group: an
+    in-group descendant survives there, the disclosed fallback residual; (20) a FIFO planted at
+    the result path cannot park the internal watchdog, which kills FIRST (the runner's
+    `killed by signal 9` failure, within the budget) and reports
+    non-blocking, regular-only; (21) armed under a group leader that is not a session leader, the
+    watchdog spares the pipeline sibling sharing the group; (22) delivery never touches the
+    shared O_NONBLOCK flag and still delivers; (23) an unreadable stderr capture, and an exit 0
+    over an uncaught-exception traceback, fail closed by name. The QA30 vectors: (24) a unit
+    that unlinks its stderr capture and plants a fresh regular file at the same path cannot
+    launder a tainted stream into a pass -- the read-back requires the launch-time device and
+    inode; (25) with the unit's stderr a full pipe nobody reads, the expiring watchdog still
+    reaches its record write within its own bounded lifetime (the stderr report is poll-gated
+    and dropped, never a blocking write); (26) with os.O_NOFOLLOW or os.O_NONBLOCK absent the
+    runner refuses by name, fail closed, instead of opening unguarded, and the watchdog helper's
+    source carries the same fail-closed gate; (27) a KeyboardInterrupt surfacing inside the
+    post-observation reap licences no second group kill (the licence is derived from the
+    recorded reap state, never from a flag assigned after the call). The QA33 vector: (28) the
+    box's removal is bounded -- a box left alone is removed and passes, a box past the depth,
+    entry or time bound or swapped for a symlink is the named cannot-evaluate with its remnant in
+    place (the swapped box's renamed files untouched, never walked through the symlink), and a
+    box removed while its unit runs is the named record failure that also names the capture and
+    the box; and the QA34 leg: a deadline passing while the walk lists a directory stops it there,
+    before it removes anything. The merge-train leg: (29) an exit 0 over a traceback written
+    ENTIRELY past the copy cap, and one straddling the cap boundary, each fail closed by name
+    (merge train 2 QA, codex MAJOR: the old prefix-only scan let a shutdown traceback past the
+    cap pass; the scan covers the complete stream, run under a 64 KiB test cap restored in a
+    finally). The r2 leg: (30) driving the REAL child entry (_cmd_self_test_unit) with a
+    synthetic unit patched into its registry in the child, a cleanup handler that ends the
+    process writes no record (the record comes from the exit handler registered first, so it
+    runs after every cleanup handler) and fails closed by name; an exit 0 over a frameless
+    builtin cleanup fault ('Exception ignored', no 'Traceback' header) fails closed on the
+    cleanup-boundary check; and a unit with a benign cleanup handler still passes (merge train 2
+    QA r2, codex and claude MAJORs). The r3 legs: (31) every CPython fault marker
+    (_UNIT_FAULT_MARKERS) in a capture is named by the scan; and, through the real child entry,
+    (32) a grandchild's frameless cleanup fault BEFORE the cleanup boundary, (33) a cyclic
+    finalizer that ends the child silently with os._exit(0), and a cleanup fault under (34) a
+    replaced sys.stderr, (35) a silenced sys.unraisablehook or (36) a closed sys.stderr, and (37) a
+    cleanup handler that replaces sys.excepthook, each fail closed (merge train 2 QA r3, codex
+    MAJOR and MEDIUM, claude MINORs 1 and 2); the benign control (30c) also leaves a benign
+    cyclic finalizer. The r4 legs: (38) a grandchild's frameless asyncio fault, a message the
+    marker list never knew, (39) a collected finalizer that creates NEW cyclic cleanup work
+    whose own finalizer faults, (40) a finalizer chain no collection pass inside
+    _child_contract.GC_PASS_BOUND ends, and (41) an undeclared benign stderr line, each fail closed, while
+    a unit writing exactly its declared _UNIT_STDERR_ALLOWED row still passes (merge train 2 QA
+    r4, codex MAJOR and MEDIUM). The r5 leg: (42) a finalizer that resurrects its own object
+    while creating new cyclic cleanup work whose finalizer faults fails closed (merge train 2
+    QA r5, codex MEDIUM). The r6 leg: (43) a resurrecting finalizer that also RELEASES other
+    tracked objects while creating that work, so the tracked count stays equal or lower and the
+    r5 settle rule passed it, fails closed under the shared contract's identity-set rule (merge
+    train 2 QA r6, codex MEDIUM). The r10 leg: (44) through the real child entry, a stdout
+    wrapper the unit leaves installed whose flush calls os._exit(0) inside the contract's FINAL
+    check (after the record callback) leaves the record file empty and fails closed by name, and
+    (45) an os._exit(0) inside the unit body does too; the benign controls (30c) and (41) still
+    pass (merge train 2 QA r10: the record was written inside the callback, before the final
+    check, and (44) passed). Returns 0 clean, 1 on a failure."""
+    import contextlib
+    import inspect
+    import io
+    import signal
+    import subprocess
+    import tempfile
+    import _child_contract
+    import threading
+    import time
+    global _UNIT_BOUND_DISABLED
+    faults = []
+    if _UNIT_BOUND_DISABLED:
+        faults.append("the committed _UNIT_BOUND_DISABLED flip is not False")
+    missing = [label for label, _fn in _self_tests()
+               if type(_UNIT_OUTER_BOUNDS.get(label)) is not float]
+    if missing:
+        faults.append("registered units without their own _UNIT_OUTER_BOUNDS row: {}".format(
+            ", ".join(missing)))
+
+    def ended(pid, bound):
+        # Gone, or a zombie awaiting its reaper: nothing left RUNNING either way. /proc only; no
+        # signal is sent to a pid this process cannot prove its own.
+        deadline = time.monotonic() + bound
+        while True:
+            try:
+                with open("/proc/{}/stat".format(pid), "rb") as handle:
+                    record = handle.read()
+                state = record.rsplit(b") ", 1)[-1][:1]
+            except OSError:
+                return True
+            if state in (b"Z", b"X"):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+    def run_vector(label, bound, script):
+        out, err = io.StringIO(), io.StringIO()
+        begun = time.monotonic()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = _run_unit_subprocess(label, bound,
+                                        argv=[sys.executable, "-I", "-B", "-c", script])
+        return code, time.monotonic() - begun, out.getvalue(), err.getvalue()
+
+    # (1) the hung unit: killed AT the bound, its failure named, its whole group gone.
+    code, took, out_text, err_text = run_vector("synthetic-hung", 2.0, (
+        "import os, time\n"
+        "park = os.fork()\n"
+        "if park == 0:\n"
+        "    time.sleep(3600)\n"
+        "    os._exit(0)\n"
+        "print('PIDS', os.getpid(), park, flush=True)\n"
+        "time.sleep(3600)\n"))
+    if code != EXIT_MALFORMED:
+        faults.append("the hung unit returned {} instead of the named exit 2".format(code))
+    if "synthetic-hung" not in err_text or "outer bound" not in err_text:
+        faults.append("the hung unit's failure does not name the unit and its outer bound: {!r}"
+                      .format(err_text[-200:]))
+    if took >= 22.0:
+        faults.append("the hung unit's kill took {:.1f} s against a 2.0 s bound".format(took))
+    told = next((line.split() for line in out_text.splitlines() if line.startswith("PIDS ")), None)
+    if told is None or len(told) != 3:
+        faults.append("the hung unit never reported its pids ({!r})".format(out_text[:120]))
+    else:
+        for target in (int(told[1]), int(told[2])):
+            if not ended(target, 10.0):
+                faults.append("pid {} of the hung unit's group was still running after the kill "
+                              "(a leftover process)".format(target))
+
+    # (2) an early os._exit(0) writes no completion record: never a pass.
+    code, _took, _out_text, err_text = run_vector("synthetic-early", 10.0,
+                                                  "import os\nos._exit(0)\n")
+    if code != EXIT_MALFORMED or "completion record" not in err_text or "synthetic-early" not in err_text:
+        faults.append("an early os._exit(0) with no completion record was not the named exit-2 "
+                      "failure (code {}, stderr tail {!r})".format(code, err_text[-200:]))
+
+    # (3) a record that contradicts the exit fails closed; a matching record passes.
+    code, _took, _out_text, err_text = run_vector("synthetic-mismatch", 10.0, (
+        "import os\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-mismatch 0\\n')\n"
+        "os._exit(1)\n"))
+    if code != EXIT_MALFORMED or "completion record" not in err_text:
+        faults.append("a record saying 0 over an exit 1 was not the named exit-2 mismatch "
+                      "(code {}, stderr tail {!r})".format(code, err_text[-200:]))
+    code, _took, _out_text, err_text = run_vector("synthetic-pass", 10.0, (
+        "import os\n"
+        "os.write(2, ('opf-unit-cleanup-boundary synthetic-pass '\n"
+        "             + str(os.getpid()) + '\\n').encode('utf-8'))\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-pass 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_OK:
+        faults.append("a clean unit with a matching record did not pass (code {}, stderr tail {!r})"
+                      .format(code, err_text[-200:]))
+
+    # (4) endless stdout cannot delay the deadline, and the copy is capped with the named note.
+    cap = _UNIT_OUTPUT_CAP
+    try:
+        globals()["_UNIT_OUTPUT_CAP"] = 65536
+        code, took, out_text, err_text = run_vector("synthetic-noisy", 2.0, (
+            "import os, time\n"
+            "chunk = b'x' * 65536\n"
+            "while True:\n"
+            "    os.write(1, chunk)\n"
+            "    time.sleep(0.005)\n"))
+    finally:
+        globals()["_UNIT_OUTPUT_CAP"] = cap
+    if code != EXIT_MALFORMED or "outer bound" not in err_text:
+        faults.append("the endlessly writing unit was not the named outer-bound exit 2 (code {})"
+                      .format(code))
+    if took >= 22.0:
+        faults.append("endless stdout delayed the deadline: the kill took {:.1f} s against a 2.0 s "
+                      "bound".format(took))
+    if "copy cap" not in out_text or len(out_text) > 65536 + 400:
+        faults.append("the capped copy carried no truncation note, or overran its cap ({} chars, "
+                      "tail {!r})".format(len(out_text), out_text[-120:]))
+
+    # (5) the flip: committed False enforces the bound; True (in-process, restored) removes it, and
+    # the SAME unit then finishes on its own clean exit past the bound. Both halves stay bounded.
+    sleeper = (
+        "import os, time\n"
+        "time.sleep(3.0)\n"
+        "os.write(2, ('opf-unit-cleanup-boundary synthetic-flip '\n"
+        "             + str(os.getpid()) + '\\n').encode('utf-8'))\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-flip 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n")
+    code, took, _out_text, err_text = run_vector("synthetic-flip", 1.0, sleeper)
+    if code != EXIT_MALFORMED or "outer bound" not in err_text or took >= 12.0:
+        faults.append("with the committed flip the 1 s bound did not kill the 3 s unit (code {}, "
+                      "{:.1f} s)".format(code, took))
+    previous = _UNIT_BOUND_DISABLED
+    _UNIT_BOUND_DISABLED = True
+    try:
+        code, took, _out_text, err_text = run_vector("synthetic-flip", 1.0, sleeper)
+    finally:
+        _UNIT_BOUND_DISABLED = previous
+    if code != EXIT_OK or took < 2.0:
+        faults.append("with the bound flipped off the same unit did not outlive its 1 s bound to its "
+                      "own clean exit (code {}, {:.1f} s): the deadline branch is not the live "
+                      "mechanism".format(code, took))
+
+    # (6) the vocabulary failure must be NAMED, not only exit 2 (the child's _exit mapping yields 2
+    # even with the check removed).
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        code = _unit_child_code("synthetic-vocab", lambda: 3, False)
+    text = sink.getvalue()
+    if code != EXIT_MALFORMED or "returned out-of-range code" not in text or "synthetic-vocab" not in text:
+        faults.append("a unit returning 3 did not yield the named out-of-range failure (code {}, "
+                      "stderr tail {!r})".format(code, text[-200:]))
+
+    # (8) the internal watchdog is live: armed at 1 s in a sleeping unit process, it SIGKILLs the
+    # unit well before the outer bound. Under the runner the diagnostic asserted is the runner's
+    # own `killed by signal 9` failure (QA31 codex MEDIUM): the runner kills the whole group, the
+    # helper included, the moment it observes the leader's death, which can drop the helper's
+    # report, so the helper's text is not something a runner-driven vector can require.
+    here = str(Path(__file__).resolve().parent)
+    code, took, _out_text, err_text = run_vector("synthetic-watchdog", 15.0, (
+        "import sys, time\n"
+        "sys.path.insert(0, " + repr(here) + ")\n"
+        "import opf\n"
+        "opf._unit_internal_watchdog('synthetic-watchdog', 1.0)\n"
+        "time.sleep(3600)\n"))
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text:
+        faults.append("the armed internal watchdog did not SIGKILL its sleeping unit into the "
+                      "runner's named signal failure (code {}, stderr tail {!r})".format(
+                          code, err_text[-240:]))
+    if took >= 12.0:
+        faults.append("the armed internal watchdog did not fire by its 1 s budget ({:.1f} s against "
+                      "a 15 s outer bound)".format(took))
+    # (8, direct) the NAMED internal-budget text, where nothing races it: the armed unit runs in its
+    # own session with stderr on a FILE (always writable) and no runner, so nothing kills the
+    # helper, which reports BEFORE it writes its record; once the record is there, the text is too.
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        record_path = os.path.join(hold, "record")
+        named_path = os.path.join(hold, "err")
+        env = dict(os.environ)
+        env["OPF_SELF_TEST_RESULT"] = record_path
+        direct = None
+        try:
+            with open(named_path, "wb") as named_file:
+                direct = subprocess.Popen(
+                    [sys.executable, "-I", "-B", "-c", (
+                        "import sys, time\n"
+                        "sys.path.insert(0, " + repr(here) + ")\n"
+                        "import opf\n"
+                        "opf._unit_internal_watchdog('synthetic-named', 0.5)\n"
+                        "time.sleep(30)\n")],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=named_file,
+                    env=env, start_new_session=True)
+            record = None
+            waited = time.monotonic() + 10.0
+            while time.monotonic() < waited:
+                try:
+                    with open(record_path, "r", encoding="utf-8") as handle:
+                        record = handle.read()
+                except OSError:
+                    record = None
+                if record and record.startswith("synthetic-named 2 "):
+                    break
+                time.sleep(0.05)
+            with open(named_path, "rb") as handle:
+                named = handle.read().decode("utf-8", "replace")
+            if (not record or not record.startswith("synthetic-named 2 ")
+                    or "INTERNAL budget" not in named):
+                faults.append("the expiring watchdog, launched where nothing kills it, did not "
+                              "write its named internal-budget text before its record (record "
+                              "{!r}, stderr tail {!r})".format(record, named[-240:]))
+        finally:
+            if direct is not None:
+                try:
+                    direct.kill()
+                except OSError:
+                    pass
+                try:
+                    direct.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+    # (7) a label without its own bounds row is refused by name, without running.
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = run_self_tests(("synthetic-unbudgeted",))
+    if code != EXIT_MALFORMED or "_UNIT_OUTER_BOUNDS row" not in err.getvalue():
+        faults.append("a label without a bounds row was not refused by name (code {}, stderr tail "
+                      "{!r})".format(code, err.getvalue()[-200:]))
+
+    # (9) QA28 codex B1 / claude MAJOR 1: an inherited SIGCHLD=SIG_IGN must not reduce the verdict
+    # to the record alone -- the runner holds SIG_DFL around the child, so the mismatch still fails.
+    previous_sigchld = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-chld", 10.0, (
+            "import os\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-chld 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(1)\n"))
+    finally:
+        signal.signal(signal.SIGCHLD, previous_sigchld)
+    if code != EXIT_MALFORMED or "completion record" not in err_text:
+        faults.append("under an inherited SIGCHLD=SIG_IGN a record saying 0 over an exit 1 was not "
+                      "the named exit-2 mismatch (code {}, stderr tail {!r})".format(
+                          code, err_text[-200:]))
+
+    # (10) QA28 codex MAJOR 4 / claude MINOR 3: a descendant that STAYS in the unit's group dies on
+    # a normal, successful completion too -- the group kill runs on every path, before the reap.
+    code, _took, out_text, err_text = run_vector("synthetic-stay", 10.0, (
+        "import os, time\n"
+        "kid = os.fork()\n"
+        "if kid == 0:\n"
+        "    time.sleep(300)\n"
+        "    os._exit(0)\n"
+        "print('STAY', kid, flush=True)\n"
+        "os.write(2, ('opf-unit-cleanup-boundary synthetic-stay '\n"
+        "             + str(os.getpid()) + '\\n').encode('utf-8'))\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-stay 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    told = next((line.split() for line in out_text.splitlines() if line.startswith("STAY ")), None)
+    if code != EXIT_OK or told is None or len(told) != 2:
+        faults.append("the stayed-descendant unit did not pass cleanly or never told its fork "
+                      "(code {}, stdout {!r}, stderr tail {!r})".format(
+                          code, out_text[:120], err_text[-160:]))
+    elif not ended(int(told[1]), 10.0):
+        faults.append("a descendant that stayed in the unit's group survived a clean completion "
+                      "(pid {})".format(told[1]))
+
+    # (11) QA28 codex B2: a FIFO planted at the result path is a quick NAMED failure, never a hang.
+    code, took, _out_text, err_text = run_vector("synthetic-fifo-result", 5.0, (
+        "import os\n"
+        "os.mkfifo(os.environ['OPF_SELF_TEST_RESULT'])\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "regular file" not in err_text or took >= 12.0:
+        faults.append("a FIFO planted at the result path was not the quick named non-regular "
+                      "failure (code {}, {:.1f} s, stderr tail {!r})".format(
+                          code, took, err_text[-200:]))
+
+    # (12) QA28 codex B2, the capture half: a FIFO replacing the stdout capture file is a quick
+    # NAMED failure, never a blocking open.
+    code, took, _out_text, err_text = run_vector("synthetic-fifo-out", 5.0, (
+        "import os\n"
+        "target = os.readlink('/proc/self/fd/1')\n"
+        "os.close(1)\n"
+        "os.remove(target)\n"
+        "os.mkfifo(target)\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-fifo-out 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "regular file" not in err_text or took >= 12.0:
+        faults.append("a FIFO replacing the stdout capture was not the quick named non-regular "
+                      "failure (code {}, {:.1f} s, stderr tail {!r})".format(
+                          code, took, err_text[-200:]))
+
+    # (13) QA28 codex B3: delivery into a full pipe nobody reads is bounded, leaves NO abandoned
+    # writer thread behind (interpreter shutdown can wedge or abort on its stream lock), and
+    # restores the caller descriptor's blocking mode.
+    reader, writer = os.pipe()
+    sink = os.fdopen(writer, "w", encoding="utf-8")
+    try:
+        os.set_blocking(writer, False)
+        try:
+            while True:
+                os.write(writer, b"x" * 65536)
+        except BlockingIOError:
+            pass
+        os.set_blocking(writer, True)
+        threads_before = threading.active_count()
+        begun = time.monotonic()
+        _unit_deliver(sink, b"y" * 65536, 1.0)
+        took = time.monotonic() - begun
+        threads_after = threading.active_count()
+        if took >= 8.0:
+            faults.append("a bounded deliver into a full pipe took {:.1f} s against a 1.0 s "
+                          "bound".format(took))
+        if threads_after != threads_before:
+            faults.append("a deliver into a full pipe left an abandoned writer thread behind ({} "
+                          "threads, was {}): interpreter shutdown can wedge on its stream "
+                          "lock".format(threads_after, threads_before))
+        if os.get_blocking(writer) is not True:
+            faults.append("the bounded deliver did not restore the caller stream's blocking mode")
+    finally:
+        os.close(reader)
+        try:
+            sink.close()
+        except OSError:
+            pass
+
+    # (14) QA28 codex MAJOR 5 / claude MEDIUM 3: capture growth is bounded AT THE SOURCE -- a unit
+    # writing past _UNIT_FSIZE_LIMIT is stopped there (EFBIG under Python's ignored SIGXFSZ, the
+    # fatal signal in other writers), fails closed by name, and the capture file never grows past
+    # the limit (run under a 64 KiB test limit, restored in a finally).
+    fsize_limit = _UNIT_FSIZE_LIMIT
+    try:
+        globals()["_UNIT_FSIZE_LIMIT"] = 65536
+        code, _took, out_text, err_text = run_vector("synthetic-fsize", 10.0, (
+            "import os\n"
+            "chunk = b'z' * 65536\n"
+            "for _ in range(4):\n"
+            "    os.write(1, chunk)\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-fsize 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(0)\n"))
+    finally:
+        globals()["_UNIT_FSIZE_LIMIT"] = fsize_limit
+    if code != EXIT_MALFORMED or ("killed by signal" not in err_text
+                                      and "completion record" not in err_text):
+        faults.append("a unit writing past _UNIT_FSIZE_LIMIT was not stopped at the source "
+                      "(code {}, stderr tail {!r})".format(code, err_text[-240:]))
+    if len(out_text) > 65536 + 400:
+        faults.append("the at-source file-size limit did not bound the capture ({} chars "
+                      "copied)".format(len(out_text)))
+
+    # (15) QA28, the watchdog triple: (a) arming and releasing the internal watchdog leaves a
+    # caller's own armed real timer alone (no SIGALRM borrowing, no verbatim restore); (b) a unit
+    # re-arming SIGALRM cannot mute it; (c) run inside a launcher's group, its expiry confines the
+    # kill to the unit and never takes the launcher's group down.
+    held = signal.signal(signal.SIGALRM, lambda _signum, _frame: None)
+    signal.setitimer(signal.ITIMER_REAL, 60.0)
+    try:
+        release = _unit_internal_watchdog("synthetic-timer", 30.0)
+        release()
+        remaining = signal.setitimer(signal.ITIMER_REAL, 0.0)[0]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, held)
+    if remaining < 50.0:
+        faults.append("arming and releasing the internal watchdog disturbed the caller's own real "
+                      "timer (about {:.1f} s left of 60)".format(remaining))
+    code, took, _out_text, err_text = run_vector("synthetic-rearm", 15.0, (
+        "import os, signal, sys, time\n"
+        "sys.path.insert(0, " + repr(here) + ")\n"
+        "import opf\n"
+        "opf._unit_internal_watchdog('synthetic-rearm', 0.5)\n"
+        "signal.signal(signal.SIGALRM, lambda _signum, _frame: None)\n"
+        "signal.setitimer(signal.ITIMER_REAL, 0.05)\n"
+        "time.sleep(2.5)\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-rearm 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    # The diagnostic asserted is the runner's own `killed by signal 9` (QA31 codex MEDIUM: the
+    # helper's text can be lost to the runner's group kill); a muted watchdog lets the unit reach
+    # its own record and exit 0 instead, a pass this check refuses.
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text or took >= 12.0:
+        faults.append("a unit re-arming SIGALRM muted the internal watchdog (code {}, {:.1f} s, "
+                      "stderr tail {!r})".format(code, took, err_text[-240:]))
+    arm_source = (
+        "import sys, time\n"
+        "sys.path.insert(0, " + repr(here) + ")\n"
+        "import opf\n"
+        "opf._unit_internal_watchdog('synthetic-nonleader', 0.5)\n"
+        "time.sleep(30)\n")
+    wrapper_source = (
+        "import subprocess, sys\n"
+        "arm = subprocess.Popen([sys.executable, '-I', '-c', " + repr(arm_source) + "],\n"
+        "                       stdout=subprocess.DEVNULL)\n"
+        "rc = arm.wait(timeout=20)\n"
+        "print('WRAPPER-ALIVE', rc, flush=True)\n")
+    probe = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", wrapper_source], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, timeout=30.0)
+    if probe.returncode != 0 or b"WRAPPER-ALIVE -9" not in probe.stdout:
+        faults.append("an expiring watchdog armed inside a launcher's group did not confine its "
+                      "kill to the unit (wrapper rc {}, stdout {!r})".format(
+                          probe.returncode, probe.stdout[:120]))
+
+    # (16) QA28 claude MEDIUM 2 and the PDEATHSIG tether: an interrupted driver (SIGINT) kills and
+    # reaps its running unit on the way out, and a SIGKILLed driver's unit leader dies with it.
+    for signame, signo in (("SIGINT", signal.SIGINT), ("SIGKILL", signal.SIGKILL)):
+        with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+            pid_path = os.path.join(hold, "pid")
+            unit_source = (
+                "import os, time\n"
+                "with open(" + repr(pid_path) + ", 'w') as handle:\n"
+                "    handle.write(str(os.getpid()))\n"
+                "time.sleep(60)\n")
+            driver_source = (
+                "import sys\n"
+                "sys.path.insert(0, " + repr(here) + ")\n"
+                "import opf\n"
+                "opf._run_unit_subprocess('synthetic-interrupt', 30.0,\n"
+                "                         argv=[sys.executable, '-I', '-c', "
+                + repr(unit_source) + "])\n")
+            # The driver makes its box under `hold` (QA33 claude MINOR 3): a SIGKILLed driver runs
+            # no removal, so its box would otherwise stay in the caller's TMPDIR; here `hold`'s own
+            # cleanup takes it once the unit is gone.
+            driver = subprocess.Popen([sys.executable, "-I", "-B", "-c", driver_source],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True,
+                                      env=dict(os.environ, TMPDIR=hold))
+            unit_pid = None
+            waited = time.monotonic() + 15.0
+            while time.monotonic() < waited:
+                try:
+                    with open(pid_path, "r", encoding="utf-8") as handle:
+                        told_pid = handle.read()
+                    if told_pid:
+                        unit_pid = int(told_pid)
+                        break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(0.05)
+            if unit_pid is None:
+                faults.append("the {}-interruption vector's unit never reported its "
+                              "pid".format(signame))
+                try:
+                    driver.kill()
+                except OSError:
+                    pass
+                try:
+                    driver.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                continue
+            os.kill(driver.pid, signo)
+            try:
+                driver.wait(timeout=15.0)
+            except subprocess.TimeoutExpired:
+                faults.append("the {}-signalled driver did not exit".format(signame))
+            if not ended(unit_pid, 10.0):
+                faults.append("a unit outlived its {}-signalled parent (pid {} still "
+                              "running)".format(signame, unit_pid))
+                try:
+                    os.killpg(unit_pid, signal.SIGKILL)   # cleanup, only after the fault is recorded
+                except OSError:
+                    pass
+
+    # (17) QA29 codex B1: a competing in-process reaper that reaps the leader right after the
+    # WNOWAIT observation cannot launder a nonzero exit into a pass -- the verdict keeps the
+    # status the observation itself carried, so the planted success record cannot stand over the
+    # real exit 7.
+    real_waitid = os.waitid
+
+    def reaping_waitid(idtype, ident, options):
+        outcome = real_waitid(idtype, ident, options)
+        if outcome is not None:
+            try:
+                os.waitpid(ident, os.WNOHANG)   # the competing reap, right after the observation
+            except OSError:
+                pass
+        return outcome
+
+    os.waitid = reaping_waitid
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-reaped", 10.0, (
+            "import os\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-reaped 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(7)\n"))
+    finally:
+        os.waitid = real_waitid
+    if code != EXIT_MALFORMED or "exited 7" not in err_text:
+        faults.append("a competing reaper right after the WNOWAIT observation laundered an exit 7 "
+                      "under a planted success record (code {}, stderr tail {!r}): the verdict "
+                      "must keep the observed status".format(code, err_text[-200:]))
+
+    # (18) QA29 claude MINOR 2 / gemini: a leader reaped before this runner ever observed it (the
+    # lost path) licences NO group kill -- the pid is unpinned and may already be reused -- and
+    # the named reaped-outside failure is exit 2.
+    killpg_calls = []
+    real_killpg = os.killpg
+
+    def spying_killpg(pgid, sig):
+        killpg_calls.append(pgid)
+        return real_killpg(pgid, sig)
+
+    def lost_waitid(idtype, ident, options):
+        raise ChildProcessError("the leader was reaped outside the runner (modelled)")
+
+    os.waitid, os.killpg = lost_waitid, spying_killpg
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-lost", 10.0, (
+            "import os\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-lost 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(0)\n"))
+    finally:
+        os.waitid, os.killpg = real_waitid, real_killpg
+    if code != EXIT_MALFORMED or "reaped outside this runner" not in err_text:
+        faults.append("the lost path was not the named reaped-outside exit-2 failure (code {}, "
+                      "stderr tail {!r})".format(code, err_text[-200:]))
+    if killpg_calls:
+        faults.append("the lost path still issued a group kill ({} killpg call(s)): a reaped "
+                      "leader's pid licences nothing".format(len(killpg_calls)))
+
+    # (19) QA29, the no-waitid fallback: the reap comes FIRST there, so no group kill may follow
+    # it -- an in-group descendant SURVIVES a fallback completion (the disclosed fallback
+    # residual), because the reaped leader's pid may already name an unrelated group.
+    os.waitid = None   # the fallback platform, modelled; restored below
+    try:
+        code, _took, out_text, err_text = run_vector("synthetic-fallback", 10.0, (
+            "import os, time\n"
+            "kid = os.fork()\n"
+            "if kid == 0:\n"
+            "    time.sleep(4)\n"
+            "    os._exit(0)\n"
+            "print('FALLBACK', kid, flush=True)\n"
+            "os.write(2, ('opf-unit-cleanup-boundary synthetic-fallback '\n"
+            "             + str(os.getpid()) + '\\n').encode('utf-8'))\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-fallback 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(0)\n"))
+    finally:
+        os.waitid = real_waitid
+    told = next((line.split() for line in out_text.splitlines() if line.startswith("FALLBACK ")), None)
+    if code != EXIT_OK or told is None or len(told) != 2:
+        faults.append("the fallback-path unit did not pass cleanly or never told its fork "
+                      "(code {}, stdout {!r}, stderr tail {!r})".format(
+                          code, out_text[:120], err_text[-160:]))
+    elif ended(int(told[1]), 1.0):
+        faults.append("the no-waitid fallback still killed the unit's group after its reap "
+                      "(pid {} gone): a reaped pid licences no group kill".format(told[1]))
+
+    # (20) QA29 codex MAJOR 4: a FIFO planted at the result path cannot park the internal
+    # watchdog's report -- the watchdog kills FIRST and its report is non-blocking and
+    # regular-only, so the budget still fails the unit closed, by name, at the budget.
+    code, took, _out_text, err_text = run_vector("synthetic-fifo-watchdog", 15.0, (
+        "import os, sys, time\n"
+        "sys.path.insert(0, " + repr(here) + ")\n"
+        "import opf\n"
+        "os.mkfifo(os.environ['OPF_SELF_TEST_RESULT'])\n"
+        "opf._unit_internal_watchdog('synthetic-fifo-watchdog', 0.5)\n"
+        "time.sleep(4)\n"
+        "os.remove(os.environ['OPF_SELF_TEST_RESULT'])\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-fifo-watchdog 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text:
+        faults.append("a FIFO at the result path parked the watchdog's report past its budget "
+                      "(code {}, stderr tail {!r}): the watchdog must kill before it reports, "
+                      "never blocking (the runner's own signal-9 failure is the asserted "
+                      "diagnostic, QA31 codex MEDIUM)".format(code, err_text[-240:]))
+    if took >= 3.0:
+        faults.append("the FIFO-parked watchdog did not enforce its 0.5 s budget ({:.1f} s)".format(took))
+
+    # (21) QA29 claude MINOR 1: armed under a group leader that is NOT a session leader (a shell
+    # job-control pipeline head), the watchdog kills only the unit -- never a pipeline sibling
+    # sharing that group.
+    leader = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", (
+            "import sys, time\n"
+            "sys.path.insert(0, " + repr(here) + ")\n"
+            "import opf\n"
+            "opf._unit_internal_watchdog('synthetic-jobcontrol', 0.5)\n"
+            "time.sleep(30)\n")],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        preexec_fn=os.setpgrp)
+    sibling = None
+    try:
+        sibling = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", "import time\ntime.sleep(6)\n"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: os.setpgid(0, leader.pid))
+        try:
+            leader_rc = leader.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            leader_rc = None
+        try:
+            sibling_rc = sibling.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            sibling_rc = None
+        if leader_rc != -signal.SIGKILL:
+            faults.append("the job-control-style unit was not killed by its own watchdog "
+                          "(rc {})".format(leader_rc))
+        if sibling_rc != 0:
+            faults.append("a pipeline sibling sharing the unit's group did not survive the "
+                          "watchdog's expiry (rc {}): a group leader that is not a session leader "
+                          "licences no group kill".format(sibling_rc))
+    finally:
+        for proc in (leader, sibling):
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+    # (22) QA29 claude MEDIUM 1: delivery never touches os.set_blocking -- the O_NONBLOCK flag
+    # lives on the open file DESCRIPTION, shared by every process holding the pipe -- and still
+    # delivers through its poll-gated rounds.
+    drain_end, feed_end = os.pipe()
+    feed_sink = os.fdopen(feed_end, "w", encoding="utf-8")
+    flips = []
+    real_set_blocking = os.set_blocking
+
+    def spying_set_blocking(fd, blocking):
+        flips.append((fd, blocking))
+        return real_set_blocking(fd, blocking)
+
+    try:
+        os.set_blocking = spying_set_blocking
+        try:
+            _unit_deliver(feed_sink, b"q" * 4096, 5.0)
+        finally:
+            os.set_blocking = real_set_blocking
+        if flips:
+            faults.append("the bounded deliver flipped os.set_blocking on a caller descriptor "
+                          "({}): the O_NONBLOCK flag is shared with every holder of the open "
+                          "file description".format(flips))
+        real_set_blocking(drain_end, False)
+        try:
+            delivered = os.read(drain_end, 8192)
+        except BlockingIOError:
+            delivered = b""
+        if delivered != b"q" * 4096:
+            faults.append("the poll-gated deliver did not deliver into a pipe with room "
+                          "({} bytes arrived)".format(len(delivered)))
+    finally:
+        os.close(drain_end)
+        try:
+            feed_sink.close()
+        except OSError:
+            pass
+
+    # (23) QA29 codex MAJOR 5: a passing verdict requires a readable capture and a clean error
+    # stream -- a unit that unlinks its stderr capture, and a unit exiting 0 over an
+    # uncaught-exception traceback, both fail closed by name. (The stdout capture goes through
+    # the same _unit_copy_capped, so the unlink sibling holds for it too.)
+    code, _took, _out_text, err_text = run_vector("synthetic-unlinked-err", 10.0, (
+        "import os\n"
+        "os.remove(os.readlink('/proc/self/fd/2'))\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-unlinked-err 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "stderr capture could not be opened" not in err_text:
+        faults.append("an unlinked stderr capture still passed (code {}, stderr tail {!r}): a "
+                      "passing verdict requires a readable, complete capture".format(
+                          code, err_text[-200:]))
+    code, _took, _out_text, err_text = run_vector("synthetic-tainted-err", 10.0, (
+        "import os, sys\n"
+        "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+        "sys.stderr.write('ZeroDivisionError: division by zero\\n')\n"
+        "sys.stderr.flush()\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-tainted-err 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "error stream" not in err_text:
+        faults.append("an exit 0 over an uncaught-exception traceback still passed (code {}, "
+                      "stderr tail {!r}): a passing verdict requires an empty or clean error "
+                      "stream".format(code, err_text[-200:]))
+
+    # (24) QA30 codex MAJOR / claude MINOR 1: a unit that unlinks its stderr capture and plants
+    # a FRESH regular file at the same path cannot launder a tainted stream into a pass -- the
+    # read-back requires the very file the runner created, by device and inode.
+    code, _took, _out_text, err_text = run_vector("synthetic-substituted-err", 10.0, (
+        "import os\n"
+        "os.write(2, b'Traceback (most recent call last):\\nRuntimeError: laundered\\n')\n"
+        "target = os.readlink('/proc/self/fd/2')\n"
+        "os.unlink(target)\n"
+        "with open(target, 'wb'):\n"
+        "    pass\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-substituted-err 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "capture file this runner created" not in err_text:
+        faults.append("a substituted stderr capture laundered a tainted stream (code {}, stderr "
+                      "tail {!r}): the read-back must reject a different file at the capture's "
+                      "path by device and inode (QA30 codex MAJOR)".format(code, err_text[-240:]))
+
+    # (25) QA30 codex MEDIUM / claude MINOR 4: with the unit's stderr a FULL pipe nobody reads,
+    # the expiring watchdog still reaches its record write within its own bounded lifetime --
+    # the stderr report is poll-gated and dropped, never a blocking write that would park the
+    # helper between its kill and its record.
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        record_path = os.path.join(hold, "record")
+        pipe_read, pipe_write = os.pipe()
+        blocked = None
+        try:
+            os.set_blocking(pipe_write, False)
+            try:
+                while True:
+                    os.write(pipe_write, b"f" * 65536)
+            except BlockingIOError:
+                pass
+            os.set_blocking(pipe_write, True)
+            env = dict(os.environ)
+            env["OPF_SELF_TEST_RESULT"] = record_path
+            blocked = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", (
+                    "import sys, time\n"
+                    "sys.path.insert(0, " + repr(here) + ")\n"
+                    "import opf\n"
+                    "opf._unit_internal_watchdog('synthetic-blocked-stderr', 0.2)\n"
+                    "time.sleep(30)\n")],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=pipe_write,
+                env=env, start_new_session=True)
+            record = None
+            waited = time.monotonic() + 10.0
+            while time.monotonic() < waited:
+                try:
+                    with open(record_path, "r", encoding="utf-8") as handle:
+                        record = handle.read()
+                except OSError:
+                    record = None
+                if record and record.startswith("synthetic-blocked-stderr 2 "):
+                    break
+                time.sleep(0.05)
+            if not record or not record.startswith("synthetic-blocked-stderr 2 "):
+                faults.append("with its stderr a full unread pipe the expiring watchdog never "
+                              "reached its record write within 10 s (record {!r}): the stderr "
+                              "report must be bounded and dropped, never a blocking write "
+                              "(QA30 codex MEDIUM)".format(record))
+        finally:
+            os.close(pipe_read)
+            os.close(pipe_write)
+            if blocked is not None:
+                try:
+                    blocked.kill()
+                except OSError:
+                    pass
+                try:
+                    blocked.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+    # (26) QA30 gemini: without os.O_NOFOLLOW (or os.O_NONBLOCK) there is no race-free guard
+    # for the name-based read-backs, and the runner refuses BY NAME, fail closed, instead of
+    # opening unguarded (modelled by removing the flag in-process, restored in a finally); the
+    # watchdog helper's generated source carries the same fail-closed gate for its record write.
+    unguarded_unit = (
+        "import os\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-unguarded 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n")
+
+    def expect_refusal(code, err_text, flag_name):
+        if code != EXIT_MALFORMED or "lacks O_NOFOLLOW or O_NONBLOCK" not in err_text:
+            faults.append("with os.{} absent the runner still ran unguarded (code {}, stderr "
+                          "tail {!r}): no race-free containment primitive means refusing by "
+                          "name, fail closed (QA30 gemini)".format(flag_name, code,
+                                                                   err_text[-200:]))
+
+    saved_nofollow = os.O_NOFOLLOW
+    del os.O_NOFOLLOW
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-unguarded", 10.0,
+                                                      unguarded_unit)
+    finally:
+        os.O_NOFOLLOW = saved_nofollow
+    expect_refusal(code, err_text, "O_NOFOLLOW")
+    saved_nonblock = os.O_NONBLOCK
+    del os.O_NONBLOCK
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-unguarded", 10.0,
+                                                      unguarded_unit)
+    finally:
+        os.O_NONBLOCK = saved_nonblock
+    expect_refusal(code, err_text, "O_NONBLOCK")
+    watchdog_source = inspect.getsource(_unit_internal_watchdog)
+    if "hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_NONBLOCK')" not in watchdog_source:
+        faults.append("the watchdog helper's record write carries no O_NOFOLLOW/O_NONBLOCK "
+                      "fail-closed gate: a platform lacking either must never fall back to an "
+                      "unguarded name-based open (QA30 gemini)")
+
+    # (27) QA30 claude MINOR 2: a KeyboardInterrupt surfacing INSIDE the post-observation reap
+    # -- after Popen has recorded the exit, before the runner's next line -- licences no second
+    # group kill: the licence is derived from the recorded reap state at the instant of use, so
+    # the interruption cleanup sees the leader already reaped and the one pre-reap group kill,
+    # issued while the leader still pinned its group, stays the only one.
+    real_popen_wait = subprocess.Popen.wait
+    interrupt_armed = [True]
+
+    def interrupting_wait(self, timeout=None):
+        outcome = real_popen_wait(self, timeout=timeout)
+        if interrupt_armed[0]:
+            interrupt_armed[0] = False
+            raise KeyboardInterrupt("surfacing between the reap and the next line (modelled)")
+        return outcome
+
+    reap_window_kills = []
+
+    def counting_killpg(pgid, sig):
+        reap_window_kills.append(pgid)
+        return real_killpg(pgid, sig)
+
+    interrupted = False
+    subprocess.Popen.wait = interrupting_wait
+    os.killpg = counting_killpg
+    try:
+        try:
+            run_vector("synthetic-reap-window", 10.0, (
+                "import os\n"
+                "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+                "    handle.write('synthetic-reap-window 0 ' + str(os.getpid()) + '\\n')\n"
+                "os._exit(0)\n"))
+        except KeyboardInterrupt:
+            interrupted = True
+    finally:
+        subprocess.Popen.wait = real_popen_wait
+        os.killpg = real_killpg
+    if not interrupted:
+        faults.append("the modelled in-reap interrupt never propagated out of the runner")
+    if len(reap_window_kills) != 1:
+        faults.append("an interrupt surfacing between the reap and the runner's next line "
+                      "licensed {} group kill(s) instead of the one pre-reap kill: a reaped "
+                      "leader's pid licences nothing (QA30 claude MINOR 2)".format(
+                          len(reap_window_kills)))
+
+    # (28) QA33 codex MAJOR / gemini: the box's removal is BOUNDED. Each case runs with the box
+    # made under `hold` (tempfile.tempdir, restored in a finally), so a remnant is observable and
+    # `hold`'s cleanup takes it: (a) a unit that leaves its box alone passes and its box is gone;
+    # (b) a directory chain deeper than _UNIT_BOX_DEPTH_CAP, (c) more entries than the entry cap
+    # (run under a 40-entry test cap) and (d) a removal past its deadline (run under a 0 s test
+    # bound) each turn a clean exit and a matching record into the named cannot-evaluate, the
+    # remnant left in place; (e) a box renamed away with a symlink left at its name is never
+    # walked through (QA34 claude MINOR 2: the renamed box keeps its out, err and result, so a
+    # removal that followed the symlink and emptied it fails here, not only the final rmdir) and
+    # is the same named exit 2; (f) a box removed while its unit runs (here by
+    # the unit itself, standing in for an outside TMPDIR sweep) is the named record failure that
+    # also names the unreadable capture and the box the removal no longer finds (QA33 claude
+    # MEDIUM 1).
+    record_line = ("os.write(2, ('opf-unit-cleanup-boundary synthetic-box '\n"
+                   "             + str(os.getpid()) + '\\n').encode('utf-8'))\n"
+                   "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+                   "    handle.write('synthetic-box 0 ' + str(os.getpid()) + '\\n')\n")
+    in_box = "import os\nbox = os.path.dirname(os.environ['OPF_SELF_TEST_RESULT'])\n"
+    box_cases = (
+        ("(a) a box left alone", None, EXIT_OK, "import os\n" + record_line),
+        ("(b) a chain deeper than the depth cap", None, EXIT_MALFORMED,
+         in_box + "os.chdir(box)\nfor _ in range(" + str(_UNIT_BOX_DEPTH_CAP + 8) + "):\n"
+         "    os.mkdir('d')\n    os.chdir('d')\n" + record_line),
+        ("(c) more entries than the entry cap", ("_UNIT_BOX_ENTRY_CAP", 40), EXIT_MALFORMED,
+         in_box + "for index in range(60):\n"
+         "    open(os.path.join(box, 'f{}'.format(index)), 'wb').close()\n" + record_line),
+        ("(d) a removal past its deadline", ("_UNIT_BOX_REMOVAL_BOUND", 0.0), EXIT_MALFORMED,
+         "import os\n" + record_line),
+        ("(e) a box swapped for a symlink", None, EXIT_MALFORMED,
+         in_box + record_line + "os.rename(box, box + '.real')\nos.symlink(box + '.real', box)\n"),
+    )
+    for case, flip, expected, script in box_cases:
+        with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+            saved_tempdir = tempfile.tempdir
+            saved_flip = None if flip is None else globals()[flip[0]]
+            try:
+                tempfile.tempdir = hold
+                if flip is not None:
+                    globals()[flip[0]] = flip[1]
+                code, took, _out_text, err_text = run_vector("synthetic-box", 10.0, script)
+            finally:
+                tempfile.tempdir = saved_tempdir
+                if flip is not None:
+                    globals()[flip[0]] = saved_flip
+            left = sorted(os.listdir(hold))
+            renamed_kept = [sorted(os.listdir(os.path.join(hold, name)))
+                            for name in left if name.endswith(".real")]
+        if case.startswith("(e)") and renamed_kept != [["err", "out", "result"]]:
+            faults.append("the bounded box removal, {}: the renamed box holds {} instead of its "
+                          "untouched err, out and result: the removal walked through the "
+                          "swapped-in symlink (QA34 claude MINOR 2)".format(case, renamed_kept))
+        if code != expected:
+            faults.append("the bounded box removal, {}: code {} instead of {} (stderr tail {!r})"
+                          .format(case, code, expected, err_text[-240:]))
+        elif expected == EXIT_OK and left:
+            faults.append("the bounded box removal, {}: the box was not removed ({})".format(
+                case, left))
+        elif expected == EXIT_MALFORMED and (
+                not left or "was not removed" not in err_text
+                or not any(os.path.join(hold, name) in err_text for name in left)):
+            faults.append("the bounded box removal, {}: the cannot-evaluate does not name a "
+                          "remnant left in place (left {}, stderr tail {!r})".format(
+                              case, left, err_text[-240:]))
+        if took >= 12.0:
+            faults.append("the bounded box removal, {}: took {:.1f} s".format(case, took))
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        saved_tempdir = tempfile.tempdir
+        try:
+            tempfile.tempdir = hold
+            code, _took, out_text, err_text = run_vector("synthetic-box", 10.0, (
+                in_box + "import shutil\nprint('BEFORE-SWEEP', flush=True)\n"
+                "shutil.rmtree(box)\n"
+                "try:\n" + "".join("    " + line + "\n" for line in record_line.splitlines())
+                + "except OSError:\n    pass\n"))
+        finally:
+            tempfile.tempdir = saved_tempdir
+    if (code != EXIT_MALFORMED or "completion record" not in err_text
+            or "capture could not be opened" not in err_text
+            or "was not removed" not in err_text):
+        faults.append("the bounded box removal, (f) a box removed while its unit ran: not the "
+                      "named record failure naming the capture and the box (code {}, stderr "
+                      "tail {!r})".format(code, err_text[-300:]))
+    # (g) QA34 codex MINOR: the deadline is checked INSIDE a directory's listing too, and again
+    # before the listing is acted on. Under a modelled clock that passes the deadline as soon as
+    # the listing yields its first entry (time.monotonic and os.scandir patched for this one
+    # direct call, restored in a finally), the removal stops with its time bound and every entry
+    # stays in place; the walk without those checks listed on and removed one entry first.
+    real_scandir = os.scandir
+    real_monotonic = time.monotonic
+    listing_began = [False]
+
+    class ListingPastTheDeadline(object):
+        def __init__(self, target):
+            self.listing = real_scandir(target)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self.listing.close()
+            return False
+
+        def __iter__(self):
+            for entry in self.listing:
+                listing_began[0] = True
+                yield entry
+
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        box = os.path.join(hold, "box")
+        os.mkdir(box)
+        for index in range(5):
+            with open(os.path.join(box, "f{}".format(index)), "wb"):
+                pass
+        made = os.lstat(box)
+        os.scandir = ListingPastTheDeadline
+        time.monotonic = lambda: real_monotonic() + (3600.0 if listing_began[0] else 0.0)
+        try:
+            stopped = _unit_remove_box(box, (made.st_dev, made.st_ino))
+        finally:
+            os.scandir = real_scandir
+            time.monotonic = real_monotonic
+        kept = sorted(os.listdir(box))
+    if stopped is None or "s bound" not in stopped or len(kept) != 5:
+        faults.append("the bounded box removal, (g) a deadline passing mid-listing: stopped {!r} "
+                      "with {} of 5 entries left; the walk must stop at its time bound inside "
+                      "the listing, before it removes anything (QA34 codex MINOR)".format(
+                          stopped, len(kept)))
+
+    # (29) merge train 2 QA, codex MAJOR: a shutdown traceback ENTIRELY past the copy cap cannot
+    # pass -- the scan covers the complete stream, never only the delivered prefix -- and neither
+    # can a marker straddling the cap boundary (the rolling window carries the marker's length
+    # across chunks). Run under a 64 KiB test cap, restored in a finally. Each unit writes its
+    # matching record and exits 0, so only the complete error-stream scan stands between it and
+    # a pass: both vectors passed before this scan read past the cap.
+    cap = _UNIT_OUTPUT_CAP
+    try:
+        globals()["_UNIT_OUTPUT_CAP"] = 65536
+        for case, writes in (
+                ("wholly past the cap",
+                 "os.write(2, b'x' * 65536)\n"
+                 "os.write(2, b'Traceback (most recent call last):\\nRuntimeError: past\\n')\n"),
+                ("straddling the cap boundary",
+                 "os.write(2, b'x' * (65536 - 16))\n"
+                 "os.write(2, b'Traceback (most recent call last):\\nRuntimeError: edge\\n')\n"),
+        ):
+            code, _took, _out_text, err_text = run_vector("synthetic-past-cap", 10.0, (
+                "import os\n" + writes +
+                "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+                "    handle.write('synthetic-past-cap 0 ' + str(os.getpid()) + '\\n')\n"
+                "os._exit(0)\n"))
+            if code != EXIT_MALFORMED or "error stream" not in err_text:
+                faults.append("an exit 0 over a traceback {} still passed (code {}, stderr tail "
+                              "{!r}): the scan must cover the complete error stream, never only "
+                              "the delivered prefix (merge train 2 QA, codex MAJOR)".format(
+                                  case, code, err_text[-240:]))
+    finally:
+        globals()["_UNIT_OUTPUT_CAP"] = cap
+
+    # (30) merge train 2 QA r2 (codex and claude MAJORs): these drive the REAL _cmd_self_test_unit
+    # in the child (a synthetic unit patched into the registry there), so the child half of the
+    # contract is the live mechanism: (a) a cleanup handler that ends the process (os._exit(0))
+    # runs before the record handler, registered FIRST of all, so the parent sees no record --
+    # before the record moved into that first-registered exit handler it was already on disk and
+    # this passed (code 0) over the interrupted cleanup; (b) a builtin cleanup hook that raises
+    # writes a frameless 'Exception ignored' fault (no 'Traceback' header) over a zero exit, and
+    # only the cleanup-boundary check refuses it; (c) a unit with a benign cleanup handler still
+    # passes through the same entry (no over-rejection).
+    def child_entry(label, fixture_body):
+        return (
+            "import atexit, os, sys\n"
+            "sys.path.insert(0, " + repr(here) + ")\n"
+            "import opf\n"
+            "def fixture():\n"
+            + fixture_body +
+            "    return 0\n"
+            "opf._self_tests = lambda: [(" + repr(label) + ", fixture)]\n"
+            "sys.exit(opf._cmd_self_test_unit(" + repr(label) + "))\n")
+
+    code, _took, _out_text, err_text = run_vector("synthetic-cleanup-interrupt", 30.0, child_entry(
+        "synthetic-cleanup-interrupt",
+        "    atexit.register(lambda: os.write(2, b'LATER CLEANUP\\n'))\n"
+        "    atexit.register(os._exit, 0)\n"))
+    if code != EXIT_MALFORMED or "completion record" not in err_text:
+        faults.append("a cleanup handler ending the child with os._exit(0) was not the named "
+                      "missing-record exit 2 (code {}, stderr tail {!r}): the record must come "
+                      "from the exit handler registered first, after every cleanup handler "
+                      "(merge train 2 QA r2, codex MAJOR)".format(code, err_text[-240:]))
+    code, _took, _out_text, err_text = run_vector("synthetic-frameless-fault", 30.0, child_entry(
+        "synthetic-frameless-fault",
+        "    atexit.register(os.remove, '/nonexistent-opf-selftest-frameless')\n"))
+    # (Since r3 the child's audit hook sees this fault first and makes the exit 2 itself, by
+    # name; the bytes after the boundary would refuse it too.)
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("an exit 0 over a frameless builtin cleanup fault still passed (code {}, "
+                      "stderr tail {!r}): a cleanup fault is never a pass "
+                      "(merge train 2 QA r2, claude MAJOR)".format(code, err_text[-240:]))
+    code, _took, _out_text, err_text = run_vector("synthetic-clean-cleanup", 30.0, child_entry(
+        "synthetic-clean-cleanup",
+        "    atexit.register(lambda: None)\n"
+        "    class Benign:\n"
+        "        def __init__(self):\n"
+        "            self.cycle = self\n"
+        "        def __del__(self):\n"
+        "            pass\n"
+        "    Benign()\n"))
+    if code != EXIT_OK:
+        faults.append("a unit with a benign cleanup handler did not pass through the real child "
+                      "entry (code {}, stderr tail {!r}): no over-rejection".format(
+                          code, err_text[-240:]))
+
+    # (31) merge train 2 QA r3, codex MAJOR: the scan names EVERY CPython fault marker, not only
+    # the traceback header (a frameless fault before the boundary used to pass).
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        for marker in _UNIT_FAULT_MARKERS:
+            path = os.path.join(hold, "capture")
+            with open(path, "wb") as handle:
+                handle.write(b"fixture diagnostic\n" + marker + b" probe\n")
+            ident = os.stat(path)
+            anomaly, tainted, _tail, _foreign = _unit_copy_capped(
+                io.StringIO(), path, "synthetic-marker", "stderr", ident)
+            if anomaly is not None or tainted != marker.decode("ascii"):
+                faults.append("the error-stream scan did not name the CPython fault marker {!r} "
+                              "(anomaly {!r}, tainted {!r}; merge train 2 QA r3, codex "
+                              "MAJOR)".format(marker, anomaly, tainted))
+
+    # (32) to (37) merge train 2 QA r3 (codex MAJOR and MEDIUM, claude MINORs 1 and 2), through
+    # the real child entry; each passed (code 0) before this round.
+    missing = "/nonexistent-opf-selftest-r3"
+    for case, body, needle in (
+            ("synthetic-grandchild-fault",
+             "    import subprocess\n"
+             "    subprocess.run([sys.executable, '-I', '-B', '-c', 'import atexit, os; "
+             "atexit.register(os.remove, ' + repr(" + repr(missing) + ") + ')'], check=True)\n",
+             "fault marker 'Exception ignored'"),
+            ("synthetic-finalizer-exit",
+             "    class Exiting:\n"
+             "        def __init__(self):\n"
+             "            self.cycle = self\n"
+             "            self.exit = os._exit\n"
+             "        def __del__(self):\n"
+             "            self.exit(0)\n"
+             "    atexit.register(Exiting)\n",
+             "completion record"),
+            ("synthetic-stderr-replaced",
+             "    import io\n"
+             "    sys.stderr = io.StringIO()\n"
+             "    atexit.register(os.remove, " + repr(missing) + ")\n",
+             "opf-unit-cleanup-fault"),
+            ("synthetic-unraisable-silenced",
+             "    sys.unraisablehook = lambda unraisable: None\n"
+             "    atexit.register(os.remove, " + repr(missing) + ")\n",
+             "opf-unit-cleanup-fault"),
+            ("synthetic-stderr-closed",
+             "    sys.stderr.close()\n"
+             "    atexit.register(os.remove, " + repr(missing) + ")\n",
+             "opf-unit-cleanup-fault"),
+            ("synthetic-excepthook-replaced",
+             "    atexit.register(setattr, sys, 'excepthook', lambda *args: None)\n",
+             "replaced the reporting machinery (sys.excepthook)"),
+    ):
+        code, _took, _out_text, err_text = run_vector(case, 30.0, child_entry(case, body))
+        if code != EXIT_MALFORMED or needle not in err_text:
+            faults.append("{} did not fail closed by name (code {}, expected {!r}, stderr tail "
+                          "{!r}; merge train 2 QA r3)".format(case, code, needle, err_text[-240:]))
+
+    # (38) merge train 2 QA r4, codex MAJOR: a grandchild's frameless asyncio fault -- `Future
+    # exception was never retrieved`, a message _UNIT_FAULT_MARKERS never knew -- lands on the
+    # inherited error stream before the cleanup boundary over a zero exit; only the empty-stream
+    # line scan stands between it and a pass (it passed the r3 marker scan).
+    asyncio_probe = ("import asyncio\n"
+                     "loop = asyncio.new_event_loop()\n"
+                     "future = loop.create_future()\n"
+                     "future.set_exception(ValueError('cleanup failed'))\n"
+                     "del future\n"
+                     "loop.close()\n")
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-asyncio-fault", 30.0, child_entry(
+            "synthetic-asyncio-fault",
+            "    import subprocess\n"
+            "    subprocess.run([sys.executable, '-I', '-B', '-c', "
+            + repr(asyncio_probe) + "], check=True)\n"))
+    if code != EXIT_MALFORMED or "undeclared line" not in err_text:
+        faults.append("an exit 0 over a frameless fault message the marker list does not know "
+                      "still passed (code {}, stderr tail {!r}): a passing unit's error stream "
+                      "is empty apart from its declared lines (merge train 2 QA r4, codex "
+                      "MAJOR)".format(code, err_text[-240:]))
+
+    # (39) merge train 2 QA r4, codex MEDIUM: a collected finalizer that creates NEW cyclic
+    # cleanup work; one collection pass left the Inner's cleanup for os._exit to skip, so its
+    # fault was never raised and the unit passed. The repeated collection reaches it, and the
+    # audit hook turns the fault into the named exit 2.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-chained-finalizer", 30.0, child_entry(
+            "synthetic-chained-finalizer",
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.remove = os.remove\n"
+            "        def __del__(self):\n"
+            "            self.remove('/nonexistent-opf-selftest-r4-chain')\n"
+            "    class Outer:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.inner = Inner\n"
+            "        def __del__(self):\n"
+            "            self.inner()\n"
+            "    atexit.register(Outer)\n"))
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("a finalizer-created cyclic finalizer's fault still passed (code {}, "
+                      "stderr tail {!r}): garbage is collected until a pass frees nothing, so "
+                      "cleanup work created by finalizers runs before the record (merge train 2 "
+                      "QA r4, codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (40) the collection bound fails CLOSED: a finalizer chain deeper than
+    # _child_contract.GC_PASS_BOUND keeps every pass freeing something, and the handler refuses
+    # by name instead of exiting over cleanup work it cannot show complete.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-unsettled-gc", 30.0, child_entry(
+            "synthetic-unsettled-gc",
+            "    def make_link(depth):\n"
+            "        class Link:\n"
+            "            def __init__(self, depth):\n"
+            "                self.cycle = self\n"
+            "                self.depth = depth\n"
+            "                self.make = make_link\n"
+            "            def __del__(self):\n"
+            "                if self.depth > 0:\n"
+            "                    self.make(self.depth - 1)\n"
+            "        Link(depth)\n"
+            "    atexit.register(make_link, " + str(_child_contract.GC_PASS_BOUND + 2) + ")\n"))
+    if code != EXIT_MALFORMED or "still freed or created objects after" not in err_text:
+        faults.append("a finalizer chain outlasting the collection bound was not the named "
+                      "fail-closed exit 2 (code {}, stderr tail {!r}; merge train 2 QA r4, "
+                      "codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (42) merge train 2 QA r5, codex MEDIUM: a pass that frees nothing is not quiescence. An
+    # Outer.__del__ that RESURRECTS its object (so the pass does not count it as freed) while
+    # building a cyclic Inner made the first pass return 0, and the r4 loop stopped there,
+    # leaving the Inner's faulting cleanup for os._exit to skip. A pass now settles only if it
+    # CHANGES NOTHING: it frees no object and leaves the identity set of tracked objects
+    # unchanged (_child_contract.collection_pass_changed_nothing). Automatic collection is
+    # disabled so the Outer is still pending when the record handler runs.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-resurrecting-finalizer", 30.0, child_entry(
+            "synthetic-resurrecting-finalizer",
+            "    import gc\n"
+            "    held = []\n"
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.remove = os.remove\n"
+            "        def __del__(self):\n"
+            "            self.remove('/nonexistent-opf-selftest-r5-resurrect')\n"
+            "    class Outer:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.held = held\n"
+            "            self.inner = Inner\n"
+            "        def __del__(self):\n"
+            "            self.held.append(self)\n"
+            "            self.inner()\n"
+            "    def setup():\n"
+            "        gc.collect()\n"
+            "        gc.disable()\n"
+            "        Outer()\n"
+            "    atexit.register(setup)\n"))
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("a resurrecting finalizer's newly created cyclic cleanup work whose "
+                      "finalizer faults still passed (code {}, stderr tail {!r}): a collection "
+                      "pass settles only if it frees nothing and leaves the tracked identity "
+                      "set unchanged (merge train 2 QA r5, codex MEDIUM)".format(
+                          code, err_text[-240:]))
+
+    # (43) merge train 2 QA r6, codex MEDIUM: the round-5 settle rule (frees nothing AND tracks
+    # no more objects than before) still passed a resurrecting finalizer that also RELEASES other
+    # tracked objects while it creates the new faulting work, since the tracked count then stays
+    # equal or lower. The shared contract settles only on a pass whose tracked identity SET is
+    # unchanged, so the released and created objects themselves unsettle the pass and the next
+    # pass collects the new work, whose fault the audit hook turns into the named exit 2.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-net-release-finalizer", 30.0, child_entry(
+            "synthetic-net-release-finalizer",
+            "    import gc\n"
+            "    held = []\n"
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "        def __del__(self):\n"
+            "            raise RuntimeError('new cyclic cleanup failed')\n"
+            "    class Outer:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.held = held\n"
+            "            self.spare = [[] for _ in range(100)]\n"
+            "            self.inner = Inner\n"
+            "        def __del__(self):\n"
+            "            self.held.append(self)\n"
+            "            self.spare.clear()\n"
+            "            self.inner()\n"
+            "    def setup():\n"
+            "        gc.collect()\n"
+            "        gc.disable()\n"
+            "        Outer()\n"
+            "    atexit.register(setup)\n"))
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("a resurrecting finalizer that releases tracked objects while creating "
+                      "new faulting cyclic cleanup work still passed (code {}, stderr tail "
+                      "{!r}): a collection pass settles only when it changes nothing (merge "
+                      "train 2 QA r6, codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (44) merge train 2 QA r10: the record was written inside the record callback, BEFORE the
+    # contract's final check, whose stream flushes run a wrapper the unit left on sys.stdout; a
+    # flush that called os._exit(0) there ended the child with exit 0 over a matching record and
+    # the boundary as its last stderr line, and the parent passed it. The record is now the
+    # contract's seal, written by os.write only after that check, so the file the child truncated
+    # before the unit ran is still empty. The wrapper fires only in the FINAL check: a `_check`
+    # frame called directly by the record handler (the first check is called through `_decide`).
+    # (45) an os._exit(0) inside the unit body leaves the same empty record.
+    for case, body in (
+            ("synthetic-final-check-exit",
+             "    class Exiting:\n"
+             "        def __init__(self, stream):\n"
+             "            self.stream = stream\n"
+             "            self.getframe = sys._getframe\n"
+             "            self.exit = os._exit\n"
+             "        def write(self, text):\n"
+             "            return self.stream.write(text)\n"
+             "        def flush(self):\n"
+             "            self.stream.flush()\n"
+             "            frame = self.getframe(1)\n"
+             "            while frame is not None:\n"
+             "                caller = frame.f_back\n"
+             "                if (frame.f_code.co_name == '_check' and caller is not None\n"
+             "                        and caller.f_code.co_name == '_record_at_exit'):\n"
+             "                    self.exit(0)\n"
+             "                frame = caller\n"
+             "    sys.stdout = Exiting(sys.stdout)\n"),
+            ("synthetic-body-exit",
+             "    os._exit(0)\n"),
+    ):
+        code, _took, _out_text, err_text = run_vector(case, 30.0, child_entry(case, body))
+        if code != EXIT_MALFORMED or "completion record" not in err_text or "got ''" not in err_text:
+            faults.append("{} was not the named missing-record exit 2 over an empty record file "
+                          "(code {}, stderr tail {!r}): the record is sealed after the final "
+                          "check (merge train 2 QA r10)".format(case, code, err_text[-240:]))
+
+    # (41) the declared-allowlist contract, both ways (merge train 2 QA r4, codex MAJOR): a unit
+    # writing EXACTLY its declared row still passes (no over-rejection; the parent-side table is
+    # patched for this label and restored in the finally), and an undeclared line -- here the
+    # very asyncio message of (38), written directly -- fails closed by name.
+    saved_rows = _UNIT_STDERR_ALLOWED.get("synthetic-declared")
+    try:
+        _UNIT_STDERR_ALLOWED["synthetic-declared"] = (b"declared fixture diagnostic",)
+        code, _took, _out_text, err_text = run_vector(
+            "synthetic-declared", 30.0, child_entry(
+                "synthetic-declared",
+                "    os.write(2, b'declared fixture diagnostic\\n')\n"))
+        if code != EXIT_OK:
+            faults.append("a unit writing exactly its declared stderr line did not pass (code "
+                          "{}, stderr tail {!r}): no over-rejection (merge train 2 QA r4)"
+                          .format(code, err_text[-240:]))
+        code, _took, _out_text, err_text = run_vector(
+            "synthetic-declared", 30.0, child_entry(
+                "synthetic-declared",
+                "    os.write(2, b'Future exception was never retrieved\\n')\n"))
+        if code != EXIT_MALFORMED or "undeclared line" not in err_text:
+            faults.append("an undeclared line on a passing unit's error stream was not the "
+                          "named fail-closed exit 2 (code {}, stderr tail {!r}; merge train 2 "
+                          "QA r4, codex MAJOR)".format(code, err_text[-240:]))
+    finally:
+        if saved_rows is None:
+            _UNIT_STDERR_ALLOWED.pop("synthetic-declared", None)
+        else:
+            _UNIT_STDERR_ALLOWED["synthetic-declared"] = saved_rows
+
+    if faults:
+        print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf unit-bound self-test: PASS (a hung unit subprocess is SIGKILLed with its whole group "
+          "at its outer bound; an early exit without its completion record, and a record that "
+          "contradicts the exit, fail closed by name; endless stdout neither delays the deadline nor "
+          "escapes the copy cap's note; the flip removing the bound is committed False and proved "
+          "live; a unit returning 3 is named by the vocabulary check; every registered unit carries "
+          "its own budget row and an unbudgeted label is refused; the armed internal watchdog "
+          "SIGKILLs a sleeping unit at its budget into the runner's named signal failure and, "
+          "where nothing races it, writes its named budget text; and the QA28 vectors hold: the "
+          "verdict survives an inherited SIGCHLD=SIG_IGN, a stayed descendant dies on a clean "
+          "completion, planted FIFOs are named failures never hangs, delivery is bounded and "
+          "thread-free, capture growth is stopped at the source, the watchdog borrows no timer and "
+          "kills only its own unit, and an interrupted or killed parent takes its unit with it; "
+          "and the QA29 vectors hold: the verdict keeps the status the WNOWAIT observation "
+          "carried, a lost or reaped leader's pid is never group-killed, the watchdog kills "
+          "before its non-blocking report and spares a job-control sibling, delivery leaves the "
+          "shared O_NONBLOCK flag alone, and a passing verdict requires a readable capture and a "
+          "clean error stream; and the QA30 vectors hold: a substituted capture is rejected by "
+          "device and inode, the watchdog's stderr report never blocks its lifetime on a full "
+          "pipe nobody reads, a platform "
+          "without O_NOFOLLOW or O_NONBLOCK is refused by name, and an interrupt inside the reap "
+          "licences no second group kill; and the QA33 vector holds: a box left alone is removed, "
+          "and a box past the removal's depth, entry or time bound, or swapped for a symlink, is "
+          "the named cannot-evaluate with its remnant left in place, and a box removed while its "
+          "unit ran is the named record failure naming the capture and the box; and the QA34 "
+          "leg holds: a swapped box's renamed files are left untouched, and a deadline passing "
+          "mid-listing stops the walk before it removes anything; and the merge-train legs hold: "
+          "the error-stream scan covers the complete capture, so a traceback wholly past the "
+          "copy cap, or straddling it, fails closed, and, through the real child entry, a "
+          "cleanup handler that ends the child leaves no completion record, a frameless builtin "
+          "cleanup fault lands past the cleanup boundary and fails closed, and a benign cleanup "
+          "handler still passes; and the r3 legs hold: every CPython fault marker is named by the "
+          "scan, and a grandchild's frameless fault before the boundary, a finalizer that ends "
+          "the child silently, and a cleanup fault under a replaced or closed sys.stderr or a "
+          "silenced sys.unraisablehook, and a replaced sys.excepthook, each fail closed; and "
+          "the r4 legs hold: a frameless fault message the marker list does not know, an "
+          "undeclared line on a passing unit's error stream, a collected finalizer's newly "
+          "created cyclic cleanup work whose finalizer faults, and a finalizer chain outlasting "
+          "the bounded repeated collection each fail closed, while a unit writing exactly its "
+          "declared stderr line still passes; and the r5 leg holds: a resurrecting finalizer's "
+          "newly created cyclic cleanup work whose finalizer faults fails closed; and the r6 "
+          "leg holds: a resurrecting finalizer that also releases tracked objects while "
+          "creating that work fails closed under the shared contract's identity-set settle "
+          "rule; and the r10 leg holds: a stdout wrapper calling os._exit(0) in the contract's "
+          "final check, and an os._exit(0) in the unit body, each leave the record file empty "
+          "and fail closed, the record sealed after the final check)")
+    return EXIT_OK
+
+
+def run_self_tests(labels=None):
+    """Keep caller HOME/XDG out of the parent as well as the units: a fresh temporary HOME/XDG with
+    GIT_CONFIG_NOSYSTEM=1 is pinned around run_self_tests_isolated, the same wrapper-then-delegate
+    shape every registered OPF self-test entry has, so the parent's own code (the runner, the
+    delivery, the box removal) never reads a caller's configuration either. Each unit's child entry
+    still pins its OWN fresh temporary HOME/XDG (_cmd_self_test_unit), and the child's scrubbed
+    environment (_unit_scrubbed_env) never carries this parent's HOME, so this wrapper adds to the
+    child's isolation and replaces none of it."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
-            return run_self_tests_isolated(tests)
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
+            return run_self_tests_isolated(labels)
 
 
-def run_self_tests_isolated(tests=None):
-    """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
-    is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
-    the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
-    by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
-    default that would need those helpers imported at module top.
-
-    Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
-    conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
-    had no fails-if-reverted check: under the DEFAULT ambient (already 4300) a dropped restore leaves 4300
-    and is invisible. So around each such helper we set a distinct SENTINEL limit (!= 4300 and != the real
-    ambient) and, after it runs, require the limit to STILL be that sentinel before restoring the real
-    ambient; a dropped restore in any of those helpers leaves 4300 != sentinel and fails the leg closed.
-    These helpers are hermetic w.r.t. the ambient int-limit by construction (they pin their own 4300), so
-    running them under the sentinel is exactly the hostile-ambient contract they already satisfy."""
-    if tests is None:
-        tests = _self_tests()
+def run_self_tests_isolated(labels=None):
+    """Run every registered helper self-test, EACH AS ITS OWN `--self-test-unit` subprocess
+    (_run_unit_subprocess, D-385-SUBPROCESS-RUNNER), forwarding each unit's verdict. The aggregate
+    exit code is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing
+    unit fails the whole leg, never masked by a later clean one. With no explicit `labels`, the
+    registered set is built by _self_tests() at call time (after _bootstrap() has bound the _opf_*
+    helpers), never a module-level default that would need those helpers imported at module top. A
+    label without its own _UNIT_OUTER_BOUNDS row is refused by name (exit 2) without running: no unit
+    runs outside a hard outer bound, and nothing is computed before that bound starts. Every
+    parent-side write to the caller's streams (the headers, the output copies, the diagnostics) goes
+    through _unit_deliver's bounded writer, so a caller stream nobody reads can never hang this
+    parent. HOME/XDG isolation is pinned twice: around this parent by the run_self_tests wrapper,
+    and around each unit by its child entry (_cmd_self_test_unit pins a fresh temporary HOME around
+    the unit), and the int-limit hermeticity sentinel (finding 8-4) and the
+    fail-closed return vocabulary ride with the unit in _unit_child_code, unchanged in meaning."""
+    if labels is None:
+        labels = [label for label, _fn in _self_tests()]
     worst = EXIT_OK
-    _idlimit_orig = sys.get_int_max_str_digits()
-    _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # distinct from 4300 AND from ambient
-    for label, fn in tests:
-        print("== opf self-test: {} ==".format(label))
-        _guard_idlimit = label in _INT_LIMIT_SELF_TESTS
-        if _guard_idlimit:
-            sys.set_int_max_str_digits(_idlimit_sentinel)
-            try:
-                code = fn()
-            finally:
-                _idlimit_after = sys.get_int_max_str_digits()
-                sys.set_int_max_str_digits(_idlimit_orig)   # restore the real ambient regardless of outcome
-            if _idlimit_after != _idlimit_sentinel:
-                print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
-                      "dropped int-limit restore is a hermeticity leak, failing closed (finding 8-4)".format(
-                          label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
-                worst = EXIT_MALFORMED
+    for label in labels:
+        _unit_deliver(sys.stdout, "== opf self-test: {} ==\n".format(label).encode("utf-8"), 30.0)
+        bound = _UNIT_OUTER_BOUNDS.get(label)
+        if type(bound) is not float:
+            _unit_deliver(sys.stderr, "opf self-test: {} has no _UNIT_OUTER_BOUNDS row of its own; a "
+                          "unit without a hard outer budget is refused, not run (fail closed)\n"
+                          .format(label).encode("utf-8", "replace"), 10.0)
+            code = EXIT_MALFORMED
         else:
-            code = fn()
-        if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
-            # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed (the
-            # worst outcome) rather than letting an unrecognized code read as clean. `type(code) is int`
-            # deliberately EXCLUDES bool (a subclass of int, where False == 0 and True == 1) and float
-            # (0.0 == 0), so a helper returning False or 0.0 can never be admitted as a clean pass.
-            print("opf self-test: {} returned out-of-range code {!r}; failing closed".format(label, code),
-                  file=sys.stderr)
-            worst = EXIT_MALFORMED
-        elif code == EXIT_MALFORMED:
+            try:
+                code = _run_unit_subprocess(label, bound)
+            except Exception as exc:
+                _unit_deliver(sys.stderr, "opf self-test: {} runner failed ({}: {}); failing "
+                              "closed\n".format(label, type(exc).__name__, exc)
+                              .encode("utf-8", "replace"), 10.0)
+                code = EXIT_MALFORMED
+        if code == EXIT_MALFORMED:
             worst = EXIT_MALFORMED
         elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
             worst = EXIT_FINDING
@@ -16093,6 +25233,15 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
+    if args and args[0] == "--self-test-unit":
+        # The suite's own child entry (D-385-SUBPROCESS-RUNNER): one registered unit in this
+        # dedicated process. A wrong arity refuses with ONE usage line (the runtime probe's
+        # refused undeclared-flag contract), before any unit runs or any record is written.
+        if len(args) != 2:
+            print("usage: opf.py --self-test-unit LABEL (one registered unit, run in this "
+                  "dedicated process; the `--self-test` suite's own child entry)", file=sys.stderr)
+            return EXIT_MALFORMED
+        return _cmd_self_test_unit(args[1])
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED

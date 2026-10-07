@@ -16,7 +16,9 @@
 #                     guard. The deny hook (opf/enforcement/claude/pretooluse_deny.py, PreToolUse only)
 #                     carries the CLI form with exit 2, so a sub-floor interpreter blocks the call. The
 #                     core hook and its plugin copy carry the guard's hook form (HOOK_SURFACES in the
-#                     gate): a fail-open event's mode warns on exit 0 instead of refusing.
+#                     gate): a fail-open event's mode warns on exit 0 instead of refusing. The pack's
+#                     clock-inject.py and future-stamp-write.py (core sources and plugin copies) carry
+#                     the CLI form with exit 2, which the plugin's launcher reports as exit 1.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
 #                     blocks the stop, and the guard runs before the hook's own block cap). Never a
@@ -31,13 +33,14 @@ format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
-    ".preview/clock-inject.py",
-    ".preview/future-stamp-write.py",
+    ".aiqt/core/hooks/scripts/clock-inject.py",
+    ".aiqt/core/hooks/scripts/future-stamp-write.py",
     ".preview/record-remove-check.py",
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
     "opf/enforcement/claude/pretooluse_deny.py",
+    "opf/tools/_child_contract.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
@@ -78,6 +81,8 @@ guarded-surfaces = [
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
     "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
     "tools/aiqt_corpus.py",
@@ -94,6 +99,7 @@ guarded-surfaces = [
     "tools/check_footer.py",
     "tools/check_gensrc_failclose.py",
     "tools/check_git_option_table.py",
+    "tools/check_hook_scripts.py",
     "tools/check_hooks_preview.py",
     "tools/check_install_page.py",
     "tools/check_instruction_budget.py",
