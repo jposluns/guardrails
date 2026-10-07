@@ -822,15 +822,40 @@ def _test_note_literal_sites(failures, tmp):
     s.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
     note("(nl-stop-warn) a Stop at the loop bound past an actionable item warns through _stop_warn",
          aiqt_hooks.orch_stop_guard(s.payload("Stop")), "AIQT guardrail")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        code = aiqt_hooks.main(["orch_stop_guard", "extra"])
-    try:
-        obj = json.loads(buf.getvalue())
-    except ValueError:
-        obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
-         (code, obj, None), "could not run")
+         _terminal_dispatch(["orch_stop_guard", "extra"]), "could not run")
+
+
+def _terminal_dispatch(argv, stdin_text=None):
+    """Run aiqt_hooks.main in-process with os._exit patched to raise SystemExit, so a TERMINAL
+    dispatcher refusal (which must never return: main's refusal paths and the fail-open warn end
+    with os._exit) can be reached and asserted here without ending the suite. The patched call
+    raises inside the refusal's try/except BaseException; the fallback os._exit after it raises
+    again, outside it, and that status is what the probe reports. The REAL os._exit behavior
+    (status preserved against broken descriptors, pre-existing buffers and diagnostic faults) is
+    pinned by tools/check_python_floor.py (launcher/dispatcher-refusal-fd-states and the
+    fault-injection checks). Returns (exit status, parsed stdout JSON or a note, None)."""
+    buf, saved_stdin, saved_exit = io.StringIO(), sys.stdin, os._exit
+
+    def _exit(status):
+        raise SystemExit(status)
+
+    try:
+        if stdin_text is not None:
+            sys.stdin = io.StringIO(stdin_text)
+        os._exit = _exit
+        with contextlib.redirect_stdout(buf):
+            try:
+                code = ("main returned", aiqt_hooks.main(argv))
+            except SystemExit as exc:
+                code = exc.code
+    finally:
+        os._exit = saved_exit
+        sys.stdin = saved_stdin
+    try:
+        return code, json.loads(buf.getvalue()), None
+    except ValueError:
+        return code, "unparseable stdout " + repr(buf.getvalue()), None
 
 
 def _shape_mutant(source, func_name, lines):
@@ -1275,17 +1300,7 @@ def _test_stop_dispatch_note_sites(failures, tmp):
          aiqt_hooks._orch_record_escape_spoof, aiqt_hooks._orch_resume_probes) = saved
 
     def dispatch(stdin_text):
-        buf, saved_stdin = io.StringIO(), sys.stdin
-        try:
-            sys.stdin = io.StringIO(stdin_text)
-            with contextlib.redirect_stdout(buf):
-                code = aiqt_hooks.main(["orch_stop_guard"])
-        finally:
-            sys.stdin = saved_stdin
-        try:
-            return code, json.loads(buf.getvalue()), None
-        except ValueError:
-            return code, "unparseable stdout " + repr(buf.getvalue()), None
+        return _terminal_dispatch(["orch_stop_guard"], stdin_text)
 
     note("(ns-dispatch-unreadable) a Stop invocation with an unreadable payload prints the fail-open note",
          dispatch("{"), "unreadable payload")

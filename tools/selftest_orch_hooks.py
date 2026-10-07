@@ -1453,20 +1453,34 @@ def _main_isolated(report_path=None):
         check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, "RecursionError" in ds.stdout),
               (0, True))
 
-        class _MemErrStdin:
-            def read(self, *_a):
-                raise MemoryError("simulated")
-        saved_in, saved_err = sys.stdin, sys.stderr
-        cap = __import__("io").StringIO()
+        # A read that raises MemoryError cannot be fed through a real stdin, so a scratch launcher installs a
+        # raising stdin and calls the dispatcher's main in a CHILD process: every dispatcher refusal is
+        # terminal (it ends its process with os._exit), so an in-process call would end this suite. A main
+        # that RETURNS from a refusal is itself a regression; the launcher reports it and exits 97.
+        mem_launcher = tmp / "memerr_dispatch.py"
+        mem_launcher.write_text(
+            "import os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import aiqt_hooks\n"
+            "class _MemErrStdin:\n"
+            "    def read(self, *_a):\n"
+            "        raise MemoryError('simulated')\n"
+            "sys.stdin = _MemErrStdin()\n"
+            "rc = aiqt_hooks.main(sys.argv[2:])\n"
+            "os.write(2, ('main returned %r from a refusal\\n' % (rc,)).encode())\n"
+            "os._exit(97)\n", encoding="utf-8")
+
+        def _memerr_dispatch(mode):
+            return subprocess.run([sys.executable, "-I", "-B", str(mem_launcher), str(Path(hook_py).parent), mode],
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        mp = _memerr_dispatch("orch_truncation_guard")
+        check("trunc/dispatch-memoryerror-fails-closed", (mp.returncode, "MemoryError" in mp.stderr), (2, True))
+        ms = _memerr_dispatch("orch_stop_guard")
         try:
-            sys.stdin, sys.stderr = _MemErrStdin(), cap
-            try:
-                mrc = aiqt_hooks.main(["orch_truncation_guard"])
-            except MemoryError:
-                mrc = "escaped"
-        finally:
-            sys.stdin, sys.stderr = saved_in, saved_err
-        check("trunc/dispatch-memoryerror-fails-closed", (mrc, "MemoryError" in cap.getvalue()), (2, True))
+            ms_note = json.loads(ms.stdout).get("systemMessage", "")
+        except (ValueError, AttributeError):
+            ms_note = "unparseable stdout " + repr(ms.stdout)
+        check("trunc/dispatch-memoryerror-stop-warns", (ms.returncode, "MemoryError" in ms_note), (0, True))
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")

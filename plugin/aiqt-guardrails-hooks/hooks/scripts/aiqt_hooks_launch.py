@@ -24,11 +24,19 @@ and a SystemExit passes through unchanged). An aiqt_hooks.py that cannot be acqu
 symbolic link, never followed, not a regular file, a FIFO or device, empty, unreadable, or
 uncompilable) is refused by the same mode rule as the floor guard - warn on exit 0 for a fail-open
 mode, exit 2 otherwise - never by an unhandled exception's exit 1, which would let a PreToolUse
-call proceed unchecked. Every refusal here (the floor guard included) delivers its diagnostic
-best-effort with an unbuffered os.write and then ends with its required exit status, whatever the
-state of stdout and stderr (closed before Python starts, so the sys stream is None, closed after,
-or a pipe whose reader is gone; a buffered sys-stream write could also fail only at the
-interpreter's shutdown flush, which replaces the exit status with 120). Because only the acquired
+call proceed unchecked. Every refusal here (the floor guard included) decides
+its exit status FIRST, runs ALL its diagnostic work (imports, string formatting, serialization,
+encoding, unbuffered os.write delivery with a bounded retry of a partial write) inside one
+try/except BaseException that swallows everything, and ends with os._exit(status), never
+SystemExit: no diagnostic fault (a MemoryError included), no state of stdout or stderr (closed
+before Python starts, so the sys stream is None, closed after, or a pipe whose reader is gone),
+no bytes already waiting in a stream buffer (os._exit skips the interpreter's shutdown flush, so
+a refusal discards such bytes rather than letting a failed flush replace the status with 120) and
+no atexit handler can change that status. Two bounds hold, stated exactly: a FULL BLOCKING PIPE
+on the diagnostic stream can block the os.write until the reader drains it (O_NONBLOCK is never
+set on a shared descriptor, so the exit is delayed, never changed), and an EXTERNAL SIGNAL that
+terminates the process ends it outside any exit-status guarantee. A successful hook run is
+untouched: it keeps the interpreter's normal stream flushing and exit semantics. Because only the acquired
 content runs, removing, renaming or replacing the file after the open changes nothing.
 RESIDUAL: an interpreter that predates -I (Python 2, or
 Python 3 before 3.4) rejects that option before it reads this file and exits 2 on every event, so
@@ -53,25 +61,31 @@ FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
-    _floor_refusal = (
-        "error: aiqt_hooks_launch.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    try:
-        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
-        pass
+    _floor_status = 2
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
+        _floor_status = 0
+
+    def _floor_tail(number, data, attempt):
+        if data and attempt < 4:
+            _floor_tail(number, data[os.write(number, data):], attempt + 1)
+    try:
+        _floor_refusal = (
+            "error: aiqt_hooks_launch.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
         try:
-            os.write(1, (json.dumps(dict(systemMessage=(
+            _floor_tail(2, _floor_refusal.encode("utf-8", "backslashreplace"), 1)
+        except BaseException:
+            pass
+        if _floor_status == 0:
+            import json
+            _floor_tail(1, (json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n"
-                ).encode("utf-8", "backslashreplace"))
-        except (OSError, ValueError, MemoryError):
-            pass
-        raise SystemExit(0)
-    raise SystemExit(2)
+                ).encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
+        pass
+    os._exit(_floor_status)
 
 import json
 import os
@@ -79,19 +93,32 @@ import stat
 import types
 
 
+def _deliver_tail(number, data, attempt):
+    """Write data to descriptor number, retrying a PARTIAL write at most three more times (os.write
+    may return short when a signal arrives mid-write or a pipe is nearly full): the attempts are
+    bounded and counted up, never a loop, so the launcher subset holds. A write that BLOCKS (a full
+    blocking pipe whose reader has not drained it) blocks here until the reader drains it, delaying
+    the refusal's exit, never changing its status: O_NONBLOCK is never set on a shared standard
+    descriptor. An external signal that terminates the process ends it outside any exit-status
+    guarantee."""
+    if data and attempt < 4:
+        _deliver_tail(number, data[os.write(number, data):], attempt + 1)
+
+
 def _deliver(number, text):
-    """Best-effort diagnostic delivery for a refusal. os.write is unbuffered, so no byte can wait
-    in a stream buffer whose failed flush at interpreter shutdown would replace the refusal's exit
-    status with 120, and a failed delivery (a descriptor closed before Python started, closed or
-    broken later, or out of memory) is swallowed: every refusal must end with its required exit
-    status, whatever the state of stdout and stderr (with descriptor 2 closed before Python
-    starts, sys.stderr is None, so a sys.stderr.write here would raise and exit 1, which does not
-    block a PreToolUse call). The floor guard above cannot call a helper (it runs first, and
-    tools/check_python_floor.py pins it by AST to HOOK_GUARD_TEMPLATE), so it carries the same
-    try/except os.write form inline."""
+    """Best-effort diagnostic delivery for a refusal. os.write is unbuffered, so no byte waits in a
+    stream buffer whose failed flush at interpreter shutdown could replace an exit status with 120,
+    and the one except BaseException swallows EVERY failure of the delivery (a descriptor closed
+    before Python started, closed or broken later, an encoding fault, out of memory, any exception
+    at all): the caller decides the refusal's exit status BEFORE calling this and ends with
+    os._exit(status), so nothing here can change it (with descriptor 2 closed before Python starts,
+    sys.stderr is None, so a sys.stderr.write here would raise and exit 1, which does not block a
+    PreToolUse call). The floor guard above cannot call a helper (it runs first, and
+    tools/check_python_floor.py pins it by AST to HOOK_GUARD_TEMPLATE), so it carries the same form
+    inline: _floor_tail and one try/except BaseException around all its diagnostic work."""
     try:
-        os.write(number, text.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
+        _deliver_tail(number, text.encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
         pass
 
 _hook = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiqt_hooks.py")
@@ -143,19 +170,25 @@ def _acquire_hook(path):
 # exception's exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired
 # content runs: removing, renaming or replacing the file after the open changes nothing; an
 # in-place rewrite of the same inode still in progress at the read is the module docstring's
-# stated residual. The refusal's diagnostic is best-effort (_deliver) and its exit status fixed,
-# whatever the state of stdout and stderr.
+# stated residual. The refusal's exit status is decided FIRST; every diagnostic step (formatting,
+# serialization, delivery) runs inside one try/except BaseException; the refusal ends with
+# os._exit, which no shutdown flush, stream-buffer state or atexit handler can change.
 _got = _acquire_hook(_hook)
 if isinstance(_got, str):
-    _missing = ("error: aiqt_hooks_launch.py: cannot acquire the hook file %s (%s). "
-                "Nothing was run (cannot evaluate).\n" % (_hook, _got))
-    _deliver(2, _missing)
+    _refusal_status = 2
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        _deliver(1, json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")
-        raise SystemExit(0)
-    raise SystemExit(2)
+        _refusal_status = 0
+    try:
+        _missing = ("error: aiqt_hooks_launch.py: cannot acquire the hook file %s (%s). "
+                    "Nothing was run (cannot evaluate).\n" % (_hook, _got))
+        _deliver(2, _missing)
+        if _refusal_status == 0:
+            _deliver(1, json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")
+    except BaseException:
+        pass
+    os._exit(_refusal_status)
 sys.argv[0] = _hook
 # The acquired content runs in a NEW module installed as sys.modules["__main__"] (as a direct
 # launch presents it), so code that resolves names through the main module (a dataclass string

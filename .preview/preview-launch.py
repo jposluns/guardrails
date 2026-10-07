@@ -32,11 +32,20 @@ a regular file, read, compiled with the hook's path as file name) and ONLY that 
 run, so removing or replacing the file after any check cannot divert what runs; a failure to open,
 fstat, read or compile is refused by the same mode rule above (exit 0 with a warning for a fail-open
 mode, exit 2 otherwise), never by an unhandled exception's exit 1, which would let a PreToolUse call
-proceed unchecked. Every refusal here (the floor guard and the unknown-mode refusal included)
-delivers its diagnostic best-effort with an unbuffered os.write and then ends with its required
-exit status, whatever the state of stdout and stderr (closed before Python starts, so the sys
-stream is None, closed after, or a pipe whose reader is gone; a buffered sys-stream write could
-also fail only at the interpreter's shutdown flush, which replaces the exit status with 120). RESIDUAL: on a platform without O_NOFOLLOW the open follows a symbolic link, and
+proceed unchecked. Every refusal here (the floor guard and the unknown-mode refusal
+included) decides its exit status FIRST, runs ALL its diagnostic work (imports, string
+formatting, serialization, encoding, unbuffered os.write delivery with a bounded retry of a
+partial write) inside one try/except BaseException that swallows everything, and ends with
+os._exit(status), never SystemExit: no diagnostic fault (a MemoryError included), no state of
+stdout or stderr (closed before Python starts, so the sys stream is None, closed after, or a pipe
+whose reader is gone), no bytes already waiting in a stream buffer (os._exit skips the
+interpreter's shutdown flush, so a refusal discards such bytes rather than letting a failed flush
+replace the status with 120) and no atexit handler can change that status. Two bounds hold,
+stated exactly: a FULL BLOCKING PIPE on the diagnostic stream can block the os.write until the
+reader drains it (O_NONBLOCK is never set on a shared descriptor, so the exit is delayed, never
+changed), and an EXTERNAL SIGNAL that terminates the process ends it outside any exit-status
+guarantee. A successful hook run is untouched: it keeps the interpreter's normal stream flushing
+and exit semantics. RESIDUAL: on a platform without O_NOFOLLOW the open follows a symbolic link, and
 the regular-file and compile checks still hold; the open of the hook's DIRECTORY resolves its path
 following symbolic links (a symlinked install must keep working, and the launcher runs with the
 calling user's own privilege), with O_NOFOLLOW kept on the final component, and where the platform
@@ -51,25 +60,31 @@ FLOOR_FAIL_OPEN_MODES = ("clock_inject", "stamp_truth_stop")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
-    _floor_refusal = (
-        "error: preview-launch.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    try:
-        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
-        pass
+    _floor_status = 2
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
+        _floor_status = 0
+
+    def _floor_tail(number, data, attempt):
+        if data and attempt < 4:
+            _floor_tail(number, data[os.write(number, data):], attempt + 1)
+    try:
+        _floor_refusal = (
+            "error: preview-launch.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
         try:
-            os.write(1, (json.dumps(dict(systemMessage=(
+            _floor_tail(2, _floor_refusal.encode("utf-8", "backslashreplace"), 1)
+        except BaseException:
+            pass
+        if _floor_status == 0:
+            import json
+            _floor_tail(1, (json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n"
-                ).encode("utf-8", "backslashreplace"))
-        except (OSError, ValueError, MemoryError):
-            pass
-        raise SystemExit(0)
-    raise SystemExit(2)
+                ).encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
+        pass
+    os._exit(_floor_status)
 
 import ast
 import io
@@ -86,19 +101,32 @@ PREVIEW_HOOKS = ("clock_inject", "future_stamp_write", "record_remove_check", "s
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _deliver_tail(number, data, attempt):
+    """Write data to descriptor number, retrying a PARTIAL write at most three more times (os.write
+    may return short when a signal arrives mid-write or a pipe is nearly full): the attempts are
+    bounded and counted up, never a loop, so the launcher subset holds. A write that BLOCKS (a full
+    blocking pipe whose reader has not drained it) blocks here until the reader drains it, delaying
+    the refusal's exit, never changing its status: O_NONBLOCK is never set on a shared standard
+    descriptor. An external signal that terminates the process ends it outside any exit-status
+    guarantee."""
+    if data and attempt < 4:
+        _deliver_tail(number, data[os.write(number, data):], attempt + 1)
+
+
 def _deliver(number, text):
-    """Best-effort diagnostic delivery for a refusal. os.write is unbuffered, so no byte can wait
-    in a stream buffer whose failed flush at interpreter shutdown would replace the refusal's exit
-    status with 120, and a failed delivery (a descriptor closed before Python started, closed or
-    broken later, or out of memory) is swallowed: every refusal must end with its required exit
-    status, whatever the state of stdout and stderr (with descriptor 2 closed before Python
-    starts, sys.stderr is None, so a sys.stderr.write here would raise and exit 1, which does not
-    block a PreToolUse call). The floor guard above cannot call a helper (it runs first, and
-    tools/check_python_floor.py pins it by AST to HOOK_GUARD_TEMPLATE), so it carries the same
-    try/except os.write form inline."""
+    """Best-effort diagnostic delivery for a refusal. os.write is unbuffered, so no byte waits in a
+    stream buffer whose failed flush at interpreter shutdown could replace an exit status with 120,
+    and the one except BaseException swallows EVERY failure of the delivery (a descriptor closed
+    before Python started, closed or broken later, an encoding fault, out of memory, any exception
+    at all): the caller decides the refusal's exit status BEFORE calling this and ends with
+    os._exit(status), so nothing here can change it (with descriptor 2 closed before Python starts,
+    sys.stderr is None, so a sys.stderr.write here would raise and exit 1, which does not block a
+    PreToolUse call). The floor guard above cannot call a helper (it runs first, and
+    tools/check_python_floor.py pins it by AST to HOOK_GUARD_TEMPLATE), so it carries the same form
+    inline: _floor_tail and one try/except BaseException around all its diagnostic work."""
     try:
-        os.write(number, text.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
+        _deliver_tail(number, text.encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
         pass
 
 
@@ -138,10 +166,47 @@ SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokeni
                   "warnings")
 
 
-def _subset_node(found, rel, numbered, node):
-    """One finding per construct of node outside the launcher subset (numbered is the source split
-    on newlines with "" prepended, so a node indexes its own line by lineno: the AST alone cannot
-    show the PEP 758 parentheses). The residual of the closed
+def _span_token(bounds, token):
+    """token when it is an operator inside bounds (a ((line, column), (line, column)) pair, the
+    tokenizer's own coordinates), None otherwise: the operator tokens of one except expression's
+    source span."""
+    if token.type == tokenize.OP and bounds[0] <= token.start and token.end <= bounds[1]:
+        return token
+    return None
+
+
+def _paren_step(state, token):
+    """One operator token of an except expression's span: state[0] is the open-bracket stack,
+    state[1] flips to 1 at a comma outside every bracket pair, the one spelling of an except tuple
+    the source does not parenthesize as a WHOLE (so `except (OSError), ValueError:` is caught,
+    where a check of the first character alone is not: its tuple starts with a parenthesis that
+    encloses only one element). The pop is guarded: a span is one complete expression, so its
+    brackets balance, and the guard only keeps a hypothetical stray closer from raising here."""
+    if token.string in ("(", "[", "{"):
+        state[0].append(1)
+    if token.string in (")", "]", "}") and state[0]:
+        state[0].pop()
+    if token.string == "," and not state[0]:
+        state[1] = 1
+
+
+def _unparenthesized(tokens, node):
+    """1 when node (an except handler's Tuple, with position attributes) is spelled without
+    parentheses enclosing the whole tuple (PEP 758, 3.14): a comma outside every bracket pair
+    within the node's own span. Judged on the tokenizer's coordinates, never on a split of the
+    source text, so an exotic line ending cannot shift which text is read (and _subset_line
+    refuses a carriage return outright)."""
+    bounds = ((node.lineno, node.col_offset), (node.end_lineno, node.end_col_offset))
+    state = [[], 0]
+    list(map(_paren_step, itertools.repeat(state),
+             list(filter(None, list(map(_span_token, itertools.repeat(bounds), tokens))))))
+    return state[1]
+
+
+def _subset_node(found, rel, tokens, node):
+    """One finding per construct of node outside the launcher subset (tokens is the file's token
+    list: the AST alone cannot show the PEP 758 parentheses, so the except-tuple rule scans the
+    tokens of the tuple's own span). The residual of the closed
     list, a LISTED node type carrying a form Python 3.4 does not compile, is enumerated and refused
     here: a Constant from an f- or t-string or with a numeric underscore (_subset_token; the value
     types here are 3.0 forms), every PEP 448 call shape (Starred and dict unpacking are refused by
@@ -150,7 +215,9 @@ def _subset_node(found, rel, numbered, node):
     are reachable), try else/finally (so no continue-through-finally grammar change is reachable),
     a non-Load list or tuple context (no unpacking targets), a bare except, an except tuple not
     parenthesized in the source (PEP 758, 3.14: the one listed-node spelling the AST cannot show,
-    so the source text is read at the tuple's own position), a bare or chained
+    so _unparenthesized scans the tuple's own token span for a comma outside every bracket pair,
+    which also refuses parentheses enclosing only part of the tuple, as in
+    `except (OSError), ValueError:`, on the tokenizer's own line numbering), a bare or chained
     raise, and any import outside SUBSET_IMPORTS; a call or a parameter list with more than 255
     entries is refused (the pre-3.7 limit). A 3.14 identifier is never a Python 3.4 keyword
     (3.14's keyword list adds to 3.4's and removes nothing), and _subset_line restricts the whole
@@ -189,7 +256,7 @@ def _subset_node(found, rel, numbered, node):
     if name == "ExceptHandler" and node.type is None:
         found.append("%s:%d: a bare except clause is outside the launcher subset" % (rel, line))
     if name == "ExceptHandler" and type(node.type).__name__ == "Tuple" \
-            and numbered[node.type.lineno][node.type.col_offset:node.type.col_offset + 1] != "(":
+            and _unparenthesized(tokens, node.type):
         found.append("%s:%d: an except tuple that is not parenthesized in the source is outside "
                      "the launcher subset (PEP 758 is newer than Python %d.%d)"
                      % ((rel, line) + SUBSET_VERSION))
@@ -236,12 +303,20 @@ def _subset_line(found, rel, pair):
     """A non-ASCII character anywhere in the source (pair is one (index, line) from enumerate):
     identifier and escape classification follows the interpreter's Unicode database (Python 3.4
     ships Unicode 6.3), so the subset is ASCII-only, comments and string contents included. The
-    test is the Python 3.4 spelling of str.isascii (3.7 and newer, so the floor interpreter could
-    run this self-check too): each ASCII character is one UTF-8 byte and every other code point is
-    more, so a line is ASCII exactly when its UTF-8 encoding is as long as the line."""
+    length test is the Python 3.4 spelling of str.isascii (3.7 and newer; only the spelling is
+    old: this allowlist as a whole still needs 3.8 for ast.parse feature_version and Constant
+    nodes, so the floor interpreter cannot run the self-check): each ASCII character is one UTF-8
+    byte and every other code point is more, so a line is ASCII exactly when its UTF-8 encoding is
+    as long as the line. A carriage return anywhere (a CR or CRLF line ending, or a lone CR inside
+    a line) is refused outright: the parser and the tokenizer read it as a line break, a split on
+    newline does not, and the subset accepts no text whose line numbering the two could read
+    apart."""
     if len(pair[1]) != len(pair[1].encode("utf-8")):
         found.append("%s:%d: a non-ASCII character is outside the launcher subset (Python %d.%d "
                      "ships an older Unicode database)" % ((rel, pair[0] + 1) + SUBSET_VERSION))
+    if "\r" in pair[1]:
+        found.append("%s:%d: a carriage return is outside the launcher subset (the parser and a "
+                     "newline split would read the line numbering apart)" % (rel, pair[0] + 1))
 
 
 def _subset_depth(state, token):
@@ -299,7 +374,7 @@ def launcher_subset_findings(rel, text):
                      % ((rel, exc.lineno) + SUBSET_VERSION + (exc.msg,)))
     warnings.filters = saved_filters
     list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel),
-             itertools.repeat([""] + lines), list(ast.walk(tree))))
+             itertools.repeat(tokens), list(ast.walk(tree))))
     list(map(_subset_token, itertools.repeat(found), itertools.repeat(rel), tokens))
     depth = [[], 0]
     list(map(_subset_depth, itertools.repeat(depth), tokens))
@@ -399,28 +474,37 @@ def self_test():
 if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
     raise SystemExit(self_test())
 if len(sys.argv) < 2 or sys.argv[1] not in PREVIEW_HOOKS:
-    _deliver(2, "error: preview-launch.py: the first argument must name one of %s. Nothing was run.\n"
-             % ", ".join(PREVIEW_HOOKS))
-    raise SystemExit(2)
+    try:
+        _deliver(2, "error: preview-launch.py: the first argument must name one of %s. Nothing was run.\n"
+                 % ", ".join(PREVIEW_HOOKS))
+    except BaseException:
+        pass
+    os._exit(2)
 _hook = hook_path(sys.argv[1])
 # The same mode rule as the floor guard: a hook file that cannot be acquired (missing, a symbolic
 # link, not a regular file, empty, unreadable, uncompilable) must not surface as an unhandled
 # exception's exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired
 # content runs: removing, renaming or replacing the file after the open changes nothing; an
 # in-place rewrite of the same inode still in progress at the read is the module docstring's
-# stated residual. The refusal's diagnostic is best-effort (_deliver) and its exit status fixed,
-# whatever the state of stdout and stderr.
+# stated residual. The refusal's exit status is decided FIRST; every diagnostic step (formatting,
+# serialization, delivery) runs inside one try/except BaseException; the refusal ends with
+# os._exit, which no shutdown flush, stream-buffer state or atexit handler can change.
 _got = _acquire_hook(_hook)
 if isinstance(_got, str):
-    _missing = ("error: preview-launch.py: cannot acquire the hook file %s (%s). "
-                "Nothing was run (cannot evaluate).\n" % (_hook, _got))
-    _deliver(2, _missing)
+    _refusal_status = 2
     if sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        _deliver(1, json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")
-        raise SystemExit(0)
-    raise SystemExit(2)
+        _refusal_status = 0
+    try:
+        _missing = ("error: preview-launch.py: cannot acquire the hook file %s (%s). "
+                    "Nothing was run (cannot evaluate).\n" % (_hook, _got))
+        _deliver(2, _missing)
+        if _refusal_status == 0:
+            _deliver(1, json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")
+    except BaseException:
+        pass
+    os._exit(_refusal_status)
 sys.argv = [_hook] + sys.argv[2:]
 # The acquired content runs in a NEW module installed as sys.modules["__main__"] (as a direct
 # launch presents it), so code that resolves names through the main module (a dataclass string

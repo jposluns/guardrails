@@ -182,25 +182,31 @@ FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
-    _floor_refusal = (
-        "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    try:
-        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
-        pass
+    _floor_status = 2
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
+        _floor_status = 0
+
+    def _floor_tail(number, data, attempt):
+        if data and attempt < 4:
+            _floor_tail(number, data[os.write(number, data):], attempt + 1)
+    try:
+        _floor_refusal = (
+            "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
         try:
-            os.write(1, (json.dumps(dict(systemMessage=(
+            _floor_tail(2, _floor_refusal.encode("utf-8", "backslashreplace"), 1)
+        except BaseException:
+            pass
+        if _floor_status == 0:
+            import json
+            _floor_tail(1, (json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n"
-                ).encode("utf-8", "backslashreplace"))
-        except (OSError, ValueError, MemoryError):
-            pass
-        raise SystemExit(0)
-    raise SystemExit(2)
+                ).encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
+        pass
+    os._exit(_floor_status)
 
 import collections
 import datetime
@@ -11695,14 +11701,21 @@ HANDLER_EVENT = {
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt. It prints the note and
-    returns the exit code 0, so main returns it directly (a note constructor's call is only ever the
-    direct value of a return)."""
+    UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage and exit 0, so no error on
+    these paths can wedge a session, trap a teammate, or block a human prompt. This is a TERMINAL
+    refusal: it prints the note, flushes it, and ends the process with os._exit(0), which no
+    interpreter shutdown flush of a broken stream (exit 120), pre-existing stream buffer or atexit
+    handler can change; its caller in main decides the status 0 FIRST and wraps this whole
+    diagnostic (formatting, serialization, print, flush) in one try/except BaseException whose
+    fallback is the same os._exit(0). A full blocking pipe on stdout can block the flush until the
+    reader drains it (the exit is delayed, never changed), and an external signal terminates
+    outside any exit-status guarantee. (A note constructor's call is only ever the direct value of
+    a return; this one never returns.)"""
     print(json.dumps({"systemMessage": (
         "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
         "(non-blocking by design on this event).".format(handler_name, detail))}))
-    return 0
+    sys.stdout.flush()
+    return os._exit(0)
 
 
 def main(argv):
@@ -11713,21 +11726,42 @@ def main(argv):
     # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
     # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
     # still fails closed (exit 2).
+    # Every refusal here is TERMINAL: its exit status is decided FIRST (by the mode rule above), all
+    # its diagnostic work (formatting, serialization, delivery, flush) runs inside one try/except
+    # BaseException, and it ends with os._exit(status), never a return or SystemExit, so no diagnostic
+    # fault (a MemoryError included), no broken or pre-filled stream buffer failing at the
+    # interpreter's shutdown flush (exit 120) and no atexit handler can change the status. A full
+    # blocking pipe can block the diagnostic write until its reader drains it (the exit is delayed,
+    # never changed), and an external signal terminates outside any exit-status guarantee. A
+    # successful handler run keeps the normal print/return/sys.exit path below, unchanged.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
-        print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
-              file=sys.stderr)
-        return 2
+        try:
+            print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
+                  file=sys.stderr)
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
     if len(argv) != 1:
-        detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0.
-            return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
-        print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
-        return 2
+            # stop guard), not even on a malformed invocation: WARN and exit 0 (the warn is terminal).
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "bad invocation: expected exactly "
+                                                  "one mode argument, got {}".format(len(argv)))
+            except BaseException:
+                pass
+            os._exit(0)
+        try:
+            print("aiqt_hooks: {} (expected exactly one mode argument, got {}); failing closed"
+                  .format(handler_name, len(argv)), file=sys.stderr)
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
     try:
         data = json.loads(sys.stdin.read())
         if not isinstance(data, dict):
@@ -11736,27 +11770,44 @@ def main(argv):
         # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
         # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
         # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
-        detail = "{}: {}".format(type(exc).__name__, exc)
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
-            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}: {}".format(
+                    type(exc).__name__, exc))
+            except BaseException:
+                pass
+            os._exit(0)
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail), file=sys.stderr)
-        return 2
+        try:
+            print("aiqt_hooks: unreadable hook payload ({}: {}); failing closed".format(
+                type(exc).__name__, exc), file=sys.stderr)
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
     try:
         code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
     except Exception as exc:  # a handler crash is an unreadable result
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
             # pathological message): WARN and exit 0, never exit 2.
-            return _dispatcher_fail_open_warn(
-                handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+            try:
+                return _dispatcher_fail_open_warn(
+                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+            except BaseException:
+                pass
+            os._exit(0)
         # A PreToolUse handler crash fails closed (block), not pass.
-        print("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc), file=sys.stderr)
-        return 2
+        try:
+            print("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
+                handler_name, type(exc).__name__, exc), file=sys.stderr)
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
     if stdout_obj is not None:
         print(json.dumps(stdout_obj))
     if stderr_text:

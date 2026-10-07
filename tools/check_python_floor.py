@@ -375,36 +375,50 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 # UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
 # PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
 # exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
-# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. The diagnostic is
-# best-effort and the exit status is unconditional: os.write is unbuffered, so a closed or broken
-# descriptor (descriptor 2 closed before Python starts leaves sys.stderr None) can neither raise before
-# the SystemExit (an unhandled exception's exit 1 fails open) nor leave bytes in a stream buffer whose
-# failed flush at interpreter shutdown replaces the exit status with 120.
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. The refusal's
+# exit status is decided FIRST (the mode rule alone), every diagnostic step (the import of json, the
+# formatting of the refusal, the serialization of the warning, the encoding, the unbuffered os.write
+# delivery and _floor_tail's bounded retry of a partial write) runs inside one OUTER try/except
+# BaseException that swallows everything (the refusal's stderr delivery also carries its own inner
+# one, so a broken descriptor 2 cannot abort the fail-open warning on stdout), and the refusal ends with os._exit(status), never SystemExit: no diagnostic
+# fault (a MemoryError included), no closed or broken descriptor (descriptor 2 closed before Python
+# starts leaves sys.stderr None), no bytes already waiting in a stream buffer (os._exit skips the
+# interpreter's shutdown flush whose failure would replace the status with 120) and no atexit handler
+# can change the status. Disclosed residual: `import os` and the status decision themselves run before
+# the protection (os._exit needs os), allocate almost nothing, and a MemoryError there still exits 1; a
+# full blocking pipe can block the diagnostic write until its reader drains it (the exit is delayed,
+# never changed); an external signal terminates outside any exit-status guarantee.
 HOOK_GUARD_TEMPLATE = '''import sys
 
 FLOOR_FAIL_OPEN_MODES = {modes}
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
     import os
-    _floor_refusal = (
-        "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    try:
-        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
-    except (OSError, ValueError, MemoryError):
-        pass
+    _floor_status = 2
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
+        _floor_status = 0
+
+    def _floor_tail(number, data, attempt):
+        if data and attempt < 4:
+            _floor_tail(number, data[os.write(number, data):], attempt + 1)
+    try:
+        _floor_refusal = (
+            "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
         try:
-            os.write(1, (json.dumps(dict(systemMessage=(
+            _floor_tail(2, _floor_refusal.encode("utf-8", "backslashreplace"), 1)
+        except BaseException:
+            pass
+        if _floor_status == 0:
+            import json
+            _floor_tail(1, (json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n"
-                ).encode("utf-8", "backslashreplace"))
-        except (OSError, ValueError, MemoryError):
-            pass
-        raise SystemExit(0)
-    raise SystemExit(2)
+                ).encode("utf-8", "backslashreplace"), 1)
+    except BaseException:
+        pass
+    os._exit(_floor_status)
 '''
 HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
                  "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
@@ -1256,10 +1270,47 @@ SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokeni
                   "warnings")
 
 
-def _subset_node(found, rel, numbered, node):
-    """One finding per construct of node outside the launcher subset (numbered is the source split
-    on newlines with "" prepended, so a node indexes its own line by lineno: the AST alone cannot
-    show the PEP 758 parentheses). The residual of the closed
+def _span_token(bounds, token):
+    """token when it is an operator inside bounds (a ((line, column), (line, column)) pair, the
+    tokenizer's own coordinates), None otherwise: the operator tokens of one except expression's
+    source span."""
+    if token.type == tokenize.OP and bounds[0] <= token.start and token.end <= bounds[1]:
+        return token
+    return None
+
+
+def _paren_step(state, token):
+    """One operator token of an except expression's span: state[0] is the open-bracket stack,
+    state[1] flips to 1 at a comma outside every bracket pair, the one spelling of an except tuple
+    the source does not parenthesize as a WHOLE (so `except (OSError), ValueError:` is caught,
+    where a check of the first character alone is not: its tuple starts with a parenthesis that
+    encloses only one element). The pop is guarded: a span is one complete expression, so its
+    brackets balance, and the guard only keeps a hypothetical stray closer from raising here."""
+    if token.string in ("(", "[", "{"):
+        state[0].append(1)
+    if token.string in (")", "]", "}") and state[0]:
+        state[0].pop()
+    if token.string == "," and not state[0]:
+        state[1] = 1
+
+
+def _unparenthesized(tokens, node):
+    """1 when node (an except handler's Tuple, with position attributes) is spelled without
+    parentheses enclosing the whole tuple (PEP 758, 3.14): a comma outside every bracket pair
+    within the node's own span. Judged on the tokenizer's coordinates, never on a split of the
+    source text, so an exotic line ending cannot shift which text is read (and _subset_line
+    refuses a carriage return outright)."""
+    bounds = ((node.lineno, node.col_offset), (node.end_lineno, node.end_col_offset))
+    state = [[], 0]
+    list(map(_paren_step, itertools.repeat(state),
+             list(filter(None, list(map(_span_token, itertools.repeat(bounds), tokens))))))
+    return state[1]
+
+
+def _subset_node(found, rel, tokens, node):
+    """One finding per construct of node outside the launcher subset (tokens is the file's token
+    list: the AST alone cannot show the PEP 758 parentheses, so the except-tuple rule scans the
+    tokens of the tuple's own span). The residual of the closed
     list, a LISTED node type carrying a form Python 3.4 does not compile, is enumerated and refused
     here: a Constant from an f- or t-string or with a numeric underscore (_subset_token; the value
     types here are 3.0 forms), every PEP 448 call shape (Starred and dict unpacking are refused by
@@ -1268,7 +1319,9 @@ def _subset_node(found, rel, numbered, node):
     are reachable), try else/finally (so no continue-through-finally grammar change is reachable),
     a non-Load list or tuple context (no unpacking targets), a bare except, an except tuple not
     parenthesized in the source (PEP 758, 3.14: the one listed-node spelling the AST cannot show,
-    so the source text is read at the tuple's own position), a bare or chained
+    so _unparenthesized scans the tuple's own token span for a comma outside every bracket pair,
+    which also refuses parentheses enclosing only part of the tuple, as in
+    `except (OSError), ValueError:`, on the tokenizer's own line numbering), a bare or chained
     raise, and any import outside SUBSET_IMPORTS; a call or a parameter list with more than 255
     entries is refused (the pre-3.7 limit). A 3.14 identifier is never a Python 3.4 keyword
     (3.14's keyword list adds to 3.4's and removes nothing), and _subset_line restricts the whole
@@ -1307,7 +1360,7 @@ def _subset_node(found, rel, numbered, node):
     if name == "ExceptHandler" and node.type is None:
         found.append("%s:%d: a bare except clause is outside the launcher subset" % (rel, line))
     if name == "ExceptHandler" and type(node.type).__name__ == "Tuple" \
-            and numbered[node.type.lineno][node.type.col_offset:node.type.col_offset + 1] != "(":
+            and _unparenthesized(tokens, node.type):
         found.append("%s:%d: an except tuple that is not parenthesized in the source is outside "
                      "the launcher subset (PEP 758 is newer than Python %d.%d)"
                      % ((rel, line) + SUBSET_VERSION))
@@ -1354,12 +1407,20 @@ def _subset_line(found, rel, pair):
     """A non-ASCII character anywhere in the source (pair is one (index, line) from enumerate):
     identifier and escape classification follows the interpreter's Unicode database (Python 3.4
     ships Unicode 6.3), so the subset is ASCII-only, comments and string contents included. The
-    test is the Python 3.4 spelling of str.isascii (3.7 and newer, so the floor interpreter could
-    run this self-check too): each ASCII character is one UTF-8 byte and every other code point is
-    more, so a line is ASCII exactly when its UTF-8 encoding is as long as the line."""
+    length test is the Python 3.4 spelling of str.isascii (3.7 and newer; only the spelling is
+    old: this allowlist as a whole still needs 3.8 for ast.parse feature_version and Constant
+    nodes, so the floor interpreter cannot run the self-check): each ASCII character is one UTF-8
+    byte and every other code point is more, so a line is ASCII exactly when its UTF-8 encoding is
+    as long as the line. A carriage return anywhere (a CR or CRLF line ending, or a lone CR inside
+    a line) is refused outright: the parser and the tokenizer read it as a line break, a split on
+    newline does not, and the subset accepts no text whose line numbering the two could read
+    apart."""
     if len(pair[1]) != len(pair[1].encode("utf-8")):
         found.append("%s:%d: a non-ASCII character is outside the launcher subset (Python %d.%d "
                      "ships an older Unicode database)" % ((rel, pair[0] + 1) + SUBSET_VERSION))
+    if "\r" in pair[1]:
+        found.append("%s:%d: a carriage return is outside the launcher subset (the parser and a "
+                     "newline split would read the line numbering apart)" % (rel, pair[0] + 1))
 
 
 def _subset_depth(state, token):
@@ -1417,7 +1478,7 @@ def launcher_subset_findings(rel, text):
                      % ((rel, exc.lineno) + SUBSET_VERSION + (exc.msg,)))
     warnings.filters = saved_filters
     list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel),
-             itertools.repeat([""] + lines), list(ast.walk(tree))))
+             itertools.repeat(tokens), list(ast.walk(tree))))
     list(map(_subset_token, itertools.repeat(found), itertools.repeat(rel), tokens))
     depth = [[], 0]
     list(map(_subset_depth, itertools.repeat(depth), tokens))
@@ -2174,7 +2235,7 @@ def _self_test_cases(base):
             ("guard/hook-computed-modes-finding", _entry(hook_good.replace(
                 "FLOOR_FAIL_OPEN_MODES = ('mode_a', 'mode_b')", "FLOOR_FAIL_OPEN_MODES = tuple(['mode_a'])"))),
             ("guard/hook-blocking-fail-open-finding",
-             _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))):
+             _entry(hook_good.replace("        _floor_status = 0\n", "        _floor_status = 2\n")))):
         code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, text)])))
         check(check_id, (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
     code, lines = evaluate(_fixture(base, source=listed, files=dict(
@@ -2188,7 +2249,8 @@ def _self_test_cases(base):
           refusal_observed(hook_path, version, (), [DENY_PROBE_MODE]), (2, "", hook_refusal, []))
     check("dynamic/hook-no-mode-refuses", refusal_observed(hook_path, version, ()),
           (2, "", hook_refusal, []))
-    blocking = dict([(hook_rel, _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))])
+    blocking = dict([(hook_rel, _entry(hook_good.replace("        _floor_status = 0\n",
+                                                        "        _floor_status = 2\n")))])
     blocked = dynamic_findings(_fixture(base, files=blocking), [hook_rel], floor)
     check("dynamic/hook-blocking-fail-open-finding",
           sorted(set(line.split(": got")[0] for line in blocked if "fail-open mode" in line)),
@@ -2201,11 +2263,12 @@ def _self_test_cases(base):
     # block a PreToolUse call. A hook surface listed in nonblocking-surfaces is cannot-evaluate, the guard
     # carrying exit 1 there (the fail-open the listing would otherwise demand) included; called directly
     # with such a listing, the guard and dynamic legs still require exit 2.
-    hook_exit_1 = _entry(hook_good.replace("    raise SystemExit(2)\n", "    raise SystemExit(1)\n"),
+    hook_exit_1 = _entry(hook_good.replace("    _floor_status = 2\n", "    _floor_status = 1\n"),
                          before='"""Fixture hook."""\n')
     check("guard/hook-form-deny-exit-fixed-at-2",
           (guard_text("aiqt_hooks.py", floor, demo_modes, code=NONBLOCKING_EXIT) == hook_good,
-           hook_good.endswith("    raise SystemExit(2)\n"), hook_exit_1 != hook[hook_rel]),
+           "    _floor_status = 2\n" in hook_good
+           and hook_good.endswith("    os._exit(_floor_status)\n"), hook_exit_1 != hook[hook_rel]),
           (True, True, True))
     got = []
     for rel, text in ((hook_rel, hook_exit_1), (hook_rel, hook[hook_rel]), (HOOK_SURFACES[1], hook_exit_1)):
@@ -2462,9 +2525,10 @@ def _self_test_cases(base):
     # best-effort and the exit status is fixed, whatever the state of the standard descriptors.
     # Probed with descriptor 2 closed before Python starts (sys.stderr is None there: a refusal
     # that raises writing it exits 1, which does not block a PreToolUse call), with descriptor 1
-    # closed the same way, and with descriptor 1 a pipe whose read end is already closed (a broken
+    # closed the same way, with descriptor 1 a pipe whose read end is already closed (a broken
     # pipe: a diagnostic left in a stream buffer fails the interpreter's shutdown flush, which
-    # replaces exit 0 with 120).
+    # replaces exit 0 with 120), and with descriptor 2 such a broken pipe (the state behind a
+    # dispatcher diagnostic lost mid-session).
     def _close_stderr():
         os.close(2)
 
@@ -2489,28 +2553,34 @@ def _self_test_cases(base):
             read_end, write_end = os.pipe()
             os.close(read_end)
             try:
-                proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=write_end,
-                                      stderr=subprocess.PIPE, env=CHILD_ENV, timeout=CHILD_TIMEOUT)
+                if fd_case == "stderr-broken":
+                    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=write_end, env=CHILD_ENV, timeout=CHILD_TIMEOUT)
+                else:
+                    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=write_end,
+                                          stderr=subprocess.PIPE, env=CHILD_ENV, timeout=CHILD_TIMEOUT)
             finally:
                 os.close(write_end)
+            if fd_case == "stderr-broken":
+                return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace")
             return proc.returncode, proc.stderr.decode("utf-8", "backslashreplace")
         except (OSError, subprocess.SubprocessError) as exc:
             raise CannotEvaluate("fd-state child launch failed: {}".format(exc))
 
-    fd_cases = ("stderr-closed", "stdout-closed", "stdout-broken")
+    fd_cases = ("stderr-closed", "stdout-closed", "stdout-broken", "stderr-broken")
 
     def _fd_seen(fd_case, rc_want, kept):
         """What the surviving stream must show: with stderr closed, stdout carries the warning for
         a fail-open refusal and stays empty for a blocking one; with stdout closed or broken,
         stderr carries the refusal either way."""
-        if fd_case == "stderr-closed" and rc_want == 0:
+        if fd_case in ("stderr-closed", "stderr-broken") and rc_want == 0:
             return "systemMessage" in kept
-        if fd_case == "stderr-closed":
+        if fd_case in ("stderr-closed", "stderr-broken"):
             return kept
         return "Nothing was run" in kept
 
     def _fd_want(fd_case, rc_want):
-        if fd_case == "stderr-closed" and rc_want != 0:
+        if fd_case in ("stderr-closed", "stderr-broken") and rc_want != 0:
             return ""
         return True
 
@@ -2552,6 +2622,111 @@ def _self_test_cases(base):
     check("launcher/floor-refusal-fd-states", floor_fd, floor_fd_want)
     check("launcher/acquire-refusal-fd-states", acquire_fd, acquire_fd_want)
     check("launcher/unknown-mode-refusal-fd-states", unknown_fd, unknown_fd_want)
+    # REQUIRED refusal-status independence from DIAGNOSTIC faults (each HOOK_SURFACES entry): the
+    # refusal exit status is decided before any diagnostic work, every diagnostic step (imports,
+    # formatting, serialization, encoding, writes) runs inside one try/except BaseException, and
+    # the refusal ends with os._exit, so no MemoryError inside the diagnostics, no pre-existing
+    # stream buffer and no shutdown flush can replace the status. Injected per surface and mode
+    # kind: MemoryError at `import json` (json dropped from sys.modules, a meta_path finder that
+    # raises), at formatting (a sys.executable whose %s conversion raises) and at serialization
+    # (json.dumps replaced); then a pre-existing stdout buffer with descriptor 1 closed before the
+    # refusal (whose failed shutdown flush would otherwise replace the status with 120); then a
+    # DISPATCHER refusal reached through its launcher (an unknown mode, an unreadable PreToolUse
+    # payload, an unreadable Stop payload) with the diagnostic stream a broken pipe. What is NOT
+    # probed, disclosed in the launcher docstrings: a full blocking pipe can block the diagnostic
+    # write until its reader drains it, and an external signal terminates outside any guarantee.
+    inject_runner = (
+        "import runpy, sys\n"
+        "fault, path, version = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "sys.argv = [path] + sys.argv[4:]\n"
+        "if version != 'real':\n"
+        "    sys.version_info = tuple(int(p) for p in version.split('.')) + ('final', 0)\n"
+        "class _Boom:\n"
+        "    def __bool__(self):\n"
+        "        return True\n"
+        "    def __str__(self):\n"
+        "        raise MemoryError('injected at formatting')\n"
+        "if fault == 'format':\n"
+        "    sys.executable = _Boom()\n"
+        "if fault == 'serialize':\n"
+        "    import json\n"
+        "    def _raise(*args, **kwargs):\n"
+        "        raise MemoryError('injected at serialization')\n"
+        "    json.dumps = _raise\n"
+        "if fault == 'import-json':\n"
+        "    class _Finder:\n"
+        "        def find_spec(self, name, *args, **kwargs):\n"
+        "            if name == 'json':\n"
+        "                raise MemoryError('injected at import json')\n"
+        "            return None\n"
+        "    sys.modules.pop('json', None)\n"
+        "    sys.meta_path.insert(0, _Finder())\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+    buffer_runner = (
+        "import os, runpy, sys\n"
+        "path, version = sys.argv[1], sys.argv[2]\n"
+        "sys.argv = [path] + sys.argv[3:]\n"
+        "if version != 'real':\n"
+        "    sys.version_info = tuple(int(p) for p in version.split('.')) + ('final', 0)\n"
+        "sys.stdout.write('pending')\n"
+        "os.close(1)\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+
+    def _hook_kind_mode(rel, kind):
+        multi = rel == ".preview/preview-launch.py"
+        if kind == "fail_open":
+            return "clock_inject" if multi else "orch_stop_guard"
+        return "unbounded_wait" if multi else "absolute_paths"
+
+    if os.name != "posix":
+        skip = "skipped (closing a child's standard descriptor needs posix)"
+        inject_got = inject_want = acq_inject_got = acq_inject_want = skip
+        buffer_got = buffer_want = dispatcher_got = dispatcher_want = skip
+    else:
+        inject_got, inject_want = [], []
+        for rel in HOOK_SURFACES:
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                for fault in ("import-json", "format", "serialize"):
+                    rc, out, err = _child(inject_runner,
+                                          [fault, str(ROOT / rel), "%d.%d.%d" % old, mode], (), base)
+                    inject_got.append((rel, kind, fault, rc, "Traceback" not in err))
+                    inject_want.append((rel, kind, fault, rc_want, True))
+        acq_inject_got, acq_inject_want = [], []
+        for rel in sorted(LAUNCHERS):
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                args = _acquire_fd_args(rel, mode)
+                rc, out, err = _child(inject_runner, ["serialize", args[0], "real", mode], (), base)
+                acq_inject_got.append((rel, kind, rc, "cannot acquire" in err,
+                                       "Traceback" not in err))
+                acq_inject_want.append((rel, kind, rc_want, True, True))
+        buffer_got, buffer_want = [], []
+        for rel in sorted(LAUNCHERS):
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                rc, out, err = _child(buffer_runner, [str(ROOT / rel), "%d.%d.%d" % old, mode],
+                                      (), base)
+                buffer_got.append((rel, "floor", kind, rc))
+                buffer_want.append((rel, "floor", kind, rc_want))
+                args = _acquire_fd_args(rel, mode)
+                rc, out, err = _child(buffer_runner, [args[0], "real", mode], (), base)
+                buffer_got.append((rel, "acquire", kind, rc))
+                buffer_want.append((rel, "acquire", kind, rc_want))
+        dispatcher_got, dispatcher_want = [], []
+        for rel in sorted(LAUNCHERS):
+            if isinstance(LAUNCHERS[rel], tuple):
+                continue
+            for mode, rc_want, fd_case in ((DENY_PROBE_MODE, REFUSAL_EXIT, "stderr-broken"),
+                                           ("absolute_paths", REFUSAL_EXIT, "stderr-broken"),
+                                           ("diff_wall_stop", 0, "stdout-broken")):
+                rc, kept = _fd_run([str(ROOT / rel), mode], fd_case)
+                dispatcher_got.append((rel, mode, fd_case, rc))
+                dispatcher_want.append((rel, mode, fd_case, rc_want))
+    check("launcher/floor-refusal-fault-injection", inject_got, inject_want)
+    check("launcher/acquire-refusal-fault-injection", acq_inject_got, acq_inject_want)
+    check("launcher/refusal-stdout-buffer-fd-closed", buffer_got, buffer_want)
+    check("launcher/dispatcher-refusal-fd-states", dispatcher_got, dispatcher_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
@@ -2565,7 +2740,9 @@ def _self_test_cases(base):
     # `return` that parses but does not compile, a `not` chain deep enough for an old parser's
     # fixed stack and the PEP 758 unparenthesized except tuple, are refused by the compile pass,
     # the `not`-count cap and the parenthesis rule (the last in the allowlist itself, not only the
-    # feature_version belt). The subset forms themselves are not findings.
+    # feature_version belt; since round 6 the rule reads the tuple's own TOKEN span, so a
+    # parenthesized first element no longer slips past it, and a carriage return is refused
+    # outright). The subset forms themselves are not findings.
     check("launcher/newer-syntax-findings", [bool(old_syntax_findings("x.py", text)) for text in (
         "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n",
         "x = [*()]\n", "x = {**{}}\n", "f(*a, *b)\n", "f(*a, b)\n", "dict(**a, b=1)\n",
@@ -2591,12 +2768,34 @@ def _self_test_cases(base):
         "x = %s1%s\n" % ("(" * 150, ")" * 150),
         "return\n", "x = %sTrue\n" % ("not " * 33),
         "try:\n    x = 1\nexcept OSError, ValueError:\n    x = 2\n",
+        "try:\n    x = 1\nexcept (OSError), ValueError:\n    x = 2\n",
         "x = 1000\n", "def f(a, b):\n    return a % (b,)\n",
         "try:\n    x = 1\nexcept (OSError, ValueError) as exc:\n    raise SystemExit(2)\n",
         "import sys\n\nif tuple(sys.version_info[:2]) < (3, 14):\n    raise SystemExit(2)\n",
         "sys.argv[0] = \"x\"\nsys.argv = [\"x\"] + sys.argv[2:]\n",
         "if __name__ == \"__main__\":\n    pass\n")],
-        [True] * 58 + [False] * 6)
+        [True] * 59 + [False] * 6)
+    # The parenthesis rule itself (the allowlist's own finding, independent of the
+    # feature_version belt, which also refuses most of these): parentheses must enclose the WHOLE
+    # except tuple, so a parenthesized first element does not pass, and deleting the rule fails
+    # this check even while the belt still fires.
+    paren_marker = "except tuple that is not parenthesized in the source"
+    check("launcher/except-paren-allowlist-finding",
+          [any(paren_marker in item for item in old_syntax_findings("x.py", text)) for text in (
+              "try:\n    x = 1\nexcept OSError, ValueError:\n    x = 2\n",
+              "try:\n    x = 1\nexcept (OSError), ValueError:\n    x = 2\n",
+              "try:\n    x = 1\nexcept (OSError), (ValueError):\n    x = 2\n",
+              "try:\n    x = 1\nexcept ((OSError), ValueError):\n    x = 2\n",
+              "try:\n    x = 1\nexcept (OSError, ValueError):\n    x = 2\n")],
+          [True, True, True, False, False])
+    # A carriage return (a lone CR line ending, or a CR inside a line) is refused outright, and
+    # the walk no longer indexes a newline split by the parser's line numbers, so neither text
+    # raises out of old_syntax_findings (the old numbered[...] read raised IndexError here).
+    check("launcher/cr-line-refused",
+          [bool(old_syntax_findings("x.py", text)) for text in (
+              "x = 1\ry = 2\ntry:\n    pass\nexcept ValueError, TypeError:\n    len(1)\n",
+              "try:\r    pass\rexcept ValueError, TypeError:\r    pass\r")],
+          [True, True])
     # The leg's scope is what the tree under check declares. A tree with no registration file and no
     # launcher adds nothing (fixture/clean-tree-passes, whose .preview/README.md names no registration);
     # a declared launcher whose registration file, launcher or hook is missing is a finding.
