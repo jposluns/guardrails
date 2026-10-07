@@ -1476,11 +1476,19 @@ def _main_isolated(report_path=None):
         mp = _memerr_dispatch("orch_truncation_guard")
         check("trunc/dispatch-memoryerror-fails-closed", (mp.returncode, "MemoryError" in mp.stderr), (2, True))
         ms = _memerr_dispatch("orch_stop_guard")
+        # Strict: stdout must be ONE JSON object whose systemMessage is a string, and only that field is
+        # searched; a parse failure, a non-object or a missing or non-string systemMessage fails the check
+        # (plain "MemoryError" text on stdout is not a warning the platform would surface).
         try:
-            ms_note = json.loads(ms.stdout).get("systemMessage", "")
-        except (ValueError, AttributeError):
-            ms_note = "unparseable stdout " + repr(ms.stdout)
-        check("trunc/dispatch-memoryerror-stop-warns", (ms.returncode, "MemoryError" in ms_note), (0, True))
+            ms_obj = json.loads(ms.stdout)
+        except ValueError:
+            ms_obj = None
+        ms_note = ms_obj.get("systemMessage") if isinstance(ms_obj, dict) else None
+        ms_shape = "json object with a string systemMessage" if isinstance(ms_note, str) \
+            else "parse or schema failure: stdout " + repr(ms.stdout)
+        check("trunc/dispatch-memoryerror-stop-warns",
+              (ms.returncode, ms_shape, isinstance(ms_note, str) and "MemoryError" in ms_note),
+              (0, "json object with a string systemMessage", True))
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")

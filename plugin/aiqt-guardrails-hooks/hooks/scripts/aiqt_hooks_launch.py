@@ -94,8 +94,9 @@ import types
 
 
 def _deliver_tail(number, data, attempt):
-    """Write data to descriptor number, retrying a PARTIAL write at most three more times (os.write
-    may return short when a signal arrives mid-write or a pipe is nearly full): the attempts are
+    """Write data to descriptor number with at most three os.write calls in all (the first write
+    and at most two retries of a PARTIAL write; os.write may return short when a signal arrives
+    mid-write or a pipe is nearly full): the attempts are
     bounded and counted up, never a loop, so the launcher subset holds. A write that BLOCKS (a full
     blocking pipe whose reader has not drained it) blocks here until the reader drains it, delaying
     the refusal's exit, never changing its status: O_NONBLOCK is never set on a shared standard
@@ -133,9 +134,12 @@ def _acquire_hook(path):
     (fstat, so no rename, removal or replacement after the open can swap what was judged), read
     that descriptor's bytes, refuse an empty read, and compile the bytes with path as the file
     name. The directory descriptor is closed on every path, the inner open's failure included.
-    Returns the compiled code object, or the failure reason as a string: the dispatch below routes
-    every acquisition failure through the mode rule, so no failure here surfaces as an unhandled
-    exception's exit 1 (a non-blocking error to a PreToolUse call)."""
+    Returns the compiled code object, or a failure as a (reason, exception or None) tuple, never
+    formatting the exception here: an exception's text is computed by its own __str__, which can
+    itself raise (a MemoryError, a SystemExit, anything), so the dispatch below formats it only
+    inside the refusal's protected block, after the exit status is decided. The dispatch also
+    calls this inside a try/except BaseException, so no failure here, caught or not, surfaces as
+    an unhandled exception's exit 1 (a non-blocking error to a PreToolUse call)."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         if os.open in os.supports_dir_fd:
@@ -151,18 +155,18 @@ def _acquire_hook(path):
             fd = os.open(path, flags)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
-            return "it is not a regular file"
+            return ("it is not a regular file", None)
         handle = os.fdopen(fd, "rb")
         data = handle.read()
         handle.close()
     except (OSError, ValueError, MemoryError) as exc:
-        return "cannot open or read it without following a symbolic link: %s" % exc
+        return ("cannot open or read it without following a symbolic link", exc)
     if not data:
-        return "it is empty (zero bytes were read)"
+        return ("it is empty (zero bytes were read)", None)
     try:
         return compile(data, path, "exec")
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
-        return "cannot compile it: %s" % exc
+        return ("cannot compile it", exc)
 
 
 # The same mode rule as the floor guard: a dispatcher that cannot be acquired (missing, a symbolic
@@ -170,17 +174,31 @@ def _acquire_hook(path):
 # exception's exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired
 # content runs: removing, renaming or replacing the file after the open changes nothing; an
 # in-place rewrite of the same inode still in progress at the read is the module docstring's
-# stated residual. The refusal's exit status is decided FIRST; every diagnostic step (formatting,
-# serialization, delivery) runs inside one try/except BaseException; the refusal ends with
-# os._exit, which no shutdown flush, stream-buffer state or atexit handler can change.
-_got = _acquire_hook(_hook)
-if isinstance(_got, str):
-    _refusal_status = 2
-    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        _refusal_status = 0
+# stated residual. The refusal's exit status is decided FIRST, before the acquisition runs; the
+# acquisition itself runs inside a try/except BaseException (an exception it does not map is
+# refused by the mode rule too, as "the acquisition raised"); every diagnostic step (formatting the
+# acquisition error, whose __str__ can raise anything, a SystemExit included, the message,
+# serialization, delivery) runs inside one try/except BaseException, with the bare reason as the
+# fallback when the error's text cannot be formatted; the refusal ends with os._exit, which no
+# shutdown flush, stream-buffer state or atexit handler can change.
+_refusal_status = 2
+if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+    _refusal_status = 0
+_got = ("the acquisition raised", None)
+try:
+    _got = _acquire_hook(_hook)
+except BaseException:
+    pass
+if isinstance(_got, tuple):
     try:
+        _reason = _got[0]
+        try:
+            if _got[1] is not None:
+                _reason = "%s: %s" % (_got[0], _got[1])
+        except BaseException:
+            pass
         _missing = ("error: aiqt_hooks_launch.py: cannot acquire the hook file %s (%s). "
-                    "Nothing was run (cannot evaluate).\n" % (_hook, _got))
+                    "Nothing was run (cannot evaluate).\n" % (_hook, _reason))
         _deliver(2, _missing)
         if _refusal_status == 0:
             _deliver(1, json.dumps(dict(systemMessage=(

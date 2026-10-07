@@ -1109,6 +1109,7 @@ expected-check-ids = [
   "launcher/acquire-refusal-fd-states",
   "launcher/unknown-mode-refusal-fd-states",
   "launcher/floor-refusal-fault-injection",
+  "launcher/acquire-error-text-fault-injection",
   "launcher/acquire-refusal-fault-injection",
   "launcher/refusal-stdout-buffer-fd-closed",
   "launcher/dispatcher-refusal-fd-states",

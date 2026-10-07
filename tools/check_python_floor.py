@@ -378,7 +378,8 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 # proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. The refusal's
 # exit status is decided FIRST (the mode rule alone), every diagnostic step (the import of json, the
 # formatting of the refusal, the serialization of the warning, the encoding, the unbuffered os.write
-# delivery and _floor_tail's bounded retry of a partial write) runs inside one OUTER try/except
+# delivery and _floor_tail's bounded retry of a partial write, at most three os.write calls in all:
+# the first write and at most two retries) runs inside one OUTER try/except
 # BaseException that swallows everything (the refusal's stderr delivery also carries its own inner
 # one, so a broken descriptor 2 cannot abort the fail-open warning on stdout), and the refusal ends with os._exit(status), never SystemExit: no diagnostic
 # fault (a MemoryError included), no closed or broken descriptor (descriptor 2 closed before Python
@@ -2632,9 +2633,18 @@ def _self_test_cases(base):
     # (json.dumps replaced); then a pre-existing stdout buffer with descriptor 1 closed before the
     # refusal (whose failed shutdown flush would otherwise replace the status with 120); then a
     # DISPATCHER refusal reached through its launcher (an unknown mode, an unreadable PreToolUse
-    # payload, an unreadable Stop payload) with the diagnostic stream a broken pipe. What is NOT
-    # probed, disclosed in the launcher docstrings: a full blocking pipe can block the diagnostic
-    # write until its reader drains it, and an external signal terminates outside any guarantee.
+    # payload, an unreadable Stop payload, a bad-argv PreToolUse call) with the diagnostic stream a
+    # broken pipe, and a PreToolUse HANDLER CRASH (a child imports the dispatcher beside each
+    # launcher, replaces the handler with one that raises, and calls main with stderr a broken pipe:
+    # a crash refusal that returned 2 instead of ending with os._exit exits 120 at the failed
+    # shutdown flush). Then, per real launcher, mode kind and acquisition branch, an ACQUISITION
+    # ERROR whose text cannot be formatted: an OSError subclass raised at the hook's os.open and a
+    # SyntaxError subclass raised at its compile, each with a __str__ that raises MemoryError, then
+    # SystemExit(0); the status is decided before the acquisition and the error is formatted only
+    # inside the protected refusal, with the bare reason as the fallback, so the refusal still names
+    # that reason and exits by the mode rule. What is NOT probed, disclosed in the launcher
+    # docstrings: a full blocking pipe can block the diagnostic write until its reader drains it,
+    # and an external signal terminates outside any guarantee.
     inject_runner = (
         "import runpy, sys\n"
         "fault, path, version = sys.argv[1], sys.argv[2], sys.argv[3]\n"
@@ -2671,6 +2681,46 @@ def _self_test_cases(base):
         "sys.stdout.write('pending')\n"
         "os.close(1)\n"
         "runpy.run_path(path, run_name='__main__')\n")
+    error_text_runner = (
+        "import builtins, os, runpy, sys\n"
+        "branch, fault, path, sibling = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]\n"
+        "sys.argv = [path] + sys.argv[5:]\n"
+        "def _text(self):\n"
+        "    if fault == 'memoryerror':\n"
+        "        raise MemoryError('injected at the acquisition error text')\n"
+        "    raise SystemExit(0)\n"
+        "class _OpenError(OSError):\n"
+        "    __str__ = _text\n"
+        "class _CompileError(SyntaxError):\n"
+        "    __str__ = _text\n"
+        "real_open, real_compile = os.open, builtins.compile\n"
+        "def _open(target, flags, *args, **kwargs):\n"
+        "    if os.path.basename(str(target)) == os.path.basename(sibling):\n"
+        "        raise _OpenError(13, 'injected at os.open')\n"
+        "    return real_open(target, flags, *args, **kwargs)\n"
+        "def _compile(source, filename, *args, **kwargs):\n"
+        "    if os.path.basename(str(filename)) == os.path.basename(sibling):\n"
+        "        raise _CompileError('injected at compile')\n"
+        "    return real_compile(source, filename, *args, **kwargs)\n"
+        "if branch == 'open':\n"
+        "    os.open = _open\n"
+        "    if real_open in os.supports_dir_fd:\n"
+        "        os.supports_dir_fd = frozenset(set(os.supports_dir_fd) | {_open})\n"
+        "if branch == 'compile':\n"
+        "    builtins.compile = _compile\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+    # The handler-crash child: the dispatcher is imported (never run as __main__), the PreToolUse
+    # handler is replaced by one that raises, stdin carries a readable payload, and main's status is
+    # handed to sys.exit exactly as the dispatcher's own __main__ block does.
+    crash_runner = (
+        "import io, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import aiqt_hooks\n"
+        "def _crash(data):\n"
+        "    raise RuntimeError('injected handler crash')\n"
+        "aiqt_hooks.HANDLERS[sys.argv[2]] = _crash\n"
+        "sys.stdin = io.StringIO('{}')\n"
+        "sys.exit(aiqt_hooks.main(sys.argv[2:]))\n")
 
     def _hook_kind_mode(rel, kind):
         multi = rel == ".preview/preview-launch.py"
@@ -2682,6 +2732,7 @@ def _self_test_cases(base):
         skip = "skipped (closing a child's standard descriptor needs posix)"
         inject_got = inject_want = acq_inject_got = acq_inject_want = skip
         buffer_got = buffer_want = dispatcher_got = dispatcher_want = skip
+        text_got = text_want = skip
     else:
         inject_got, inject_want = [], []
         for rel in HOOK_SURFACES:
@@ -2717,16 +2768,44 @@ def _self_test_cases(base):
         for rel in sorted(LAUNCHERS):
             if isinstance(LAUNCHERS[rel], tuple):
                 continue
-            for mode, rc_want, fd_case in ((DENY_PROBE_MODE, REFUSAL_EXIT, "stderr-broken"),
-                                           ("absolute_paths", REFUSAL_EXIT, "stderr-broken"),
-                                           ("diff_wall_stop", 0, "stdout-broken")):
-                rc, kept = _fd_run([str(ROOT / rel), mode], fd_case)
-                dispatcher_got.append((rel, mode, fd_case, rc))
-                dispatcher_want.append((rel, mode, fd_case, rc_want))
+            for argv, rc_want, fd_case in (([DENY_PROBE_MODE], REFUSAL_EXIT, "stderr-broken"),
+                                           (["absolute_paths"], REFUSAL_EXIT, "stderr-broken"),
+                                           (["absolute_paths", "extra"], REFUSAL_EXIT,
+                                            "stderr-broken"),
+                                           (["diff_wall_stop"], 0, "stdout-broken")):
+                rc, kept = _fd_run([str(ROOT / rel)] + argv, fd_case)
+                dispatcher_got.append((rel, argv, fd_case, rc))
+                dispatcher_want.append((rel, argv, fd_case, rc_want))
+            rc, kept = _fd_run(["-c", crash_runner, str((ROOT / rel).parent), "absolute_paths"],
+                               "stderr-broken")
+            dispatcher_got.append((rel, "handler-crash", "stderr-broken", rc))
+            dispatcher_want.append((rel, "handler-crash", "stderr-broken", REFUSAL_EXIT))
+        text_got, text_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+                for branch, reason in (("open", "(cannot open or read it without following a "
+                                                "symbolic link)"),
+                                       ("compile", "(cannot compile it)")):
+                    for fault in ("memoryerror", "systemexit"):
+                        spot = Path(tempfile.mkdtemp(prefix="error-text-", dir=base))
+                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                        (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                        rc, out, err = _child(error_text_runner,
+                                              [branch, fault, str(spot / Path(rel).name),
+                                               str(spot / sibling), mode], (), spot)
+                        seen = ("systemMessage" in out) if kind == "fail_open" else out
+                        text_got.append((rel, kind, branch, fault, rc, reason in err,
+                                         "Traceback" not in err, "HOOK_RAN" not in out, seen))
+                        text_want.append((rel, kind, branch, fault, rc_want, True, True, True,
+                                          True if kind == "fail_open" else ""))
     check("launcher/floor-refusal-fault-injection", inject_got, inject_want)
     check("launcher/acquire-refusal-fault-injection", acq_inject_got, acq_inject_want)
     check("launcher/refusal-stdout-buffer-fd-closed", buffer_got, buffer_want)
     check("launcher/dispatcher-refusal-fd-states", dispatcher_got, dispatcher_want)
+    check("launcher/acquire-error-text-fault-injection", text_got, text_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
