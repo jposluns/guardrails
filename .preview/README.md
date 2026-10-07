@@ -82,16 +82,18 @@ the authority, and the summary further down this page only points to it.
   command text and no recorded change between, it adds a note to the assistant's context; at turn end it
   refuses, at most twice in a row, a final message that calls a pass conclusive without naming the earlier
   failure. Events: `PostToolUse` and `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`),
-  and `Stop`. Its shell reading is exact only for a small closed grammar (listed in its docstring). Inside it,
-  a CI rerun is missed only when its words come into existence when the command runs (an expansion that has
-  a value, a pathname expansion, an alias or a shell function, or a command string handed to another
-  program), and a simple command that names `gh`, `run` and `rerun` in order without running them is noted
-  anyway (a false note). A command outside the grammar counts as a change, so a rerun across it is not
-  flagged (a missed note; this includes `echo "$(date)"` and a here-document), and it is a possible CI rerun
-  when any normalized variant of its text names one anywhere (a false note). Read-only is decided only inside the grammar:
-  `env` with any argument, an assignment prefix, a command word holding an expansion, and any output
-  redirection whose target is not the unquoted word `/dev/null` count as a change; an input redirection and a
-  descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
+  and `Stop`. Its shell reading is exact only for a small closed grammar (listed in its docstring) and for
+  commands of at most 8192 characters. Inside it, a CI rerun is missed only when its words come into
+  existence when the command runs (an expansion that has a value, a pathname expansion, an alias or a shell
+  function, or a command string handed to another program), and a simple command that names `gh`, `run`
+  and `rerun` in order without running them is noted anyway (a false note). Every command outside the
+  grammar (including `echo "$(date)"`, a here-document, and any longer command) is a possible CI rerun by
+  construction, because the hook could not parse it: each one that does not fail gets a note and leaves an
+  outstanding possible rerun, so every off-grammar command between a failure and a pass marks the pass as
+  possibly rerun. That is a deliberate false-note cost of a warn-only hook. Read-only is decided only
+  inside the grammar: `env` with any argument, an assignment prefix, a command word holding an expansion,
+  and any output redirection whose target is not the unquoted word `/dev/null` count as a change; an input
+  redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
 
 ## Integrity
 
@@ -106,7 +108,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `4f78bcdb877dca06e733028a15e344e2d17239ffad29fd7e681c8418a1ad7b8c` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `bd1a8eea77731e7cdaa977d450d4cde380e9d811539051f2c522c6dc3ef61f24` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
@@ -353,14 +355,16 @@ section of its opening docstring. Read that section before relying on a hook; in
   ignores it is allowed to stop after three refusals with a warning.
 - **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
   through the shell tool, with identical command text. A rerun through a web page, a runner's own retry
-  option, or a change made outside the tool calls it sees is missed or misread. A command its shell lexer
-  cannot read (a here-document or ANSI-C quoting such as `$'...'`, notably) counts as a change, and one that
-  names a CI rerun command anywhere is noted as a possible CI rerun. Shell syntax its reader neither models
-  nor detects can still be misread. Its turn-end check reads
-  only the final message against fixed phrase lists, and any disclosure word such as `flaky` or `rerun`
-  clears it; it does not record or investigate the failure itself. It fails open on its own failure (an
-  internal error, an unreadable state file, or an unwritable stdout gives no note and no refusal), by design for
-  an advisory hook.
+  option, or a change made outside the tool calls it sees is missed or misread. A command its shell reader
+  cannot parse (a here-document, ANSI-C quoting such as `$'...'`, a command substitution, a line
+  continuation, or a command over 8192 characters, notably) is, unless it fails, always noted as a
+  possible CI rerun and counted as a change, even when it reruns nothing (a false note). Inside its grammar, a rerun whose words
+  come into existence only when the command runs (an expansion with a value, an alias) is missed. Its
+  turn-end check reads only the final message against fixed phrase lists, and any disclosure word such as
+  `flaky` or `rerun` clears it; it does not record or investigate the failure itself. It fails open on its
+  own failure, by design for an advisory hook: an internal error or an unwritable stdout gives no note and
+  no refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed and
+  the stop is allowed, but the current call's own CI rerun or possible CI rerun note is still given.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

@@ -11,14 +11,9 @@ WHAT IT DOES
        definition. The hook reads the command in a small closed grammar (SHELL GRAMMAR, below) and does not
        decide which word is the command: a simple command whose word values, each expansion read as empty,
        hold a word whose last path part is gh, then run, then rerun (or glab, ci, retry), in that order at any
-       positions, is a CI rerun. A command outside the grammar is a possible CI rerun when any normalized
-       variant of its text holds gh, run, rerun (or glab, ci, retry) as whole words in that order anywhere
-       (redirections are not removed). The variants: every backslash-newline deleted, or replaced by a
-       newline; then, in every combination, each `...` and $(...) deleted (read as printing nothing; an inner
-       one first), each ${...} (an inner one first), $NAME and $ with the special character after it deleted,
-       each $'...' decoded when its escapes are only hexadecimal (\x) or octal and else deleted, and each { }
-       and , replaced by a space. Each variant is searched with every \ ' " { } , $ and backtick deleted.
-       After it runs, the hook adds a note to the assistant's context: the rerun's result
+       positions, is a CI rerun. A command outside the grammar (off-grammar) is always a possible CI rerun:
+       the hook could not parse it, so a CI rerun cannot be ruled out, and no search of its text decides
+       otherwise. After it runs, the hook adds a note to the assistant's context: the rerun's result
        does not erase the earlier failure, which is to be recorded and investigated.
     2. A LOCAL RERUN. A recognized check command (CHECK_RE: a test runner, `make test` or `make check`, a
        `--self-test` or `--check` run) that failed and then, run again with the identical command text, passed,
@@ -30,19 +25,23 @@ WHAT IT DOES
        message that names it clears the outstanding reruns. A loop cap bounds the refusals: inside one
        continuous stop_hook_active run at most BLOCK_CAP, then the stop is allowed with a one-line warning.
 
-    A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, and any
-    other shell command that did not fail, is not a CI rerun, and is not read-only. A command is read-only only
+    A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, any shell
+    command outside the grammar that did not fail (also a possible CI rerun, see 1), and any other shell command
+    that did not fail, is not a CI rerun, and is not read-only. A command is read-only only
     inside the grammar: no simple command writes a file, and in each simple command, after leading ! { } if
     then elif else fi do done while until, either nothing remains or the command word holds no expansion and
     its last path part (so ./cat and /usr/bin/env count) is on the short read-only list (READ_ONLY: cat, ls,
     grep, echo, and similar), git with READ_ONLY_GIT
     (status, diff, log, ...), gh with READ_ONLY_GH (run view, pr checks, ...), env with no argument, or a
     for NAME [in ...] header. So an install, a checkout, a sed, an echo into a file, an assignment prefix, or
-    any command outside the grammar between the runs counts as a deliberate change and no rerun is flagged.
+    any command outside the grammar between the runs counts as a deliberate change and no local rerun is
+    flagged (a command outside the grammar is itself noted as a possible CI rerun, see 1).
 
     SHELL GRAMMAR. The hook reads this grammar exactly; anything outside it is off-grammar.
-    - The whole text is off-grammar if it holds a NUL. Blanks are space and tab. An unquoted # where a token
-      starts is a comment up to the next newline (a backslash before that newline does not extend it).
+    - The whole text is off-grammar if it holds a NUL or is longer than MAX_PARSE (8192) characters, so the
+      reading work is bounded (a longer command is a possible CI rerun, see 1). Blanks are space and tab. An
+      unquoted # where a token starts is a comment up to the next newline (a backslash before that newline
+      does not extend it).
     - Operators, longest first: <<< &>> &> >> >| >& <& && || |& > < ; & | ( ) and newline. Off-grammar:
       <<, <<-, <>, ;;, ;&, ((, and a ( directly after a word.
     - A word is one or more pieces; any other character outside quotes (a carriage return, a non-ASCII
@@ -97,13 +96,15 @@ RESIDUAL COVERAGE
     function, or a command string handed to another program (sh -c '...', eval '...', ssh, xargs input, a script).
     The name rule ignores command position, so a simple command that names gh, run and rerun in order without
     running them is noted anyway: echo gh run rerun, unquoted or with each word quoted alone (echo "gh" "run"
-    "rerun"), command -v gh run rerun, a function body that is defined but never called (a false note). A command
-    outside the grammar counts as a change, so a rerun across it is not flagged (a missed note); this includes `echo
-    "$(date)"`, a here-document, a line continuation, ${x:-y}, $'...', and a redirection spelling not listed. It is
-    also a possible CI rerun when any normalized variant of its text, as described above, holds gh, run, rerun (or
-    glab, ci, retry) in order anywhere, even in quotes, a comment or a here-document body (a false note); the same
-    missed-rerun classes apply to that search, and so does a substitution that prints a word, a $'...' word with
-    another escape (such as \u0072, deleted rather than decoded), and a nesting the variants do not take apart.
+    "rerun"), command -v gh run rerun, a function body that is defined but never called (a false note). Every
+    command outside the grammar is a possible CI rerun, by construction: this includes `echo "$(date)"`, a
+    here-document, a line continuation, ${x:-y}, $'...', a redirection spelling not listed, and any command longer
+    than MAX_PARSE characters. Each one that does not fail gets a note and leaves an outstanding possible rerun,
+    wherever it falls in the session, so every off-grammar command between a failure and a pass marks the pass as
+    possibly rerun: a final message that then presents a pass as conclusive without a disclosure word is refused.
+    This is a deliberate false-note cost of a warn-only hook: an off-grammar command that reruns nothing is noted
+    anyway. It also counts as a change, so a local rerun across it gets no local-rerun note of its own, and a check
+    command outside the grammar is never compared as a check (its pass gets the possible-CI-rerun note instead).
     Read-only is decided only inside the grammar: env with any argument, an assignment prefix (X=1 ls), a command
     word holding an expansion, and any output redirection (> >> >| &> &>>) whose target is not the unquoted word
     /dev/null count as a change; an input redirection (< <<<) and a descriptor duplication or close (>&2, <&0, >&-)
@@ -120,9 +121,10 @@ RESIDUAL COVERAGE
     runs in one session can lose a state update. State keeps at most MAX_CHECKS commands (one longer than MAX_KEY
     JSON characters is keyed by its SHA-256, so the state stays under STATE_MAX_BYTES) and MAX_FLAGS outstanding
     reruns. The hook fails open on its own failure (warn-only by design: an advisory hook must not block on its own
-    failure): an internal error exits 0 with no output, an unreadable state file is read as no earlier runs and
-    allows the stop, and a note or refusal that cannot be written to stdout is dropped, so each can miss a note or a
-    refusal.
+    failure): an internal error exits 0 with no output, an unreadable state file is read as no earlier runs (so a
+    local rerun across it is missed) and allows the stop, though the current call's own CI rerun or possible CI
+    rerun note is still given, and a note or refusal that cannot be written to stdout is dropped, so each can miss
+    a note or a refusal.
 
 Self-test: python3 -I -S -B rerun-pass-check.py --self-test
 """
@@ -155,16 +157,9 @@ _BAD_OPS = ("<<", "<>", ";;", ";&", "((")
 _REDIRS = frozenset(("<", ">", ">>", ">|", "&>", "&>>", "<<<", ">&", "<&"))
 _EXPANSION_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9?#$!@*-])")
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# A command outside the grammar: the text searched for a CI rerun named anywhere, in normalized variants (see
-# ci_rerun), each with the quoting, brace, comma and $ characters removed.
-_SUBSTITUTION_TEXT_RE = re.compile(r"`[^`]*`|\$\([^()]*\)")
-_EXPANSION_TEXT_RE = re.compile(r"\$\{[^{}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9?#$!@*-]")
-_ANSI_C_TEXT_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
-_ANSI_C_SIMPLE_RE = re.compile(r"(?:[^\\]|\\x[0-9A-Fa-f]{1,2}|\\[0-7]{1,3})*")
-_ANSI_C_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{1,2})|\\([0-7]{1,3})")
-_BRACE_TEXT_RE = re.compile(r"[{},]")
-_DROP_RE = re.compile(r"[\\'\"{},$`]")
-_NAMED_RERUN_RE = re.compile(r"\bgh\b.*?\brun\b.*?\brerun\b|\bglab\b.*?\bci\b.*?\bretry\b", re.S)
+# The longest command the grammar reads, in characters; a longer one is off-grammar (a possible CI rerun). It
+# bounds the reading work, and CHECK_RE, whose worst case is quadratic, then sees only commands this long.
+MAX_PARSE = 8192
 SKIPPED = frozenset(("!", "{", "}", "if", "then", "elif", "else", "fi", "do", "done", "while", "until"))
 # A negation directly before a conclusive phrase ("not verified", "hasn't been verified", "never green").
 _NEGATED_RE = re.compile(r"(?:\bnot|\bcannot|n't|\bnever|\bno longer)"
@@ -390,7 +385,10 @@ def _tokens(text):
 def parse(cmd):
     """The simple commands `cmd` runs, as a tuple of (words, writes) pairs: words is the tuple of word values
     with redirections removed (an expansion stands as a NUL character, read as empty), and writes is True
-    when a redirection of that simple command writes a file; None when `cmd` is outside the grammar."""
+    when a redirection of that simple command writes a file; None when `cmd` is outside the grammar (including
+    any command longer than MAX_PARSE characters)."""
+    if len(cmd) > MAX_PARSE:
+        return None
     try:
         toks = _tokens(cmd)
     except _Unsupported:
@@ -438,44 +436,11 @@ def _names(words):
     return False
 
 
-def _ansi_c(m):
-    """The $'...' word `m` decoded when each escape in it is hexadecimal (backslash x) or octal; else deleted."""
-    if _ANSI_C_SIMPLE_RE.fullmatch(m.group(1)) is None:
-        return ""
-    return _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, m.group(1))
-
-
-def _ansi_c_escape(m):
-    """The character one hexadecimal or octal escape in a $'...' word stands for."""
-    if m.group(1) is not None:
-        return chr(int(m.group(1), 16))
-    return chr(int(m.group(2), 8))
-
-
-def _until_fixed(rx, repl, text):
-    """`text` with `rx` replaced by `repl` until nothing changes, so an inner construct goes before an outer one."""
-    while True:
-        new = rx.sub(repl, text)
-        if new == text:
-            return text
-        text = new
-
-
 def ci_rerun(cmd):
-    """True when a simple command of `cmd` names a CI rerun command (see _names); a command outside the grammar
-    is one when any normalized variant of its text names one anywhere (a possible CI rerun). The variants: each
-    backslash-newline deleted, or read as a newline; then, in every combination, each `...` and $(...) deleted
-    (read as printing nothing), each ${...}, $NAME and $ with the special character after it deleted (read as
-    empty), each $'...' decoded or deleted (see _ansi_c), and each { } and , read as a space. Each variant is
-    searched with every backslash, quote, brace, comma, $ and backtick deleted; a variant can only add a note."""
+    """True when a simple command of `cmd` names a CI rerun command (see _names), and always when `cmd` is
+    outside the grammar: the hook cannot parse it, so a CI rerun cannot be ruled out (a possible CI rerun)."""
     cmds = parse(cmd)
-    if cmds is None:
-        texts = set((cmd.replace("\\\n", ""), cmd.replace("\\\n", "\n")))
-        for rx, repl in ((_SUBSTITUTION_TEXT_RE, ""), (_EXPANSION_TEXT_RE, ""), (_ANSI_C_TEXT_RE, _ansi_c),
-                         (_BRACE_TEXT_RE, " ")):
-            texts.update([_until_fixed(rx, repl, t) for t in texts])
-        return any(_NAMED_RERUN_RE.search(_DROP_RE.sub("", t)) is not None for t in texts)
-    return any(_names(words) for words, _ in cmds)
+    return cmds is None or any(_names(words) for words, _ in cmds)
 
 
 def _command(words):
@@ -583,8 +548,8 @@ def after_tool(payload, state, event):
         if parse(cmd) is None:  # read conservatively: a possible CI rerun, and a change
             state["change"] += 1
             state["flags"] = (state["flags"] + ["possible CI rerun: " + shown(cmd)])[-MAX_FLAGS:]
-            return ("a command the hook cannot fully parse names a CI rerun command (" + shown(cmd) + "), so it "
-                    "is read as a possible CI rerun.")
+            return ("the hook could not parse a command (" + shown(cmd) + "), so a CI rerun cannot be ruled "
+                    "out; it is read as a possible CI rerun.")
         state["flags"] = (state["flags"] + ["CI rerun: " + shown(cmd)])[-MAX_FLAGS:]
         return "a CI rerun was started (" + shown(cmd) + ")."
     if not CHECK_RE.search(cmd):
@@ -726,13 +691,14 @@ def _self_test():
               '$(:)$(:) gh run rerun 7', 'exec $x gh run rerun 7', 'command $x gh run rerun 7',
               'gh 2>&1""- run rerun 7', 'gh >"a b" run rerun $\'7\'', '$empty$other gh run rerun 7',
               '${empty:-} gh run rerun 7', '/usr/bin/gh run rerun 1', 'command -p -- gh run rerun 1',
-              # Round 8: off-grammar reruns the fallback search missed before its normalized variants.
+              # Rounds 8 and 9: off-grammar reruns a search of the text missed; each is a possible CI rerun now.
               'echo "$(date)" # CI failed on main\\\ngh run rerun 123 --failed', 'echo "$(date)" a\\\\\ngh run rerun 7',
               'ls $((1))  # see C:\\temp\\\nglab ci retry 9', 'gh {run,rerun} 7', 'gh run {rerun,7}',
               '{gh,run,rerun} 7', 'glab {ci,retry} 7', 'gh run re$(true)run 7', 'gh run re`true`run 7',
               'g$(:)h run rerun 7', 'gh `true`run rerun 7', "$'\\x67'h run rerun 7", "$'\\147'h run rerun 7",
               "gh run re$'\\x72'un 7", 'gh run re${x:-${y}}run 7', 'g$(echo $(true))h run rerun 7',
-              'g\\\nh run rerun; echo $', 'gh \\> run rerun 7', '$!gh run rerun 7')
+              'g\\\nh run rerun; echo $', 'gh \\> run rerun 7', '$!gh run rerun 7', 'gh run re{run,try} 7',
+              "#x\\\ng\\\nh run rerun 7", "g$'\\0x'h run rerun 7", "g$'\\400'h run rerun 7", "$'\\547h' run rerun 7")
     # Shapes that run no rerun but name one: accepted false notes.
     FLIPPED = ("command -v gh run rerun 1", "command -V gh run rerun 1", "exec -q gh run rerun 7",
                "exec --help gh run rerun 1", "exec -: gh run rerun 7", "builtin gh run rerun 1",
@@ -959,8 +925,10 @@ def _self_test():
                 self.assertTrue(ci_rerun(c), c)
             self.assertFalse(ci_rerun('echo "\x5c$(gh run rerun 6)"'))
             self.assertIsNone(self.bash("pytest -q", ok=False))
-            self.assertIsNone(self.bash('echo "$(date) done"'))
-            self.assertIsNone(self.bash("pytest -q"))  # counted as a change: the documented missed note
+            out = self.bash('echo "$(date) done"')  # off-grammar: always a possible CI rerun, and a change
+            self.assertIn("could not parse a command", out["hookSpecificOutput"]["additionalContext"])
+            self.assertIsNone(self.bash("pytest -q"))  # no local-rerun note; the possible rerun stays outstanding
+            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
 
         def test_22_an_escaped_space_or_quote_is_part_of_a_word(self):
             self.assertIsNotNone(self.bash("echo x\x5c # ; gh run rerun 7"))  # the # is inside the word
@@ -994,7 +962,7 @@ def _self_test():
                 self.assertIsNone(parse(c), c)
                 self.assertFalse(read_only(c), c)
                 self.assertTrue(changes_beside_check(c), c)
-                self.assertFalse(ci_rerun(c), c)
+                self.assertTrue(ci_rerun(c), c)  # off-grammar: a possible CI rerun
             for c in ("case $x in a) gh run rerun 1;; esac", "cat <<EOF\ng'h' run rerun 1\nEOF",
                       "echo 'x; gh run rerun 1"):
                 self.assertTrue(ci_rerun(c), c)
@@ -1070,7 +1038,7 @@ def _self_test():
                 self.assertFalse(ci_rerun(c), c)
             for c in ("cat <<EOF\nnothing here\nEOF", "echo $(gh run view 7)", "echo ${x:-gh} run", "g`h` run"):
                 self.assertIsNone(parse(c), c)
-                self.assertFalse(ci_rerun(c), c)
+                self.assertTrue(ci_rerun(c), c)  # off-grammar: a possible CI rerun (a false note)
 
         def test_30_read_only_table(self):
             for c in ("ls -la", "cat README.md", "git status", "git diff HEAD~1 -- f.py", "git log --oneline -5",
@@ -1137,8 +1105,9 @@ def _self_test():
             self.assertIn("possible CI rerun", out["hookSpecificOutput"]["additionalContext"])
             self.assertIsNone(self.bash("pytest -q"))  # the command outside the grammar counted as a change
             self.assertIsNone(self.bash("pytest -q", ok=False))
-            self.assertIsNone(self.bash("echo \"$(date)\""))
-            self.assertIsNone(self.bash("pytest -q"))  # the documented narrowing: a missed note
+            out = self.bash("echo \"$(date)\"")
+            self.assertIn("possible CI rerun", out["hookSpecificOutput"]["additionalContext"])
+            self.assertIsNone(self.bash("pytest -q"))  # a change too: the off-grammar command's own note stands
             out = self.bash("$@ gh run rerun 7")
             self.assertIn("a CI rerun was started", out["hookSpecificOutput"]["additionalContext"])
             self.assertTrue(changes_beside_check(">f && pytest -q") and changes_beside_check("$x; pytest -q"))
@@ -1152,29 +1121,24 @@ def _self_test():
                       "echo \"${HOME:-a b}\"", "echo \"$'x'\"", "ls >&1-", "gh 2>&\"-1\" run rerun 7", "ls <&x; ls"):
                 self.assertFalse(read_only(c), c)
 
-        def test_34_fallback_variants(self):
-            # x + " run rerun; echo $" is off-grammar (a lone $); each case pins one normalization detail.
-            for x in ("g${x}h", "g${x0}h", "g$m'h'", "g$-h", "g$M'h'", "g$_'h'", "g$0h", "g$xM'h'", "g$x5'h'",
-                      "g$x_'h'", "g$1h", "g$9h", "g$?h", "g$#h", "g$!h", "g$@h", "g$*h", "g\\h", 'g"h', "g{h", "g}h",
-                      "g,h", "g$h", "g`h", "g''h", "g`:`h", "g$(:)h", "g$(echo $(true))h", "$'\\x67'h", "$'\\147'h",
-                      "$'\\x67\\x68'", "g$'\\n'h", "$'g'h", "g$'\\xzz'h", "g$'a\\'b'h", "$'\\x6g'h",
-                      "g${x:-${y}}h", "$gh", "{gh,}", "{g,}h"):
+        def test_34_off_grammar_is_always_a_possible_rerun(self):
+            # x + " run rerun; echo $" is off-grammar (a lone $): flagged whatever x is, with no search of the text.
+            for x in ("g${x}h", "g$m'h'", "g\\h", "g`h", "g$(echo $(true))h", "$'\\x67'h", "g${x:-${y}}h", "{gh,}",
+                      "g${x{}'h'", "g$_h", "g$Ah", "g$'\\x67'", "$'\\x6G'h", "g$'\\1'h", "xgh", "ghx", "", "ls"):
+                self.assertIsNone(parse(x + " run rerun; echo $"), x)
                 self.assertTrue(ci_rerun(x + " run rerun; echo $"), x)
-            for x in ("g${x{}'h'", "g${}x}'h'", "g$_h", "g$x]'h'", "g$x0h", "g$:h", "g$${x}h", "g$Ah", "g$zh",
-                      "g$Z9h", "g$'\\x67'", "g'\\x68'", "$'\\x6G'h",
-                      "g$'\\x6'h", "g$'\\1'h", "xgh", "ghx"):
-                self.assertFalse(ci_rerun(x + " run rerun; echo $"), x)
-            for c in ("glab ci retry 7", "glab -ci -retry", "glab `:`ci retry", "glab ci `:`retry"):
-                self.assertTrue(ci_rerun(c + "; echo $"), c)
-            for c in ("xglab ci retry", "glabx ci retry", "glab xci retry", "glab cix retry", "glab ci xretry",
-                      "glab ci retryx", "gh xrun rerun", "gh runx rerun", "gh run xrerun",
-                      "gh run rerunx"):
-                self.assertFalse(ci_rerun(c + "; echo $"), c)
-            for c in ("g$$${x}h run rerun", "gh run $'\\x72erun'", "gh run reru$'\\x6e' 7", "gh run reru$'\\x6E' 7",
-                      "gh run re$'\\x72\\165'n", "gh run $'\\162\\145run'"):
-                self.assertTrue(ci_rerun(c + "; echo $"), c)
-            for x in ("\\xa", "\\xA", "\\xf", "\\xB", "\\x9"):  # a control character, decoded: not deleted
-                self.assertFalse(ci_rerun("g$'" + x + "'h run rerun; echo $"), x)
+            for c in ("echo $", "ls \\", "cat <<EOF\nx\nEOF", "echo $((1))", "echo 'a", "ls\0"):
+                self.assertIsNone(parse(c), c)
+                self.assertTrue(ci_rerun(c), c)
+            pad = "ls " + "a" * (MAX_PARSE - 3)  # the longest command the grammar reads
+            self.assertEqual(parse(pad), ((("ls", "a" * (MAX_PARSE - 3)), False),))
+            self.assertTrue(read_only(pad))
+            self.assertFalse(ci_rerun(pad))
+            for c in (pad + "a", pad + " ", "gh run rerun 7 " + "a" * MAX_PARSE):  # one character too long
+                self.assertIsNone(parse(c), len(c))
+                self.assertTrue(ci_rerun(c), len(c))
+                self.assertFalse(read_only(c), len(c))
+                self.assertTrue(changes_beside_check(c), len(c))
 
         def test_35_reader_witnesses(self):
             # Each assertion pins a reader detail that a mutation sweep found no other test for.
@@ -1234,8 +1198,8 @@ def _self_test():
             for cmd, what in (("pytest -q", "the check `pytest -q` failed earlier and passed on a rerun with no "
                                             "change recorded between."),
                               ("gh run rerun 7", "a CI rerun was started (gh run rerun 7)."),
-                              ("gh {run,rerun} 7", "a command the hook cannot fully parse names a CI rerun command "
-                                                   "(gh {run,rerun} 7), so it is read as a possible CI rerun.")):
+                              ("gh {run,rerun} 7", "the hook could not parse a command (gh {run,rerun} 7), so a CI "
+                                                   "rerun cannot be ruled out; it is read as a possible CI rerun.")):
                 out = self.bash(cmd)["hookSpecificOutput"]["additionalContext"]
                 self.assertEqual(out, "RERUN NOTE (rerun-pass-check hook): " + what + tail)
             self.assertIn("failed (local rerun: pytest -q; CI rerun: gh run rerun 7; possible CI rerun: gh {run,rerun} "
@@ -1245,6 +1209,57 @@ def _self_test():
                 after_tool(dict(tool_name="Bash", tool_input=dict(command=cmd)), state, "PostToolUse")
             self.assertEqual(list(state["checks"]), ["pytest " + "a" * 503, "sha256:" + hashlib.sha256(
                 ("pytest " + "a" * 504).encode()).hexdigest()])
+
+        def test_36_failure_is_not_pass(self):
+            state = new_state()
+            payload = dict(tool_name="Bash", tool_input=dict(command="pytest -q"))
+            self.assertIsNone(after_tool(payload, state, "PostToolUseFailure"))
+            self.assertIsNone(after_tool(payload, state, "PostToolUseFailure"))
+            self.assertEqual(state["flags"], [])
+
+        def test_37_check_retention(self):
+            state = new_state()
+            for i in range(201):
+                payload = dict(
+                    tool_name="Bash",
+                    tool_input=dict(command="pytest t" + str(i)),
+                )
+                after_tool(payload, state, "PostToolUseFailure")
+            self.assertEqual(
+                list(state["checks"]),
+                ["pytest t" + str(i) for i in range(1, 201)],
+            )
+
+        def test_38_newline_is_not_continuation(self):
+            # Inside the grammar a newline ends a simple command; with a lone $ the text is off-grammar instead.
+            self.assertFalse(ci_rerun("echo g\nh run rerun"))
+            self.assertTrue(ci_rerun("echo g\nh run rerun; echo $"))
+
+        def test_39_round_9_reproductions_are_flagged(self):
+            for c in ("#x\\\ng\\\nh run rerun 7", "g$'\\0x'h run rerun 7", "g$'\\400'h run rerun 7",
+                      "$'\\547h' run rerun 7", "g" + "${x:-" * 40000 + "}" * 40000 + "h run rerun",
+                      "gh run re{run,try} 7", "echo $; " + "gh run " * 800):
+                self.assertIsNone(parse(c), c[:40])
+                self.assertTrue(ci_rerun(c), c[:40])
+                state = new_state()
+                what = after_tool(dict(tool_name="Bash", tool_input=dict(command=c)), state, "PostToolUse")
+                self.assertIn("so a CI rerun cannot be ruled out", what)
+                self.assertEqual(state["flags"], ["possible CI rerun: " + shown(c)])
+                self.assertIsNone(after_tool(dict(tool_name="Bash", tool_input=dict(command=c)), new_state(),
+                                             "PostToolUseFailure"))
+
+        def test_40_bounds_and_pins(self):
+            self.assertEqual(MAX_PARSE, 8192)  # the cap the docstring, README and residue state
+            for cmd in ("echo $; ", "gh run rerun "):  # off-grammar and in-grammar flags are both capped
+                state = new_state()
+                for i in range(MAX_FLAGS + 5):
+                    after_tool(dict(tool_name="Bash", tool_input=dict(command=cmd + str(i))), state, "PostToolUse")
+                self.assertEqual(len(state["flags"]), MAX_FLAGS, cmd)
+                self.assertTrue(state["flags"][-1].endswith(cmd + str(MAX_FLAGS + 4)), cmd)
+            state = new_state()
+            state["checks"]["pytest -q"] = ["skip", 0]  # only a recorded failure makes a rerun
+            self.assertIsNone(after_tool(dict(tool_name="Bash", tool_input=dict(command="pytest -q")), state,
+                                         "PostToolUse"))
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
