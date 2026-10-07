@@ -53,10 +53,24 @@ does not support dir_fd for os.open the hook is opened by its full name, still w
 the final component; and a writer whose in-place rewrite of the SAME inode is still in progress
 when the launcher reads it (never a rename, removal or replacement, which the descriptor
 acquisition covers) can expose a partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs.
-The steps before the acquisition refusal decides its status run outside any protected block: the
-module imports (sys before the floor guard; ast, io, itertools, os, stat, tokenize, types and
-warnings after it), the HERE path computation and the _hook path computation (hook_path), so a
-fault in one of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call.
+The steps before the acquisition refusal decides its status run outside any protected block, so a
+fault in one of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call:
+the module imports (sys before the floor guard; ast, io, itertools, os, stat, tokenize, types and
+warnings after it), the FLOOR_FAIL_OPEN_MODES assignment, the floor test
+`tuple(sys.version_info[:2]) < (3, 14)`, the floor guard's own steps before its try (its
+`import os`, its status decision and the def statement for _floor_tail), the PREVIEW_HOOKS
+assignment, the HERE path computation, every other module-level def statement and assignment
+(_deliver_tail, _deliver, hook_path, the launcher-subset allowlist block, _acquire_hook,
+_missing_sibling, _stderr_failure and self_test), the --self-test branch (its argv test and, when
+that holds, the self-test itself, which exits through SystemExit and keeps the interpreter's normal
+exit semantics), the unknown-mode condition (`len(sys.argv) < 2 or sys.argv[1] not in
+PREVIEW_HOOKS`; the unknown-mode refusal it selects then runs protected), the _hook path
+computation (hook_path), and the acquisition refusal's own status decision (the mode test on
+sys.argv). Each fail-open refusal (the floor guard's and the acquisition refusal's) delivers its
+stderr diagnostic FIRST and imports json only after it, inside the protected block: if that
+`import json` fails (a MemoryError, for example), the stderr diagnostic has already been delivered
+and the exit status still holds, but the JSON systemMessage warning is not written to stdout, so
+the platform shows no warning for that refusal.
 """
 import sys
 

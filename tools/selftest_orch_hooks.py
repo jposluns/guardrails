@@ -1451,19 +1451,46 @@ def _main_isolated(report_path=None):
         ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
                             capture_output=True, text=True, timeout=120)
 
+        def _strict_constant(name):
+            raise ValueError("non-standard JSON constant " + name)
+
+        def _strict_pairs(pairs):
+            keys = [key for key, _value in pairs]
+            if len(keys) != len(set(keys)):
+                raise ValueError("duplicate JSON object key")
+            return dict(pairs)
+
         def _stop_warning(stdout):
-            """(shape, note) for a fail-open Stop warning, judged strictly: stdout must be ONE JSON object
-            whose systemMessage is a string, and only that field is searched; a parse failure, a non-object
-            or a missing or non-string systemMessage fails the check (plain text naming the exception on
-            stdout is not a warning the platform would surface)."""
+            """(shape, note) for a fail-open Stop warning, judged strictly: stdout must be ONE strict JSON
+            object (NaN, Infinity, -Infinity and a duplicate key at any depth are refused, which the default
+            json.loads accepts) whose keys are EXACTLY {"systemMessage"} with a string value (the exact-key
+            rule of tools/selftest_aiqt_hooks.py's _reduce_result: a note beside "decision": "block" would
+            BLOCK a Stop, so it is not a fail-open warning), and only that field is searched; any other shape
+            fails the check (plain text naming the exception on stdout is not a warning the platform would
+            surface)."""
             try:
-                obj = json.loads(stdout)
-            except ValueError:
+                obj = json.loads(stdout, parse_constant=_strict_constant, object_pairs_hook=_strict_pairs)
+            except (ValueError, RecursionError):
                 obj = None
-            note = obj.get("systemMessage") if isinstance(obj, dict) else None
+            note = obj["systemMessage"] if isinstance(obj, dict) and set(obj) == {"systemMessage"} else None
             if isinstance(note, str):
                 return "json object with a string systemMessage", note
             return "parse or schema failure: stdout " + repr(stdout), ""
+        # Negative fixtures: each shape a lenient parse or a lenient key test would accept as a warning
+        # (a NaN or infinite member, a duplicate systemMessage whose last value carries the text, an extra
+        # key, decision=block beside the note) must read as a parse or schema failure.
+        check("trunc/stop-warning-strict-json", [_stop_warning(text)[0] == "json object with a string systemMessage"
+                                                 for text in (
+            json.dumps({"systemMessage": "RecursionError"}) + "\n",
+            json.dumps({"extra": float("nan"), "systemMessage": "RecursionError"}) + "\n",
+            json.dumps({"extra": float("inf"), "systemMessage": "RecursionError"}) + "\n",
+            json.dumps({"extra": float("-inf"), "systemMessage": "RecursionError"}) + "\n",
+            '{"systemMessage": "x", "systemMessage": "RecursionError"}\n',
+            '{"systemMessage": "RecursionError", "extra": {"k": 1, "k": NaN}}\n',
+            json.dumps({"systemMessage": "RecursionError", "extra": 1}) + "\n",
+            json.dumps({"decision": "block", "reason": "x", "systemMessage": "RecursionError"}) + "\n",
+            json.dumps({"systemMessage": ["RecursionError"]}) + "\n",
+            "RecursionError\n")], [True] + [False] * 9)
         ds_shape, ds_note = _stop_warning(ds.stdout)
         check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, ds_shape, "RecursionError" in ds_note),
               (0, "json object with a string systemMessage", True))

@@ -50,10 +50,18 @@ os.open the hook is opened by its full name, still with O_NOFOLLOW on the final 
 writer whose in-place rewrite of the SAME inode is still in progress when the launcher reads it
 (never a rename, removal or replacement, which the descriptor acquisition covers) can expose a
 partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs. The
-steps before the acquisition refusal decides its status run outside any protected block: the
-module imports (sys before the floor guard; os, stat and types after it) and the _hook path
-computation, so a fault in one of them (a MemoryError, for example) exits 1, which does not block
-a PreToolUse call.
+steps before the acquisition refusal decides its status run outside any protected block, so a
+fault in one of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call:
+the module imports (sys before the floor guard; os, stat and types after it), the
+FLOOR_FAIL_OPEN_MODES assignment, the floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor
+guard's own steps before its try (its `import os`, its status decision and the def statement for
+_floor_tail), the def statements for _deliver_tail, _deliver and _acquire_hook, the _hook path
+computation, and the acquisition refusal's own status decision (the mode test on sys.argv). Each
+fail-open refusal (the floor guard's and the acquisition refusal's) delivers its stderr diagnostic
+FIRST and imports json only after it, inside the protected block: if that `import json` fails (a
+MemoryError, for example), the stderr diagnostic has already been delivered and the exit status
+still holds, but the JSON systemMessage warning is not written to stdout, so the platform shows no
+warning for that refusal.
 
 SOURCE tree copy: tools/gen_hooks.py copies this file byte-identical into the plugin surface beside
 the dispatcher; edit the source, never the generated copy.

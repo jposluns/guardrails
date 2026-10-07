@@ -265,6 +265,7 @@ expected-check-ids = [
   "trunc/dispatch-deep-json-stop-warns",
   "trunc/dispatch-memoryerror-fails-closed",
   "trunc/dispatch-memoryerror-stop-warns",
+  "trunc/stop-warning-strict-json",
   # ---------- component 3b: the untracked wait-loop guard ----------
   "wl/base-match",
   "wl/no-detach-none",
@@ -1096,6 +1097,8 @@ expected-check-ids = [
   "launcher/allowlist-parity",
   "launcher/real-launchers-block-below-floor",
   "launcher/real-launchers-missing-sibling-blocks",
+  "launcher/warning-json-strict-parse",
+  "launcher/warning-json-strict-shape",
   "launcher/acquire-and-run",
   "launcher/acquire-removal-race-runs",
   "launcher/acquire-missing-mode-rule",

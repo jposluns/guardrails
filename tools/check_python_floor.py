@@ -1143,6 +1143,44 @@ def expected_warning(name, floor, version, executable, mode):
         % (mode, expected_refusal(name, floor, version, executable).strip())))) + "\n"
 
 
+def _reject_json_constant(name):
+    """parse_constant hook for strict_json: NaN, Infinity and -Infinity are not JSON (RFC 8259), and
+    json.loads accepts them by default."""
+    raise ValueError("non-standard JSON constant {}".format(name))
+
+
+def _reject_duplicate_keys(pairs):
+    """object_pairs_hook for strict_json: a repeated object key is refused, never resolved by the
+    default last-one-wins rule (which would let a second systemMessage replace the first)."""
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate JSON object key")
+    return dict(pairs)
+
+
+def strict_json(text):
+    """text parsed as strict JSON: NaN, Infinity, -Infinity and a duplicate object key (at any
+    depth) raise ValueError, as malformed JSON does."""
+    return json.loads(text, parse_constant=_reject_json_constant,
+                      object_pairs_hook=_reject_duplicate_keys)
+
+
+def warning_note(out):
+    """The systemMessage of out when out is ONE strict JSON object (strict_json) whose keys are
+    EXACTLY {"systemMessage"} and whose value is a string, else None. This is the exact-key rule
+    tools/selftest_aiqt_hooks.py's _reduce_result applies to a note: any other key is refused,
+    because a fail-open warning beside "decision": "block" would BLOCK a Stop, so a check that
+    ignored extra keys would accept a refusal that does not fail open."""
+    try:
+        parsed = strict_json(out)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != {"systemMessage"}:
+        return None
+    note = parsed["systemMessage"]
+    return note if isinstance(note, str) else None
+
+
 def _child(code, args, flags, cwd):
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", *flags, "-c", code, *args], cwd=cwd,
@@ -2442,16 +2480,48 @@ def _self_test_cases(base):
     hook_ran = "import sys\nsys.stdout.write(\"HOOK_RAN\\n\")\n"
 
     def _warning(out, needle):
-        """True only when out is ONE JSON object whose systemMessage is a string containing needle.
-        Only that parsed field is searched, never the raw stream: a fail-open warning that does not
-        parse (a json.dumps replaced by str prints a Python dict repr) is not a warning the platform
-        can surface, so a substring test on the stream would accept a broken refusal."""
+        """True only when out is ONE strict JSON object whose ONLY key is systemMessage, a string
+        containing needle (warning_note: no NaN, Infinity or -Infinity, no duplicate key, no other
+        key). Only that parsed field is searched, never the raw stream: a fail-open warning that does
+        not parse (a json.dumps replaced by str prints a Python dict repr) is not a warning the
+        platform can surface, and one carrying another key ("decision": "block", for example) is not
+        a fail-open warning, so a substring test on the stream would accept a broken refusal."""
+        note = warning_note(out)
+        return note is not None and needle in note
+
+    def _strict_refused(text):
         try:
-            parsed = json.loads(out)
+            strict_json(text)
         except ValueError:
-            return False
-        note = parsed.get("systemMessage") if isinstance(parsed, dict) else None
-        return isinstance(note, str) and needle in note
+            return True
+        return False
+
+    # The strict parse refuses each non-standard constant and a duplicate key at any depth, all of
+    # which the default json.loads accepts (the last two fixtures are plain JSON it must accept).
+    check("launcher/warning-json-strict-parse", [_strict_refused(text) for text in (
+        "NaN", "Infinity", "-Infinity", "[1, NaN]", "{\"a\": {\"b\": Infinity}}",
+        "{\"a\": [-Infinity]}", "{\"a\": 1, \"a\": 1}", "{\"o\": {\"k\": 1, \"k\": 2}}",
+        "{\"systemMessage\": \"x\"}", "{\"a\": [1.5, -2e300, null]}")],
+          [True] * 8 + [False] * 2)
+    # The warning shape: exactly one key, systemMessage, holding a string. The json.dumps fixtures
+    # mirror the recorded round-9 mutants' output (a NaN or infinite extra member, decision=block
+    # beside the note); a duplicate systemMessage whose LAST value carries the needle is refused,
+    # where last-one-wins parsing would accept it.
+    check("launcher/warning-json-strict-shape", [_warning(text, "needle") for text in (
+        json.dumps(dict(systemMessage="the needle")) + "\n",
+        json.dumps(dict(extra=float("nan"), systemMessage="the needle")) + "\n",
+        json.dumps(dict(extra=float("inf"), systemMessage="the needle")) + "\n",
+        json.dumps(dict(extra=float("-inf"), systemMessage="the needle")) + "\n",
+        "{\"systemMessage\": \"the needle\", \"systemMessage\": \"the needle\"}\n",
+        "{\"systemMessage\": \"other\", \"systemMessage\": \"the needle\"}\n",
+        json.dumps(dict(extra=1, systemMessage="the needle")) + "\n",
+        json.dumps(dict(decision="block", reason="x", systemMessage="the needle")) + "\n",
+        json.dumps(dict(systemMessage=["the needle"])) + "\n",
+        json.dumps(["the needle"]) + "\n",
+        "{'systemMessage': 'the needle'}\n",
+        json.dumps(dict(systemMessage="the needle")) * 2 + "\n",
+        "the needle\n")],
+          [True] + [False] * 12)
 
     def _acquire_case(scenario, mode_kind):
         got = []
@@ -2585,8 +2655,9 @@ def _self_test_cases(base):
     def _fd_seen(fd_case, rc_want, kept):
         """What the surviving stream must show: with stderr closed, stdout carries the warning for
         a fail-open refusal and stays empty for a blocking one; with stdout closed or broken,
-        stderr carries the refusal either way. The warning is judged strictly (_warning: one JSON
-        object whose string systemMessage carries the launcher's refusal wording)."""
+        stderr carries the refusal either way. The warning is judged strictly (_warning: one strict
+        JSON object whose only key, systemMessage, is a string carrying the launcher's refusal
+        wording)."""
         if fd_case in ("stderr-closed", "stderr-broken") and rc_want == 0:
             return _warning(kept, "check could not run")
         if fd_case in ("stderr-closed", "stderr-broken"):
@@ -2661,8 +2732,9 @@ def _self_test_cases(base):
     # holds the mode rule there, so the refusal must name the fallback reason "the acquisition
     # raised" and the hook must not run. The acquisition refusal is also probed with MemoryError at
     # its `import json`, which therefore runs inside the protected block. Every fail-open warning
-    # is judged strictly (_warning: one JSON object whose string systemMessage carries the reason),
-    # never by a substring of the raw stream. What is NOT probed, disclosed in the launcher
+    # is judged strictly (_warning: one strict JSON object, no NaN, Infinity or duplicate key, whose
+    # only key, systemMessage, is a string carrying the reason), never by a substring of the raw
+    # stream. What is NOT probed, disclosed in the launcher
     # docstrings: a full blocking pipe can block the diagnostic write until its reader drains it,
     # and an external signal terminates outside any guarantee.
     inject_runner = (
