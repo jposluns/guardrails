@@ -97,7 +97,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `00f4d7013d630c344ef75268838d844b27e2c210848f8fbb691149e2f89eaa6d` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `a2f93711f0e91267b8f87b89b01a5e99ec6e1e36668cede587bc4f88936c687d` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
@@ -345,8 +345,9 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
   through the shell tool, with identical command text. A rerun through a web page, a runner's own retry
   option, or a change made outside the tool calls it sees is missed or misread. A command its shell lexer
-  cannot read (a here-document, notably) counts as a change, and one that names a CI rerun command anywhere
-  is noted as a possible CI rerun. Its turn-end check reads
+  cannot read (a here-document or ANSI-C quoting such as `$'...'`, notably) counts as a change, and one that
+  names a CI rerun command anywhere is noted as a possible CI rerun. Shell syntax its reader neither models
+  nor detects can still be misread. Its turn-end check reads
   only the final message against fixed phrase lists, and any disclosure word such as `flaky` or `rerun`
   clears it; it does not record or investigate the failure itself.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
