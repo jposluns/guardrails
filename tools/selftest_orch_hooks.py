@@ -3588,6 +3588,99 @@ def _main_isolated(report_path=None):
                [(r.get("kind"), r.get("decision")) for r in _r21_rows]),
               (2, False, [("Stop", "deny")]))
 
+        # ROUND 22, THE REMAINING WARNING SITES EACH HAVE A VECTOR: with guard-events.jsonl a directory (a
+        # real failed append), (a) a Stop deny whose counter cannot be persisted fails open with the
+        # allow_unpersistable warning in its banner; (b) a Stop at the loop bound and (c) a stop-classified
+        # scheduling call at the loop bound allow with findings, each banner carrying the allow_with_findings
+        # warning; (d) a resume audit with a finding carries the findings warning; (e) the operator-escape
+        # ALLOW of a Stop and of a scheduling call (the escape seam stands in for a differently-owned
+        # sentinel) is still allowed, its banner saying the override's row could not be written. Each row
+        # fails when its warning is removed. (f) A resume barrier that cannot be written (a directory at its
+        # path, guard-events writable) leaves the finding's warning saying the barrier was not persisted and
+        # never saying a re-run clears it (red on f8fe9112). The control rows show neither warning when the
+        # row and the barrier are written, and the escape row recorded.
+        _r22 = Fixture(tmp, "r22-events")
+        _r22_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r22.root)))
+        _r22_ge = _r22_sd / "guard-events.jsonl"
+        _r22_ge.mkdir(parents=True, exist_ok=True)
+        _r22.set_items([item("R22-1")])
+
+        def _r22_note(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            return _verdict(result), str(obj.get("systemMessage", ""))
+
+        def _r22_has(result, text):
+            verdict, msg = _r22_note(result)
+            return verdict, text in msg
+        _r22_record = aiqt_hooks._orch_record_denial
+        try:
+            aiqt_hooks._orch_record_denial = lambda *a: False
+            _r22.set_turn_state(dict())
+            check("r22/allow-unpersistable-warns",
+                  _r22_has(aiqt_hooks.orch_stop_guard(_r22.payload("Stop")),
+                           "the guard-events row for this allow_unpersistable (Stop) could not be written"),
+                  ("warn", True))
+        finally:
+            aiqt_hooks._orch_record_denial = _r22_record
+        _r22.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        check("r22/stop-findings-warns",
+              _r22_has(aiqt_hooks.orch_stop_guard(_r22.payload("Stop")),
+                       "the guard-events row for this allow_with_findings (Stop) could not be written"),
+              ("warn", True))
+        _r22.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        check("r22/yield-findings-warns",
+              _r22_has(aiqt_hooks.orch_yield_tool(_r22.payload(
+                  "PreToolUse", "ScheduleWakeup", dict(stop=True, prompt="end after R22-1"))),
+                  "the guard-events row for this allow_with_findings (yield-tool) could not be written"),
+              ("warn", True))
+        _r22.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _r22_audit = aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart"))
+        check("r22/resume-audit-findings-warns",
+              (_r22_has(_r22_audit, "the guard-events row for this findings (resume-audit) could not be "
+                                    "written"), "feature/other" in _r22_note(_r22_audit)[1]),
+              (("warn", True), True))
+        _r22.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        _r22_escape = aiqt_hooks._orch_escape_active
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _r22.set_turn_state(dict())
+            _r22_esc_stop = aiqt_hooks.orch_stop_guard(_r22.payload("Stop"))
+            _r22.set_turn_state(dict())
+            _r22_esc_sched = aiqt_hooks.orch_yield_tool(_r22.payload(
+                "PreToolUse", "ScheduleWakeup", dict(prompt="recheck R22-1 later")))
+            check("r22/escape-allow-unrecorded-warns",
+                  (_r22_has(_r22_esc_stop, "the guard-events row recording this operator-escape release "
+                                           "(Stop) could not be written"),
+                   _r22_has(_r22_esc_sched, "the guard-events row recording this operator-escape release "
+                                            "(yield-tool) could not be written")),
+                  (("warn", True), ("warn", True)))
+            _r22_ge.rmdir()
+            _r22.set_turn_state(dict())
+            _r22_esc_ctl = aiqt_hooks.orch_stop_guard(_r22.payload("Stop"))
+            _r22_rows = aiqt_hooks._orch_read_jsonl(str(_r22_ge))[0] or []
+            check("r22/escape-allow-recorded-no-warning",
+                  (_r22_esc_ctl, [(r.get("kind"), r.get("decision"), r.get("detail")) for r in _r22_rows]),
+                  ((0, None, None), [("Stop", "allow", "operator escape artefact present (logged)")]))
+        finally:
+            aiqt_hooks._orch_escape_active = _r22_escape
+        _r22_bar = _r22_sd / "resume-barrier.json"
+        try:
+            _r22_bar.unlink()
+        except FileNotFoundError:
+            pass
+        _r22_bar.mkdir()
+        _r22.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _r22_unarmed = _r22_note(aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart")))
+        _r22_bar.rmdir()
+        _r22_armed = _r22_note(aiqt_hooks.orch_resume_audit(_r22.payload("SessionStart")))
+        _r22.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        check("r22/resume-barrier-unwritten-warns-never-says-cleared",
+              tuple((v, "feature/other" in m,
+                     "the resume barrier could not be written (IsADirectoryError), so it was not persisted"
+                     in m, "to clear the barrier" in m) for v, m in (_r22_unarmed, _r22_armed))
+              + (json.loads(_r22_bar.read_text(encoding="utf-8")).get("active"),),
+              (("warn", True, True, False), ("warn", True, False, True), True))
+
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
         esched = lambda ti: aiqt_hooks.orch_yield_tool(

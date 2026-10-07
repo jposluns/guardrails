@@ -498,6 +498,13 @@ expected-check-ids = [
   "r21/ask-deny-holds-and-warns",
   "r21/checkpoint-bound-drop-warns",
   "r21/stop-deny-recorded-no-warning",
+  "r22/allow-unpersistable-warns",
+  "r22/stop-findings-warns",
+  "r22/yield-findings-warns",
+  "r22/resume-audit-findings-warns",
+  "r22/escape-allow-unrecorded-warns",
+  "r22/escape-allow-recorded-no-warning",
+  "r22/resume-barrier-unwritten-warns-never-says-cleared",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

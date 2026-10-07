@@ -8598,6 +8598,16 @@ def _orch_event_warn(root, kind, decision, detail):
             "manually (nocncl).".format(decision, kind))
 
 
+def _orch_escape_event_warn(root, kind, reason):
+    """The guard-events row of an operator-escape ALLOW, the only record that the override was used:
+    returns '' when the append succeeded, else the warning the caller appends to its output (the ALLOW
+    stands)."""
+    if _orch_guard_event(root, kind, "allow", reason):
+        return ""
+    return ("Additionally, the guard-events row recording this operator-escape release ({}) could not be "
+            "written, so the override's use is unrecorded; record it manually (nocncl).".format(kind))
+
+
 def _orch_warn_tail(*warns):
     """The recording-failure warnings of one hook call, each preceded by a space ('' when none)."""
     return "".join(" " + w for w in warns if w)
@@ -9570,9 +9580,16 @@ def _orch_stop_family(data, event_name, kind):
             extra = _orch_record_forced_exit(root, event_name, ctx, reason)
         return _stop_warn("AIQT guardrail ({}): {}{}".format(
             event_name, reason, _orch_warn_tail(extra, ev, spoof_warn, ctx["record_warn"])))
-    # a clean ALLOW's row is the over-fire metric only: best effort, a failed append is not surfaced
-    _orch_guard_event(root, event_name, verdict.lower(), reason)
-    tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, event_name, reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, event_name, verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
     if tail:
         # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
         return _stop_warn("AIQT guardrail ({}):{}".format(event_name, tail))
@@ -9684,9 +9701,16 @@ def orch_yield_tool(data):
             if extra:
                 msg += " " + extra
         return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
-    # a clean ALLOW's row is the over-fire metric only: best effort, a failed append is not surfaced
-    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
-    tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "yield-tool", reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
     if tail:
         # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
         return _allow_note("AIQT guardrail:" + tail)
@@ -11178,9 +11202,11 @@ def orch_resume_audit(data):
     fails, for example XDG_STATE_HOME naming a regular file, or a full disk), the error is swallowed so
     SessionStart never wedges, the temporary file is removed, the previous barrier file (armed or clear)
     or its absence is left byte-identical, and an audit with findings still returns its warning naming
-    them (where opening the forced-exit log fails other than as not-found, because the state directory
-    cannot be searched or is not a directory, as with that regular file, the forced-exit probe adds its
-    cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
+    them, which then says the barrier was not persisted (this audit did not arm it) and asks for a manual
+    record instead of saying a re-run clears the barrier; a clean audit's failed clear adds no warning,
+    since the PreToolUse barrier notes a barrier left armed (where opening the forced-exit log fails other
+    than as not-found, because the state directory cannot be searched or is not a directory, as with that
+    regular file, the forced-exit probe adds its cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
     _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
     does not swallow the error (its run ends with it, the previous barrier unchanged). Registry-scoped:
     silent where _orch_registry reads the root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
@@ -11217,20 +11243,30 @@ def orch_resume_audit(data):
     # SessionStart run in the same mode never clears a barrier the doctor armed for a scope deny that still
     # holds; the barrier does not record the mode, so a run in the other mode can (_orch_resume_audit_findings).
     findings = _orch_resume_audit_findings(status, reg, root)
+    unwritten = None
     try:
         _orch_barrier_write(barrier_path, {"active": bool(findings), "findings": findings,
                                            "ts": _orch_now().isoformat(), "warned": False})
-    except (OSError, ValueError):
-        pass  # the previous barrier is left unchanged and the warning still surfaces; never wedge SessionStart
+    except (OSError, ValueError) as exc:
+        # never wedge SessionStart: the previous barrier file (or its absence) is left unchanged. A failed
+        # ARM is named in the warning below; a clean audit's failed CLEAR stays silent here, because the
+        # PreToolUse barrier reads a barrier still armed (or a directory in its place) as armed and notes it
+        unwritten = type(exc).__name__
     if findings:
         tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",
                                                 "; ".join(findings)[:1000]))
+        if unwritten is None:
+            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
+                   "acknowledgement alone does not clear it.")
+        else:
+            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' once the state directory "
+                   "is writable. Additionally, the resume barrier could not be written ({}), so it was "
+                   "not persisted: this audit did not arm it (any earlier barrier file is left unchanged); "
+                   "record these findings manually (nocncl).".format(unwritten))
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
                           "observed reality: {}. Correct the record, or for a truncation guard finding "
                           "the condition it names (for example a directory's permissions, or the "
-                          "registry's file type), then re-run "
-                          "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
-                          "acknowledgement alone does not clear it.{}".format("; ".join(findings), tail))
+                          "registry's file type), {}{}".format("; ".join(findings), nxt, tail))
     return _allow()
 
 
