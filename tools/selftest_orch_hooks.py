@@ -273,6 +273,1606 @@ def now_iso(hours_ago=0):
     return t.isoformat()
 
 
+AUTH_STUB = """#!/usr/bin/env python3
+import json
+import sys
+import time
+ctl = json.load(open(sys.argv[1]))
+time.sleep(ctl.get("sleep", 0))
+sys.stdout.write(ctl.get("out", ""))
+sys.exit(ctl.get("exit", 0))
+"""
+
+
+def _rdp_git(root, *args):
+    """Run a fixture git command in root with a fixed identity; returns stdout text."""
+    p = subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"] + list(args),
+                       check=True, capture_output=True, text=True, timeout=30)
+    return p.stdout.strip()
+
+
+class RdpFixture:
+    """One review dispatch pin fixture: a repo whose seed commit holds seed.txt, src/a.py and old.txt and
+    whose change commit (self.pin) modifies src/a.py, adds src/b.py and deletes old.txt; a registry with a
+    review_dispatch binding (or none); and an authority stub that prints the pin unless told otherwise."""
+    CHANGED = ("old.txt", "src/a.py", "src/b.py")
+
+    def __init__(self, base, name, binding=True):
+        self.root = base / name
+        self.briefs = base / (name + "-briefs")
+        self.briefs.mkdir(parents=True)
+        (self.root / "src").mkdir(parents=True)
+        _rdp_git(base, "init", "-q", "-b", "main", str(self.root))
+        (self.root / "seed.txt").write_text("seed\n", encoding="utf-8")
+        (self.root / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        (self.root / "old.txt").write_text("old\n", encoding="utf-8")
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "seed")
+        self.seed = _rdp_git(self.root, "rev-parse", "HEAD")
+        (self.root / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        (self.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+        (self.root / "old.txt").unlink()
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "change")
+        self.pin = _rdp_git(self.root, "rev-parse", "HEAD")
+        self.ctl = self.briefs / "authority.json"
+        self.stub = self.briefs / "authority-stub.py"
+        self.stub.write_text(AUTH_STUB, encoding="utf-8")
+        self.authority(self.pin + "\n")
+        self.binding = dict(
+            commands=["orch-dispatch"], brief_option="--brief",
+            labels=dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                        repo="Review-repo:", branch="Review-branch:"),
+            authority=dict(argv=[sys.executable, "-I", "-B", str(self.stub), str(self.ctl)], timeout=5),
+            max_brief_bytes=4096)
+        (self.root / ".aiqt").mkdir()
+        self.write_registry(self.binding if binding else None)
+
+    def write_registry(self, binding):
+        reg = dict(version=1, state_dir=str(self.briefs / "state"))
+        if binding is not None:
+            reg["review_dispatch"] = binding
+        (self.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
+
+    def rebind(self, binding):
+        """An operator's change of the binding: write the registry and clear the hook's binding record, so
+        the next check records the new binding instead of withholding the dispatch as a changed one."""
+        self.write_registry(binding)
+        shutil.rmtree(self.root / ".git" / "aiqt" / "review-dispatch-binding", ignore_errors=True)
+
+    def ignore_registry(self, patterns=(".aiqt/orchestration.local.json", ".aiqt/orchestration.json")):
+        exclude = self.root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("".join(p + "\n" for p in patterns), encoding="utf-8")
+
+    def authority(self, out, code=0, sleep=0):
+        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
+
+    def brief(self, lines, name="brief.txt"):
+        path = self.briefs / name
+        path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return str(path)
+
+    def good(self, pin=None, paths=None, extra=()):
+        lines = ["Review the change.", "Review-target: revision", "Reviewed-revision: " + (pin or self.pin)]
+        lines += ["Review-path: " + p for p in (self.CHANGED if paths is None else paths)]
+        return self.brief(lines + list(extra))
+
+    def run(self, command, background=False):
+        return aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(self.root), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command, run_in_background=background)))
+
+    def dispatch(self, brief, background=False):
+        return self.run("orch-dispatch --brief " + brief, background)
+
+
+def _rdp_kind(result):
+    """_verdict, with a deny whose reason carries the UNVERIFIABLE: prefix reported as unverifiable."""
+    verdict = _verdict(result)
+    if verdict == "deny":
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "")
+        if reason.startswith("UNVERIFIABLE: "):
+            return "unverifiable"
+    return verdict
+
+
+def _rdp_cases(tmp):
+    """The review dispatch pin vectors (rdp/*). Each fixture is a throwaway repo under tmp."""
+    base = tmp / "rdp"
+    base.mkdir()
+    bare = base / "bare"
+    _rdp_git(base, "init", "-q", "-b", "main", str(bare))
+    check("rdp/registry-absent-inert", _verdict(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(bare), tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /nonexistent")))), "allow")
+    nb = RdpFixture(base, "nobinding", binding=False)
+    check("rdp/no-binding-inert", _verdict(nb.dispatch(nb.brief(["Review-branch: main"]))), "allow")
+
+    f = RdpFixture(base, "main")
+    branch_only = f.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    check("rdp/reconciled-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    # An undeclared command off rule 4's allowlist is not plain, so a bound session withholds it.
+    check("rdp/undeclared-command-not-plain-unverifiable",
+          _rdp_kind(f.run("other-dispatch --brief " + branch_only)), "unverifiable")
+    check("rdp/missing-target-denies", _rdp_kind(f.dispatch(f.brief(["Reviewed-revision: " + f.pin]))), "deny")
+    check("rdp/unknown-target-denies", _rdp_kind(f.dispatch(f.brief(["Review-target: tip"]))), "deny")
+    check("rdp/duplicate-target-unverifiable", _rdp_kind(f.dispatch(f.brief(
+        ["Review-target: revision", "Review-target: working-tree"]))), "unverifiable")
+    events = f.briefs / "state" / "guard-events.jsonl"
+
+    def _event_rows():
+        try:
+            return [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines() if line]
+        except OSError:
+            return []
+    rows_before = len(_event_rows())
+    wt_kind = _rdp_kind(f.dispatch(f.brief(["Review-target: working-tree"])))
+    new_rows = _event_rows()[rows_before:]
+    check("rdp/working-tree-target-notes", (wt_kind, [(r.get("kind"), r.get("decision")) for r in new_rows]),
+          ("warn", [("review-dispatch-pin", "allow-declared-target")]))
+    check("rdp/branch-only-brief-denies", _rdp_kind(f.dispatch(branch_only)), "deny")
+    check("rdp/short-sha-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin[:12]))), "deny")
+    check("rdp/ref-name-as-pin-denies", [_rdp_kind(f.dispatch(f.good(pin=p))) for p in ("HEAD", "main")],
+          ["deny", "deny"])
+    check("rdp/wrong-length-for-format-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin + "0" * 24))), "deny")
+    check("rdp/uppercase-pin-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin.upper()))), "deny")
+    check("rdp/duplicate-pin-unverifiable", _rdp_kind(f.dispatch(f.good(
+        extra=["Reviewed-revision: " + f.pin]))), "unverifiable")
+    check("rdp/absent-object-pin-unverifiable", _rdp_kind(f.dispatch(f.good(pin="1" * 40))), "unverifiable")
+    _rdp_git(f.root, "tag", "-a", "-m", "t", "rv1", f.pin)
+    tag_oid = _rdp_git(f.root, "rev-parse", "rv1")
+    check("rdp/tag-object-pin-unverifiable", (tag_oid != f.pin, _rdp_kind(f.dispatch(f.good(pin=tag_oid)))),
+          (True, "unverifiable"))
+    f.authority(f.seed + "\n")
+    check("rdp/authority-mismatch-denies", _rdp_kind(f.dispatch(f.good())), "deny")
+    f.authority(f.pin + "\n", code=3)
+    check("rdp/authority-error-unverifiable/exit", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n" + f.pin + "\n")
+    check("rdp/authority-error-unverifiable/two-lines", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin[:12] + "\n")
+    check("rdp/authority-error-unverifiable/short", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n", sleep=3)
+    f.rebind(dict(f.binding, authority=dict(f.binding["authority"], timeout=1)))
+    check("rdp/authority-error-unverifiable/timeout", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.rebind(f.binding)
+    f.authority(f.pin + "\n")
+    check("rdp/declared-path-not-in-commit-denies", _rdp_kind(f.dispatch(f.good(
+        paths=f.CHANGED + ("src/c.py",)))), "deny")
+    check("rdp/committed-path-undeclared-denies", _rdp_kind(f.dispatch(f.good(paths=("src/a.py", "src/b.py")))),
+          "deny")
+    em = RdpFixture(base, "emptycommit")
+    _rdp_git(em.root, "commit", "-q", "--allow-empty", "-m", "empty")
+    empty_pin = _rdp_git(em.root, "rev-parse", "HEAD")
+    em.authority(empty_pin + "\n")
+    # A clean clone holds no untracked registry, so only the declared-paths check refuses the empty set there.
+    em_clone = base / "emptycommit-clone"
+    _rdp_git(base, "clone", "-q", str(em.root), str(em_clone))
+    check("rdp/no-declared-paths-denies", [_rdp_kind(f.dispatch(f.good(paths=()))), _rdp_kind(em.dispatch(
+        em.good(pin=empty_pin, paths=(), extra=["Review-repo: " + str(em_clone)])))], ["deny", "deny"])
+    (f.root / "seed.txt").write_text("unrelated edit\n", encoding="utf-8")
+    check("rdp/unrelated-dirty-path-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    _rdp_git(f.root, "checkout", "-q", "--", "seed.txt")
+    good = f.good()
+    check("rdp/stdin-heredoc-brief-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " <<'EOF'\nReview-target: working-tree\nEOF",
+        "orch-dispatch --brief - <<EOF\nReview-target: working-tree\nEOF",
+        "cat " + good + " | orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " < " + good,
+        "orch-dispatch",
+        "orch-dispatch --brief " + good + " --brief=" + good)],
+        ["unverifiable", "unverifiable", "unverifiable", "unverifiable", "deny", "deny"])
+    # A file literally named $BRIEF exists, so only the expansion check stops the literal read of it.
+    (f.root / "$BRIEF").write_text("Review-target: working-tree\n", encoding="utf-8")
+    check("rdp/opaque-brief-arg-unverifiable", _rdp_kind(f.run("orch-dispatch --brief $BRIEF")), "unverifiable")
+    (f.root / "$BRIEF").unlink()
+    rel = os.path.relpath(f.good(), str(f.root))
+    check("rdp/relative-brief-resolves-against-cwd", _rdp_kind(f.run("orch-dispatch --brief " + rel)), "allow")
+    check("rdp/cd-then-relative-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root) + " && orch-dispatch --brief " + rel)), "unverifiable")
+    check("rdp/wrapper-prefixed-dispatch-recognized", [_rdp_kind(f.run(c + branch_only)) for c in (
+        "env FOO=1 nice -n 5 orch-dispatch --brief ", "command /usr/local/bin/orch-dispatch --brief=",
+        "true && nohup orch-dispatch --brief ")], ["unverifiable", "unverifiable", "unverifiable"])
+    import signal as _signal
+
+    class _Blocked(BaseException):
+        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
+
+    def _alarm(_sig, _frame):
+        raise _Blocked()
+
+    def _bounded(fn):
+        old = _signal.signal(_signal.SIGALRM, _alarm)
+        _signal.alarm(5)
+        try:
+            return fn()
+        except _Blocked:
+            return "blocked"
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
+    oversize = f.briefs / "oversize.txt"
+    oversize.write_text("Review-target: working-tree\n" + "x" * 5000 + "\n", encoding="utf-8")
+    bad_utf8 = f.briefs / "bad-utf8.txt"
+    bad_utf8.write_bytes(b"Review-target: working-tree\n\xff\n")
+    nul = f.briefs / "nul.txt"
+    nul.write_bytes(b"Review-target: working-tree\n\x00\n")
+    sep = f.briefs / "sep.txt"
+    sep.write_text("Note: see below\u2028Review-target: working-tree\n", encoding="utf-8")
+    unreadable = f.briefs / "unreadable.txt"
+    unreadable.write_text("Review-target: working-tree\n", encoding="utf-8")
+    unreadable.chmod(0)
+    fifo = f.briefs / "fifo.txt"
+    os.mkfifo(str(fifo))
+    got = [_bounded(lambda p=p: _rdp_kind(f.dispatch(str(p)))) for p in (
+        f.briefs / "missing.txt", f.briefs, fifo, oversize, bad_utf8, nul, sep)]
+    # A privileged run reads a mode-0 file anyway, so that one leg is judged only where it can bite.
+    got.append(_rdp_kind(f.dispatch(str(unreadable))) if os.geteuid() != 0 else "unverifiable")
+    unreadable.chmod(0o644)
+    check("rdp/unreadable-brief-unverifiable", got, ["unverifiable"] * 8)
+
+    w = RdpFixture(base, "wtedit")
+    (w.root / "src" / "a.py").write_text("a = 3  # the real fix, never committed\n", encoding="utf-8")
+    check("rdp/pre-change-tip-worktree-edit-denies", _rdp_kind(w.dispatch(w.good())), "deny")
+    st = RdpFixture(base, "staged")
+    (st.root / "src" / "b.py").write_text("b = 2\n", encoding="utf-8")
+    _rdp_git(st.root, "add", "src/b.py")
+    # The working tree goes back to the pinned content, so only the staged-state check sees the change.
+    (st.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+    check("rdp/staged-only-change-denies", _rdp_kind(st.dispatch(st.good())), "deny")
+    un = RdpFixture(base, "untracked")
+    (un.root / ".git" / "info" / "exclude").write_text("old.txt\n", encoding="utf-8")
+    (un.root / "old.txt").write_text("recreated\n", encoding="utf-8")
+    check("rdp/untracked-recreates-deleted-denies", _rdp_kind(un.dispatch(un.good())), "deny")
+
+    ro = RdpFixture(base, "rootcommit")
+    _rdp_git(ro.root, "checkout", "-q", ro.seed)
+    ro.authority(ro.seed + "\n")
+    check("rdp/root-commit-empty-tree-allows", _rdp_kind(ro.dispatch(ro.good(
+        pin=ro.seed, paths=("old.txt", "seed.txt", "src/a.py")))), "allow")
+
+    mg = RdpFixture(base, "merge")
+    _rdp_git(mg.root, "checkout", "-q", "-b", "side", mg.seed)
+    (mg.root / "side.txt").write_text("side\n", encoding="utf-8")
+    _rdp_git(mg.root, "add", "side.txt")
+    _rdp_git(mg.root, "commit", "-q", "-m", "side")
+    _rdp_git(mg.root, "checkout", "-q", "main")
+    _rdp_git(mg.root, "merge", "-q", "--no-ff", "-m", "merge", "side")
+    merge = _rdp_git(mg.root, "rev-parse", "HEAD")
+    mg.authority(merge + "\n")
+    check("rdp/merge-first-parent-allows", [_rdp_kind(mg.dispatch(mg.good(pin=merge, paths=p))) for p in (
+        ("side.txt",), mg.CHANGED)], ["allow", "deny"])
+
+    shallow = base / "shallow"
+    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(f.root), str(shallow))
+    shallow_result = f.dispatch(f.good(extra=["Review-repo: " + str(shallow)]))
+    shallow_reason = shallow_result[1]["hookSpecificOutput"]["permissionDecisionReason"]
+    check("rdp/shallow-missing-parent-unverifiable",
+          (_rdp_kind(shallow_result), "is not in the repository" in shallow_reason), ("unverifiable", True))
+    check("rdp/repo-label-not-toplevel-unverifiable", [_rdp_kind(f.dispatch(f.good(extra=["Review-repo: " + r])))
+                                                       for r in ("src", str(f.root / "src"))],
+          ["unverifiable", "unverifiable"])
+
+    rp = RdpFixture(base, "replace")
+    _rdp_git(rp.root, "replace", "--graft", rp.pin)
+    rp_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
+    check("rdp/replace-ref-ignored", ("parent " in _rdp_git(rp.root, "cat-file", "commit", rp.pin),
+                                      _rdp_kind(rp.dispatch(rp.good())),
+                                      rp_parent.stdout.decode().strip() if rp_parent else None),
+          (False, "allow", rp.seed))
+    gf = RdpFixture(base, "grafts")
+    (gf.root / ".git" / "info" / "grafts").write_text(gf.pin + "\n", encoding="utf-8")
+    gf_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
+    check("rdp/grafts-file-ignored", (_rdp_git(gf.root, "log", "-1", "--format=%P", gf.pin),
+                                      _rdp_kind(gf.dispatch(gf.good())),
+                                      gf_parent.stdout.decode().strip() if gf_parent else None),
+          ("", "allow", gf.seed))
+
+    seen = []
+    real_run = subprocess.run
+
+    def _capture(argv, **kw):
+        seen.append((list(argv), dict(kw.get("env") or {})))
+        return real_run(argv, **kw)
+    aiqt_hooks.subprocess.run = _capture
+    try:
+        aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD")
+    finally:
+        aiqt_hooks.subprocess.run = real_run
+    argv, env = seen[0] if seen else ([], {})
+    check("rdp/git-env-neutralized", (
+        env.get("GIT_OPTIONAL_LOCKS"), env.get("GIT_NO_REPLACE_OBJECTS"), env.get("GIT_GRAFT_FILE"),
+        env.get("GIT_LITERAL_PATHSPECS"), argv[:9]),
+        ("0", "1", os.devnull, "1", ["git", "-C", str(f.root), "-c", "core.commitGraph=false",
+                                     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]))
+
+    ps = RdpFixture(base, "pathspec")
+    for name in ("*", ":(glob)*.py"):
+        (ps.root / name).write_text("literal\n", encoding="utf-8")
+        _rdp_git(ps.root, "add", "--", ":(literal)" + name)
+    _rdp_git(ps.root, "commit", "-q", "-m", "odd names")
+    odd = _rdp_git(ps.root, "rev-parse", "HEAD")
+    ps.authority(odd + "\n")
+    (ps.root / "src" / "a.py").write_text("a = 9\n", encoding="utf-8")
+    check("rdp/pathspec-magic-literal", _rdp_kind(ps.dispatch(ps.good(pin=odd, paths=("*", ":(glob)*.py")))),
+          "allow")
+
+    bm = RdpFixture(base, "branchmoved")
+    (bm.root / "seed.txt").write_text("later\n", encoding="utf-8")
+    _rdp_git(bm.root, "commit", "-q", "-am", "later")
+    check("rdp/branch-label-moved-notes", [_rdp_kind(bm.dispatch(bm.good(extra=["Review-branch: " + b])))
+                                           for b in ("main", "no-such-branch")], ["warn", "warn"])
+
+    mb = RdpFixture(base, "malformed")
+    mb.write_registry(dict(mb.binding, surplus=1))
+    check("rdp/malformed-binding-withholds-every-call", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls"))], ["unverifiable", "unverifiable"])
+    mb.write_registry(dict(mb.binding, labels=dict(mb.binding["labels"], path="Review-target:")))
+    check("rdp/duplicate-labels-malformed", _rdp_kind(mb.run("ls", background=True)), "unverifiable")
+    (mb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+    # A registry that cannot be parsed cannot say which commands dispatch: a foreground dispatch is withheld
+    # as well as a background one.
+    check("rdp/bad-registry-withholds-every-call", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls")),
+        _rdp_kind(mb.run("orch-dispatch --brief /nonexistent"))], ["unverifiable"] * 3)
+
+    # ---------- fail-closed discovery, workdir, descriptors, content, isolation ----------
+    dc = RdpFixture(base, "discovery")
+    good_dc = dc.good()
+    with open(str(dc.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("[broken\n")
+    gone = dc.root / "gone"
+
+    def _why(result):
+        return (_rdp_kind(result), "cannot resolve the session repository" in result[1]["hookSpecificOutput"].get(
+            "permissionDecisionReason", "") if result[1] else False)
+    check("rdp/discovery-failure-unverifiable", [
+        _why(dc.dispatch(good_dc)), _why(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(gone), tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + good_dc)))),
+        _rdp_kind(dc.run("ls"))], [("unverifiable", True), ("unverifiable", True), "allow"])
+    ec = RdpFixture(base, "envchdir")
+    (ec.root / "brief.txt").write_text(open(ec.good(), encoding="utf-8").read(), encoding="utf-8")
+    (ec.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n",
+                                                encoding="utf-8")
+    # Only a provably plain dispatch is checked: every wrapper (env and its -C and -S forms, as GNU env and
+    # other env builds read them, timeout, nohup, sudo, xargs, setsid, ionice) is withheld, so no wrapper
+    # grammar decides which brief is read or where.
+    check("rdp/wrapped-dispatch-unverifiable", [_rdp_kind(ec.run(c)) for c in (
+        "orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief brief.txt",
+        "env --chdir=src orch-dispatch --brief brief.txt", "env -C src -C .. orch-dispatch --brief brief.txt",
+        "env -S '-C src' orch-dispatch --brief brief.txt", "env -Sorch-dispatch --brief src/brief.txt",
+        "env A=1 -S'orch-dispatch --brief src/brief.txt'", "env -S'A=1' -S'orch-dispatch --brief src/brief.txt'",
+        "env -S'orch-dispatch --brief brief.txt' -S'--brief src/brief.txt'",
+        "env -S$'orch-dispatch\\t--brief\\tsrc/brief.txt'", "sudo env -Sorch-dispatch --brief src/brief.txt",
+        "timeout 600 orch-dispatch --brief brief.txt", "setsid orch-dispatch --brief brief.txt",
+        "sudo -u me orch-dispatch --brief brief.txt", "xargs orch-dispatch --brief brief.txt",
+        "ionice -c3 orch-dispatch --brief brief.txt", "bash -c 'orch-dispatch --brief src/brief.txt'")],
+        ["allow"] + ["unverifiable"] * 16)
+    # Every command that is not plain is withheld, whatever it names (an undeclared command off the
+    # allowlist too); a plain one that names no declared command is allowed.
+    check("rdp/non-plain-command-unverifiable", [_rdp_kind(ec.run(c)) for c in (
+        "timeout --frobnicate 5 ls", "env -S'ls -l' /tmp", "ls -la && git log --oneline | head -3",
+        "echo $HOME > /dev/null", "other-dispatch --brief src/brief.txt", "ls -la src")],
+        ["unverifiable"] * 5 + ["allow"])
+    check("rdp/cd-then-absolute-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
+    good = f.good()
+    check("rdp/abbreviated-second-brief-denies", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " --brie " + branch_only, " --bri=" + branch_only)], ["deny", "deny"])
+    # An abbreviation BEFORE the brief, where the last-argument rule cannot catch it.
+    check("rdp/abbreviated-brief-before-last-denies", _rdp_kind(f.run(
+        "orch-dispatch --brie " + branch_only + " --brief " + good)), "deny")
+    check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " 3</dev/null", " 0<" + good, " <&3")], ["unverifiable", "unverifiable", "unverifiable"])
+
+    ff = RdpFixture(base, "fifos")
+    fifo_brief = ff.briefs / "fifo-brief.txt"
+    os.mkfifo(str(fifo_brief))
+    link_brief = ff.briefs / "link-brief.txt"
+    link_brief.symlink_to(ff.good())
+    check("rdp/fifo-or-symlink-brief-unverifiable-without-blocking", [
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(fifo_brief)))),
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(link_brief))))], ["unverifiable", "unverifiable"])
+    reg = ff.root / ".aiqt" / "orchestration.local.json"
+    reg_text = reg.read_text(encoding="utf-8")
+    reg.unlink()
+    os.mkfifo(str(reg))
+    fifo_reg = _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))
+    reg.unlink()
+    (ff.briefs / "registry.json").write_text(reg_text, encoding="utf-8")
+    reg.symlink_to(ff.briefs / "registry.json")
+    check("rdp/fifo-or-symlink-registry-unverifiable-without-blocking", [
+        fifo_reg, _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))],
+        ["unverifiable", "unverifiable"])
+    ix = RdpFixture(base, "indexflags")
+    (ix.root / "src" / "a.py").write_text("a = 3  # uncommitted\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--assume-unchanged", "src/a.py")
+    got = [_rdp_kind(ix.dispatch(ix.good()))]
+    _rdp_git(ix.root, "update-index", "--no-assume-unchanged", "src/a.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    (ix.root / "src" / "b.py").write_text("b = 9\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--skip-worktree", "src/b.py")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "update-index", "--no-skip-worktree", "src/b.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/b.py")
+    _rdp_git(ix.root, "config", "core.ignoreStat", "true")
+    _rdp_git(ix.root, "update-index", "--really-refresh")
+    (ix.root / "src" / "a.py").write_text("a = 777\n", encoding="utf-8")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    _rdp_git(ix.root, "config", "--unset", "core.ignoreStat")
+    (ix.root / "src" / "a.py").chmod(0o755)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    (ix.root / "src" / "a.py").chmod(0o644)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    check("rdp/index-flags-cannot-hide-worktree-edit", got, ["deny", "deny", "deny", "deny", "allow"])
+
+    hostile = {"GIT_DIR": str(bare / ".git"), "GIT_WORK_TREE": str(bare), "GIT_INDEX_FILE": str(bare / "nope")}
+    saved_env = {k: os.environ.get(k) for k in hostile}
+    os.environ.update(hostile)
+    try:
+        # The probes are scrubbed and still read f.root; the dispatch, which inherits the variables, is
+        # withheld, since its verifier would read the repository they name.
+        hostile_kind = (_rdp_kind(f.dispatch(f.good())), aiqt_hooks._review_git(
+            str(f.root), "rev-parse", "HEAD").stdout.decode().strip() == f.pin)
+        graft_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
+        replace_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("rdp/hostile-git-env-scrubbed-and-dispatch-withheld", hostile_kind, ("unverifiable", True))
+    # Each ambient variable on its own withholds the dispatch, named in the reason.
+    ambient_names = (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE")
+    ambient_brief = f.good()
+    ambient_got = []
+    for name in ambient_names:
+        saved = os.environ.get(name)
+        os.environ[name] = str(bare / "elsewhere")
+        try:
+            result = f.dispatch(ambient_brief)
+        finally:
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        ambient_got.append((name, _rdp_kind(result), "sets " + name + "," in reason))
+    check("rdp/each-ambient-git-variable-withholds", ambient_got,
+          [(name, "unverifiable", True) for name in ambient_names])
+    check("rdp/grafts-and-replace-probe-real-parents", [
+        (p.returncode, p.stdout.decode().strip()) if p is not None else None
+        for p in (graft_parent, replace_parent)], [(0, gf.seed), (0, rp.seed)])
+    fm = RdpFixture(base, "fsmonitor")
+    marker = fm.briefs / "fsmonitor-ran"
+    hook = fm.briefs / "fsmonitor.sh"
+    hook.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _rdp_git(fm.root, "config", "core.fsmonitor", str(hook))
+    fm_kind = _rdp_kind(fm.dispatch(fm.good()))
+    aiqt_hooks._review_git(str(fm.root), "status", "--porcelain")
+    check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    f.authority(f.pin + "\n", sleep=3)
+    aiqt_hooks._RDP_BUDGET = 1.0
+    started = aiqt_hooks.time.monotonic()
+    try:
+        budget_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._RDP_BUDGET = saved_budget
+        f.authority(f.pin + "\n")
+    check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
+          ("unverifiable", True))
+    # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
+    # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
+    (f.root / "rdp-link").symlink_to("seed.txt")
+    probes = []
+    fd = os.open(str(f.root / "seed.txt"), os.O_RDONLY)
+    try:
+        for name, call in (
+                ("blob", lambda: aiqt_hooks._rdp_blob_id("sha1", 5, fd)),
+                ("read", lambda: aiqt_hooks._rdp_read_fd(fd, 10)),
+                ("entry", lambda: aiqt_hooks._rdp_worktree_entry(str(f.root), b"rdp-link", "sha1")),
+                ("git", lambda: aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD"))):
+            aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+            try:
+                probes.append((name, "returned" if call() is not None else "none"))
+            except TimeoutError:
+                probes.append((name, "timeout"))
+            finally:
+                aiqt_hooks._RDP_DEADLINE[0] = None
+    finally:
+        os.close(fd)
+    (f.root / "rdp-link").unlink()
+    check("rdp/content-read-past-deadline-refused", probes,
+          [("blob", "timeout"), ("read", "timeout"), ("entry", "timeout"), ("git", "none")])
+    # The reported reproduction: a declared file's hash starts after the budget is spent (here the deadline
+    # is moved into the past instead of sleeping), and the decision must not allow.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _late_blob(fmt, header_size, fd):
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return real_blob(fmt, header_size, fd)
+    aiqt_hooks._rdp_blob_id = _late_blob
+    try:
+        late = [_rdp_kind(f.dispatch(f.good()))]
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+    # An overrun anywhere else (here after the whole reconciliation returned allow) is a cannot-evaluate too.
+    real_reconcile = aiqt_hooks._rdp_reconcile
+
+    def _late_reconcile(*args):
+        out = real_reconcile(*args)
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return out
+    aiqt_hooks._rdp_reconcile = _late_reconcile
+    try:
+        late.append(_rdp_kind(f.dispatch(f.good())))
+    finally:
+        aiqt_hooks._rdp_reconcile = real_reconcile
+    late.append(_rdp_kind(f.dispatch(f.good())))
+    check("rdp/overdue-read-never-allows", late, ["unverifiable", "unverifiable", "allow"])
+    f.rebind(dict(f.binding, brief_option="-b"))
+    check("rdp/attached-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        "", " -b" + branch_only)], ["allow", "deny"])
+    f.rebind(f.binding)
+    # ---------- only a provably plain dispatch is checked; every command that is not plain withholds ----------
+    check("rdp/second-brief-alias-or-group-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " -b " + branch_only, "orch-dispatch --brief " + good + " extra",
+        "orch-dispatch -- --brief " + good, "orch-dispatch -b " + branch_only + " --brief " + good)],
+        ["deny", "deny", "deny", "allow"])
+    f.rebind(dict(f.binding, brief_option="-b"))
+    check("rdp/grouped-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        " -xb " + branch_only, " -xb" + branch_only, "")], ["deny", "deny", "allow"])
+    f.rebind(f.binding)
+    pl = RdpFixture(base, "plain")
+    (pl.root / "brief.txt").write_text(open(pl.good(), encoding="utf-8").read(), encoding="utf-8")
+    (pl.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n", encoding="utf-8")
+    check("rdp/quote-split-or-expanded-name-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "cat <<EOF >/dev/null\nx\nEOF\norch-dis''patch --brief src/brief.txt",
+        "diff <(true) /dev/null; orch-dis\\patch --brief src/brief.txt",
+        "{orch-dispatch,} --brief src/brief.txt", "D=orch-dispatch; $D --brief src/brief.txt",
+        "$'\\x6frch-dispatch' --brief src/brief.txt", "$'orch\\x2ddispatch' --brief src/brief.txt",
+        "$\"orch-dispatch\" --brief src/brief.txt", "\\orch-dispatch --brief src/brief.txt",
+        "orch-dispatch --brief brief.txt > out.log", "o{r,}ch-dispatch --brief src/brief.txt")],
+        ["unverifiable"] * 10)
+    check("rdp/shell-control-before-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "eval cd src; orch-dispatch --brief brief.txt", "pushd src; orch-dispatch --brief brief.txt",
+        "if true; then cd src; fi; orch-dispatch --brief brief.txt", ". ./env.sh; orch-dispatch --brief brief.txt",
+        "PWD=src orch-dispatch --brief brief.txt", "orch-dispatch --brief brief.txt; orch-dispatch --brief brief.txt")],
+        ["unverifiable"] * 6)
+    check("rdp/plain-dispatch-forms-allow", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --family x --brief=brief.txt", "orch-dispatch \"--brief\" 'brief.txt'",
+        "/usr/local/bin/orch-dispatch --brief brief.txt", "  orch-dispatch  --brief  b'rief'.txt  ")],
+        ["allow"] * 4)
+    # The shared specification admits ONE simple command: an operator, a redirection (even </dev/null) or a
+    # quoted command word makes the dispatch not plain.
+    check("rdp/compound-or-redirected-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --brief brief.txt </dev/null", "orch-dispatch --brief brief.txt 0</dev/null",
+        "'orch-dispatch' --brief brief.txt", "git status && orch-dispatch --brief brief.txt",
+        "orch-dispatch --brief brief.txt | tee /dev/null", "orch-dispatch --brief brief.txt &")],
+        ["unverifiable"] * 6)
+    # A linked worktree, inside the orchestrated tree or beside it, is scoped by the main worktree's registry.
+    lw = RdpFixture(base, "linked")
+    lw_branch = lw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(lw.root / ".worktrees" / "rev"), lw.pin)
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(base / "linked-beside"), lw.pin)
+    check("rdp/linked-worktree-scoped", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief " + lw_branch)))) for wt in (
+            lw.root / ".worktrees" / "rev", base / "linked-beside")], ["deny", "deny"])
+    real_walk = aiqt_hooks._rdp_registry_dir
+    aiqt_hooks._rdp_registry_dir = lambda cwd: ("fail", "the ancestor walk failed")
+    try:
+        walk_fail = [_verdict(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(bare), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="ls", run_in_background=bg)))) for bg in (True, False)]
+    finally:
+        aiqt_hooks._rdp_registry_dir = real_walk
+    check("rdp/ancestor-walk-failure-withholds", walk_fail, ["deny", "deny"])
+    # A submodule's .gitmodules `ignore = all` cannot hide its bump from the changed set, and its checkout is
+    # compared with the pinned gitlink.
+    sb = RdpFixture(base, "submodule")
+    (sb.root / ".gitmodules").write_text('[submodule "lib"]\n\tpath = lib\n\turl = ./lib\n\tignore = all\n',
+                                          encoding="utf-8")
+    _rdp_git(sb.root, "add", ".gitmodules")
+    _rdp_git(sb.root, "update-index", "--add", "--cacheinfo", "160000," + sb.seed + ",lib")
+    _rdp_git(sb.root, "commit", "-q", "-m", "add lib")
+    _rdp_git(sb.root, "update-index", "--cacheinfo", "160000," + sb.pin + ",lib")
+    (sb.root / "src" / "a.py").write_text("a = 4\n", encoding="utf-8")
+    _rdp_git(sb.root, "add", "src/a.py")
+    _rdp_git(sb.root, "commit", "-q", "-m", "bump lib")
+    sb_pin = _rdp_git(sb.root, "rev-parse", "HEAD")
+    sb.authority(sb_pin + "\n")
+    (sb.root / "lib").mkdir()
+    sb_got = [_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=p))) for p in (("src/a.py",), ("lib", "src/a.py"))]
+    _rdp_git(base, "init", "-q", "-b", "main", str(sb.root / "lib"))
+    _rdp_git(sb.root / "lib", "commit", "-q", "--allow-empty", "-m", "other")
+    sb_got.append(_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=("lib", "src/a.py")))))
+    check("rdp/submodule-ignore-config-neutralized", sb_got, ["deny", "allow", "deny"])
+    # A file the pin replaces with a directory is clean when the directory holds the pin's own entries; a
+    # directory where the pin has nothing is not.
+    fd_ = RdpFixture(base, "filetodir")
+    (fd_.root / "seed.txt").unlink()
+    (fd_.root / "seed.txt").mkdir()
+    (fd_.root / "seed.txt" / "inner.txt").write_text("inner\n", encoding="utf-8")
+    _rdp_git(fd_.root, "add", "-A", "--", "seed.txt")
+    _rdp_git(fd_.root, "commit", "-q", "-m", "file to dir")
+    fd_pin = _rdp_git(fd_.root, "rev-parse", "HEAD")
+    fd_.authority(fd_pin + "\n")
+    fd_got = [_rdp_kind(fd_.dispatch(fd_.good(pin=fd_pin, paths=("seed.txt", "seed.txt/inner.txt"))))]
+    dd = RdpFixture(base, "deleteddir")
+    (dd.root / "old.txt").mkdir()
+    (dd.root / "old.txt" / "x").write_text("untracked\n", encoding="utf-8")
+    fd_got.append(_rdp_kind(dd.dispatch(dd.good())))
+    check("rdp/file-replaced-by-directory", fd_got, ["allow", "deny"])
+    # A declared symlink is compared by its target.
+    sl = RdpFixture(base, "symlink")
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    _rdp_git(sl.root, "add", "src/l")
+    _rdp_git(sl.root, "commit", "-q", "-m", "link")
+    sl_pin = _rdp_git(sl.root, "rev-parse", "HEAD")
+    sl.authority(sl_pin + "\n")
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../old.txt")
+    sl_got = [_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",))))]
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    sl_got.append(_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",)))))
+    check("rdp/symlink-target-compared", sl_got, ["deny", "allow"])
+    # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
+    # hold the hook past its budget.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _hung_blob(fmt, header_size, fd):
+        aiqt_hooks.time.sleep(3)
+        return real_blob(fmt, header_size, fd)
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 1.0
+    aiqt_hooks._rdp_blob_id = _hung_blob
+    started = aiqt_hooks.time.monotonic()
+    try:
+        hung_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/hung-read-bounded-by-deadline", (hung_kind, aiqt_hooks.time.monotonic() - started < 2.0),
+          ("unverifiable", True))
+    aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
+    mf = RdpFixture(base, "mutants")
+    check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
+        lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
+        ["unverifiable", "unverifiable"])
+    check("rdp/unparseable-dispatch-unverifiable", _rdp_kind(mf.run("orch-dispatch --brief 'open")),
+          "unverifiable")
+    check("rdp/empty-path-value-unverifiable", _rdp_kind(mf.dispatch(mf.good(extra=["Review-path: "]))),
+          "unverifiable")
+    mf.write_registry(dict(mf.binding, surplus=1))
+    check("rdp/malformed-binding-without-tool-input-unverifiable", _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(mf.root), tool_name="Bash", tool_input="ls"))), "unverifiable")
+    mf.write_registry(mf.binding)
+    real_review_git = aiqt_hooks._review_git
+
+    failed_probe = []
+    for verb in ("diff-index", "ls-tree"):
+        def _fail_one(repo, *args, stdin=None, _verb=verb):
+            return None if args[:1] == (_verb,) else real_review_git(repo, *args, stdin=stdin)
+        aiqt_hooks._review_git = _fail_one
+        try:
+            failed_probe.append(_rdp_kind(mf.dispatch(mf.good())))
+        finally:
+            aiqt_hooks._review_git = real_review_git
+    check("rdp/failed-state-probe-unverifiable", failed_probe, ["unverifiable", "unverifiable"])
+
+    # ---------- one strict plain-command classifier (the shared specification) ----------
+    check("rdp/plain-spec-vector-table", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None)
+                                          for c, _p in aiqt_hooks._RDP_PLAIN_VECTORS],
+          list(aiqt_hooks._RDP_PLAIN_VECTORS))
+    bad = mf.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    good = mf.good()
+    # Bash truncates an ANSI-C quoted word at a NUL, so these run orch-dispatch with the unpinned brief.
+    check("rdp/ansi-c-nul-name-unverifiable", [_rdp_kind(mf.run(c + "patch --brief " + bad)) for c in (
+        "$'orch-dis\\0junk'", "$'orch-dis\\x00junk'", "$'orch-dis\\u0000junk'")], ["unverifiable"] * 3)
+    # A non-ASCII digit is no descriptor to bash: it stays the brief argument, so the command is not plain.
+    check("rdp/unicode-digit-not-plain-unverifiable", [_rdp_kind(mf.run(
+        "orch-dispatch --brief " + d + "</dev/null " + good)) for d in ("\u00b2", "\u0661", "\uff10")],
+        ["unverifiable"] * 3)
+    # An earlier command in the same call can rewrite the brief or the tree after the check.
+    check("rdp/same-call-rewrite-unverifiable", [_rdp_kind(mf.run(c)) for c in (
+        "cp " + bad + " " + good + "; orch-dispatch --brief " + good,
+        "cp " + bad + " " + good + " && orch-dispatch --brief " + good,
+        "git -C " + str(mf.root) + " checkout -q " + mf.seed + " && orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " & cp " + bad + " " + good,
+        "printf -v HOME %s /tmp; orch-dispatch --brief " + good)], ["unverifiable"] * 5)
+    check("rdp/case-folded-command-name", [_rdp_kind(mf.run(n + " --brief " + bad)) for n in (
+        "ORCH-DISPATCH", "Orch-Dispatch", "/usr/bin/ORCH-dispatch")], ["deny"] * 3)
+    mf.rebind(dict(mf.binding, brief_option="-b"))
+    check("rdp/short-option-equals-form-denies", [_rdp_kind(mf.run("orch-dispatch -b" + c + good)) for c in (
+        "=", " ")], ["deny", "allow"])
+    mf.rebind(mf.binding)
+    bom = mf.briefs / "bom.txt"
+    bom.write_bytes(b"\xef\xbb\xbf" + "".join(line + "\n" for line in [
+        "Review-target: revision", "Reviewed-revision: " + mf.pin] + [
+        "Review-path: " + p for p in mf.CHANGED]).encode("utf-8"))
+    check("rdp/bom-brief-allows", _rdp_kind(mf.dispatch(str(bom))), "allow")
+    # /proc/self names the hook's own process, not the dispatcher's: here the hook's cwd holds a good brief.
+    saved_cwd = os.getcwd()
+    os.chdir(str(mf.briefs))
+    try:
+        proc_kind = _rdp_kind(mf.dispatch("/proc/self/cwd/brief.txt"))
+    finally:
+        os.chdir(saved_cwd)
+    check("rdp/proc-self-brief-unverifiable", proc_kind, "unverifiable")
+    # The worker finishes after the deadline and after the caller's reset of the shared deadline (simulated
+    # by the worker clearing it), so the worker's own overdue check cannot see it: the verdict is not used.
+    real_judge = aiqt_hooks._rdp_judge
+
+    def _late_judge(*args, **kwargs):
+        aiqt_hooks.time.sleep(0.35)
+        aiqt_hooks._RDP_DEADLINE[0] = None
+        return ("allow", "")
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 0.3
+    aiqt_hooks._rdp_judge = _late_judge
+    try:
+        late_kind = _rdp_kind(mf.dispatch(good))
+    finally:
+        aiqt_hooks._rdp_judge = real_judge
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/late-verdict-never-used", late_kind, "unverifiable")
+    fx = RdpFixture(base, "filemode")
+    (fx.root / "src" / "b.py").chmod(0o755)
+    _rdp_git(fx.root, "add", "src/b.py")
+    _rdp_git(fx.root, "commit", "-q", "-m", "exec")
+    fx_pin = _rdp_git(fx.root, "rev-parse", "HEAD")
+    fx.authority(fx_pin + "\n")
+    (fx.root / "src" / "b.py").chmod(0o644)
+    fx_got = []
+    for mode in ("false", "true"):
+        _rdp_git(fx.root, "config", "core.fileMode", mode)
+        fx_got.append(_rdp_kind(fx.dispatch(fx.good(pin=fx_pin, paths=("src/b.py",)))))
+    check("rdp/filemode-false-ignores-exec-bit", fx_got, ["allow", "deny"])
+    # A relative authority runs from the registry's worktree: a linked worktree without its own copy still
+    # gets the registry's authority, and a nested repository's own authority and commit are never used.
+    ra = RdpFixture(base, "relauth")
+    auth = "import subprocess, sys\nsys.stdout.write(subprocess.run(['git', 'rev-parse', 'HEAD'], " \
+           "capture_output=True, text=True).stdout)\n"
+    (ra.root / "auth.py").write_text(auth, encoding="utf-8")
+    ra.write_registry(dict(ra.binding, authority=dict(argv=[sys.executable, "-I", "-B", "auth.py"], timeout=5)))
+    _rdp_git(ra.root, "worktree", "add", "-q", "--detach", str(base / "relauth-linked"), ra.pin)
+    nested = ra.root / "nested"
+    _rdp_git(base, "init", "-q", "-b", "main", str(nested))
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(nested, "add", "x.txt")
+    _rdp_git(nested, "commit", "-q", "-m", "nested")
+    nested_pin = _rdp_git(nested, "rev-parse", "HEAD")
+    (nested / "auth.py").write_text(auth, encoding="utf-8")
+
+    def _from(cwd, brief, background=False):
+        return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + brief, run_in_background=background))))
+    check("rdp/authority-runs-from-registry-worktree", [
+        _from(base / "relauth-linked", ra.good()),
+        _from(nested, ra.good(pin=nested_pin, paths=("x.txt",)))], ["allow", "unverifiable"])
+    # core.worktree moves git's top level to a directory whose registry has no binding: the cwd's own
+    # registry still scopes the session, and the redirected top level is foreign to it.
+    cw = RdpFixture(base, "coreworktree")
+    elsewhere = base / "coreworktree-elsewhere"
+    (elsewhere / ".aiqt").mkdir(parents=True)
+    (elsewhere / ".aiqt" / "orchestration.local.json").write_text(json.dumps(dict(
+        version=1, state_dir=str(cw.briefs / "state2"))), encoding="utf-8")
+    cw_branch = cw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    cw_got = [_rdp_kind(cw.dispatch(cw_branch))]
+    _rdp_git(cw.root, "config", "core.worktree", str(elsewhere))
+    cw_got.append(_rdp_kind(cw.dispatch(cw_branch)))
+    check("rdp/core-worktree-cannot-unscope", cw_got, ["deny", "unverifiable"])
+    # A linked worktree beside its main worktree stays scoped when the shared configuration breaks git
+    # (read from the raw .git and commondir files), and when the git directory is separated from the main
+    # worktree (no main worktree can be located: withheld as a registry state that cannot be read).
+    lb = RdpFixture(base, "linkedbroken")
+    lb_branch = lb.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lb.root, "worktree", "add", "-q", "--detach", str(base / "linkedbroken-beside"), lb.pin)
+    lb_got = [_from(base / "linkedbroken-beside", lb_branch)]
+    with open(str(lb.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[broken\n")
+    lb_got.append(_from(base / "linkedbroken-beside", lb_branch))
+    check("rdp/linked-worktree-broken-config-scoped", lb_got, ["deny", "unverifiable"])
+    ls_ = RdpFixture(base, "linkedsep")
+    ls_branch = ls_.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(ls_.root, "worktree", "add", "-q", "--detach", str(base / "linkedsep-beside"), ls_.pin)
+    _rdp_git(ls_.root, "init", "-q", "--separate-git-dir=" + str(base / "linkedsep-meta"))
+    subprocess.run(["git", "-C", str(ls_.root), "worktree", "repair"], capture_output=True, timeout=30)
+    check("rdp/linked-worktree-separate-gitdir-withheld", [
+        _from(base / "linkedsep-beside", ls_branch, background=True), _from(base / "linkedsep-beside", ls_branch),
+        _rdp_kind(ls_.dispatch(ls_branch))], ["unverifiable", "unverifiable", "deny"])
+    # The same separated git directory with a broken shared configuration: git cannot resolve the linked
+    # worktree, and the raw .git and commondir files name a common directory that is no main worktree's
+    # .git, so the scope still cannot be known and every call stays withheld.
+    with open(str(base / "linkedsep-meta" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[invalid\n")
+    check("rdp/linked-worktree-separate-gitdir-broken-config-withheld", [
+        _from(base / "linkedsep-beside", "/nonexistent", background=bg) for bg in (False, True)],
+        ["unverifiable", "unverifiable"])
+    # A registry WITHOUT a binding never ends the search for one: not one a linked worktree checks out from
+    # a commit (the binding kept in the main worktree's untracked local registry), not one written beside
+    # or inside a linked worktree, not one in a repository nested inside the orchestrated tree.
+    sw = RdpFixture(base, "shadow")
+    sw_bad = sw.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    unbound = json.dumps(dict(version=1))
+    (sw.root / ".aiqt" / "orchestration.json").write_text(unbound, encoding="utf-8")
+    _rdp_git(sw.root, "add", ".aiqt/orchestration.json")
+    _rdp_git(sw.root, "commit", "-q", "-m", "registry without a binding")
+    _rdp_git(sw.root, "worktree", "add", "-q", "--detach", str(base / "shadow-committed"), "HEAD")
+    sw_dirs = [base / "shadow-committed"]
+    for wt in (base / "shadow-beside", sw.root / ".worktrees" / "inside"):
+        _rdp_git(sw.root, "worktree", "add", "-q", "--detach", str(wt), sw.pin)
+        (wt / ".aiqt").mkdir()
+        (wt / ".aiqt" / "orchestration.local.json").write_text(unbound, encoding="utf-8")
+        sw_dirs.append(wt)
+    sw_nested = sw.root / "nested"
+    _rdp_git(base, "init", "-q", "-b", "main", str(sw_nested))
+    (sw_nested / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(sw_nested, "add", "x.txt")
+    _rdp_git(sw_nested, "commit", "-q", "-m", "nested")
+    (sw_nested / ".aiqt").mkdir()
+    (sw_nested / ".aiqt" / "orchestration.local.json").write_text(unbound, encoding="utf-8")
+    check("rdp/bindingless-registry-cannot-hide-binding", [_from(d, sw_bad) for d in sw_dirs + [sw_nested]],
+          ["deny", "deny", "deny", "unverifiable"])
+    # A failed or timed-out common-directory probe in a linked worktree: the raw .git and commondir files
+    # still name the main worktree, whose binding checks the dispatch (never a foreground note).
+    real_main = aiqt_hooks._rdp_main_worktree
+
+    def _probe_fails(root):
+        raise OSError("git cannot read the common git directory of {}".format(root))
+    aiqt_hooks._rdp_main_worktree = _probe_fails
+    try:
+        probe_got = [_from(base / "linked-beside", lw_branch, background=bg) for bg in (False, True)]
+    finally:
+        aiqt_hooks._rdp_main_worktree = real_main
+    check("rdp/failed-main-worktree-probe-reads-gitfile", probe_got, ["deny", "deny"])
+    # The authority runs with every ambient GIT_* variable scrubbed, as the git probes do.
+    auth_envs = []
+    auth_argv = f.binding["authority"]["argv"]
+    real_run = aiqt_hooks.subprocess.run
+
+    def _capture_auth(argv, **kw):
+        if list(argv[:len(auth_argv)]) == auth_argv:
+            auth_envs.append(kw.get("env"))
+        return real_run(argv, **kw)
+    saved_param = os.environ.get("GIT_CONFIG_PARAMETERS")
+    os.environ["GIT_CONFIG_PARAMETERS"] = "'aiqt.selftest=1'"
+    aiqt_hooks.subprocess.run = _capture_auth
+    try:
+        f.authority(f.pin + "\n")
+        f.dispatch(f.good())
+    finally:
+        aiqt_hooks.subprocess.run = real_run
+        if saved_param is None:
+            os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+        else:
+            os.environ["GIT_CONFIG_PARAMETERS"] = saved_param
+    check("rdp/authority-git-env-scrubbed", [isinstance(e, dict) and "GIT_CONFIG_PARAMETERS" not in e
+                                             and e.get("GIT_TERMINAL_PROMPT") == "0" for e in auth_envs], [True])
+    # A dispatcher name assembled at run time is not in the raw text: the command is not plain, so it is
+    # withheld although no declared name can be found in it.
+    sw_run = RdpFixture(base, "assembled")
+    as_bad = sw_run.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    check("rdp/assembled-name-unverifiable", [_rdp_kind(sw_run.run(c)) for c in (
+        "o=orch-; ${o}dispatch --brief " + as_bad, "o=orch-dis; ${o}patch --brief " + as_bad,
+        "/usr/local/bin/orch-dispatc? --brief " + as_bad, "orch-dis$(true)patch --brief " + as_bad)],
+        ["unverifiable"] * 4)
+    # A plain command that names a declared command inside an argument (a git alias that runs it), compared
+    # without regard to case: refused, since its -c global sets configuration, which no bound session may.
+    check("rdp/plain-command-naming-dispatch-unverifiable", [_rdp_kind(sw_run.run(c)) for c in (
+        "git -c 'alias.r=!orch-dispatch --brief " + as_bad + "' r",
+        "git -c 'alias.r=!ORCH-Dispatch --brief " + as_bad + "' r")], ["deny"] * 2)
+    # Each rule of the plain-command specification on its own: every forbidden character, bare or in a
+    # double-quoted segment (but literal in a single-quoted one), a tab or a line break, an unterminated
+    # quote, every wrapper command word, also in another case, and rule 4's allowlist: each allowed program,
+    # bare or under one of its four directories, is plain, and any other command word, an allowed one in
+    # another case, or one under another directory or a relative path is not.
+    allowed = (
+        "git opf ls cat echo printf pwd true false test head tail wc grep egrep fgrep diff cmp stat du df date "
+        "basename dirname realpath readlink uniq cut tr mkdir rmdir touch cp mv rm ln chmod").split()
+    forbidden = "$`\\;&|<>(){}[]*?!#~"
+    wrappers = (
+        ". alias ash awk bash builtin bun busybox bwrap caffeinate chroot chrt command coproc csh dash "
+        "deno doas entr env eval exec expect fakeroot find firejail fish flock function gawk gdb ghci "
+        "groovy guile ionice irb jshell julia ksh ltrace lua luajit make mawk mksh nawk nice node nodejs "
+        "nohup nsenter oksh osascript parallel pdksh perl php powershell proot pwsh pypy python racket "
+        "rbash rlwrap rscript ruby runghc runuser script sed setpriv setsid sh source ssh stdbuf strace "
+        "su sudo systemd-run taskset tclsh tcsh time timeout toybox trap unbuffer unshare valgrind watch "
+        "wish xargs yash zsh").split()
+    rule_rows = [("git log a" + ch, False) for ch in forbidden] + \
+        [('git log "a' + ch + '"', False) for ch in forbidden] + \
+        [("git log 'a" + ch + "'", True) for ch in forbidden] + [
+        ("git\tstatus", False), ("git status\n", False), ("git status\r", False), ("git log 'x", False),
+        ('git log "x', False), ("git log x'", False)] + \
+        [(w + " x", False) for w in wrappers] + [(w.upper() + " x", False) for w in wrappers] + \
+        [("/usr/bin/" + w + " x", False) for w in wrappers] + \
+        [(w + " x", True) for w in allowed] + [(d + "/" + w + " x", True) for w in allowed for d in (
+            "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")] + [(w.upper() + " x", False) for w in allowed] + \
+        [(c + " x", False) for c in (
+            "sort", "cd", "jq", "tar", "python3.14", "/usr/bin/python3.14", "./ls", "/tmp/x/ls", "bin/ls",
+            "../bin/ls", "/usr//bin/ls", "/usr/bin/../bin/ls", "/ls", "/usr/bin/", "nodejs", "tee", "dd",
+            "install", "rsync", "vim", "less", "orch-dispatch")]
+    check("rdp/plain-spec-each-rule", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None) for c, _p in rule_rows],
+          rule_rows)
+    check("rdp/plain-words-literal", aiqt_hooks._rdp_plain_words("git commit -m 'fix: a; b' x\"y\"z"),
+          (["git", "commit", "-m", "fix: a; b", "xyz"], None))
+    import contextlib
+    import io
+    saved_decide, saved_stdin = aiqt_hooks._rdp_decide, sys.stdin
+
+    def _boom(data):
+        raise RuntimeError("injected review dispatch fault")
+    try:
+        aiqt_hooks._rdp_decide = _boom
+        sys.stdin = io.StringIO(json.dumps(dict(hook_event_name="PreToolUse", cwd=str(f.root),
+                                                tool_name="Bash", tool_input=dict(command="ls"))))
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = aiqt_hooks.main(["review_dispatch_pin"])
+    finally:
+        aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
+    check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_scope_cases(base, bare)
+
+
+def _rdp_ls(cwd, background):
+    """The review dispatch verdict on a plain `ls` from cwd."""
+    return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="ls", run_in_background=background))))
+
+
+def _rdp_scope_cases(base, plain):
+    """Scope vectors: a session with no registry anywhere is never withheld (a linked worktree of a bare
+    repository, a failed common-directory probe, a git that echoes --git-common-dir back), and a bound
+    session cannot switch the hook off through a plain command that writes or removes its registry."""
+    src = base / "baresrc"
+    _rdp_git(base, "init", "-q", "-b", "main", str(src))
+    (src / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(src, "add", "x.txt")
+    _rdp_git(src, "commit", "-q", "-m", "x")
+    _rdp_git(base, "clone", "-q", "--bare", str(src), str(base / "bareproj.git"))
+    _rdp_git(base / "bareproj.git", "worktree", "add", "-q", str(base / "bareproj-wt"), "main")
+    check("rdp/bare-repository-linked-worktree-unbound-allows",
+          [_rdp_ls(base / "bareproj-wt", bg) for bg in (False, True)], ["allow", "allow"])
+    real_main, real_git = aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git
+
+    def _probe_fails(root):
+        raise OSError("git cannot read the common git directory of {}".format(root))
+
+    def _old_git(repo, *args, stdin=None):
+        # git before 2.5 echoes an option rev-parse does not know (--git-common-dir) as if it were a path.
+        p = real_git(repo, *args, stdin=stdin)
+        if p is not None and args[:1] == ("rev-parse",) and "--git-common-dir" in args and p.returncode == 0:
+            p.stdout = b"--git-common-dir\n" + p.stdout.split(b"\n", 1)[-1]
+        return p
+    got = []
+    try:
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+        aiqt_hooks._rdp_main_worktree = real_main
+        aiqt_hooks._review_git = _old_git
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+    finally:
+        aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git = real_main, real_git
+    check("rdp/unbound-repository-failed-probe-or-old-git-allows", got, ["allow"] * 4)
+    # A plain command that writes, moves or removes the registry binding this session is refused; a read
+    # of it, and a command naming other .aiqt paths, is not.
+    rg = RdpFixture(base, "regdisarm")
+    rg_bad = rg.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    unbound = rg.briefs / "unbound.json"
+    unbound.write_text(json.dumps(dict(version=1)), encoding="utf-8")
+    local = rg.root / ".aiqt" / "orchestration.local.json"
+    check("rdp/plain-registry-write-denies", [_rdp_kind(rg.run(c)) for c in (
+        "cp " + str(unbound) + " .aiqt/orchestration.local.json", "git rm -q .aiqt/orchestration.json",
+        "rm -rf .aiqt", "mv .aiqt/ elsewhere", "rm " + str(rg.root / ".AIQT" / "Orchestration.Local.JSON"),
+        "ln -sf " + str(unbound) + " .aiqt/orchestration.local.json", "git checkout HEAD -- .aiqt/.",
+        "cp " + str(unbound) + " --target-directory=.aiqt")], ["deny"] * 8)
+    check("rdp/plain-registry-read-allows", [_rdp_kind(rg.run(c)) for c in (
+        "cat .aiqt/orchestration.local.json", "ls .aiqt", "git diff .aiqt/core/x.toml")], ["allow"] * 3)
+    check("rdp/registry-disarm-dispatch-still-denies", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The binding in the committed registry, a bindingless local one beside it: the binding still scopes.
+    reg = dict(version=1, state_dir=str(rg.briefs / "state"), review_dispatch=rg.binding)
+    (rg.root / ".aiqt" / "orchestration.json").write_text(json.dumps(reg), encoding="utf-8")
+    local.write_text(json.dumps(dict(version=1, state_dir=str(rg.briefs / "state"))), encoding="utf-8")
+    check("rdp/bindingless-local-registry-cannot-hide-committed-binding", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The .aiqt directory named without its plain name: a value glued to a short option (alone or in a
+    # group), a quoted glob git expands itself, a pathspec after its magic, a subdirectory entered with -C
+    # while another word climbs with .., and a .. resolved against a cwd inside .aiqt. Other .aiqt paths,
+    # and prose holding a glob character, are not refused.
+    (rg.root / ".aiqt" / "core").mkdir()
+    check("rdp/plain-registry-indirect-name-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git rm -rfq '.aiq*'", "git clean -fdxq '.aiq*'", "git -C .aiqt/core rm -rfq ..",
+        "cp -rt.aiqt " + str(rg.briefs) + "/.", "mv -ft.aiqt x", "git rm -rq ':/.aiqt'",
+        "git rm -rq ':(icase).AIQT'", "git rm -rq '.aiqt/orch*'", "git rm -rq '.a?qt/'")] + [
+        _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(rg.root / ".aiqt" / "core"), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=c, run_in_background=False)))) for c in ("rm -rf ..", "git rm -rq -C..")],
+        ["deny"] * 11)
+    check("rdp/plain-aiqt-subpath-and-glob-prose-allow", [_rdp_kind(rg.run(c)) for c in (
+        "git add .aiqt/core/x.toml", "git commit -m 'why?'", "touch .aiqt/core/x.toml", "git rm -q '*.py'")],
+        ["allow"] * 4)
+    # A plain git command that moves the repository or its work tree off the bound registry (core.worktree,
+    # core.bare, a configuration include, a separated git directory) is refused; a read of the key is not.
+    check("rdp/plain-git-repository-move-denies", [_rdp_kind(rg.run(c)) for c in (
+        "git config core.worktree " + str(base), "git config --worktree Core.WorkTree " + str(base),
+        "git config core.bare true", "git config --unset core.worktree", "git config set core.bare true",
+        "git config include.path " + str(unbound), "git config includeIf.gitdir:/x/.path " + str(unbound),
+        "git init -q --separate-git-dir=" + str(base / "regdisarm-meta"), "git -c core.worktree=/x config x y",
+        "git -c core.bare=true branch --list")],
+        ["deny"] * 10)
+    # git config is judged by position: only --get, --get-all, --get-regexp, --list or -l (after modifiers,
+    # --show-origin among them), with the operands each takes, or one key alone, reads.
+    reads = ("git config --get core.worktree", "git config --list", "git config core.bare",
+             "git config --show-origin --list", "git config --global --get-all core.worktree",
+             "git config --get core.worktree get", "git config --show-origin core.worktree")
+    check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in reads], ["allow"] * len(reads))
+    # Any other git config form naming repository configuration is a write: a word after the key is its
+    # value (git config core.worktree get sets core.worktree to get), a rename into the core or include
+    # section moves a key there, an edit action opens an editor that can set any key, and a subcommand
+    # behind an unknown global option is judged the same way.
+    writes = ("git config core.worktree get", "git config core.bare true list", "git config get core.bare",
+              "git config --worktree core.worktree /x get", "git config --show-origin core.worktree /x",
+              "git config core.worktree --get", "git config --worktree --rename-section x core",
+              "git config --rename-section x Include", "git config rename-section x includeIf.gitdir:/x/",
+              "git config --edit", "git config -e", "git config edit", "git config --ed",
+              "git --exec-path=/x config core.worktree get", "git --exec-path=/x config --rename-section x core",
+              "git -c core.worktree=/x config --list", "git --config-env=core.bare=V config --list")
+    check("rdp/plain-git-config-judged-by-position", [_rdp_kind(rg.run(c)) for c in writes],
+          ["deny"] * len(writes))
+    # A git subcommand that only reads (status, log, diff, show, rev-parse, ls-files, blame, grep, cat-file)
+    # treats every word as data: a repository key, a registry name or a glob in it is no move and no write.
+    data = ("git log -S core.worktree --oneline", "git log -1 --format='tformat:*'", "git ls-files '*'",
+            "git grep core.worktree", "git log --grep=core.bare", "git log -S include.path", "git diff -- '*'",
+            "git show HEAD:.aiqt/orchestration.local.json", "git -C .aiqt/core log -- ..",
+            "git blame -- .aiqt/orchestration.local.json", "git cat-file -p HEAD:seed.txt",
+            "git rev-parse --git-path core.worktree", "git status -- .aiqt", "git --no-pager log -- '.aiq*'")
+    check("rdp/plain-git-read-words-are-data", [_rdp_kind(rg.run(c)) for c in data], ["allow"] * len(data))
+    # A read subcommand that writes a file (--output, abbreviated or not), runs a program on its matches
+    # (grep -O, --open-files-in-pager) or takes configuration from a -c or --config-env global is judged as
+    # any other git command; so is a subcommand off the read list, or one not written exactly.
+    judged = ("git log -1 --format=%B --output=.aiqt/orchestration.local.json",
+              "git diff --outp=.aiqt/orchestration.local.json", "git show --output .aiqt/orchestration.json",
+              "git grep -O/bin/rm -l review .aiqt", "git grep -lO/bin/rm review .aiqt",
+              "git grep --open-files-in-pager=/bin/rm -l review .aiqt", "git -c core.pager=x log -- '.aiq*'",
+              "git -c x.y=z log -S core.worktree", "git LOG -S core.worktree", "git checkout -- '*'",
+              "git commit -m 'document core.worktree handling'", "git init -q --separate-git-dir=/tmp/x")
+    check("rdp/plain-git-read-that-writes-or-runs-judged", [_rdp_kind(rg.run(c)) for c in judged],
+          ["deny"] * len(judged))
+    # Configuration can make any git command, a read among them, run a program, so no key list closes it:
+    # the external diff sequence (set diff.external to rm -f, then diff the registry with --ext-diff), each
+    # call run only where the hook allows it, would delete the registry and let a missing-brief dispatch
+    # through; every git config write and -c or --config-env global is refused, whatever the key.
+    ed = RdpFixture(base, "extdiff")
+    (ed.root / "other").write_text("different\n", encoding="utf-8")
+    ed_got = []
+    for command, args in (("git config diff.external 'rm -f'", ["config", "diff.external", "rm -f"]),
+                          ("git diff --no-index --ext-diff .aiqt/orchestration.local.json other",
+                           ["diff", "--no-index", "--ext-diff", ".aiqt/orchestration.local.json", "other"])):
+        ed_got.append(_rdp_kind(ed.run(command)))
+        if ed_got[-1] == "allow":
+            subprocess.run(["git", "-C", str(ed.root)] + args, capture_output=True, timeout=30)
+    ed_got += [_rdp_kind(ed.dispatch("/missing")), (ed.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-external-diff-sequence-cannot-remove-registry", ed_got,
+          ["deny", "deny", "unverifiable", True])
+    keys = ("git config core.pager 'rm -f'", "git config alias.l '!rm -f x'", "git config core.fsmonitor x",
+            "git config --global diff.x.textconv x", "git config filter.x.smudge x", "git config set diff.external x",
+            "git config --file x diff.external x", "git config --add core.hooksPath x",
+            "git config --unset diff.external", "git -c diff.external=x status", "git -c x.y=z commit -m x",
+            "git --config-env=core.pager=V status", "git --exec-path=/x -c diff.external=x status",
+            "git --exec-path=/x config diff.external x")
+    check("rdp/plain-git-config-write-any-key-denies", [_rdp_kind(ed.run(c)) for c in keys], ["deny"] * len(keys))
+    # A read carrying an option that runs a configured or named program (an external diff, a textconv or
+    # smudge filter, a patch a textconv applies to, a signature check, the pager) gets the full checks.
+    runs = ("git diff --textconv .aiqt/orchestration.local.json other", "git diff --textc -- .aiqt",
+            "git show --textconv HEAD:.aiqt/orchestration.local.json", "git cat-file --textconv HEAD:.aiqt/orchestration.json",
+            "git cat-file --filters HEAD:.aiqt/orchestration.json", "git grep --textconv x .aiqt", "git blame --textconv -- .aiqt",
+            "git log -p -- .aiqt", "git log --patch -- .aiqt", "git show -U3 -- .aiqt", "git log -pS x -- .aiqt",
+            "git diff --ext -- .aiqt", "git log --cc -- .aiqt", "git log --word-diff -- .aiqt",
+            "git log --show-signature -- .aiqt", "git log --format='%G?' -- .aiqt", "git -p log -- .aiqt",
+            "git --paginate status .aiqt")
+    check("rdp/plain-git-read-running-program-judged", [_rdp_kind(ed.run(c)) for c in runs], ["deny"] * len(runs))
+    # A plain command that may write into a git directory or a git configuration file (a configuration
+    # file or hook copied, linked or moved into place) is refused; reads of them, and a read naming the
+    # registry with no program-running option, are not.
+    gitdir = ("cp other .git/config", "ln -sf other .git/hooks/post-index-change", "mv other .GIT/config",
+              "git show HEAD:seed.txt --output=.git/config", "cp other x/.gitconfig",
+              "cp other x/.config/git/config", "git init -q --template=/x", "cp -rT other '.gi?'",
+              "chmod +x .git/hooks/pre-commit", "git -C .git commit -m x")
+    check("rdp/plain-git-dir-write-denies", [_rdp_kind(ed.run(c)) for c in gitdir], ["deny"] * len(gitdir))
+    quiet = ("git config --get diff.external", "git config --list", "ls .git", "test -d .git",
+             "cat .git/config", "git diff --stat -- .aiqt/orchestration.local.json",
+             "git log --oneline -- .aiqt/orchestration.local.json", "git diff --text -- .aiqt",
+             "git log --no-ext-diff --no-textconv -S x -- .aiqt", "git status")
+    check("rdp/plain-git-read-without-program-allows", [_rdp_kind(ed.run(c)) for c in quiet],
+          ["allow"] * len(quiet))
+    # A git option or subcommand that runs a program can run shell text no word check sees (.aiqt inside
+    # a pager command), so it is refused outright, whatever the command names: the pager sequence (grep's
+    # --open-files-in-pager set to rm -rf .aiqt), each call run only where the hook allows it, would delete
+    # the registry and let a missing-brief dispatch through.
+    pg = RdpFixture(base, "pager")
+    pg_got = [_rdp_kind(pg.dispatch("/missing"))]
+    pg_got.append(_rdp_kind(pg.run("git grep --open-files-in-pager='rm -rf .aiqt' a -- src/a.py")))
+    if pg_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(pg.root), "grep", "--open-files-in-pager=rm -rf .aiqt", "a", "--",
+                        "src/a.py"], capture_output=True, timeout=30)
+    pg_got += [_rdp_kind(pg.dispatch("/missing")), (pg.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-pager-option-sequence-cannot-remove-registry", pg_got,
+          ["unverifiable", "deny", "unverifiable", True])
+    # The checks below use a fixture of their own, so a registry removed above cannot make them pass.
+    go = RdpFixture(base, "gitops")
+    programs = ("git grep -O'rm -rf x' a", "git grep -iO a", "git grep --open a", "git grep -e a -O",
+                "git -p status", "git --paginate log", "git diff --ext-diff", "git log --textconv",
+                "git cat-file --filters HEAD:seed.txt", "git log --show-signature", "git log --format='%G?'",
+                "git for-each-ref --format '%(signature)'", "git rebase -x 'rm -rf x' HEAD",
+                "git rebase --exec=x HEAD", "git difftool -x x", "git difftool --extcmd=x",
+                "git clone -u x a b", "git clone --config core.fsmonitor=x a b", "git clone -c x=y a b",
+                "git fetch --upload-pack=x origin", "git push --receive-pack=x origin",
+                "git archive --remote=x --exec=y HEAD", "git send-email --sendmail-cmd=x a",
+                "git --exec-path=/x status", "git bisect run x", "git submodule foreach x",
+                "git filter-branch --tree-filter x", "git --no-advice rebase -x x HEAD",
+                "git commit -S -m x", "git commit --gpg-sign -m x", "git commit -p", "git commit --trailer a=b -m x",
+                "git tag -s v1 -m x", "git tag -v v1", "git tag -u k v1", "git tag --sign v1",
+                "git merge -s x y", "git merge --strategy=x y", "git merge --verify-signatures y", "git merge -S y",
+                "git rebase -s x y", "git rebase -S y", "git cherry-pick --strategy=x y", "git cherry-pick -S y",
+                "git revert --gpg-sign y", "git push --signed origin", "git add -p", "git add -i",
+                "git add --interactive", "git checkout -p", "git restore --patch x", "git reset -p",
+                "git stash -p", "git fetch evil::x", "git clone evil::x d", "git remote add o evil::x",
+                "git push --repo=evil::x", "git log --help", "git diff --ext-diff --",
+                "git log --show-signature --", "git log --grep -- --ext-diff", "git log -n -- --show-signature",
+                "git commit -m -- -S", "git commit --mess -- --gpg-sign", "git diff --cached --ext-diff",
+                "git grep -e -e -e -- -O", "git commit --mess -m -m -- -S", "git blame -n -L -- --ext-diff",
+                "git stash show -- --ext-diff", "git clone -- evil::x d", "git commit --mess --mess --mess -- -S",
+                "git blame -L -- --ext-diff", "git shortlog --committer --grep -- --ext-diff",
+                "git commit --allow-empty --mess --mess --mess -- -S", "git blame -CS --ext-diff f",
+                "git blame -MS --ext-diff f", "git shortlog -wG --ext-diff",
+                "git show --word-diff-regex --grep --ext-diff", "git log -p --word-diff-regex -S --ext-diff",
+                "git show HEAD --default --grep --ext-diff", "git log -p --output --grep --ext-diff",
+                "git show -s --word-diff-regex -S --show-signature", "git log --since-as-filter --author --ext-diff",
+                "git diff --word-diff-regex --grep --ext-diff", "git rev-list --default --grep --ext-diff HEAD",
+                "git shortlog --since-as-filter --grep --ext-diff", "git blame --word-diff-regex -S --ext-diff f",
+                "git log --word-diff-regex -- --ext-diff", "git show --word-diff-reg --grep --ext-diff",
+                "git log --oneline --default --grep --ext-diff", "git log -1 --format=%-GG",
+                "git show -s --pretty=tformat:%+GK", "git log -1 --format='% GT' -- .aiqt",
+                "git log --pretty tformat:%-GS", "git log --format='%<(9)% GF'",
+                "git for-each-ref --format='%(*signature)'", "git tag -l --format '%(*signature:grade)'",
+                "git for-each-ref --sort=signature", "git for-each-ref --sort=signature:grade",
+                "git for-each-ref --sort=-signature", "git for-each-ref --sort='*signature'",
+                "git for-each-ref --sort='-*signature:signer'", "git for-each-ref --sort=v:signature",
+                "git for-each-ref --sort=version:signature:key", "git for-each-ref --so=signature",
+                "git for-each-ref --sor signature", "git for-each-ref --sort=refname --sort=signature",
+                "git for-each-ref --sort refname --sort -signature", "git for-each-ref --no-sort --sort=signature",
+                "git branch --sort=signature", "git branch --so=signature:grade", "git tag --sort='*signature'",
+                "git tag -l --sor '*signature'", "git for-each-ref --sort=contents:signature",
+                "git shortlog --group=%GG HEAD", "git shortlog --gr=%GG HEAD", "git shortlog --g='%G?' HEAD",
+                "git shortlog --group %GG HEAD", "git shortlog --group --format=%GG HEAD",
+                "git shortlog --group=format:%GS HEAD", "git shortlog --group=committer --group=%GK HEAD",
+                "git shortlog -c --group %-GG HEAD")
+    pr_got = []
+    for c in programs:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        pr_got.append((_rdp_kind(result), "runs a program" in reason))
+    check("rdp/plain-git-program-option-denies", pr_got, [("deny", True)] * len(programs))
+    # Options are read with their operands: a search operand glued to -S or -G, or the next word of
+    # --grep, --author or -S, is no patch request (git log -Sconfig reads, its c no -c), and words after
+    # -- are paths, also after an option taking no value or with its value glued (--stat, --cached, -1,
+    # --format=oneline, -n5), or after a word that is itself an option's value, separated as attached
+    # (git grep -e -e -- -O as git grep -e-e -- -O); an option that shares a letter or prefix with a
+    # program-running one runs none.
+    operands = ("git log -Sconfig -- .aiqt", "git log -S config -- .aiqt", "git log -Gcmp -- .aiqt",
+                "git log --grep -c -- .aiqt", "git log --author -p -- .aiqt", "git log -n 3 -- .aiqt",
+                "git log -- .aiqt -p", "git grep -e -O -- .aiqt", "git grep -eOops -- .aiqt",
+                "git cat-file --filter=blob:none --batch-check", "git commit -m 'fix -x and %G'",
+                "git rebase -i HEAD", "git --exec-path", "git log --grep --ext-diff",
+                "git log --grep=--ext-diff", "git show --author --show-signature", "git commit -m --gpg-sign",
+                "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b",
+                "git log --grep --format=%G --format=%s", "git diff -- --ext-diff",
+                "git log -- --show-signature", "git log HEAD -- --show-signature", "git grep a -- -O",
+                "git diff --stat -- --ext-diff", "git diff --cached -- --ext-diff", "git log -1 -- --show-signature",
+                "git log --format=oneline -- --show-signature", "git log -n5 -- --show-signature",
+                "git commit -a -- -S", "git grep -e -e -- -O", "git grep -e-e -- -O",
+                "git log --grep --author -- --show-signature", "git log --grep=--author -- --show-signature",
+                "git log -S -n -- --ext-diff", "git log -S-n -- --ext-diff", "git commit --mess --mess -- -S",
+                "git blame -n -- --ext-diff", "git blame -L 1,2 -- --ext-diff", "git shortlog -n -- --ext-diff",
+                "git blame -G -G -- --ext-diff", "git commit --mess --gpg-sign", "git shortlog -G -G -- --ext-diff",
+                "git blame -I -O -- --ext-diff", "git for-each-ref --sort=refname", "git for-each-ref --sort refname",
+                "git branch --sort=-committerdate", "git tag -l --sort=v:refname", "git shortlog --group=author HEAD",
+                "git shortlog --group author --group=trailer:x HEAD", "git shortlog --group=%an HEAD",
+                "git shortlog --grep %GG HEAD", "git log --grep signature", "git tag -m signature v1",
+                "git for-each-ref --sort=refname signature", "git shortlog --group=author %GG",
+                "git for-each-ref --sort refname signature", "git shortlog --group author %GG")
+    check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
+          ["allow"] * len(operands))
+    patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
+               "git show -U3 -- .aiqt", "git log --grep=x --patch -- .aiqt", "git log --default --grep -p -- .aiqt",
+               "git show --since-as-filter -S -p -- .aiqt", "git log --default -- -p -- .aiqt")
+    check("rdp/plain-git-patch-read-judged", [_rdp_kind(go.run(c)) for c in patches], ["deny"] * len(patches))
+    # A git config read keeps its scope options (--local, --global, --system, --worktree, --file PATH),
+    # --show-origin and --type before any read form; a trailing word after the key is still a value.
+    config_reads = ("git config --show-origin --get core.bare", "git config --local core.bare",
+                    "git config --local --show-origin core.bare", "git config --system --get core.bare",
+                    "git config --worktree core.bare", "git config --global --list",
+                    "git config --file other --get core.bare", "git config -f other core.bare",
+                    "git config --file=.git/config core.bare", "git config --type bool --get core.bare",
+                    "git config --show-scope --show-origin --get-all core.bare")
+    check("rdp/plain-git-config-read-modifiers-allow", [_rdp_kind(go.run(c)) for c in config_reads],
+          ["allow"] * len(config_reads))
+    config_writes = ("git config core.bare --local", "git config --local core.bare true",
+                     "git config --file core.bare", "git config --show-origin core.bare false",
+                     "git config --type bool core.bare true", "git config --file x --unset core.bare")
+    check("rdp/plain-git-config-trailing-word-still-writes", [_rdp_kind(go.run(c)) for c in config_writes],
+          ["deny"] * len(config_writes))
+    # A git subcommand off the allowlist is refused whatever it names: the instaweb sequence (its --httpd
+    # set to rm -rf .aiqt, run only where the hook allows it) would delete the registry and let a
+    # missing-brief dispatch through.
+    iw = RdpFixture(base, "instaweb")
+    iw_got = [_rdp_kind(iw.dispatch("/missing")),
+              _rdp_kind(iw.run("git instaweb --httpd='rm -rf .aiqt lighttpd' --start"))]
+    if iw_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(iw.root), "instaweb", "--httpd=rm -rf .aiqt lighttpd", "--start"],
+                       capture_output=True, timeout=30)
+    iw_got += [_rdp_kind(iw.dispatch("/missing")), (iw.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-instaweb-sequence-cannot-remove-registry", iw_got, ["unverifiable", "deny", "unverifiable", True])
+    off_list = (("git instaweb --start", "instaweb"), ("git difftool", "difftool"), ("git mergetool", "mergetool"),
+                ("git send-email --to=a x", "send-email"), ("git filter-branch", "filter-branch"),
+                ("git bisect start", "bisect"), ("git submodule status", "submodule"), ("git daemon", "daemon"),
+                ("git web--browse x", "web--browse"), ("git credential fill", "credential"),
+                ("git credential-store get", "credential-store"), ("git credential-cache exit", "credential-cache"),
+                ("git help log", "help"), ("git co main", "co"), ("git my-external", "my-external"),
+                ("git LOG", "LOG"), ("git --no-advice status", "--no-advice"), ("git init", "init"),
+                ("git clean -n", "clean"), ("git gc", "gc"), ("git --help", "--help"))
+    off_got = []
+    for c, word in off_list:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        off_got.append((_rdp_kind(result), "({})".format(word) in reason))
+    check("rdp/plain-git-off-allowlist-subcommand-denies", off_got, [("deny", True)] * len(off_list))
+    allowed = ("git status", "git log", "git diff", "git show", "git rev-parse HEAD", "git ls-files", "git ls-tree HEAD",
+               "git cat-file -t HEAD", "git blame seed.txt", "git grep x", "git describe", "git shortlog",
+               "git merge-base HEAD HEAD", "git rev-list HEAD", "git for-each-ref", "git show-ref", "git branch",
+               "git tag", "git remote", "git config --list", "git add x", "git rm x", "git mv x y", "git commit -m x",
+               "git push", "git fetch", "git stash", "git switch main", "git checkout main", "git restore x",
+               "git reset", "git merge x", "git rebase x", "git cherry-pick x", "git revert x", "git worktree list",
+               "git clone a b", "git", "git --version")
+    check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
+          ["allow"] * len(allowed))
+    # The binding record (D-433-FAILCLOSED-BINDING): once the hook has seen the registry bind, a registry
+    # removed or rewritten by any command leaves the next dispatch withheld as UNVERIFIABLE, its reason naming
+    # the binding record, never allowed. Each change is made directly, as a command the hook did not judge
+    # would make it, after one dispatch has been checked under the binding.
+    def _reason(result):
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        return specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+
+    def _drifted(name, prepare, change):
+        fx = RdpFixture(base, name)
+        prepare(fx)
+        first = _rdp_kind(fx.dispatch("/missing"))
+        change(fx)
+        after = fx.dispatch("/missing")
+        return [first, aiqt_hooks._rdp_scope(str(fx.root))[0], _rdp_kind(after), "binding record" in _reason(after)]
+
+    def _payload(fx):
+        fx.ignore_registry()
+        (fx.root / "payload" / ".aiqt").mkdir(parents=True)
+        (fx.root / "payload" / ".aiqt" / "orchestration.local.json").write_text(json.dumps(dict(version=1)),
+                                                                                encoding="utf-8")
+        _rdp_git(fx.root, "add", "-f", "payload")
+        _rdp_git(fx.root, "commit", "-q", "-m", "payload")
+
+    def _tracked(fx):
+        _rdp_git(fx.root, "branch", "noreg")
+        _rdp_git(fx.root, "add", "-f", ".aiqt/orchestration.local.json")
+        _rdp_git(fx.root, "commit", "-q", "-m", "track the registry")
+    changes = (
+        ("record-rm-tree", lambda fx: None,
+         lambda fx: (_rdp_git(fx.root, "add", "-A"), _rdp_git(fx.root, "rm", "-rfq", "."))),
+        ("record-restore-subtree", _payload, lambda fx: _rdp_git(fx.root, "restore", "--source=HEAD:payload", ".")),
+        ("record-checkout-subtree", _payload, lambda fx: _rdp_git(fx.root, "checkout", "HEAD:payload", "--", ".")),
+        ("record-reset-branch", _tracked, lambda fx: _rdp_git(fx.root, "reset", "-q", "--hard", "noreg")),
+        ("record-rm-aiqt", lambda fx: None, lambda fx: shutil.rmtree(fx.root / ".aiqt")))
+    check("rdp/record-registry-removed-withholds-dispatch", [_drifted(n, p, c) for n, p, c in changes],
+          [["unverifiable", None, "unverifiable", True]] * len(changes))
+    rebound = _drifted("record-rebind", lambda fx: None,
+                       lambda fx: fx.write_registry(dict(fx.binding, commands=["other-dispatch"])))
+    check("rdp/record-registry-rewritten-withholds-dispatch", rebound, ["unverifiable", "ok", "unverifiable", True])
+    # The record is hook-owned state in the common git directory, mode 0600, holding the binding; an operator
+    # clears it outside the session and the next check records the binding then in force. In the session a
+    # plain command naming it is refused, and a plain command naming neither is still allowed while the
+    # registry is changed.
+    rb = RdpFixture(base, "record-operator")
+    rb.dispatch("/missing")
+    home = rb.root / ".git" / "aiqt" / "review-dispatch-binding"
+    records = sorted(home.iterdir()) if home.is_dir() else []
+    record = records[0] if len(records) == 1 else home / "absent.json"
+    modes = [oct(path.stat().st_mode & 0o777) for path in [home] + records if path.exists()]
+    doc = json.loads(record.read_text(encoding="utf-8")) if record.is_file() else {}
+    shutil.rmtree(rb.root / ".aiqt")
+    in_session = [_rdp_kind(rb.run(c)) for c in ("rm " + str(record), "rm -rf .git/aiqt", "ls", "git status")]
+    (rb.root / ".aiqt").mkdir()
+    rb.write_registry(dict(rb.binding, commands=["other-dispatch"]))
+    still = _rdp_kind(rb.dispatch("/missing"))
+    record.unlink(missing_ok=True)
+    cleared = rb.run("other-dispatch --brief /missing")
+    check("rdp/record-location-and-operator-clear",
+          [len(records), modes,
+           [doc.get("worktree"), doc.get("registry_path")] == [".", "."], doc.get("binding", {}).get("commands"),
+           in_session, still, _rdp_kind(cleared), "binding record" in _reason(cleared),
+           json.loads(record.read_text(encoding="utf-8"))["binding"]["commands"] if record.is_file() else None],
+          [1, ["0o700", "0o600"], True, ["orch-dispatch"], ["deny", "deny", "allow", "allow"], "unverifiable", "unverifiable",
+           False, ["other-dispatch"]])
+    # Ordinary git commands are allowed whatever the registry's git state: tracked with an older registry
+    # commit in its history, or untracked and not ignored; the registry stays bound and nothing is withheld.
+    def _ordinary(name, track):
+        fx = RdpFixture(base, name)
+        reg = fx.root / ".aiqt" / "orchestration.local.json"
+        if track:
+            _rdp_git(fx.root, "add", "-f", ".aiqt/orchestration.local.json")
+            _rdp_git(fx.root, "commit", "-q", "-m", "track the registry")
+            reg.write_bytes(reg.read_bytes() + b"\n")
+            _rdp_git(fx.root, "commit", "-q", "-a", "-m", "touch the registry")
+        (fx.root / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
+        got = []
+        for c in ("git add src/a.py", "git commit -q -m edit", "git checkout HEAD -- src/a.py", "git restore src/a.py",
+                  "git reset --hard HEAD", "git checkout -- .", "git restore .", "git reset -q", "git checkout -q -b side",
+                  "git switch -q main"):
+            got.append(_rdp_kind(fx.run(c)))
+            if got[-1] == "allow":
+                subprocess.run(["git", "-C", str(fx.root), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                                "-c", "commit.gpgsign=false"] + c.split(" ")[1:], capture_output=True, timeout=30)
+        after = fx.dispatch("/missing")
+        return got + [aiqt_hooks._rdp_scope(str(fx.root))[0], _rdp_kind(after), "binding record" in _reason(after)]
+    check("rdp/record-ordinary-git-commands-allow", [_ordinary("record-ord-tracked", True),
+                                                     _ordinary("record-ord-untracked", False)],
+          [["allow"] * 10 + ["ok", "unverifiable", False]] * 2)
+    # A record that cannot be read leaves the recorded dispatch commands unknown, so every Bash call is
+    # withheld; a binding whose record cannot be written withholds every dispatch, naming the record.
+    bad = RdpFixture(base, "record-malformed")
+    bad.dispatch("/missing")
+    for path in (bad.root / ".git" / "aiqt" / "review-dispatch-binding").glob("*.json"):
+        path.write_text("{", encoding="utf-8")
+    nw = RdpFixture(base, "record-unwritable")
+    (nw.root / ".git" / "aiqt").write_text("x\n", encoding="utf-8")
+    nw_result = nw.dispatch("/missing")
+    check("rdp/record-unreadable-or-unwritable-withholds",
+          [_rdp_kind(bad.run("ls")), _rdp_kind(nw.run("ls")), _rdp_kind(nw_result),
+           "cannot be recorded" in _reason(nw_result)], ["unverifiable", "allow", "unverifiable", True])
+    # A linked worktree is guarded by its main worktree's record, kept in the shared common git directory.
+    lw = RdpFixture(base, "record-linked")
+    _rdp_git(lw.root, "worktree", "add", "-q", str(base / "record-linked-wt"), "-b", "wt")
+    linked = dict(hook_event_name="PreToolUse", cwd=str(base / "record-linked-wt"), session_id="s1",
+                  tool_name="Bash", tool_input=dict(command="orch-dispatch --brief /missing"))
+    lw_first = _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(linked)))
+    shutil.rmtree(lw.root / ".aiqt")
+    lw_after = aiqt_hooks.review_dispatch_pin(dict(linked))
+    check("rdp/record-linked-worktree-main-registry-removed-withholds",
+          [lw_first, _rdp_kind(lw_after), "binding record" in _reason(lw_after)], ["unverifiable", "unverifiable", True])
+    # The record is keyed by the worktree's identity in its common git directory and the registry's path
+    # relative to the top level, never an absolute path, so a renamed repository keeps its record: the
+    # bound registry is committed, reset away to the registry-free revision, the repository is renamed
+    # outside the session (in it, mv of a directory holding the git directory is refused), and the
+    # dispatch from the renamed repository is still withheld, naming the record.
+    rn = RdpFixture(base, "record-rename")
+    _tracked(rn)
+    rn_first = _rdp_kind(rn.dispatch("/missing"))
+    _rdp_git(rn.root, "reset", "-q", "--hard", "noreg")
+    renamed = base / "record-renamed"
+    rn_mv = _rdp_kind(rn.run("mv " + str(rn.root) + " " + str(renamed)))
+    os.rename(rn.root, renamed)
+    rn_after = aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(renamed), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /missing", run_in_background=False)))
+    check("rdp/record-renamed-repository-withholds",
+          [rn_first, rn_mv, _rdp_kind(rn_after), "binding record" in _reason(rn_after),
+           str(renamed / ".git" / "aiqt") in _reason(rn_after)], ["unverifiable", "deny", "unverifiable", True, True])
+    # The protected directory is the RESOLVED common git directory, whatever its spelling: with a separated
+    # git directory not named .git, every plain command but a read whose operand is it, lies inside it or
+    # holds it is refused (absolute, relative, through a symbolic link, a parent), a read and ordinary work
+    # are not, and a registry removed outside the session still withholds the dispatch through the record.
+    sg = RdpFixture(base, "record-sepgit")
+    sg_meta = base / "record-sepgit-meta"
+    _rdp_git(sg.root, "init", "-q", "--separate-git-dir=" + str(sg_meta))
+    sg_first = _rdp_kind(sg.dispatch("/missing"))
+    sg_home = sg_meta / "aiqt" / "review-dispatch-binding"
+    sg_records = sorted(sg_home.iterdir()) if sg_home.is_dir() else []
+    (base / "record-sepgit-alias").symlink_to(sg_meta)
+    refused = ["rm -rf " + str(sg_meta / "aiqt"), "rm -rf " + str(sg_meta), "rm -rf ../record-sepgit-meta/aiqt",
+               "rm -rf " + str(base / "record-sepgit-alias") + "/aiqt", "mv " + str(sg_meta) + " x",
+               "chmod -R 000 " + str(sg_meta), "rm -rf " + str(base), "touch " + str(sg_records[0] if sg_records
+                                                                                      else sg_home),
+               "cp seed.txt " + str(sg_home), "ln -sf /dev/null " + str(sg_home / "x.json"),
+               "rm -rf ../RECORD-SEPGIT-META/AIQT", "git -C " + str(sg_meta) + " rm -rq aiqt",
+               "git diff --output=" + str(sg_home / "x.json")]
+    allowed = ["ls " + str(sg_home), "cat " + str(sg_records[0] if sg_records else sg_home), "git add .",
+               "git status", "mkdir build", "rm -rf build", "touch seed.txt"]
+    sg_refused = [_rdp_kind(sg.run(c)) for c in refused]
+    sg_allowed = [_rdp_kind(sg.run(c)) for c in allowed]
+    shutil.rmtree(sg.root / ".aiqt")
+    sg_after = sg.dispatch("/missing")
+    check("rdp/record-separated-git-dir-protected-by-resolution",
+          [sg_first, len(sg_records), sg_refused, sg_allowed, _rdp_kind(sg_after), "binding record" in _reason(sg_after)],
+          ["unverifiable", 1, ["deny"] * len(refused), ["allow"] * len(allowed), "unverifiable", True])
+    # Where the git directory cannot be located, every plain command but a read is refused in a bound session.
+    check("rdp/record-unresolved-git-dir-refuses",
+          [aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, "no git directory")) is not None,
+           aiqt_hooks._rdp_names_common_dir(["cat", "x"], str(sg.root), (None, "no git directory")),
+           aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, None))], [True, None, None])
+    # A directory HOLDING the git directory (the repository root, for .git inside it) is refused only to a
+    # command that can delete, move or recursively rewrite it: rm -r or -d, rmdir, mv of it, mv --exchange,
+    # chmod, cp -r or -a of it, a write whose path merges into it (x/., -T) or resolves into the git
+    # directory through a link, and a word the option tables do not model. Writing a new file or directory
+    # into it, and ln naming it (ln never recurses), are allowed.
+    an = RdpFixture(base, "record-ancestor")
+    an_first = _rdp_kind(an.dispatch("/missing"))
+    (base / "record-ancestor-src" / "g").mkdir(parents=True)
+    (an.root / "sub").mkdir()
+    (an.root / "sub" / "g").symlink_to(an.root / ".git")
+    ext = str(base / "record-ancestor-src")
+    refused = ["rm -rf .", "rm -r " + str(an.root), "rm -d .", "rmdir .", "rm --rec .", "rm -rf -- ../record-ancestor",
+               "mv " + str(an.root) + " " + str(base / "record-ancestor-moved"), "mv -t " + str(base) + " .",
+               "mv --exchange seed.txt .", "chmod -R 755 .", "chmod 755 .", "cp -a . " + ext + "/copy",
+               "cp -rl . " + ext + "/links", "cp -r " + ext + "/. .", "cp -rT " + ext + " .",
+               "cp -r " + ext + "/g sub", "ln -sfT seed.txt .", "cp -b -S /../x seed.txt .",
+               "cp --frob seed.txt ."]
+    allowed = ["cp seed.txt .", "touch .", "touch ./f", "touch " + str(an.root), "mkdir newdir", "mkdir -p .",
+               "ln -s seed.txt ./l", "ln -s . self", "ln -sr . self2", "cp -r src .", "mv seed.txt .",
+               "cp -t . seed.txt", "rm -f .", "rm -rf build", "mv -- old.txt .", "cp -a src " + ext + "/s"]
+    an_refused = [_rdp_kind(an.run(c)) for c in refused]
+    an_allowed = [_rdp_kind(an.run(c)) for c in allowed]
+    check("rdp/record-ancestor-only-destructive-forms-refused",
+          [an_first, an_refused, an_allowed],
+          ["unverifiable", ["deny"] * len(refused), ["allow"] * len(allowed)])
+    # A declared dispatch command writes no git directory, so a word of it may name a directory holding
+    # the git directory (--workdir ., the repository root) and the dispatch reaches the pin check; a
+    # word naming the git directory or a path inside it is still refused, and so is a holding directory
+    # to a program the option tables do not model (opf).
+    dw = RdpFixture(base, "dispatch-workdir")
+    dw_good = dw.good()
+    dw_allowed = [_rdp_kind(dw.run(c)) for c in ("orch-dispatch --brief " + dw_good,
+                                                "orch-dispatch --workdir . --brief " + dw_good,
+                                                "orch-dispatch --workdir " + str(dw.root) + " --brief " + dw_good)]
+    dw_inside = [dw.run(c) for c in ("orch-dispatch --workdir .git/aiqt --brief " + dw_good,
+                                     "orch-dispatch --workdir " + str(dw.root / ".git") + " --brief " + dw_good)]
+    dw_guard = (os.path.realpath(dw.root / ".git"), None)
+    check("rdp/dispatch-workdir-holding-dir-allowed-inside-refused",
+          [dw_allowed, [_rdp_kind(r) for r in dw_inside],
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", "."], str(dw.root), dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", ".git/aiqt"], str(dw.root), dw_guard,
+                                            True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", str(dw.root / ".git")], str(dw.root),
+                                            dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["opf", "."], str(dw.root), dw_guard)],
+          [["allow"] * 3, ["deny", "deny"], None, ".git/aiqt", str(dw.root / ".git"), "."])
+    # One check reads each registry ONCE and enforces the recorded binding: a registry removed between the
+    # record comparison and the enforcement (the record check wrapped to remove .aiqt after it compares)
+    # still leaves the dispatch withheld, and no registry directory is read twice within one check.
+    il = RdpFixture(base, "record-interleave")
+    il_before = _rdp_kind(il.dispatch("/missing"))
+    real_check, real_scope = aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope
+    reads = []
+
+    def _check_then_remove(*args, **kw):
+        out = real_check(*args, **kw)
+        shutil.rmtree(il.root / ".aiqt", ignore_errors=True)
+        return out
+
+    def _counted(reg_dir):
+        reads.append(os.path.realpath(reg_dir))
+        return real_scope(reg_dir)
+    try:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = _check_then_remove, _counted
+        il_mid = il.dispatch("/missing")
+    finally:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = real_check, real_scope
+    il_next = il.dispatch("/missing")
+    check("rdp/record-interleaved-removal-withholds",
+          [il_before, _rdp_kind(il_mid), len(reads) == len(set(reads)), _rdp_kind(il_next),
+           "binding record" in _reason(il_next)], ["unverifiable", "unverifiable", True, "unverifiable", True])
+    # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
+    # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
+    # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
+    # value and no read action.
+    cv = RdpFixture(base, "cfgvalue")
+    cv_meta = base / "cfgvalue-meta"
+    _rdp_git(cv.root, "init", "-q", "--separate-git-dir=" + str(cv_meta))
+    _rdp_git(cv.root, "config", "core.worktree", str(cv.root))
+    cv_wt = base / "cfgvalue-beside"
+    _rdp_git(cv.root, "worktree", "add", "-q", "--detach", str(cv_wt), cv.pin)
+    check("rdp/config-value-word-cannot-unscope-linked-worktree", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cv_wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command=c, run_in_background=False)))) for c in (
+            "orch-dispatch --brief /missing", "mkdir " + str(cv_meta / "get"), "git config core.worktree get")],
+        ["unverifiable", "deny", "deny"])
+    # core.worktree moved onto ANOTHER bound tree: the binding above the session cwd still governs, and a
+    # dispatch either binding declares is withheld, never checked against the other repository (before,
+    # the redirected tree's binding decided and the cwd's dispatcher went undeclared, so it was allowed).
+    ca = RdpFixture(base, "conflict-a")
+    cb = RdpFixture(base, "conflict-b")
+    cb.write_registry(dict(cb.binding, commands=["another-dispatch"]))
+    cs = RdpFixture(base, "conflict-same")
+    ca_bad = ca.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    cf_got = [_rdp_kind(ca.dispatch(ca_bad))]
+    _rdp_git(ca.root, "config", "core.worktree", str(cb.root))
+    cf_got += [_rdp_kind(ca.run(c)) for c in (
+        "orch-dispatch --brief " + ca_bad, "another-dispatch --brief " + ca_bad, "ls", "rm -rf .aiqt")]
+    _rdp_git(ca.root, "config", "core.worktree", str(cs.root))
+    cf_got.append(_rdp_kind(ca.dispatch(cs.good())))
+    check("rdp/redirected-bound-tree-conflict-withholds", cf_got,
+          ["deny", "unverifiable", "unverifiable", "allow", "deny", "unverifiable"])
+    # The cannot-say withholds, each on its own: a failed common-directory probe where the raw .git file,
+    # its examination, or the commondir file cannot be read withholds every call (no registry anywhere is
+    # needed for that), and a gone .git/worktrees/NAME directory still names its main worktree.
+    fake = base / "rawgit-fake"
+    fake.mkdir()
+    meta = base / "rawgit-meta" / "worktrees" / "n"
+    (meta / "commondir").mkdir(parents=True)
+    real_root, real_main, real_lstat = aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree, aiqt_hooks.os.lstat
+    dotgit = os.path.join(os.path.realpath(str(fake)), ".git")
+
+    def _denied_lstat(path, *a, **k):
+        if str(path) == dotgit:
+            raise PermissionError(13, "Permission denied", dotgit)
+        return real_lstat(path, *a, **k)
+    raw_got = []
+    try:
+        aiqt_hooks._orch_root = lambda data: str(fake)
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        for text in ("not a pointer\n", "gitdir: " + str(meta) + "\n"):
+            (fake / ".git").write_text(text, encoding="utf-8")
+            raw_got.append(_rdp_ls(fake, False))
+        aiqt_hooks.os.lstat = _denied_lstat
+        try:
+            raw_got.append(_rdp_ls(fake, False))
+        finally:
+            aiqt_hooks.os.lstat = real_lstat
+        (fake / ".git").write_text("gitdir: " + str(rg.root / ".git" / "worktrees" / "gone") + "\n",
+                                   encoding="utf-8")
+        raw_got.append(_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(fake), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="rm -rf .aiqt", run_in_background=False)))))
+    finally:
+        aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree = real_root, real_main
+        aiqt_hooks.os.lstat = real_lstat
+    # The last: git cannot name the common git directory of the gitfile's root, so its binding record cannot
+    # be read and the call is withheld (before the record, the main worktree's binding refused it).
+    check("rdp/raw-gitfile-cannot-say-withholds", raw_got, ["unverifiable"] * 4)
+
+
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
 def main(report_path=None):
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -282,7 +1882,7 @@ def main(report_path=None):
 
 def _main_isolated(report_path=None):
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-orch-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
@@ -2271,6 +3871,7 @@ def _main_isolated(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+        _rdp_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
