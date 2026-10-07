@@ -1708,10 +1708,18 @@ def _self_test():
                                              env=dict(PATH=stubs, HOME=self.tmp)).returncode for c in (c1, c2)], rcs)
             # Round 15 (claude MINOR): read by bash in a UTF-8 locale, each $'...' shown text is the command that
             # ran (\xHH is one byte, so C1 controls are spelled \u00HH).
+            # Round 16 (codex MEDIUM): bash decodes \u00HH only in a locale it can use, so a probe that does not
+            # use shown() decides first whether this host has one; without it the round trip is a skip.
+            utf8 = "C.UTF-8"
+            probe = subprocess.run([bash, "--noprofile", "--norc", "-c", "printf %s $'\\u00e9'"], cwd=self.tmp,
+                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+                                   env=dict(PATH=stubs, HOME=self.tmp, LC_ALL=utf8))
+            if (probe.returncode, probe.stdout, probe.stderr) != (0, b"\xc3\xa9", b""):
+                self.skipTest("bash cannot use the " + utf8 + " locale")
             for cmd in ("pytest 'a\x85b'", "pytest 'a\x9b\x7f\x0b\tb'\n", "pytest '\x80\x9f\xa0'"):
                 got = subprocess.run([bash, "--noprofile", "--norc", "-c", 'printf %s ' + shown(cmd)], cwd=self.tmp,
                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
-                                     env=dict(PATH=stubs, HOME=self.tmp, LC_ALL="C.UTF-8")).stdout
+                                     env=dict(PATH=stubs, HOME=self.tmp, LC_ALL=utf8)).stdout
                 self.assertEqual(got, cmd.strip().encode("utf-8"), cmd)
 
         def test_47_an_expanding_check_is_never_compared(self):
@@ -1772,19 +1780,25 @@ def _self_test():
             if not os.path.exists(readme):
                 self.skipTest("no README.md beside the hook")
             with open(readme, encoding="utf-8") as fh:
-                lines, inside, seen = fh.read().split("\n"), False, 0
+                lines, inside, items = fh.read().split("\n"), False, []
             for n, line in enumerate(lines, 1):
                 if line.startswith("- **`rerun-pass-check.py`**"):
-                    inside, seen = True, seen + 1
+                    inside = True
+                    items.append([])
                 elif not line.startswith("  "):
                     inside = False
                 if inside:
                     self.assertLessEqual(len(line), 110, n)
-            self.assertEqual(seen, 2)
+                    items[-1].append(line)
+            self.assertEqual(len(items), 2)
             # Round 15 (claude NIT): each Stop message also names a local rerun, so "only" is scoped to its CI clause.
-            text = " ".join("\n".join(lines).split())
-            self.assertIn("(of CI, each says only that a command naming a CI rerun was not reported as failed)", text)
-            self.assertNotIn("(each says only", text)
+            # Round 16 (codex MINOR): the README may quote old wording elsewhere, so both read the hook description.
+            text = [" ".join(" ".join(item).split()) for item in items]
+            desc = [t for t in text if t.startswith("- **`rerun-pass-check.py`** keeps an earlier failure in view")]
+            self.assertEqual(len(desc), 1)
+            self.assertIn("(of CI, each says only that a command naming a CI rerun was not reported as failed)",
+                          desc[0])
+            self.assertNotIn("(each says only", desc[0])
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
