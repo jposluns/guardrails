@@ -25167,6 +25167,21 @@ def _unit_bound_self_test():
 
 
 def run_self_tests(labels=None):
+    """Keep caller HOME/XDG out of the parent as well as the units: a fresh temporary HOME/XDG with
+    GIT_CONFIG_NOSYSTEM=1 is pinned around run_self_tests_isolated, the same wrapper-then-delegate
+    shape every registered OPF self-test entry has, so the parent's own code (the runner, the
+    delivery, the box removal) never reads a caller's configuration either. Each unit's child entry
+    still pins its OWN fresh temporary HOME/XDG (_cmd_self_test_unit), and the child's scrubbed
+    environment (_unit_scrubbed_env) never carries this parent's HOME, so this wrapper adds to the
+    child's isolation and replaces none of it."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
+            return run_self_tests_isolated(labels)
+
+
+def run_self_tests_isolated(labels=None):
     """Run every registered helper self-test, EACH AS ITS OWN `--self-test-unit` subprocess
     (_run_unit_subprocess, D-385-SUBPROCESS-RUNNER), forwarding each unit's verdict. The aggregate
     exit code is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing
@@ -25177,8 +25192,9 @@ def run_self_tests(labels=None):
     runs outside a hard outer bound, and nothing is computed before that bound starts. Every
     parent-side write to the caller's streams (the headers, the output copies, the diagnostics) goes
     through _unit_deliver's bounded writer, so a caller stream nobody reads can never hang this
-    parent. HOME/XDG isolation moved into the unit's child entry (_cmd_self_test_unit pins a fresh
-    temporary HOME around the unit), and the int-limit hermeticity sentinel (finding 8-4) and the
+    parent. HOME/XDG isolation is pinned twice: around this parent by the run_self_tests wrapper,
+    and around each unit by its child entry (_cmd_self_test_unit pins a fresh temporary HOME around
+    the unit), and the int-limit hermeticity sentinel (finding 8-4) and the
     fail-closed return vocabulary ride with the unit in _unit_child_code, unchanged in meaning."""
     if labels is None:
         labels = [label for label, _fn in _self_tests()]
