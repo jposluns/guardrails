@@ -274,6 +274,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_claude  # noqa: E402  the RULES-INDEX markers it writes, never a second copy of them
 import gen_rules  # noqa: E402  its validated frontmatter value parsers, never a second one
+import _selftest_exit_report  # noqa: E402
 
 RULES_REL = ".claude/rules"
 CLAUDE_REL = "CLAUDE.md"
@@ -1518,21 +1519,11 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-instruction-budget-selftest-"))
     try:
         # Counting: frontmatter goes with the blank line after it; a whole-line comment between blank lines
@@ -2322,8 +2313,6 @@ def self_test(report_path=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    if not _write_report(report_path):
-        return 2
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -2376,4 +2365,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    _selftest_exit_report.exit_with(main(sys.argv[1:]))
