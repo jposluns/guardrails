@@ -206,15 +206,15 @@ class _StCensusError(RuntimeError):
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
     is reused by a different file. Each is keyed on (st_dev, st_ino, anonymous-inode kind): anonymous-inode
-    descriptors of every kind share one (st_dev, st_ino), so the kind, read from the descriptor's /proc/self/fd
+    descriptors of many kinds share one (st_dev, st_ino), so the kind, read from the descriptor's /proc/self/fd
     link ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"; None for any other file), is what tells an epoll
     descriptor from an eventfd put at its number. Residual: two anonymous-inode descriptors of the same kind
     share every field, so one replaced at its number by another of its own kind still reads as unchanged; and
-    where /proc/self/fd does not exist (not Linux) every link read is ENOENT, so the kind is None throughout
-    and the table is keyed on (st_dev, st_ino) alone. Only EBADF on the fstat reads as closed, and only ENOENT
-    on the link read (the number has no entry: closed since its fstat) reads as no kind; any other read error
-    raises _StCensusError naming the descriptor, never omitting it as closed (a leak check fails closed on
-    input it cannot read)."""
+    where /proc/self/fd does not exist (not Linux, or Linux without /proc mounted) every link read is ENOENT,
+    so the kind is None throughout and the table is keyed on (st_dev, st_ino) alone. Only EBADF on the fstat
+    reads as closed, and only ENOENT on the link read (the number has no entry: closed since its fstat) reads
+    as no kind; any other read error raises _StCensusError naming the descriptor, never omitting it as closed
+    (a leak check fails closed on input it cannot read)."""
     import errno
     table = {}
     for fd in range(1024):
@@ -239,16 +239,18 @@ def _st_anon_reuse(table):
     Linux): a held epoll descriptor is in the baseline, then an eventfd is put at its number (dup2).
     `detected` is whether `table()` reads that as a change; `shared` is whether the two have one (st_dev,
     st_ino), where a table of those alone reads the replacement as unchanged and only the anonymous-inode
-    kind tells them apart."""
+    kind tells them apart. Every descriptor it opens is closed once on every path: `held` is owned from the
+    dup on, under the finally that also covers the epoll's own close, so a raising close leaves nothing open."""
     import select
     if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
         return None
     poll = select.epoll()
+    held = None
     try:
-        held = os.dup(poll.fileno())
-    finally:
-        poll.close()
-    try:
+        try:
+            held = os.dup(poll.fileno())
+        finally:
+            poll.close()
         before = os.fstat(held)
         baseline = table()
         other = os.eventfd(0)
@@ -260,7 +262,8 @@ def _st_anon_reuse(table):
         shared = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
         return table() != baseline, shared
     finally:
-        os.close(held)
+        if held is not None:
+            os.close(held)
 
 
 def _st_close_run(call, masking, expect, watch=True):

@@ -2119,12 +2119,27 @@ def _watchdog_completion_case(mode):
         # keeps a libffi mapping descriptor open for the process's life) so the
         # descriptor parity below measures ONLY what a cancelled launch leaks.
         emit._fixture_preload()
+        import errno
         held_fd = os.open(os.devnull, os.O_RDONLY)
         try:
             assert _st_census_eio_raises(open_fds, held_fd), \
                 "the descriptor census read an EIO descriptor as closed"
             assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
                 "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
         finally:
             os.close(held_fd)
         # A descriptor reopened at the same number to another file reads as
@@ -2141,6 +2156,8 @@ def _watchdog_completion_case(mode):
         assert not shared or not _st_census_anon_reuse_detected(
             lambda: set(entry[:4] for entry in open_fds()))[0], \
             "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -3224,12 +3241,27 @@ def _watchdog_completion_case(mode):
 
         emit._fixture_preload()
         assert no_children(), "children live before the close-cancel probe"
+        import errno
         held_fd = os.open(os.devnull, os.O_RDONLY)
         try:
             assert _st_census_eio_raises(open_fds, held_fd), \
                 "the descriptor census read an EIO descriptor as closed"
             assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
                 "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
         finally:
             os.close(held_fd)
         # A descriptor reopened at the same number to another file reads as
@@ -3246,6 +3278,8 @@ def _watchdog_completion_case(mode):
         assert not shared or not _st_census_anon_reuse_detected(
             lambda: set(entry[:4] for entry in open_fds()))[0], \
             "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -14869,7 +14903,7 @@ def _st_census_open(fd, fstat=None):
 
 def _st_census_anon_kind(fd, readlink=None):
     """The anonymous-inode kind of descriptor `fd` ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"), None
-    for any other file, from its /proc/self/fd link. Anonymous-inode descriptors of every kind share one
+    for any other file, from its /proc/self/fd link. Anonymous-inode descriptors of many kinds share one
     (st_dev, st_ino), so the kind is what tells an epoll descriptor from an eventfd put at its number. ENOENT
     (the number has no entry: closed since its stat read) returns None; any other read error raises naming
     `fd`, never read as closed. `readlink` defaults to os.readlink as bound when called."""
@@ -14921,14 +14955,17 @@ def _st_census_anon_reuse_detected(scan):
     """(detected, shared) for an anonymous-inode replacement: a held epoll descriptor is in the baseline, then
     an eventfd is put at its number (dup2). `detected` is whether `scan()` reads that as a change; `shared` is
     whether the two have one (st_dev, st_ino, file type), where a census of those stat fields alone reads the
-    replacement as unchanged and only the anonymous-inode kind tells them apart."""
+    replacement as unchanged and only the anonymous-inode kind tells them apart. Every descriptor it opens is
+    closed once on every path: `held` is owned from the dup on, under the finally that also covers the epoll's
+    own close, so a raising close leaves nothing open."""
     import select
     poll = select.epoll()
+    held = None
     try:
-        held = os.dup(poll.fileno())
-    finally:
-        poll.close()
-    try:
+        try:
+            held = os.dup(poll.fileno())
+        finally:
+            poll.close()
         before = os.fstat(held)
         baseline = scan()
         other = os.eventfd(0)
@@ -14941,21 +14978,54 @@ def _st_census_anon_reuse_detected(scan):
             (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
         return scan() != baseline, shared
     finally:
-        os.close(held)
+        if held is not None:
+            os.close(held)
 
 
-def _st_census_eio_raises(scan, fd, seam="fstat"):
-    """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails EIO: it must raise
-    RuntimeError naming fd (read as closed, a leak would pass). os.<seam> (fstat, or readlink of fd's
-    /proc/self/fd link) fails for fd only during the call. An independent fstat must still see fd open
-    afterwards, else the check proves nothing. The caller owns fd."""
+def _st_census_anon_close_leak_free(scan):
+    """Whether _st_census_anon_reuse_detected leaves no descriptor open when its epoll's close raises:
+    select.epoll is wrapped so close() closes the real epoll and then raises OSError(EIO); the call must raise
+    that error, and `scan()` must read as it did before the call."""
     import errno
+    import select
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = scan()
+    select.epoll = RaisingEpoll
+    try:
+        _st_census_anon_reuse_detected(scan)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and scan() == before
+
+
+def _st_census_eio_raises(scan, fd, seam="fstat", code=None):
+    """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails errno `code` (EIO
+    by default): it must raise RuntimeError naming fd (read as closed, a leak would pass). os.<seam> (fstat,
+    or readlink of fd's /proc/self/fd link) fails for fd only during the call. An independent fstat must
+    still see fd open afterwards, else the check proves nothing. The caller owns fd."""
+    import errno
+    code = errno.EIO if code is None else code
     real_fstat, real_readlink = os.fstat, os.readlink
     real_seam = real_readlink if seam == "readlink" else real_fstat
 
     def failing(number, *args, **kwargs):
         if number in (fd, "/proc/self/fd/{}".format(fd)):
-            raise OSError(errno.EIO, "injected census read failure")
+            raise OSError(code, "injected census read failure")
         return real_seam(number, *args, **kwargs)
     if seam == "readlink":
         os.readlink = failing
