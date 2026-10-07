@@ -1216,7 +1216,12 @@ def _watchdog_bound_faults(bounds, budgets):
 # could call a user __repr__), and on completion, success or exception,
 # appends exactly one LAND record (the token plus its charged seconds,
 # its uncountable label, or a void marker) to the append-only `landed`
-# list: list.append is atomic under the GIL, and nothing on these paths
+# list (the BEGIN append is the first step inside the try whose finally
+# appends the LAND, so an exception a same-thread signal handler raises
+# right after the BEGIN still lands it; an exception raised
+# asynchronously INSIDE that finally, before its append runs, is the
+# one way a token stays unlanded, and the report then refuses to
+# evaluate, never passes): list.append is atomic under the GIL, and nothing on these paths
 # read-modify-writes shared state (the per-thread suppression depth is
 # an append-only list of +1/-1 steps summed at read time). The leg's
 # report runs a CLOSING PROTOCOL: the ledger leaves the stack first (no
@@ -1312,12 +1317,23 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
     `landed` lists, atomic under the GIL, so a same-thread signal handler,
     finalizer or nested registered call landing mid-charge can never block,
     and a forked child never waits on an inherited ledger. The ledger is
-    bound ONCE and a BEGIN token appended BEFORE any user code runs (the
-    value's own conversion, the only user code a charge runs, happens
-    afterwards; `what` must already be a plain safe string, never one built
-    by formatting a user object); the leg's report refuses to evaluate until
-    the token has a LAND record, and exactly one LAND record is appended on
-    every completion path, success or exception. A charge whose bound ledger
+    bound ONCE and a BEGIN token appended BEFORE any user code runs (all
+    the user code a charge runs comes afterwards: the value's type check
+    and conversion, where isinstance may read a user __class__ and float()
+    runs a subclass __float__, and the hashing of the current Thread
+    object, which may be a user Thread subclass, in the thread-keyed map
+    lookups, namely the suppression-depth read here and the sub-tick
+    exemption's ticks lookup; `what` must already be a plain safe string,
+    never one built by formatting a user object); the leg's report refuses
+    to evaluate until the token has a LAND record. The BEGIN append is the
+    first step inside the try whose finally appends the LAND record, so
+    exactly one LAND record is appended on every completion path, success
+    or exception, including an exception a same-thread signal handler
+    raises right after the BEGIN, and the retry branch lands through the
+    same finally. Stated limit: an exception raised asynchronously INSIDE
+    that finally, before its append runs, still leaves the token unlanded;
+    the report then refuses to evaluate (CANNOT-EVALUATE naming the
+    token), never a pass. A charge whose bound ledger
     is already closed when its BEGIN lands appends a void LAND there and
     re-binds whichever ledger is innermost THEN (its real wait has not
     started, so it belongs there, or to no leg); a conversion resumed in a
@@ -1331,10 +1347,17 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
     unsuppressible record (suppressible=False: a fixture timeout the ledger
     cannot introspect) lands uncountable at ANY depth. Only a non-bool int
     or float (subclasses included, so a user __float__ still runs, after the
-    BEGIN) is convertible; a bool, str, bytes or other value lands
-    uncountable, exactly as _watchdog_finite_seconds refuses it. `transform`
-    is a TRUSTED post-conversion hook (the wrapper's fixture allowance and
-    sub-tick exemption), never user code. Returns the normalized (and
+    BEGIN) is convertible; outside a suppression (where every suppressible
+    charge lands void) a bool, str, bytes or other value lands
+    uncountable, exactly as _watchdog_finite_seconds refuses it, on the
+    fixture path too: `transform` never runs on such a value, so the
+    fixture allowance cannot turn it into a 0.0 wait. A convertible value
+    whose conversion fails (an int too large for a float) or yields a
+    non-finite number still reaches the transform. `transform` is a
+    TRUSTED post-conversion hook (the wrapper's fixture allowance and
+    sub-tick exemption), written in this module, never user code, though
+    the sub-tick exemption's ticks lookup hashes the current Thread
+    object as above. Returns the normalized (and
     transformed) float AND the one ledger bound at the BEGIN, as the
     pair (normalized, ledger), or (None, None) off the charged
     paths; the caller carries that ledger through every later step
@@ -1354,59 +1377,68 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
             return None, None
         if ledger["pid"] != os.getpid():
             return None, None
-        # BEGIN: one atomic append of a unique token, before the closed
-        # check. The report marks the ledger closed and THEN reads `begun`;
-        # this side appends and THEN reads `closed`, so under the GIL every
-        # charge either sees the close here or its token is seen (and
-        # waited for) by the report.
         token = [what]
-        ledger["begun"].append(token)
-        if not ledger["closed"]:
-            break
-        # Closed between the bind and the BEGIN: that leg's report is out
-        # (or waiting only on tokens it has seen), so land void THERE (the
-        # report never waits on a landed token) and re-bind. Each retry
-        # binds a strictly outer ledger (a closed ledger has already left
-        # the stack), so the loop terminates.
-        ledger["landed"].append((token, None))
-    record = None
-    try:
-        # Normalize AFTER the BEGIN, holding nothing: the value's own
-        # conversion is the only user code a charge runs, and it may
-        # block, fork, or make registered calls. Only a non-bool int or
-        # float is convertible (a user subclass 's __float__ runs HERE);
-        # anything else is uncountable, exactly as _watchdog_finite_seconds
-        # refuses it.
-        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        record = None
+        try:
+            # BEGIN: one atomic append of a unique token, before the closed
+            # check, and the FIRST step inside this try, so an exception a
+            # same-thread signal handler raises right after it still lands
+            # the token through the finally below. The report marks the
+            # ledger closed and THEN reads `begun`; this side appends and
+            # THEN reads `closed`, so under the GIL every charge either sees
+            # the close here or its token is seen (and waited for) by the
+            # report.
+            ledger["begun"].append(token)
+            if ledger["closed"]:
+                # Closed between the bind and the BEGIN: that leg's report
+                # is out (or waiting only on tokens it has seen), so the
+                # finally lands void THERE (the report never waits on a
+                # landed token) and the loop re-binds. Each retry binds a
+                # strictly outer ledger (a closed ledger has already left
+                # the stack), so the loop terminates.
+                continue
+            # Normalize AFTER the BEGIN, holding nothing: the value's type
+            # check and conversion run user code (isinstance may read a
+            # user __class__, float() runs a subclass __float__), as does
+            # the Thread-keyed depth read below (a user Thread subclass's
+            # __hash__), and any of it may block, fork, raise or make
+            # registered calls. Only a non-bool int or float is
+            # convertible; anything else is uncountable, exactly as
+            # _watchdog_finite_seconds refuses it, and never reaches the
+            # transform (whose fixture allowance would turn its NaN into a
+            # 0.0 wait).
+            convertible = not (isinstance(seconds, bool)
+                               or not isinstance(seconds, (int, float)))
             normalized = float("nan")
-        else:
-            try:
-                normalized = float(seconds)
-            except (TypeError, ValueError, OverflowError):
-                normalized = float("nan")
-        if ledger["pid"] != os.getpid():
-            # A forked child resuming the conversion: lands nothing (the
-            # landing below is pid-gated too) and returns normally.
-            return None, None
-        if transform is not None:
-            normalized = transform(normalized, ledger)
-        me = threading.current_thread()
-        if not suppressible:
-            record = ("uncountable", what)
-        elif sum(ledger["depth"].get(me) or ()) > 0:
-            record = None  # belongs to this thread's outer registered call
-        elif not _watchdog_finite_seconds(normalized) and normalized != 0:
-            record = ("uncountable", "%s(%r)" % (what, normalized))
-        else:
-            record = ("wait", "%s(%r)" % (what, normalized), normalized)
-        return normalized, ledger
-    finally:
-        # Exactly one LAND per BEGIN on every path, success or exception (a
-        # user conversion may raise anything, and the depth read above may
-        # run a user Thread subclass's __hash__); void on the exceptional
-        # paths, and never in a forked child.
-        if ledger["pid"] == os.getpid():
-            ledger["landed"].append((token, record))
+            if convertible:
+                try:
+                    normalized = float(seconds)
+                except (TypeError, ValueError, OverflowError):
+                    normalized = float("nan")
+            if ledger["pid"] != os.getpid():
+                # A forked child resuming the conversion: lands nothing (the
+                # landing below is pid-gated too) and returns normally.
+                return None, None
+            if transform is not None and convertible:
+                normalized = transform(normalized, ledger)
+            me = threading.current_thread()
+            if not suppressible:
+                record = ("uncountable", what)
+            elif sum(ledger["depth"].get(me) or ()) > 0:
+                record = None  # belongs to this thread's outer registered call
+            elif not _watchdog_finite_seconds(normalized) and normalized != 0:
+                record = ("uncountable", "%s(%r)" % (what, normalized))
+            else:
+                record = ("wait", "%s(%r)" % (what, normalized), normalized)
+            return normalized, ledger
+        finally:
+            # Exactly one LAND per BEGIN on every path, success, retry or
+            # exception (a user conversion may raise anything, the depth
+            # read above may run a user Thread subclass's __hash__, and a
+            # signal handler may raise right after the BEGIN); void on the
+            # retry and exceptional paths, and never in a forked child.
+            if ledger["pid"] == os.getpid():
+                ledger["landed"].append((token, record))
 
 
 def _watchdog_deadline(seconds):
@@ -1637,19 +1669,22 @@ def _watchdog_leg_entry(budget, case, *args):
             break
         if time.monotonic() >= bound:
             # Accounting incomplete: a charge begun during the leg has not
-            # landed (its value's conversion is suspended or blocked), so
-            # NO verdict can be issued over it: not a pass, and not a
-            # budget violation either (nothing was measured over budget).
-            # Distinct CANNOT-EVALUATE, stating the bound. A stalled live
-            # conversion on a heavily loaded host reaches this bound too,
-            # so this exit means only that the accounting could not
-            # finish. Whenever the charge finally lands, it lands in this
-            # closed ledger, inert.
+            # landed, from ANY cause (its conversion is suspended, blocked
+            # or stalled by a loaded host, or an exception raised inside
+            # its landing step left the token unlanded for good), so NO
+            # verdict can be issued over it: not a pass, and not a budget
+            # violation either (nothing was measured over budget).
+            # Distinct CANNOT-EVALUATE, stating the bound. This exit means
+            # only that the accounting could not finish. Whenever such a
+            # charge finally lands, it lands in this closed ledger, inert.
             print("opf watchdog leg: CANNOT EVALUATE (accounting incomplete: "
                   "%d charge(s) begun during the leg had not landed within "
-                  "the %ss closing bound: %s; a stalled conversion on a "
-                  "heavily loaded host reaches this bound without any "
-                  "demonstrated budget violation)" % (
+                  "the %ss closing bound: %s; a token stays unlanded while "
+                  "its charge is unfinished (a suspended or stalled "
+                  "conversion, which a heavily loaded host can cause) or "
+                  "after an exception interrupted its landing step, in "
+                  "either case without any demonstrated budget "
+                  "violation)" % (
                       len(unlanded), _WATCHDOG_CLOSE_BOUND, ", ".join(unlanded)))
             return EXIT_MALFORMED
         sleep(0.005)
@@ -1687,11 +1722,18 @@ def _watchdog_ledger_case(mode, budget):
     deliberately return a bool the launching fixture must REJECT
     (codex round-8 MEDIUM). The held-landing vectors suspend one thread INSIDE
     the landing bookkeeping (a Thread subclass whose one-shot __hash__
-    blocks at the suppression-depth read), exactly where any reintroduced
-    ledger lock would be held: a design that locks registration never
-    reaches their fork or signal step and dies at this fixture's bound, and
-    one that locks only the landing leaves the lock held across the fork,
-    where the child's own alarm turns its resumed landing red."""
+    blocks at the suppression-depth read), so they catch a reintroduced
+    ledger lock held ACROSS that read, as the round-7 per-leg gate was: a
+    design that locks registration that way never reaches their fork or
+    signal step and dies at this fixture's bound, and one whose landing
+    lock spans the depth read leaves it held across the fork, where the
+    child's own alarm turns its resumed landing red. A lock scoped to the
+    `begun` and `landed` appends alone is never held at that suspension
+    point, so those vectors pass it; landing-reentrant-charge catches it
+    instead, by making a same-thread charge from inside the landing
+    append (a trace hook at that line), where such a non-reentrant lock
+    self-deadlocks."""
+    import inspect
     import signal
     import threading
     import time
@@ -1704,8 +1746,8 @@ def _watchdog_ledger_case(mode, budget):
     def charge_atomic():
         # Deterministic both-charges-land probe: thread A's charge is
         # suspended MID-CONVERSION, inside its value's own float conversion
-        # (the only user code a charge runs, after its BEGIN token is
-        # appended), while thread B charges 3 and only then releases A.
+        # (user code that runs after its BEGIN token is appended),
+        # while thread B charges 3 and only then releases A.
         # Every handshake is an UNTIMED unregistered Lock, never a timed
         # escape a stall could outrun: B can always finish, because A's
         # suspension point holds nothing (no ledger step waits), and the
@@ -1877,8 +1919,9 @@ def _watchdog_ledger_case(mode, budget):
         # __hash__ after run() begins is the suppression-depth read of
         # _watchdog_charge (the BEGIN append and a plain float's conversion
         # touch no thread-keyed map), so this thread stops exactly inside a
-        # ledger step, holding whatever a reintroduced lock would make that
-        # step hold. One-shot, and armed only inside run(): threading's own
+        # ledger step, holding whatever a reintroduced lock spanning the
+        # depth read would make that step hold (a lock scoped to the
+        # appends alone is not held here). One-shot, and armed only inside run(): threading's own
         # bookkeeping (the limbo map) hashes this object before run().
         def __init__(self, in_step, release_step):
             # Attributes BEFORE Thread.__init__: the base initializer
@@ -1909,9 +1952,12 @@ def _watchdog_ledger_case(mode, budget):
         # nothing and exits 0 promptly, inside its own 10 s alarm. Proven
         # red against a mutant restoring the round-7 per-leg gate: a
         # design that locks registration deadlocks before the fork (this
-        # fixture's bound kills it), and one that locks only the landing
-        # leaves the lock held across the fork, so the resumed child's
-        # landing blocks and its alarm turns the outcome red. Charges:
+        # fixture's bound kills it), and one whose landing lock spans the
+        # depth read leaves it held across the fork, so the resumed
+        # child's landing blocks and its alarm turns the outcome red. A
+        # lock scoped to the begun/landed appends alone is not held at
+        # this suspension point and passes here; landing-reentrant-charge
+        # is the vector that catches it. Charges:
         # outer 1.0 + held-landing 0.5 = 1.5, exactly the budget.
         in_step = threading.Event()
         release_step = threading.Lock()
@@ -2011,6 +2057,88 @@ def _watchdog_ledger_case(mode, budget):
             return _watchdog_leg_entry(budget, leg)
         finally:
             signal.signal(signal.SIGUSR1, saved)
+
+    def charge_lines(text):
+        # The source lines of _watchdog_charge holding `text`: the trace
+        # vectors below act at exactly those lines, and a vector whose
+        # line is missing never fires and fails as a dead path.
+        lines, first = inspect.getsourcelines(_watchdog_charge)
+        return set(first + index for index, line in enumerate(lines)
+                   if text in line)
+
+    def traced_charge(local):
+        # One _watchdog_charge on THIS thread with `local` as its line
+        # tracer. Trace functions run with tracing suspended, so a
+        # charge the tracer makes is itself untraced; the prior tracer
+        # is restored.
+        code = _watchdog_charge.__code__
+
+        def tracer(frame, event, arg):
+            return local if frame.f_code is code else None
+        saved = sys.gettrace()
+        sys.settrace(tracer)
+        try:
+            return _watchdog_charge(1.0, "outer")
+        finally:
+            sys.settrace(saved)
+
+    def landing_reentrant_charge():
+        # claude round-8 MEDIUM: a same-thread charge made from INSIDE
+        # the landing append, exactly where a signal handler or finalizer
+        # can land, must complete. A trace hook at the landing line runs
+        # the nested charge before that line's append, so a reintroduced
+        # non-reentrant lock wrapping the begun and landed appends is
+        # HELD there and the nested BEGIN self-deadlocks (this fixture's
+        # bound kills it and reports this vector's failure); the
+        # held-landing vectors cannot see such a lock, because their
+        # suspension point (the depth read) lies outside it. Lock-free,
+        # both charges land: outer 1.0 + nested 2.0 = 3.0, exactly the
+        # budget, from declared timeouts alone.
+        landing = charge_lines('ledger["landed"].append((token, record))')
+        fired = []
+
+        def local(frame, event, arg):
+            if event == "line" and frame.f_lineno in landing and not fired:
+                fired.append(True)
+                _watchdog_charge(2.0, "nested-landing")
+            return local
+
+        def leg():
+            traced_charge(local)
+            return outcome(bool(fired), True)
+        return _watchdog_leg_entry(budget, leg)
+
+    def begin_interrupted():
+        # claude round-8 MINOR: an exception raised on the charging
+        # thread right AFTER its BEGIN append (a trace hook at the next
+        # line stands in for a raising signal handler) must still land
+        # the token, because the BEGIN is the first step inside the try
+        # whose finally lands it. The interrupted charge lands void, so
+        # the leg is evaluated (0 charged, within the 1 budget); a BEGIN
+        # outside that try leaves the token unlanded, and the closing
+        # protocol then reports CANNOT-EVALUATE instead.
+        begin = charge_lines('ledger["begun"].append(token)')
+        state = dict(begun=False, raised=False)
+
+        class Interrupted(Exception):
+            pass
+
+        def local(frame, event, arg):
+            if event == "line" and not state["raised"]:
+                if state["begun"]:
+                    state["raised"] = True
+                    raise Interrupted()
+                if frame.f_lineno in begin:
+                    state["begun"] = True
+            return local
+
+        def leg():
+            try:
+                traced_charge(local)
+            except Interrupted:
+                pass
+            return outcome(state["raised"], True)
+        return _watchdog_leg_entry(budget, leg)
 
     def late_conversion(charge):
         # codex round-7 MAJOR 1: registration precedes the value's own
@@ -2397,6 +2525,10 @@ def _watchdog_ledger_case(mode, budget):
         return late_conversion(lambda slow: _watchdog_charge(slow(2.0), "late"))
     if mode == "unlanded-charge":
         return unlanded_charge()
+    if mode == "landing-reentrant-charge":
+        return landing_reentrant_charge()
+    if mode == "begin-interrupted":
+        return begin_interrupted()
     if mode == "nested-deadline-monotone":
         return nested_deadline_monotone()
     if mode == "cross-thread-subtick":
@@ -12413,6 +12545,13 @@ def _watchdog_regression_self_test():
         ("deadline-late-conversion", 0.0001, EXIT_FINDING),
         ("late-landing-charge", 1, EXIT_FINDING),
         ("unlanded-charge", 10, EXIT_MALFORMED),
+        # claude round-8 MEDIUM: a same-thread charge made from inside
+        # the landing append completes (a non-reentrant lock around the
+        # appends self-deadlocks here); claude round-8 MINOR: an
+        # exception right after the BEGIN append still lands the token,
+        # so the leg is evaluated, never CANNOT-EVALUATE.
+        ("landing-reentrant-charge", 3, EXIT_OK),
+        ("begin-interrupted", 1, EXIT_OK),
         ("nested-deadline-monotone", 101, EXIT_OK),
         ("cross-thread-subtick", 5.01, EXIT_FINDING),
         ("recycled-thread-sleep", 600.01, EXIT_FINDING),
@@ -12691,16 +12830,25 @@ def _watchdog_regression_self_test():
     # late-landing-charge), never passed over with zero waits; one that
     # cannot land within the closing bound turns the leg into the distinct
     # CANNOT-EVALUATE, with the charging thread never raising
-    # (unlanded-charge); a child forked while another thread is mid-charge
-    # exits 0 promptly (fork-mid-charge), as does a child that RESUMES a
-    # conversion while a second thread sits suspended inside the landing
-    # bookkeeping itself, exactly where any reintroduced lock would be
-    # held across the fork (fork-held-landing, red on the round-7 locked
-    # design by construction: the suspension is a Thread subclass's
-    # one-shot __hash__ under the suppression-depth read); a SIGUSR1
-    # handler charging on the main thread while that same held-landing
-    # suspension is live completes without a hang (signal-held-landing,
-    # red on the locked design); and a nested longer deadline opened from
+    # (unlanded-charge); an exception raised right after a BEGIN append
+    # still lands its token, so the leg is evaluated, never
+    # CANNOT-EVALUATE (begin-interrupted); a same-thread charge made
+    # from inside the landing append completes, where a non-reentrant
+    # lock around the begun and landed appends self-deadlocks
+    # (landing-reentrant-charge); a child forked while another thread
+    # is mid-charge exits 0 promptly (fork-mid-charge), as does a child
+    # that RESUMES a conversion while a second thread sits suspended
+    # inside the landing bookkeeping itself, where a reintroduced lock
+    # spanning the suppression-depth read would be held across the fork
+    # (fork-held-landing, red on the round-7 locked design by
+    # construction: the suspension is a Thread subclass's one-shot
+    # __hash__ under the suppression-depth read; a lock scoped to the
+    # appends alone is not held there and is landing-reentrant-charge's
+    # to catch); a SIGUSR1 handler charging on the main thread while
+    # that same held-landing suspension is live completes without a
+    # hang (signal-held-landing, red on the round-7 locked design); a
+    # bool or str fixture timeout is uncountable, never a 0.0 wait
+    # (run-bounded-bool-timeout, run-bounded-str-timeout); and a nested longer deadline opened from
     # inside the outer deadline's own clock read survives, because ticks
     # is an append-only list with max taken at read time
     # (nested-deadline-monotone); a nested leg with NO charges
@@ -12998,6 +13146,13 @@ def _watchdog_regression_self_test():
             ("run-bounded-timeout-within", _watchdog_leg_entry(
                 _deadline_case_budget(0.5),
                 bounded(0.5, lambda: time.sleep(4) or "ok", "TIMEOUT")), EXIT_OK),
+            # claude round-8 MINOR: a bool or str fixture timeout (refused
+            # by run_bounded before fork) is uncountable and fails the
+            # leg, never a 0.0 wait through the fixture allowance.
+            ("run-bounded-bool-timeout", _watchdog_leg_entry(
+                1, bounded(True, lambda: "ok", "SETUP-ERROR:BadTimeout")), EXIT_FINDING),
+            ("run-bounded-str-timeout", _watchdog_leg_entry(
+                1, bounded("5", lambda: "ok", "SETUP-ERROR:BadTimeout")), EXIT_FINDING),
         ]
         if owns_install:
             hold = _deadline_case_budget(1)
