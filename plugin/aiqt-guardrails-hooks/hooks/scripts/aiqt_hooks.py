@@ -181,16 +181,24 @@ FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_
                          "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
+    import os
     _floor_refusal = (
         "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    sys.stderr.write(_floor_refusal)
+    try:
+        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
+    except (OSError, ValueError, MemoryError):
+        pass
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
         import json
-        sys.stdout.write(json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
+        try:
+            os.write(1, (json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n"
+                ).encode("utf-8", "backslashreplace"))
+        except (OSError, ValueError, MemoryError):
+            pass
         raise SystemExit(0)
     raise SystemExit(2)
 

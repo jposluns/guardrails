@@ -375,22 +375,34 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 # UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
 # PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
 # exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
-# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces.
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. The diagnostic is
+# best-effort and the exit status is unconditional: os.write is unbuffered, so a closed or broken
+# descriptor (descriptor 2 closed before Python starts leaves sys.stderr None) can neither raise before
+# the SystemExit (an unhandled exception's exit 1 fails open) nor leave bytes in a stream buffer whose
+# failed flush at interpreter shutdown replaces the exit status with 120.
 HOOK_GUARD_TEMPLATE = '''import sys
 
 FLOOR_FAIL_OPEN_MODES = {modes}
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
+    import os
     _floor_refusal = (
         "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    sys.stderr.write(_floor_refusal)
+    try:
+        os.write(2, _floor_refusal.encode("utf-8", "backslashreplace"))
+    except (OSError, ValueError, MemoryError):
+        pass
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
         import json
-        sys.stdout.write(json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+        try:
+            os.write(1, (json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n"
+                ).encode("utf-8", "backslashreplace"))
+        except (OSError, ValueError, MemoryError):
+            pass
         raise SystemExit(0)
     raise SystemExit(2)
 '''
@@ -1244,15 +1256,19 @@ SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokeni
                   "warnings")
 
 
-def _subset_node(found, rel, node):
-    """One finding per construct of node outside the launcher subset. The residual of the closed
+def _subset_node(found, rel, numbered, node):
+    """One finding per construct of node outside the launcher subset (numbered is the source split
+    on newlines with "" prepended, so a node indexes its own line by lineno: the AST alone cannot
+    show the PEP 758 parentheses). The residual of the closed
     list, a LISTED node type carrying a form Python 3.4 does not compile, is enumerated and refused
     here: a Constant from an f- or t-string or with a numeric underscore (_subset_token; the value
     types here are 3.0 forms), every PEP 448 call shape (Starred and dict unpacking are refused by
     name above, a ** keyword by arg None here), every decorator, annotation, default and non-plain
     parameter on FunctionDef/arguments/arg (so no 3.9 decorator grammar and no 3.8 parameter forms
     are reachable), try else/finally (so no continue-through-finally grammar change is reachable),
-    a non-Load list or tuple context (no unpacking targets), a bare except, a bare or chained
+    a non-Load list or tuple context (no unpacking targets), a bare except, an except tuple not
+    parenthesized in the source (PEP 758, 3.14: the one listed-node spelling the AST cannot show,
+    so the source text is read at the tuple's own position), a bare or chained
     raise, and any import outside SUBSET_IMPORTS; a call or a parameter list with more than 255
     entries is refused (the pre-3.7 limit). A 3.14 identifier is never a Python 3.4 keyword
     (3.14's keyword list adds to 3.4's and removes nothing), and _subset_line restricts the whole
@@ -1290,6 +1306,11 @@ def _subset_node(found, rel, node):
                      "subset" % (rel, line))
     if name == "ExceptHandler" and node.type is None:
         found.append("%s:%d: a bare except clause is outside the launcher subset" % (rel, line))
+    if name == "ExceptHandler" and type(node.type).__name__ == "Tuple" \
+            and numbered[node.type.lineno][node.type.col_offset:node.type.col_offset + 1] != "(":
+        found.append("%s:%d: an except tuple that is not parenthesized in the source is outside "
+                     "the launcher subset (PEP 758 is newer than Python %d.%d)"
+                     % ((rel, line) + SUBSET_VERSION))
     if name == "Raise" and (node.exc is None or node.cause is not None):
         found.append("%s:%d: only `raise <exception>` (no bare raise, no `from`) is in the "
                      "launcher subset" % (rel, line))
@@ -1332,8 +1353,11 @@ def _subset_token(found, rel, token):
 def _subset_line(found, rel, pair):
     """A non-ASCII character anywhere in the source (pair is one (index, line) from enumerate):
     identifier and escape classification follows the interpreter's Unicode database (Python 3.4
-    ships Unicode 6.3), so the subset is ASCII-only, comments and string contents included."""
-    if not pair[1].isascii():
+    ships Unicode 6.3), so the subset is ASCII-only, comments and string contents included. The
+    test is the Python 3.4 spelling of str.isascii (3.7 and newer, so the floor interpreter could
+    run this self-check too): each ASCII character is one UTF-8 byte and every other code point is
+    more, so a line is ASCII exactly when its UTF-8 encoding is as long as the line."""
+    if len(pair[1]) != len(pair[1].encode("utf-8")):
         found.append("%s:%d: a non-ASCII character is outside the launcher subset (Python %d.%d "
                      "ships an older Unicode database)" % ((rel, pair[0] + 1) + SUBSET_VERSION))
 
@@ -1350,19 +1374,39 @@ def _subset_depth(state, token):
         state[1] = len(state[0])
 
 
+def _subset_not(token):
+    """One `not` keyword. The 3.4 grammar's not_test is right-recursive ('not' not_test), so each
+    `not` in a chain holds one frame of the same fixed parser stack the bracket cap protects;
+    launcher_subset_findings caps the file's TOTAL count, which bounds every chain wherever it
+    sits and however it is wrapped, far below any shipped limit."""
+    return token.type == tokenize.NAME and token.string == "not"
+
+
 def launcher_subset_findings(rel, text):
     """Each construct in text outside the LAUNCHER SUBSET (SUBSET_NODES with the per-form checks of
     _subset_node, the token scan of _subset_token, the ASCII-only line scan of _subset_line and
-    the bracket-depth cap of _subset_depth), as "rel:line: message" strings; [] accepts.
+    the bracket-depth cap of _subset_depth and the `not`-count cap of _subset_not), as
+    "rel:line: message" strings; [] accepts.
     This is a CLOSED ALLOWLIST, never a list of known-newer constructs: only the listed node types
     and forms pass, so a construct this check has never heard of is refused by name.
+    The guarantee, stated exactly: a text accepted here ([]) uses only forms the Python 3.4
+    grammar and compiler hold with today's meaning, and it also compiles under THIS interpreter's
+    own compiler (the compile below: ast.parse alone accepts text the compiler refuses, `return`
+    at module level for example, so a parse-only pass would overstate the guarantee); what an
+    older interpreter does with a text REFUSED here is outside the guarantee.
     ast.parse(feature_version=...) is only best-effort below its documented lowest supported
     version, so it is kept as a belt, never as the guarantee. Raises SyntaxError,
     tokenize.TokenError or ValueError when text does not parse under THIS interpreter."""
     found = []
+    lines = text.split("\n")
     list(map(_subset_line, itertools.repeat(found), itertools.repeat(rel),
-             list(enumerate(text.split("\n")))))
+             list(enumerate(lines))))
     tree = ast.parse(text)
+    try:
+        compile(text, rel, "exec")
+    except (SyntaxError, ValueError) as exc:
+        found.append("%s: parses but does not compile on this interpreter (the subset accepts "
+                     "only text the compiler itself accepts): %s" % (rel, exc))
     tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
     saved_filters = warnings.filters[:]
     warnings.simplefilter("ignore")
@@ -1372,21 +1416,26 @@ def launcher_subset_findings(rel, text):
         found.append("%s:%s: does not compile under the Python %d.%d grammar: %s"
                      % ((rel, exc.lineno) + SUBSET_VERSION + (exc.msg,)))
     warnings.filters = saved_filters
-    list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel), list(ast.walk(tree))))
+    list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel),
+             itertools.repeat([""] + lines), list(ast.walk(tree))))
     list(map(_subset_token, itertools.repeat(found), itertools.repeat(rel), tokens))
     depth = [[], 0]
     list(map(_subset_depth, itertools.repeat(depth), tokens))
     if depth[1] > 32:
         found.append("%s: brackets nested deeper than 32 levels are outside the launcher subset "
                      "(an old parser's fixed stack)" % rel)
+    if len(list(filter(_subset_not, tokens))) > 32:
+        found.append("%s: more than 32 `not` keywords are outside the launcher subset (each "
+                     "chained `not` holds one frame of an old parser's fixed stack)" % rel)
     return found
 # END LAUNCHER-SUBSET ALLOWLIST
 
 
 def old_syntax_findings(rel, text):
-    """Each construct in text outside the LAUNCHER SUBSET of the Python 3.4 grammar: a launcher
-    must compile on every Python 3 that accepts -I. The allowlist above judges it; a text this
-    interpreter cannot parse is cannot-evaluate."""
+    """Each construct in text outside the LAUNCHER SUBSET of the Python 3.4 grammar: an accepted
+    launcher uses only forms every Python 3 that accepts -I parses and compiles identically, under
+    the exact guarantee stated on launcher_subset_findings. The allowlist above judges it; a text
+    this interpreter cannot parse is cannot-evaluate."""
     try:
         return launcher_subset_findings(rel, text)
     except (SyntaxError, tokenize.TokenError, ValueError) as exc:
@@ -2409,6 +2458,100 @@ def _self_test_cases(base):
         fifo_got = _acquire_case("fifo", "blocking") + _acquire_case("fifo", "fail_open")
         fifo_want = [(2, "", True)] * 3 + [(0, True, True)] * 3
     check("launcher/acquire-fifo-mode-rule", fifo_got, fifo_want)
+    # REQUIRED refusal delivery (each real launcher, every refusal path): the diagnostic is
+    # best-effort and the exit status is fixed, whatever the state of the standard descriptors.
+    # Probed with descriptor 2 closed before Python starts (sys.stderr is None there: a refusal
+    # that raises writing it exits 1, which does not block a PreToolUse call), with descriptor 1
+    # closed the same way, and with descriptor 1 a pipe whose read end is already closed (a broken
+    # pipe: a diagnostic left in a stream buffer fails the interpreter's shutdown flush, which
+    # replaces exit 0 with 120).
+    def _close_stderr():
+        os.close(2)
+
+    def _close_stdout():
+        os.close(1)
+
+    def _fd_run(args, fd_case):
+        """(exit, the surviving captured stream) for a child run with one standard descriptor
+        closed before Python starts (preexec_fn, after the fork) or broken."""
+        cmd = [sys.executable, "-I", "-B"] + args
+        try:
+            if fd_case == "stderr-closed":
+                proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=None, env=CHILD_ENV, timeout=CHILD_TIMEOUT,
+                                      preexec_fn=_close_stderr)
+                return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace")
+            if fd_case == "stdout-closed":
+                proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=None,
+                                      stderr=subprocess.PIPE, env=CHILD_ENV, timeout=CHILD_TIMEOUT,
+                                      preexec_fn=_close_stdout)
+                return proc.returncode, proc.stderr.decode("utf-8", "backslashreplace")
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            try:
+                proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=write_end,
+                                      stderr=subprocess.PIPE, env=CHILD_ENV, timeout=CHILD_TIMEOUT)
+            finally:
+                os.close(write_end)
+            return proc.returncode, proc.stderr.decode("utf-8", "backslashreplace")
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CannotEvaluate("fd-state child launch failed: {}".format(exc))
+
+    fd_cases = ("stderr-closed", "stdout-closed", "stdout-broken")
+
+    def _fd_seen(fd_case, rc_want, kept):
+        """What the surviving stream must show: with stderr closed, stdout carries the warning for
+        a fail-open refusal and stays empty for a blocking one; with stdout closed or broken,
+        stderr carries the refusal either way."""
+        if fd_case == "stderr-closed" and rc_want == 0:
+            return "systemMessage" in kept
+        if fd_case == "stderr-closed":
+            return kept
+        return "Nothing was run" in kept
+
+    def _fd_want(fd_case, rc_want):
+        if fd_case == "stderr-closed" and rc_want != 0:
+            return ""
+        return True
+
+    def _fd_refusals(maker):
+        got, want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            for mode, rc_want in ((("unbounded_wait" if multi else "absolute_paths"), REFUSAL_EXIT),
+                                  (("clock_inject" if multi else "orch_stop_guard"), 0)):
+                for fd_case in fd_cases:
+                    rc, kept = _fd_run(maker(rel, mode), fd_case)
+                    got.append((rel, mode, fd_case, rc, _fd_seen(fd_case, rc_want, kept)))
+                    want.append((rel, mode, fd_case, rc_want, _fd_want(fd_case, rc_want)))
+        return got, want
+
+    def _floor_fd_args(rel, mode):
+        return ["-c", REFUSAL_CHILD, str(ROOT / rel), "%d.%d.%d" % old, mode]
+
+    def _acquire_fd_args(rel, mode):
+        sibling = mode.replace("_", "-") + ".py" if isinstance(LAUNCHERS[rel], tuple) \
+            else "aiqt_hooks.py"
+        spot = Path(tempfile.mkdtemp(prefix="fd-acquire-", dir=base))
+        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+        (spot / sibling).write_text("", encoding="utf-8")
+        return [str(spot / Path(rel).name), mode]
+
+    if os.name != "posix":
+        floor_fd = floor_fd_want = "skipped (closing a child's standard descriptor needs posix)"
+        acquire_fd = acquire_fd_want = unknown_fd = unknown_fd_want = floor_fd
+    else:
+        floor_fd, floor_fd_want = _fd_refusals(_floor_fd_args)
+        acquire_fd, acquire_fd_want = _fd_refusals(_acquire_fd_args)
+        preview_rel = [rel for rel in sorted(LAUNCHERS) if isinstance(LAUNCHERS[rel], tuple)][0]
+        unknown_fd, unknown_fd_want = [], []
+        for fd_case in fd_cases:
+            rc, kept = _fd_run([str(ROOT / preview_rel), DENY_PROBE_MODE], fd_case)
+            unknown_fd.append((fd_case, rc, _fd_seen(fd_case, REFUSAL_EXIT, kept)))
+            unknown_fd_want.append((fd_case, REFUSAL_EXIT, _fd_want(fd_case, REFUSAL_EXIT)))
+    check("launcher/floor-refusal-fd-states", floor_fd, floor_fd_want)
+    check("launcher/acquire-refusal-fd-states", acquire_fd, acquire_fd_want)
+    check("launcher/unknown-mode-refusal-fd-states", unknown_fd, unknown_fd_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
@@ -2418,7 +2561,11 @@ def _self_test_cases(base):
     # trailing-comma forms with every other lambda. The disclosed round-3 escapes, a non-ASCII
     # identifier or attribute, a backslash-N named escape (raw spelling included), a non-utf-8
     # coding cookie, a 256-entry call or parameter list and 150 nested brackets, are refused by the
-    # ASCII, escape, cookie, arity and depth rules. The subset forms themselves are not findings.
+    # ASCII, escape, cookie, arity and depth rules. The disclosed round-5 escapes, a module-level
+    # `return` that parses but does not compile, a `not` chain deep enough for an old parser's
+    # fixed stack and the PEP 758 unparenthesized except tuple, are refused by the compile pass,
+    # the `not`-count cap and the parenthesis rule (the last in the allowlist itself, not only the
+    # feature_version belt). The subset forms themselves are not findings.
     check("launcher/newer-syntax-findings", [bool(old_syntax_findings("x.py", text)) for text in (
         "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n",
         "x = [*()]\n", "x = {**{}}\n", "f(*a, *b)\n", "f(*a, b)\n", "dict(**a, b=1)\n",
@@ -2442,12 +2589,14 @@ def _self_test_cases(base):
         "f(%s)\n" % ", ".join(["1"] * 256),
         "def f(%s):\n    pass\n" % ", ".join(["a%d" % n for n in range(256)]),
         "x = %s1%s\n" % ("(" * 150, ")" * 150),
+        "return\n", "x = %sTrue\n" % ("not " * 33),
+        "try:\n    x = 1\nexcept OSError, ValueError:\n    x = 2\n",
         "x = 1000\n", "def f(a, b):\n    return a % (b,)\n",
         "try:\n    x = 1\nexcept (OSError, ValueError) as exc:\n    raise SystemExit(2)\n",
         "import sys\n\nif tuple(sys.version_info[:2]) < (3, 14):\n    raise SystemExit(2)\n",
         "sys.argv[0] = \"x\"\nsys.argv = [\"x\"] + sys.argv[2:]\n",
         "if __name__ == \"__main__\":\n    pass\n")],
-        [True] * 55 + [False] * 6)
+        [True] * 58 + [False] * 6)
     # The leg's scope is what the tree under check declares. A tree with no registration file and no
     # launcher adds nothing (fixture/clean-tree-passes, whose .preview/README.md names no registration);
     # a declared launcher whose registration file, launcher or hook is missing is a finding.
