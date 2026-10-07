@@ -1716,8 +1716,11 @@ def _self_test():
                                    env=dict(PATH=stubs, HOME=self.tmp, LC_ALL=utf8))
             if (probe.returncode, probe.stdout, probe.stderr) != (0, b"\xc3\xa9", b""):
                 self.skipTest("bash cannot use the " + utf8 + " locale")
+            # Round 17 (codex MEDIUM): the command goes to bash as UTF-8 bytes, so Python's own host encoding (ASCII
+            # under LC_ALL=C without UTF-8 mode) cannot decide the result.
             for cmd in ("pytest 'a\x85b'", "pytest 'a\x9b\x7f\x0b\tb'\n", "pytest '\x80\x9f\xa0'"):
-                got = subprocess.run([bash, "--noprofile", "--norc", "-c", 'printf %s ' + shown(cmd)], cwd=self.tmp,
+                line = ("printf %s " + shown(cmd)).encode("utf-8")
+                got = subprocess.run([bash, "--noprofile", "--norc", "-c", line], cwd=self.tmp,
                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
                                      env=dict(PATH=stubs, HOME=self.tmp, LC_ALL=utf8)).stdout
                 self.assertEqual(got, cmd.strip().encode("utf-8"), cmd)
