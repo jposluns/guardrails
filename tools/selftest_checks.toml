@@ -1102,6 +1102,8 @@ expected-check-ids = [
   "launcher/acquire-directory-mode-rule",
   "launcher/acquire-syntax-error-mode-rule",
   "launcher/acquire-unreadable-mode-rule",
+  "launcher/acquire-empty-mode-rule",
+  "launcher/acquire-fifo-mode-rule",
   "launcher/newer-syntax-findings",
   "launcher/conformant-passes",
   "launcher/undeclared-readme-adds-nothing",

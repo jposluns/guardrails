@@ -12,20 +12,28 @@ PostToolUse handler, kept equal to aiqt_hooks.py's own literal) warns on exit 0,
 argv (each PreToolUse handler) refuses with exit 2, which blocks the call. At or above the floor it
 acquires aiqt_hooks.py beside it ONCE (_acquire_hook: opened with O_NOFOLLOW relative to a file
 descriptor of this launcher's own directory, fstat-checked to be a regular file, read, compiled with
-the hook's path as file name) and runs ONLY that acquired content in this same process as __main__,
-with the same argv and argv[0] set to the hook's path, so the hook behaves as when launched
-directly: an exception the hook does not catch keeps its direct-launch exit semantics (the
-interpreter prints the traceback and exits 1, and a SystemExit passes through unchanged). An
-aiqt_hooks.py that cannot be acquired (missing, a symbolic link, never followed, not a regular
-file, unreadable, or uncompilable) is refused by the same mode rule as the floor guard - warn on
-exit 0 for a fail-open mode, exit 2 otherwise - never by an unhandled exception's exit 1, which
-would let a PreToolUse call proceed unchecked; because only the acquired content runs, removing or
-replacing the file after the open changes nothing. RESIDUAL: an interpreter that predates -I
-(Python 2, or Python 3 before 3.4) rejects that option before it reads this file and exits 2 on
-every event, so it blocks each UserPromptSubmit and Stop as well as each PreToolUse call, and on
-TeammateIdle the exit 2 keeps the teammate working (orch_teammate_idle is a registered handler);
-and on a platform without O_NOFOLLOW the open follows a symbolic link, while the regular-file and
-compile checks still hold.
+the hook's path as file name) and runs ONLY that acquired content in this same process as __main__
+(a new module installed as sys.modules["__main__"], so code that resolves names through the main
+module sees the hook's globals, as a direct launch presents them), with the same argv and argv[0]
+set to the hook's path, so the hook behaves as when launched directly: an exception the hook does
+not catch keeps its direct-launch exit semantics (the interpreter prints the traceback and exits 1,
+and a SystemExit passes through unchanged). An aiqt_hooks.py that cannot be acquired (missing, a
+symbolic link, never followed, not a regular file, a FIFO or device, empty, unreadable, or
+uncompilable) is refused by the same mode rule as the floor guard - warn on exit 0 for a fail-open
+mode, exit 2 otherwise - never by an unhandled exception's exit 1, which would let a PreToolUse
+call proceed unchecked; because only the acquired content runs, removing, renaming or replacing
+the file after the open changes nothing. RESIDUAL: an interpreter that predates -I (Python 2, or
+Python 3 before 3.4) rejects that option before it reads this file and exits 2 on every event, so
+it blocks each UserPromptSubmit and Stop as well as each PreToolUse call, and on TeammateIdle the
+exit 2 keeps the teammate working (orch_teammate_idle is a registered handler); on a platform
+without O_NOFOLLOW the open follows a symbolic link, while the regular-file and compile checks
+still hold; the open of the hook's DIRECTORY resolves its path following symbolic links (a
+symlinked install must keep working, and the launcher runs with the calling user's own privilege),
+with O_NOFOLLOW kept on the final component, and where the platform does not support dir_fd for
+os.open the hook is opened by its full name, still with O_NOFOLLOW on the final component; and a
+writer that rewrites the SAME inode between the open and the read (never a rename, removal or
+replacement, which the descriptor acquisition covers) can expose a partial hook: an empty or
+uncompilable prefix is refused, a prefix that still compiles runs.
 
 SOURCE tree copy: tools/gen_hooks.py copies this file byte-identical into the plugin surface beside
 the dispatcher; edit the source, never the generated copy.
@@ -52,24 +60,33 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import stat
+import types
 
 _hook = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiqt_hooks.py")
 
 
 def _acquire_hook(path):
-    """Acquire the hook file ONCE: open it without following a symbolic link (O_NOFOLLOW, relative
-    to a file descriptor of its directory where the platform supports dir_fd; O_NONBLOCK so a FIFO
-    cannot hold the open), require a regular file of the OPENED descriptor (fstat, so no rename,
-    removal or replacement after the open can swap what was judged), read that descriptor's bytes
-    and compile them with path as the file name. Returns the compiled code object, or the failure
-    reason as a string: the dispatch below routes every acquisition failure through the mode rule,
-    so no failure here surfaces as an unhandled exception's exit 1 (a non-blocking error to a
-    PreToolUse call)."""
+    """Acquire the hook file ONCE: open it without following a symbolic link on the final component
+    (O_NOFOLLOW, relative to a file descriptor of its directory where the platform supports dir_fd
+    for os.open, otherwise by its full name; the directory open itself follows symbolic links so a
+    symlinked install keeps working, and requires a directory where the platform has O_DIRECTORY;
+    O_NONBLOCK so a FIFO cannot hold the open), require a regular file of the OPENED descriptor
+    (fstat, so no rename, removal or replacement after the open can swap what was judged), read
+    that descriptor's bytes, refuse an empty read, and compile the bytes with path as the file
+    name. The directory descriptor is closed on every path, the inner open's failure included.
+    Returns the compiled code object, or the failure reason as a string: the dispatch below routes
+    every acquisition failure through the mode rule, so no failure here surfaces as an unhandled
+    exception's exit 1 (a non-blocking error to a PreToolUse call)."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         if os.open in os.supports_dir_fd:
-            directory_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-            fd = os.open(os.path.basename(path), flags, dir_fd=directory_fd)
+            directory_fd = os.open(os.path.dirname(path) or ".",
+                                   os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                fd = os.open(os.path.basename(path), flags, dir_fd=directory_fd)
+            except (OSError, ValueError, MemoryError) as exc:
+                os.close(directory_fd)
+                raise exc
             os.close(directory_fd)
         else:
             fd = os.open(path, flags)
@@ -81,6 +98,8 @@ def _acquire_hook(path):
         handle.close()
     except (OSError, ValueError, MemoryError) as exc:
         return "cannot open or read it without following a symbolic link: %s" % exc
+    if not data:
+        return "it is empty (zero bytes were read)"
     try:
         return compile(data, path, "exec")
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
@@ -88,9 +107,11 @@ def _acquire_hook(path):
 
 
 # The same mode rule as the floor guard: a dispatcher that cannot be acquired (missing, a symbolic
-# link, not a regular file, unreadable, uncompilable) must not surface as an unhandled exception's
-# exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired content runs:
-# removing or replacing the file after the open changes nothing.
+# link, not a regular file, empty, unreadable, uncompilable) must not surface as an unhandled
+# exception's exit 1 (a non-blocking error that lets a PreToolUse call proceed). Only the acquired
+# content runs: removing, renaming or replacing the file after the open changes nothing; an
+# in-place rewrite of the same inode between the open and the read is the module docstring's
+# stated residual.
 _got = _acquire_hook(_hook)
 if isinstance(_got, str):
     _missing = ("error: aiqt_hooks_launch.py: cannot acquire the hook file %s (%s). "
@@ -103,8 +124,15 @@ if isinstance(_got, str):
         raise SystemExit(0)
     raise SystemExit(2)
 sys.argv[0] = _hook
-# An exception the dispatcher raises and does not catch propagates out of this statement: the
-# traceback prints and the process exits 1, exactly as when aiqt_hooks.py is launched directly (a
-# direct `python3 -I` launch does not put the hook's directory on sys.path, and neither does this).
-exec(_got, dict(__name__="__main__", __file__=_hook, __spec__=None, __loader__=None,
-                __package__="", __cached__=None))
+# The acquired content runs in a NEW module installed as sys.modules["__main__"] (as a direct
+# launch presents it), so code that resolves names through the main module (a dataclass string
+# annotation, for example) sees the hook's globals, never this launcher's. An exception the
+# dispatcher raises and does not catch propagates out of the exec statement: the traceback prints
+# and the process exits 1, exactly as when aiqt_hooks.py is launched directly (a direct
+# `python3 -I` launch does not put the hook's directory on sys.path, and neither does this).
+_module = types.ModuleType("__main__")
+_module.__file__ = _hook
+_module.__package__ = ""
+_module.__cached__ = None
+sys.modules["__main__"] = _module
+exec(_got, _module.__dict__)

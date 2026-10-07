@@ -1399,6 +1399,27 @@ def self_test_main():
                 failures.append("unreadable plugin hooks/ expected C5 MALFORMED:\n{}".format(out))
         os.chmod(hooks_surface, 0o755)  # restore so cleanup can remove it
 
+        # 16g. _build_hooks derives its source list from gen_hooks.GENSRC_OUTPUTS (never a fixed
+        #      list): with the registry temporarily extended by one extra readable source, the
+        #      fixture must copy that source too. A mutation that replaces the derivation with the
+        #      current literal source paths fails this case.
+        hreg = tmp / "hooks-registry"
+        hreg.mkdir()
+        _build_conformant(hreg)
+        extra_rel = "tools/_gen_common.py"
+        saved_outputs = gen_hooks.GENSRC_OUTPUTS
+        gen_hooks.GENSRC_OUTPUTS = saved_outputs + (
+            {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
+             "sources": (extra_rel,), "regenerate": "python3 tools/gen_hooks.py"},)
+        try:
+            _build_hooks(hreg)
+        finally:
+            gen_hooks.GENSRC_OUTPUTS = saved_outputs
+        if not (hreg / extra_rel).is_file():
+            failures.append("_build_hooks must copy every source gen_hooks.GENSRC_OUTPUTS declares "
+                            "(derived from the registry, not a fixed list): the extra registry "
+                            "source {} was not copied".format(extra_rel))
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:

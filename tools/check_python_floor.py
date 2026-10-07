@@ -1223,8 +1223,11 @@ SUBSET_VERSION = (3, 4)
 # Parser/Python.asdl and Grammar/Grammar files of CPython 3.4 (3.4 is the launcher floor: the first
 # Python that accepts -I). Every name listed here is a statement, expression, operator or context
 # form the Python 3.4 grammar already holds in the same source spelling with the same meaning (each
-# has been in the grammar unchanged since Python 3.0), and _subset_node below refuses by form every
-# spelling of a listed node that a modern parser accepts and Python 3.4 does not (enumerated there).
+# has been in the grammar unchanged since Python 3.0 for the ASCII-only spellings _subset_line
+# admits: identifier and escape classification follows the interpreter's Unicode database, so a
+# spelling proven only under a newer database is refused), and _subset_node below refuses by form
+# every spelling of a listed node that a modern parser accepts and Python 3.4 does not (enumerated
+# there).
 # Every node name outside this tuple is refused by name, whether it is newer than 3.4 (JoinedStr,
 # NamedExpr, AnnAssign, Match, TryStar, the Async nodes, ...) or merely not needed by a launcher
 # (For, While, With, Lambda, ClassDef, the comprehensions, Starred, Dict, Set, IfExp, Delete,
@@ -1237,7 +1240,8 @@ SUBSET_NODES = (
     "arguments", "keyword")
 # The only modules a launcher may import: one per statement, unaliased, each in the Python 3.4
 # standard library.
-SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokenize", "warnings")
+SUBSET_IMPORTS = ("ast", "io", "itertools", "json", "os", "stat", "sys", "tokenize", "types",
+                  "warnings")
 
 
 def _subset_node(found, rel, node):
@@ -1249,8 +1253,11 @@ def _subset_node(found, rel, node):
     parameter on FunctionDef/arguments/arg (so no 3.9 decorator grammar and no 3.8 parameter forms
     are reachable), try else/finally (so no continue-through-finally grammar change is reachable),
     a non-Load list or tuple context (no unpacking targets), a bare except, a bare or chained
-    raise, and any import outside SUBSET_IMPORTS. A 3.14 identifier is never a Python 3.4 keyword
-    (3.14's keyword list adds to 3.4's and removes nothing), so every Name is safe."""
+    raise, and any import outside SUBSET_IMPORTS; a call or a parameter list with more than 255
+    entries is refused (the pre-3.7 limit). A 3.14 identifier is never a Python 3.4 keyword
+    (3.14's keyword list adds to 3.4's and removes nothing), and _subset_line restricts the whole
+    source to ASCII, so a Name or attribute spelling the floor's own Unicode database does not
+    classify cannot pass."""
     name = type(node).__name__
     line = getattr(node, "lineno", 0)
     if name not in SUBSET_NODES:
@@ -1293,28 +1300,68 @@ def _subset_node(found, rel, node):
     if name in ("List", "Tuple") and type(node.ctx).__name__ != "Load":
         found.append("%s:%d: a list or tuple outside a load context (an unpacking target) is "
                      "outside the launcher subset" % (rel, line))
+    if name == "Call" and len(node.args) + len(node.keywords) > 255:
+        found.append("%s:%d: a call with more than 255 arguments is outside the launcher subset "
+                     "(the pre-3.7 limit)" % (rel, line))
+    if name == "arguments" and len(node.args) > 255:
+        found.append("%s:%d: more than 255 parameters are outside the launcher subset "
+                     "(the pre-3.7 limit)" % (rel, line))
 
 
 def _subset_token(found, rel, token):
     """The newer spellings the AST cannot show on a listed node: an f- or t-string opener (a
     placeholder-free one can parse to a plain Constant) and a numeric underscore (PEP 515, 3.6)
-    both read back as a Constant the walk accepts."""
+    both read back as a Constant the walk accepts; a backslash-N named escape resolves against the
+    interpreter's Unicode name table (Python 3.4 ships Unicode 6.3), so it is refused whole, raw
+    strings included; and a comment that could carry a coding declaration (PEP 263 reads the first
+    two lines) is refused, so no non-utf-8 codec name can reach an older interpreter."""
     kind = tokenize.tok_name[token.type]
     if kind in ("FSTRING_START", "TSTRING_START") \
             or (token.type == tokenize.NUMBER and "_" in token.string):
         found.append("%s:%d: %r is newer than Python %d.%d"
                      % ((rel, token.start[0], token.string) + SUBSET_VERSION))
+    if token.type == tokenize.STRING and ("\\" + "N{") in token.string:
+        found.append("%s:%d: a backslash-N named escape resolves against the interpreter's "
+                     "Unicode name table and is outside the launcher subset"
+                     % (rel, token.start[0]))
+    if kind == "COMMENT" and token.start[0] < 3 and "coding" in token.string:
+        found.append("%s:%d: a comment that could carry a coding declaration is outside the "
+                     "launcher subset" % (rel, token.start[0]))
+
+
+def _subset_line(found, rel, pair):
+    """A non-ASCII character anywhere in the source (pair is one (index, line) from enumerate):
+    identifier and escape classification follows the interpreter's Unicode database (Python 3.4
+    ships Unicode 6.3), so the subset is ASCII-only, comments and string contents included."""
+    if not pair[1].isascii():
+        found.append("%s:%d: a non-ASCII character is outside the launcher subset (Python %d.%d "
+                     "ships an older Unicode database)" % ((rel, pair[0] + 1) + SUBSET_VERSION))
+
+
+def _subset_depth(state, token):
+    """Track bracket nesting (state[0] is the open-bracket stack, state[1] the deepest size seen;
+    ast.parse already accepted the text, so the brackets balance): an old parser's fixed stack caps
+    how deep brackets may nest, so the subset caps them far below any shipped limit."""
+    if token.type == tokenize.OP and token.string in ("(", "[", "{"):
+        state[0].append(1)
+    if token.type == tokenize.OP and token.string in (")", "]", "}"):
+        state[0].pop()
+    if len(state[0]) > state[1]:
+        state[1] = len(state[0])
 
 
 def launcher_subset_findings(rel, text):
     """Each construct in text outside the LAUNCHER SUBSET (SUBSET_NODES with the per-form checks of
-    _subset_node and the token scan of _subset_token), as "rel:line: message" strings; [] accepts.
+    _subset_node, the token scan of _subset_token, the ASCII-only line scan of _subset_line and
+    the bracket-depth cap of _subset_depth), as "rel:line: message" strings; [] accepts.
     This is a CLOSED ALLOWLIST, never a list of known-newer constructs: only the listed node types
     and forms pass, so a construct this check has never heard of is refused by name.
     ast.parse(feature_version=...) is only best-effort below its documented lowest supported
     version, so it is kept as a belt, never as the guarantee. Raises SyntaxError,
     tokenize.TokenError or ValueError when text does not parse under THIS interpreter."""
     found = []
+    list(map(_subset_line, itertools.repeat(found), itertools.repeat(rel),
+             list(enumerate(text.split("\n")))))
     tree = ast.parse(text)
     tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
     saved_filters = warnings.filters[:]
@@ -1327,6 +1374,11 @@ def launcher_subset_findings(rel, text):
     warnings.filters = saved_filters
     list(map(_subset_node, itertools.repeat(found), itertools.repeat(rel), list(ast.walk(tree))))
     list(map(_subset_token, itertools.repeat(found), itertools.repeat(rel), tokens))
+    depth = [[], 0]
+    list(map(_subset_depth, itertools.repeat(depth), tokens))
+    if depth[1] > 32:
+        found.append("%s: brackets nested deeper than 32 levels are outside the launcher subset "
+                     "(an old parser's fixed stack)" % rel)
     return found
 # END LAUNCHER-SUBSET ALLOWLIST
 
@@ -2245,22 +2297,35 @@ def _self_test_cases(base):
     # REQUIRED acquisition behavior (each real launcher, deterministic): the sibling hook is
     # acquired ONCE (open without following a symbolic link, fstat, read, compile) and ONLY the
     # acquired content runs, and every acquisition failure (missing, a symbolic link, a directory,
-    # an unreadable file, a syntax error) is routed through the mode rule: exit 2 with empty stdout
-    # for a blocking mode, warn and exit 0 for a fail-open mode, never an unhandled exception's
-    # exit 1. The removal race is deterministic: the child wraps os.open to unlink the sibling
-    # right after the launcher's own open of it, and the acquired content still runs.
+    # an unreadable file, a FIFO, an empty file, a syntax error) is routed through the mode rule:
+    # exit 2 with empty stdout for a blocking mode, warn and exit 0 for a fail-open mode, never an
+    # unhandled exception's exit 1. The removal race is deterministic: the child wraps os.open
+    # (keeping os.supports_dir_fd consistent with the wrapper, so the launcher still takes its
+    # directory-descriptor branch where the platform has one) to unlink the sibling right after the
+    # launcher's own open of it, then reports whether the injection fired, whether a dir_fd open
+    # carried it, and whether the sibling is gone; the acquired content must still run. A launcher
+    # that resolves the path before running it and then reads it again (the pre-acquisition
+    # dispatch, or an explicit reopen) fails this case: the injection never fires there, or the
+    # reopen hits the removed path.
     race_runner = ("import os, runpy, sys\n"
                    "path, sibling = sys.argv[1], sys.argv[2]\n"
                    "sys.argv = [path] + sys.argv[3:]\n"
                    "real_open = os.open\n"
+                   "fired = []\n"
                    "def tracked(target, flags, dir_fd=None, **kwargs):\n"
                    "    fd = real_open(target, flags, dir_fd=dir_fd, **kwargs)\n"
                    "    if os.path.basename(str(target)) == os.path.basename(sibling) \\\n"
                    "            and os.path.lexists(sibling):\n"
                    "        os.unlink(sibling)\n"
+                   "        fired.append(dir_fd)\n"
                    "    return fd\n"
                    "os.open = tracked\n"
-                   "runpy.run_path(path, run_name='__main__')\n")
+                   "if real_open in os.supports_dir_fd:\n"
+                   "    os.supports_dir_fd = frozenset(set(os.supports_dir_fd) | {tracked})\n"
+                   "runpy.run_path(path, run_name='__main__')\n"
+                   "sys.stdout.write('INJECTION_FIRED=%d DIR_FD_USED=%d SIBLING_GONE=%d\\n' % (\n"
+                   "    min(len(fired), 1), int(bool(fired) and fired[0] is not None),\n"
+                   "    int(not os.path.lexists(sibling))))\n")
     hook_ran = "import sys\nsys.stdout.write(\"HOOK_RAN\\n\")\n"
 
     def _acquire_case(scenario, mode_kind):
@@ -2287,20 +2352,37 @@ def _self_test_cases(base):
                 os.chmod(target, 0)
             elif scenario == "syntax-error":
                 target.write_text("def broken(:\n", encoding="utf-8")
+            elif scenario == "fifo":
+                os.mkfifo(target)
+            elif scenario == "empty":
+                target.write_text("", encoding="utf-8")
             runner = race_runner if scenario == "race" else sibling_runner
             extra = [str(target)] if scenario == "race" else []
+            # The refusal reason is asserted exactly where two guards could mask one another: a
+            # FIFO without the S_ISREG guard reads empty under O_NONBLOCK and would be refused as
+            # empty, not as a non-regular file.
+            marker = "cannot acquire"
+            if scenario == "fifo":
+                marker = "(it is not a regular file)"
+            if scenario == "empty":
+                marker = "(it is empty"
             rc, out, err = _child(runner, [str(spot / Path(rel).name), *extra, mode], (), spot)
-            if scenario in ("ok", "race"):
+            if scenario == "race":
+                got.append((rc, "HOOK_RAN" in out, "INJECTION_FIRED=1" in out,
+                            "SIBLING_GONE=1" in out,
+                            ("DIR_FD_USED=1" in out) == (os.open in os.supports_dir_fd)))
+            elif scenario == "ok":
                 got.append((rc, "HOOK_RAN" in out))
             elif mode_kind == "fail_open":
-                got.append((rc, "systemMessage" in out, "cannot acquire" in err))
+                got.append((rc, "systemMessage" in out, marker in err))
             else:
-                got.append((rc, out, "cannot acquire" in err))
+                got.append((rc, out, marker in err))
         return got
 
     check("launcher/acquire-and-run",
           _acquire_case("ok", "blocking") + _acquire_case("ok", "fail_open"), [(0, True)] * 6)
-    check("launcher/acquire-removal-race-runs", _acquire_case("race", "blocking"), [(0, True)] * 3)
+    check("launcher/acquire-removal-race-runs", _acquire_case("race", "blocking"),
+          [(0, True, True, True, True)] * 3)
     for check_id, scenario in (("launcher/acquire-missing-mode-rule", "missing"),
                                ("launcher/acquire-symlink-mode-rule", "symlink"),
                                ("launcher/acquire-directory-mode-rule", "directory"),
@@ -2315,13 +2397,28 @@ def _self_test_cases(base):
         unreadable_got = _acquire_case("unreadable", "blocking") + _acquire_case("unreadable", "fail_open")
         unreadable_want = [(2, "", True)] * 3 + [(0, True, True)] * 3
     check("launcher/acquire-unreadable-mode-rule", unreadable_got, unreadable_want)
+    check("launcher/acquire-empty-mode-rule",
+          _acquire_case("empty", "blocking") + _acquire_case("empty", "fail_open"),
+          [(2, "", True)] * 3 + [(0, True, True)] * 3)
+    # The FIFO case discriminates both acquisition guards: without S_ISREG the FIFO's empty
+    # O_NONBLOCK read is refused for a DIFFERENT reason (the exact reason is asserted above), and
+    # without O_NONBLOCK the open itself blocks until the child timeout.
+    if getattr(os, "mkfifo", None) is None:
+        fifo_got = fifo_want = "skipped (no os.mkfifo on this platform)"
+    else:
+        fifo_got = _acquire_case("fifo", "blocking") + _acquire_case("fifo", "fail_open")
+        fifo_want = [(2, "", True)] * 3 + [(0, True, True)] * 3
+    check("launcher/acquire-fifo-mode-rule", fifo_got, fifo_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
     # comprehensions, classes): the subset is CLOSED, so the two disclosed round-2 escapes, a
     # parenthesized decorator and a loop-else continue reached through a skipped loop node inside
     # finally, are refused by name with every other decorator and loop, and the disclosed lambda
-    # trailing-comma forms with every other lambda. The subset forms themselves are not findings.
+    # trailing-comma forms with every other lambda. The disclosed round-3 escapes, a non-ASCII
+    # identifier or attribute, a backslash-N named escape (raw spelling included), a non-utf-8
+    # coding cookie, a 256-entry call or parameter list and 150 nested brackets, are refused by the
+    # ASCII, escape, cookie, arity and depth rules. The subset forms themselves are not findings.
     check("launcher/newer-syntax-findings", [bool(old_syntax_findings("x.py", text)) for text in (
         "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n",
         "x = [*()]\n", "x = {**{}}\n", "f(*a, *b)\n", "f(*a, b)\n", "dict(**a, b=1)\n",
@@ -2339,12 +2436,18 @@ def _self_test_cases(base):
         "x = a if b else c\n", "class C:\n    pass\n", "def g():\n    yield from x\n",
         "x = 1.5\n", "x = b'ab'\n", "import shutil\n", "import os as o\n", "import os, sys\n",
         "async def f():\n    pass\n", "c = a @ b\n", "x[*a]\n", "raise\n",
+        "\u1c90 = 1\n", "x = sys.\u1c90\n",
+        "x = \"\\N{GEORGIAN MTAVRULI CAPITAL LETTER AN}\"\n", "x = \"\\N{BITCOIN SIGN}\"\n",
+        "x = r\"\\N{BITCOIN SIGN}\"\n", "# -*- coding: kz1048 -*-\nx = 1\n",
+        "f(%s)\n" % ", ".join(["1"] * 256),
+        "def f(%s):\n    pass\n" % ", ".join(["a%d" % n for n in range(256)]),
+        "x = %s1%s\n" % ("(" * 150, ")" * 150),
         "x = 1000\n", "def f(a, b):\n    return a % (b,)\n",
         "try:\n    x = 1\nexcept (OSError, ValueError) as exc:\n    raise SystemExit(2)\n",
         "import sys\n\nif tuple(sys.version_info[:2]) < (3, 14):\n    raise SystemExit(2)\n",
         "sys.argv[0] = \"x\"\nsys.argv = [\"x\"] + sys.argv[2:]\n",
         "if __name__ == \"__main__\":\n    pass\n")],
-        [True] * 46 + [False] * 6)
+        [True] * 55 + [False] * 6)
     # The leg's scope is what the tree under check declares. A tree with no registration file and no
     # launcher adds nothing (fixture/clean-tree-passes, whose .preview/README.md names no registration);
     # a declared launcher whose registration file, launcher or hook is missing is a finding.
