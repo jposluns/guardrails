@@ -16,11 +16,17 @@ It first prints every collected assertion failure, then exits 1 if any assertion
 harness error was recorded (an uncaught exception or SystemExit is recorded as one), else 0. Harness
 errors also include a failed report write, an unreadable or malformed expectation manifest (a suite
 container that is not an array of tables included), a ci-status.sh whose jq program cannot be
-extracted, and a duplicate check id. The execution set is reconciled against the manifest only when no
-check recorded a harness error, because an unevaluated check would also be reported missing. Bad
-arguments, a Python older than 3.14, and a missing tomllib are refused before any check runs, so they
-always exit 2. The one path outside the rule is a failure to print the result itself (for example a
-closed stdout): the interpreter then ends the run with its own exit 1.
+extracted, a duplicate check id, and a diagnostic or result that cannot be printed or flushed. The
+execution set is reconciled against the manifest only when no check recorded a harness error, because
+an unevaluated check would also be reported missing. Bad arguments, a Python older than 3.14, and a
+missing tomllib are refused before any check runs, so they always exit 2.
+
+Reporting can never escape or change the rule. An error is recorded before any exception text is
+formatted; str(), repr() and every print and flush of a diagnostic are contained, whatever they raise
+(SystemExit included), and fall back to the type name. The exit code is computed once, after all
+reporting, and the script ends with os._exit() on that code, so the interpreter's own exit-time flush
+cannot replace it. A stdout already closed when the run starts (None in Python) discards the result
+lines; the exit code still follows the rule.
 """
 import sys
 
@@ -179,7 +185,7 @@ def check(name, got, want):
         _EXECUTED_SET.add(name)
         EXECUTED.append(name)
     if got != want:
-        FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+        FAILURES.append("{}: got {}, want {}".format(name, _safe_text(repr, got), _safe_text(repr, want)))
 
 
 def _duplicate_check_id(name):
@@ -193,10 +199,44 @@ def harness_error(check_id, detail):
 
 
 def _record_harness_error(message):
-    # Every harness error is recorded here, before it is printed, so _conclude() sees it even if the
-    # print fails.
+    # Every harness error is recorded here, before it is printed; a failing print is contained, so it
+    # neither escapes nor erases the record.
     HARNESS_ERRORS.append(message)
-    print("SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
+    _contained(print, "SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
+
+
+def _contained(action, *args, **kwargs):
+    """Run one diagnostic action; whatever it raises, SystemExit included, is recorded, never raised."""
+    try:
+        action(*args, **kwargs)
+    except BaseException as exc:
+        HARNESS_ERRORS.append("diagnostic output failed: " + _type_name(exc))
+        try:
+            print("SELF-TEST HARNESS ERROR: diagnostic output failed: " + _type_name(exc), file=sys.stderr)
+        except BaseException:  # the stream that failed may be stderr itself; the record above stands
+            pass
+
+
+def _type_name(obj):
+    # type(obj).__name__ can itself run code (a metaclass property); the fallback is a constant.
+    try:
+        name = type(obj).__name__
+        if type(name) is str:
+            return name
+    except BaseException:
+        pass
+    return "<unnamed type>"
+
+
+def _safe_text(render, obj):
+    """render(obj) (str or repr), or the type name if that raises anything, SystemExit included."""
+    try:
+        text = render(obj)
+        if type(text) is str:
+            return text
+    except BaseException:
+        pass
+    return "<unprintable {}>".format(_type_name(obj))
 
 
 def iso(epoch):
@@ -801,6 +841,8 @@ def _run_checks():
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.
+    # Round 8: an exception or a stream that raises while being reported (SystemExit included) is
+    # contained and recorded, and a duplicate id whose assertions pass still exits 2.
     _finalise_check(*_finalisation_cases())
 
 
@@ -814,23 +856,33 @@ def main(report_path=None, run_checks=_run_checks):
     """Run the checks and the reconciliation, then return the exit code by the module docstring's rule.
 
     Whatever ends the try block (a normal finish, an exception, or SystemExit raised anywhere, including
-    inside check()), the finally clause runs _conclude(), which prints every collected failure and maps
-    the exit code: any assertion failure -> 1; else any harness error, an uncaught exception or
-    SystemExit included -> 2; else 0. run_checks is replaced only by _finalisation_cases().
+    inside check()) is recorded, then _report() prints every collected failure. Neither can raise: each
+    diagnostic is contained. The last statement computes the code from the records alone: any assertion
+    failure -> 1; else any harness error, an uncaught exception or SystemExit included -> 2; else 0.
+    run_checks is replaced only by _finalisation_cases().
     """
-    code = 2
     try:
         run_checks()
         _reconcile(report_path)
-    except BaseException as exc:  # SystemExit and KeyboardInterrupt too: none may skip _conclude()
+    except BaseException as exc:  # SystemExit and KeyboardInterrupt too: none may skip the report
         _record_uncaught(exc)
-    finally:
-        code = _conclude()
-    return code
+    _contained(_report)
+    return _exit_code()
 
 
 def _record_uncaught(exc):
-    _record_harness_error("uncaught {}: {}".format(type(exc).__name__, exc))
+    # Recorded BEFORE any exception text is formatted: str(), repr() and the traceback run the
+    # exception's own code, which may raise anything, SystemExit included.
+    name = _type_name(exc)
+    HARNESS_ERRORS.append("uncaught " + name)
+    _contained(_describe_uncaught, name, exc)
+
+
+def _describe_uncaught(name, exc):
+    text = _safe_text(str, exc)
+    if text.startswith("<unprintable "):
+        text = _safe_text(repr, exc)
+    print("SELF-TEST HARNESS ERROR: uncaught {}: {}".format(name, text), file=sys.stderr)
     traceback.print_exception(exc, file=sys.stderr)
 
 
@@ -850,8 +902,10 @@ def _reconcile(report_path):
         FAILURES.append("execution-set/extra: {}".format(check_id))
 
 
-def _conclude():
-    # The single exit-code rule. Every collected failure is printed first, on every path.
+def _report():
+    # Prints the result and computes nothing; main() runs it contained. Both streams are flushed here, so
+    # a result that cannot be delivered is recorded as a harness error before _exit_code() runs.
+    _flush(sys.stderr)
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
@@ -859,12 +913,26 @@ def _conclude():
         if HARNESS_ERRORS:
             print("SELF-TEST HARNESS ERROR: see the labelled errors above; the assertion failures make "
                   "this run a FAIL", file=sys.stderr)
+    elif HARNESS_ERRORS:
+        print("SELF-TEST HARNESS ERROR: see the labelled errors above (cannot evaluate)", file=sys.stderr)
+    else:
+        print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
+              "tools/selftest_checks.toml".format(len(EXECUTED)))
+    _flush(sys.stderr)
+    _flush(sys.stdout)
+
+
+def _flush(stream):
+    if stream is not None:  # a stream closed before the run started is None and has nothing to flush
+        stream.flush()
+
+
+def _exit_code():
+    # The single exit-code rule, read from the records only.
+    if FAILURES:
         return 1
     if HARNESS_ERRORS:
-        print("SELF-TEST HARNESS ERROR: see the labelled errors above (cannot evaluate)", file=sys.stderr)
         return 2
-    print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
-          "tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 
@@ -872,6 +940,36 @@ class _ExitOnCompare:
     """A got value whose comparison raises SystemExit(0): a SystemExit raised from inside check()."""
 
     def __ne__(self, other):
+        raise SystemExit(0)
+
+
+class _ExitOnText:
+    """An exception argument whose str() and repr() raise SystemExit(0)."""
+
+    def __str__(self):
+        raise SystemExit(0)
+
+    __repr__ = __str__
+
+
+class _UnprintableError(Exception):
+    """An exception whose str() raises ValueError; its repr() still works."""
+
+    def __str__(self):
+        raise ValueError("seeded formatting fault")
+
+
+class _UnrepresentableValue:
+    """A failing got value whose repr() raises SystemExit(0)."""
+
+    def __repr__(self):
+        raise SystemExit(0)
+
+
+class _ExitOnWrite(io.StringIO):
+    """An output stream whose every write raises SystemExit(0)."""
+
+    def write(self, text):
         raise SystemExit(0)
 
 
@@ -901,6 +999,13 @@ def _finalisation_cases():
         _finalise_check(0, 0)
         _finalise_check("duplicate", "wanted")
 
+    def duplicated_passing():
+        _finalise_check(0, 0)
+        _finalise_check(0, 0)
+
+    def unrepresentable():
+        _finalise_check(_UnrepresentableValue(), 0)
+
     def recorded():
         _finalise_check(0, 0)
         harness_error("seeded/not-evaluated", "seeded harness error")
@@ -911,6 +1016,14 @@ def _finalisation_cases():
     def raises():
         _finalise_check(0, 0)
         raise subprocess.TimeoutExpired("fixture", 30)
+
+    def exits_on_text():
+        _finalise_check(0, 0)
+        raise RuntimeError(_ExitOnText())
+
+    def unprintable():
+        _finalise_check(0, 0)
+        raise _UnprintableError()
 
     results, wants = [], []
     try:
@@ -931,14 +1044,20 @@ def _finalisation_cases():
             scalar_suite = manifest("scalar-suite.toml", text="suite = 1\n")
             absent = base / "absent" / "selftest_checks.toml"
             bad_report = str(base / "absent" / "report.json")
-            # (seed a failure first?, checks run, report path, manifest, code, stdout texts, stderr texts)
-            for fail, run, report, path, code, out_texts, err_texts in (
+            exit_text = "uncaught RuntimeError: <unprintable RuntimeError>"
+            value_text = "uncaught _UnprintableError: _UnprintableError()"
+            # (seed a failure first?, checks run, report path, manifest, code, stdout texts, stderr texts,
+            # and optionally which stream raises SystemExit(0) on every write)
+            for fail, run, report, path, code, out_texts, err_texts, *faulting in (
                     (False, passes, None, own_only, 0, ["SELF-TEST PASS"], []),
                     (True, passes, None, own_only, 1, [seeded], []),
                     (True, recorded, None, own_only, 1, [seeded], ["seeded/not-evaluated"]),
                     (False, recorded, None, not_evaluated, 2, [], ["seeded/not-evaluated"]),
                     (True, duplicated, None, own_only, 1, [seeded, duplicate],
                      [own + ": duplicate check id"]),
+                    (False, duplicated_passing, None, own_only, 2, [], [own + ": duplicate check id"]),
+                    (False, unrepresentable, None, own_only, 1,
+                     [own + ": got <unprintable _UnrepresentableValue>, want 0"], []),
                     (False, passes, bad_report, never_run, 1, ["execution-set/missing: seeded/never-run"],
                      ["cannot write execution report"]),
                     (False, passes, bad_report, own_only, 2, [], ["cannot write execution report"]),
@@ -950,13 +1069,24 @@ def _finalisation_cases():
                     (False, exits, None, own_only, 2, [], ["uncaught SystemExit: 0"]),
                     (True, raises, None, own_only, 1, [seeded], ["uncaught TimeoutExpired"]),
                     (True, passes, None, _FaultingPath(), 1, [seeded], ["uncaught RuntimeError"]),
-                    (False, passes, None, _FaultingPath(), 2, [], ["uncaught RuntimeError"])):
+                    (False, passes, None, _FaultingPath(), 2, [], ["uncaught RuntimeError"]),
+                    (True, exits_on_text, None, own_only, 1, [seeded], [exit_text]),
+                    (False, exits_on_text, None, own_only, 2, [], [exit_text]),
+                    (True, unprintable, None, own_only, 1, [seeded], [value_text]),
+                    (False, unprintable, None, own_only, 2, [], [value_text]),
+                    (False, passes, None, own_only, 2, [], ["diagnostic output failed: SystemExit"],
+                     "stdout"),
+                    (True, passes, None, own_only, 1, [], ["diagnostic output failed: SystemExit"],
+                     "stdout"),
+                    (False, raises, None, own_only, 2, [], [], "stderr"),
+                    (False, duplicated, None, own_only, 1, [duplicate], [], "stderr")):
                 FAILURES[:] = [seeded] if fail else []
                 HARNESS_ERRORS[:] = []
                 EXECUTED[:] = []
                 _EXECUTED_SET.clear()
                 CHECKS_MANIFEST = path
-                out, err = io.StringIO(), io.StringIO()
+                out = _ExitOnWrite() if faulting == ["stdout"] else io.StringIO()
+                err = _ExitOnWrite() if faulting == ["stderr"] else io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     try:
                         got = main(report, run)
@@ -984,4 +1114,6 @@ def _parse_argv(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(_parse_argv(sys.argv[1:])))
+    # os._exit: main() has already flushed both streams, and the interpreter's exit-time flush must not
+    # replace the code main() computed (a failing final flush would otherwise end the run with 120).
+    os._exit(main(_parse_argv(sys.argv[1:])))
