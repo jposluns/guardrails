@@ -14,13 +14,25 @@ WHAT IT DOES
     2. On every later user prompt (UserPromptSubmit) the same reminder is added again, until the durable record
        holds a re-read entry dated after that compaction.
     3. At each turn end (Stop) in that window the hook refuses the stop and says why. A loop cap bounds this:
-       inside one continuous corrective continuation (the platform's stop_hook_active flag) it refuses at most
-       BLOCK_CAP times, then allows the stop with a one-line warning, so it never blocks without bound.
+       it refuses at most BLOCK_CAP times in a row, then allows the stop with a one-line warning, so it never
+       blocks without bound (LOOP CAP, below).
 
     Events: SessionStart (matcher `compact`, or no matcher), PreCompact (optional), UserPromptSubmit, and Stop.
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext reminder
     (SessionStart, UserPromptSubmit), a top-level decision "block" object with a reason (Stop), or a top-level
-    systemMessage warning (Stop, at the cap or when the count cannot be kept). Exit status: always 0.
+    systemMessage warning (Stop, at the cap or when the count cannot be kept). Exit status: 0, except the
+    floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE DIRECTION).
+
+LOOP CAP
+    The refusal count lives in the state file and does not rely on the platform's stop_hook_active field: the
+    cap holds whether that field is absent, false or true. A Stop without the field is not read as a new turn,
+    so the count goes on from the stored value. The count is reset to 0 only by a signal of a new turn that the
+    hook receives: a UserPromptSubmit event (a prompt the user submitted), a new compaction (which records a
+    fresh state), or a Stop whose stop_hook_active field is explicitly false (the platform's own statement that
+    this stop does not continue a stop-hook refusal). An allowed stop does not reset it: another Stop hook may
+    still refuse that same stop, and two hooks that each reset on their own allowed stop could refuse in turn
+    without bound. So after BLOCK_CAP refusals each later Stop is allowed with the warning until one of those
+    signals arrives.
 
 DETECTION
     The compaction marker is the platform's own, not a heuristic: the SessionStart payload field `source` with
@@ -63,11 +75,13 @@ FAILURE DIRECTION
     (any other error) keeps the reminder on with the compaction time unknown, and its Stop is allowed with a
     warning, since no entry can be dated against an unknown time; that reminder says so, and says that only
     restoring access to the state location clears it. The Stop event refuses while a re-read is
-    outstanding, but its
-    count is the loop bound: under stop_hook_active an unknown or unsaveable count allows with a warning rather
-    than refusing again. Any error in the hook itself, an unreadable payload, or an unrecognized event exits 0
-    with no output (fail open). The one exception to exit 0 is an interpreter older than Python 3.14 that can
-    start the hook: the guard at the top of this file reads no input, writes one line beginning
+    outstanding, but its count is the loop bound: an unknown count (a state file that cannot be parsed) or a
+    count that cannot be saved allows the stop with a warning rather than refusing, whether or not the
+    payload carries stop_hook_active; only a Stop whose stop_hook_active field is explicitly false (read as a
+    new turn, count 0) still refuses once with an unsaveable count, and a later Stop without the field or
+    with it true is then allowed. Any error in the hook itself, an unreadable payload, or an unrecognized
+    event exits 0 with no output (fail open). The one exception to exit 0 is an interpreter older than
+    Python 3.14 that can start the hook: the guard at the top of this file reads no input, writes one line beginning
     `error: constraint-reread.py requires Python 3.14 or newer` to stderr and exits 1, which every event this
     hook uses treats as a non-blocking error: no reminder is added at SessionStart or UserPromptSubmit, no
     compaction time is recorded at SessionStart or PreCompact, and the stop goes ahead unchecked. It does not
@@ -92,10 +106,13 @@ RESIDUAL COVERAGE
     state. With no state location (no AIQT_HOOK_STATE_DIR, XDG_STATE_HOME, or HOME as an absolute path) or no
     session key in the payload, the compaction is reminded once at SessionStart and then forgotten: no later
     reminder, no Stop refusal. Concurrent hook runs in one session can lose a count update (the replace is
-    atomic, so the file is never torn). The loop cap bounds refusals per continuous stop_hook_active run, so a
-    model that ignores the refusal is held for at most BLOCK_CAP refusals per turn and then allowed with a
-    warning; each new turn refuses again. An entry beyond the first RECORD_MAX_BYTES of the record is not seen
-    (the reminder stays on). The host clock is trusted: a wrong clock dates the compaction wrongly.
+    atomic, so the file is never torn). The loop cap bounds consecutive refusals (LOOP CAP), so a model that
+    ignores the refusal is held for at most BLOCK_CAP refusals and then allowed with a warning; the next
+    prompt the user submits, a new compaction, or a Stop with stop_hook_active explicitly false starts the
+    count again. Without UserPromptSubmit registered and without that field, the count stays at the cap, so
+    every later Stop until the next compaction is allowed with the warning (a missed refusal). An entry
+    beyond the first RECORD_MAX_BYTES of the record is not seen (the reminder stays on). The host clock is
+    trusted: a wrong clock dates the compaction wrongly.
 
 Self-test: python3 -I -S -B constraint-reread.py --self-test
 """
@@ -120,7 +137,7 @@ import tempfile
 HOOK = "constraint-reread"
 RECORD_MAX_BYTES = 1 << 20
 STATE_MAX_BYTES = 1 << 16
-BLOCK_CAP = 3  # refusals per continuous stop_hook_active run before a Stop is allowed with a warning
+BLOCK_CAP = 3  # consecutive refusals before a Stop is allowed with a warning (LOOP CAP in the docstring)
 CLOCK_SKEW = 60  # seconds an entry may lie ahead of the clock and still count
 MAX_NAMED = 20  # constraints named in one reminder
 MAX_ITEM = 300  # characters kept of one named constraint
@@ -356,16 +373,18 @@ def decide(payload, env, now):
     if st is None:
         return None
     if event != "Stop":
+        if event == "UserPromptSubmit" and st["since"] is not None and st["blocks"] != 0:
+            save_state(spath, st["since"], 0)  # a prompt the user submitted starts a new turn: the count restarts
         return _context(event, reminder(st["since"], rpath, st["constraints"], st["why"]))
-    active = payload.get("stop_hook_active") is True
-    blocks = st["blocks"] if active else 0
+    new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (LOOP CAP)
+    blocks = 0 if new_turn else st["blocks"]
     allowed = "constraint-reread: turn end allowed without a post-compaction re-read entry in " + rpath
     if st["since"] is None:  # no entry can be dated against an unknown compaction time: never hold on it
         return dict(systemMessage=allowed + " (this hook's state could not be read)")
     if blocks is None or blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + (" (refusal count unknown)" if blocks is None else " (loop cap)"))
     saved = save_state(spath, st["since"], blocks + 1)
-    if active and not saved:
+    if not saved and not new_turn:
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
     return dict(decision="block", reason="constraint-reread: the context was compacted at " + stamp(st["since"])
                 + " and "
@@ -482,7 +501,46 @@ def _self_test():
                 n += 1
             self.assertEqual(n, BLOCK_CAP)
             self.assertIn("loop cap", out["systemMessage"])
-            self.assertEqual(self.call("Stop", 30)["decision"], "block")  # a new turn refuses again
+            self.assertIn("loop cap", self.call("Stop", 29)["systemMessage"])  # no field: not a new turn
+            self.assertIn("(refusal 1 of", self.call("Stop", 30, stop_hook_active=False)["reason"])  # a new turn
+
+        def test_23_the_cap_holds_without_stop_hook_active(self):
+            # Round 20: with no stop_hook_active field in the payload the count was reset at every Stop, so the
+            # cap was never reached. Each Stop below carries no such field.
+            self.compact()
+            outs = [self.call("Stop", s) for s in range(5, 5 + BLOCK_CAP + 3)]
+            refusals = [o for o in outs if o.get("decision") == "block"]
+            self.assertEqual(len(refusals), BLOCK_CAP)
+            self.assertEqual(outs[:BLOCK_CAP], refusals)
+            for o in outs[BLOCK_CAP:]:
+                self.assertEqual(o, dict(systemMessage="constraint-reread: turn end allowed without a "
+                                         "post-compaction re-read entry in " + self.rec + " (loop cap)"))
+            self.assertEqual(load_state(self.spath())[2], BLOCK_CAP)
+            self.assertIsNotNone(self.call("UserPromptSubmit", 20))  # a prompt the user submitted: a new turn
+            self.assertEqual(load_state(self.spath())[2], 0)
+            self.assertIn("(refusal 1 of", self.call("Stop", 21)["reason"])
+            self.compact(30)  # a new compaction records a fresh count too
+            self.assertIn("(refusal 1 of", self.call("Stop", 31)["reason"])
+
+        def test_24_unknown_or_unsaveable_counts_allow_without_the_field(self):
+            self.compact()
+            with open(self.spath(), "w", encoding="ascii") as fh:
+                fh.write("\x7bnot json")
+            mtime = int(at(1).timestamp())
+            os.utime(self.spath(), (mtime, mtime))
+            self.assertIn("refusal count unknown", self.call("Stop", 5)["systemMessage"])
+            self.assertIn("refusal count unknown", self.call("Stop", 6, stop_hook_active=True)["systemMessage"])
+            self.assertIn("(refusal 1 of", self.call("Stop", 7, stop_hook_active=False)["reason"])
+            self.assertEqual(load_state(self.spath())[2], 1)  # the refusal wrote a well-formed state
+            d = os.path.dirname(self.spath())
+            os.chmod(d, 0o500)
+            try:
+                if os.access(d, os.W_OK):
+                    self.skipTest("SKIPPED, running with privileges that ignore directory modes")
+                for s in range(8, 8 + BLOCK_CAP + 2):
+                    self.assertIn("cannot be saved", self.call("Stop", s)["systemMessage"])
+            finally:
+                os.chmod(d, 0o700)
 
         def test_05_entry_must_postdate_the_compaction_and_not_be_future(self):
             self.write("Constraints-reread: " + stamp(at(-5)) + "\n", "a")
@@ -544,8 +602,9 @@ def _self_test():
             try:
                 if os.access(d, os.W_OK):
                     self.skipTest("SKIPPED, running with privileges that ignore directory modes")
-                self.assertEqual(self.call("Stop", 5)["decision"], "block")
+                self.assertEqual(self.call("Stop", 5, stop_hook_active=False)["decision"], "block")
                 self.assertIn("cannot be saved", self.call("Stop", 6, stop_hook_active=True)["systemMessage"])
+                self.assertIn("cannot be saved", self.call("Stop", 7)["systemMessage"])
             finally:
                 os.chmod(d, 0o700)
 
@@ -623,7 +682,8 @@ def _self_test():
             os.utime(self.spath(), (mtime, mtime))
             self.assertEqual(load_state(self.spath())[:2], ("bad", at(100)))
             self.write("Constraints-reread: " + stamp(at(50)) + "\n", "a")
-            self.assertEqual(self.call("Stop", 110)["decision"], "block")
+            self.assertIn("refusal count unknown", self.call("Stop", 110)["systemMessage"])
+            self.assertEqual(self.call("Stop", 110, stop_hook_active=False)["decision"], "block")
             self.write("Constraints-reread: " + stamp(at(105)) + "\n", "a")
             self.assertIsNone(self.call("Stop", 110))
 
@@ -631,6 +691,10 @@ def _self_test():
             ctx = self.compact()["hookSpecificOutput"]["additionalContext"]
             self.assertIn("at most " + str(BLOCK_CAP) + " times in a row before the stop is allowed", ctx)
             self.assertNotIn("is held", ctx)
+            doc = " ".join(__doc__.split())  # round 20: the docstring describes the cap as it works
+            self.assertNotIn("Exit status: always 0", doc)
+            self.assertNotIn("per continuous stop_hook_active run", doc)
+            self.assertIn("does not rely on the platform's stop_hook_active field", doc)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

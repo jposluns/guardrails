@@ -45,10 +45,20 @@ WHAT IT DOES
        unresolved; it does not assert that a CI rerun was started or followed a failure. A final message that
        names any disclosure word, wherever it stands (also inside a denial, a quotation or a negation, as in "I did
        not rerun CI"), clears the outstanding reruns.
-       A loop cap bounds the refusals: inside one continuous stop_hook_active run at most BLOCK_CAP, then the stop
-       is allowed with a one-line warning that says the same as the refusal: it asserts no CI rerun either, and
-       names a local rerun only as a check seen to pass after a recorded failure. The reruns stay outstanding,
-       so a later turn is refused again.
+       A loop cap bounds the refusals: at most BLOCK_CAP in a row, then the stop is allowed with a one-line
+       warning that says the same as the refusal: it asserts no CI rerun either, and names a local rerun only as
+       a check seen to pass after a recorded failure. The reruns stay outstanding. The count lives in the state
+       file and does not rely on the platform's stop_hook_active field: the cap holds whether that field is
+       absent, false or true, and a Stop without it is not read as a new turn, so the count goes on from the
+       stored value. This hook receives no event that marks a prompt the user submitted, so the count is reset
+       to 0 only by a final message that names a disclosure word (which also clears the outstanding reruns) or
+       by a Stop whose stop_hook_active field is explicitly false (the platform's own statement that this stop
+       does not continue a stop-hook refusal), and a later turn is refused again only after one of those. A
+       tool call does not reset it (a model that ignores a refusal runs tool calls inside the same
+       continuation), and neither does an allowed stop (another Stop hook may still refuse that same stop, and
+       two hooks that each reset on their own allowed stop could refuse in turn without bound). So without
+       that field, after BLOCK_CAP refusals each later conclusive stop is allowed with the warning until a
+       disclosure (a missed refusal).
 
     A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, any shell
     command outside the grammar that did not fail (also a possible CI rerun, see 3), and any other shell command
@@ -102,7 +112,8 @@ WHAT IT DOES
     Events: PostToolUse and PostToolUseFailure (matcher Bash|Write|Edit|MultiEdit|NotebookEdit), and Stop.
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext note (after a tool
     call), a top-level decision "block" object with a reason, or a top-level systemMessage warning (Stop).
-    Exit status: always 0. No configuration is needed. State: one JSON file per session (named by a SHA-256 of
+    Exit status: 0, except the floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE
+    DIRECTION). No configuration is needed. State: one JSON file per session (named by a SHA-256 of
     session_id, else transcript_path) in AIQT_HOOK_STATE_DIR/rerun-pass-check when that is an absolute path,
     else $XDG_STATE_HOME/aiqt-guardrails/rerun-pass-check, else $HOME/.local/state/aiqt-guardrails/
     rerun-pass-check (created 0700, written by an atomic replace).
@@ -110,8 +121,10 @@ WHAT IT DOES
 FAILURE DIRECTION
     After a tool call the safe direction is to inform: a rerun the hook recognizes is noted even when its state
     cannot be saved. At Stop the safe direction is not to hold the session on a guess: with no readable state,
-    no final message in the payload (last_assistant_message), or an unknown or unsaveable refusal count under
-    stop_hook_active, the stop is allowed. A state file longer than STATE_MAX_BYTES, or with a negative
+    no final message in the payload (last_assistant_message), or a refusal count that cannot be saved, the
+    stop is allowed with a warning, whether or not the payload carries stop_hook_active; only a Stop whose
+    stop_hook_active field is explicitly false (read as a new turn, count 0) still refuses once when the count
+    cannot be saved. A state file longer than STATE_MAX_BYTES, or with a negative
     counter or a non-text flag, is malformed and read as no state (it is never parsed from a cut prefix). A
     well-formed state file without the current STATE_VERSION (written by an earlier revision of the hook) is
     discarded and read as no earlier runs, so no flag it holds arms a refusal; one of the current STATE_VERSION
@@ -215,7 +228,7 @@ import tempfile
 
 HOOK = "rerun-pass-check"
 STATE_MAX_BYTES = 1 << 18
-BLOCK_CAP = 2  # refusals per continuous stop_hook_active run before a Stop is allowed with a warning
+BLOCK_CAP = 2  # consecutive refusals before a Stop is allowed with a warning (see 4 in the docstring)
 MAX_CHECKS = 200
 MAX_FLAGS = 20
 MAX_SHOWN = 160  # characters of a command shown in a note
@@ -763,15 +776,15 @@ def at_stop(payload, state, readable, path):
         return None
     if not conclusive(msg):
         return None
-    active = payload.get("stop_hook_active") is True
-    blocks = state["blocks"] if active else 0
+    new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (see 4 in the docstring)
+    blocks = 0 if new_turn else state["blocks"]
     allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
                "session ran a command that names a CI rerun and was not reported as failed, or saw a check pass on a "
                "rerun after a recorded failure")
     if blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + " (loop cap)")
     state["blocks"] = blocks + 1
-    if not save_state(path, state) and active:
+    if not save_state(path, state) and not new_turn:
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
     return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
                 "but this session ran a command that names a CI rerun and was not reported as failed, or saw a "
@@ -905,9 +918,11 @@ def _self_test():
             return decide(dict(hook_event_name="PostToolUse", session_id="s", tool_name="Edit",
                                tool_input=dict(file_path="/x")), self.env)
 
-        def stop(self, msg, active=False):
-            return decide(dict(hook_event_name="Stop", session_id="s", last_assistant_message=msg,
-                               stop_hook_active=active), self.env)
+        def stop(self, msg, active=False):  # active None: the payload carries no stop_hook_active field
+            payload = dict(hook_event_name="Stop", session_id="s", last_assistant_message=msg)
+            if active is not None:
+                payload["stop_hook_active"] = active
+            return decide(payload, self.env)
 
         def test_01_local_rerun_is_noted(self):
             self.assertIsNone(self.bash("pytest -q tests", ok=False))
@@ -1821,6 +1836,41 @@ def _self_test():
             self.assertIn("(of CI, each says only that a command naming a CI rerun was not reported as failed)",
                           desc[0])
             self.assertNotIn("(each says only", desc[0])
+
+        def test_49_the_cap_holds_without_stop_hook_active(self):
+            # Round 20: with no stop_hook_active field in the payload the count was reset at every Stop, so the
+            # cap was never reached. Each Stop below carries no such field.
+            path = state_path(dict(session_id="s"), self.env)
+            allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
+                       "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
+                       "pass on a rerun after a recorded failure")
+            self.bash("gh run rerun 7")
+            outs = [self.stop("All tests pass.", active=None) for _ in range(BLOCK_CAP + 3)]
+            refusals = [o for o in outs if o.get("decision") == "block"]
+            self.assertEqual(len(refusals), BLOCK_CAP)
+            self.assertEqual(outs[:BLOCK_CAP], refusals)
+            for o in outs[BLOCK_CAP:]:
+                self.assertEqual(o, dict(systemMessage=allowed + " (loop cap)"))
+            self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
+            self.bash("gh run rerun 8")  # a tool call is no new turn
+            self.assertEqual(self.stop("All tests pass.", active=None), dict(systemMessage=allowed + " (loop cap)"))
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=False)["reason"])  # explicit false
+            self.assertIsNone(self.stop("It was flaky; all tests pass.", active=None))  # a disclosure resets
+            self.bash("gh run rerun 9")
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+            # A count that cannot be saved allows without the field (and under it); explicit false refuses once.
+            state = dict(new_state(), flags=["CI rerun command: gh run rerun 7"])
+            for active in (None, True):
+                payload = dict(last_assistant_message="All tests pass.")
+                if active is not None:
+                    payload["stop_hook_active"] = active
+                self.assertEqual(at_stop(payload, dict(state), True, None),
+                                 dict(systemMessage=allowed + " (refusal count cannot be saved)"), active)
+            self.assertEqual(at_stop(dict(last_assistant_message="All tests pass.", stop_hook_active=False),
+                                     dict(state), True, None)["decision"], "block")
+            doc = " ".join(__doc__.split())
+            self.assertNotIn("per continuous stop_hook_active run", doc)
+            self.assertIn("does not rely on the platform's stop_hook_active field", doc)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

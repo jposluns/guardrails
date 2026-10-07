@@ -72,7 +72,10 @@ the authority, and the summary further down this page only points to it.
   it cannot make the assistant honour them. When Claude Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
   record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
   compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
-  with a warning, so a turn end is never held until an entry is recorded. If the hook's state location
+  with a warning, so a turn end is never held until an entry is recorded. The count is kept in its state
+  file and does not rely on the `stop_hook_active` input field, so the cap holds whether that field is
+  absent, false or true; it restarts only at the next prompt you submit (`UserPromptSubmit`), a new
+  compaction, or a turn end whose `stop_hook_active` is explicitly false. If the hook's state location
   cannot be examined, it keeps reminding but says that no entry can clear the reminder, and it does not
   refuse the turn end. It detects a compaction by the platform's own markers: the `SessionStart` input field
   `source` with the value `compact`, and the `PreCompact` event, both described in the
@@ -83,7 +86,10 @@ the authority, and the summary further down this page only points to it.
   with the same words, each as written with its quoting, and no recorded change between (a certain rerun;
   a check whose words hold an expansion, such as `$LINENO` or `tests/test_*.py`, is never compared), it
   adds a note to the assistant's context; at turn end it refuses, at most twice in a row, a final
-  message that calls a pass conclusive without naming the earlier failure. Events: `PostToolUse` and
+  message that calls a pass conclusive without naming the earlier failure. The count is kept in its
+  state file and does not rely on the `stop_hook_active` input field, so the cap holds whether that
+  field is absent, false or true; it restarts only at a final message that names a disclosure word or
+  a turn end whose `stop_hook_active` is explicitly false. Events: `PostToolUse` and
   `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`), and `Stop`. Its shell reading
   is exact only for a small closed grammar (listed in its docstring) and for commands of at most 8192
   characters. Inside it, a CI rerun is missed only when its words come into existence when the command
@@ -125,10 +131,10 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `2684d58043c71b4288c072465ba127e131e78073a5f05f7231399ac74aadbc62` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `5225b4fca9afabfba1fa377a9feb898056b40647b7f0ad0bc326a1f8fe0251f1` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `cc8ac07234b091c4851191248090cd4e84bd35be203da65f45a3020589bb2981` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `c76807ff75e410544a767a5782cbd24d5d83d86a5d6b5020e731428f9c0f9c64` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
@@ -392,7 +398,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   It sees a compaction only through the platform markers named above, so a context lost without one (a
   new session, a host without those events, a hook not registered for them) is not seen. Without a state
   folder or a session id it reminds once and then forgets. Its turn-end refusal is capped, so a model that
-  ignores it is allowed to stop after three refusals with a warning.
+  ignores it is allowed to stop after three refusals with a warning. Without `UserPromptSubmit` registered
+  and without a `stop_hook_active` field in the input, the count stays at the cap, so every later turn end
+  until the next compaction is allowed with the warning (a missed refusal).
 - **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
   through the shell tool, with the same words, each as written with its quoting (a word quoted another way
   is a different check, and so is an operator spelled another way, such as a newline in place of `;`
@@ -423,7 +431,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   the stop is allowed, but the current call's own CI rerun or possible CI rerun note is still given. A
   state file written by an earlier revision of the hook is read the same way, so none of its flags arms a
   refusal. The state file is trusted: a hand-edited state of the current revision whose flags are of the
-  kinds it keeps still arms a refusal.
+  kinds it keeps still arms a refusal. It receives no event for a prompt you submit, so without a
+  `stop_hook_active` field in the input, once it has refused twice in a row every later conclusive turn
+  end is allowed with the warning until a final message names a disclosure word (a missed refusal).
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git
