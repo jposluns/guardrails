@@ -2158,31 +2158,41 @@ carries or states a declaration that differs from that file's, where any conform
 release omits either digest or the runtime result, writes either digest in any other form,
 `not-read` with a runtime result other than `cannot_evaluate` included, writes the runtime result in
 any form other than `pass`, `fail`, and `cannot_evaluate`, or carries a shipped-file digest other
-than the digest of that file's bytes as the release ships them, or where its documentation does not
-state where the implementation carries the shipped-file digest. Each such failure is a release
-nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the
-declaration malformed or contradictory, and it does not change what a runtime check of the installed
-copy yields. A check of the documentation or the conformance reports of a release MUST compare each
-restatement, each shipped-file digest, and each installed-copy digest with that file's bytes as the
-release ships them, never with an installed copy. An implementation that declares no class MUST be
-treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A
-declaration that is absent, or that omits its release identity, its `spec_version`, its homes
-generation, or its worklog storage generation, is malformed rather than one that declares no class:
-it MUST yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that carries
-its release identity, its `spec_version`, its homes generation, and its worklog storage generation,
-and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission,
-and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is
-malformed or contradictory on other grounds. The rules on an absent, unreadable, malformed,
-contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to
-the installed copy as it stands, a check of the documentation or the conformance reports MUST apply
-them to that file as the release ships it, and each check MUST NOT take a class or any other field
-from the documentation of the release or from a conformance report. Where that documentation or a
-conformance report of that release states a class that the file omits, the release does not conform
-to this section because that restatement states a field the file does not carry, and the file
-declares no class only where it omits its class and no other field: a file that is absent, or that
-also omits its release identity, its `spec_version`, its homes generation, or its worklog storage
-generation, is malformed and MUST yield cannot-evaluate.
+than the digest of that file's bytes as the release ships them, where any conformance report of that
+release whose installed-copy digest is that digest states a runtime result other than one that the
+runtime check of a fresh, unmodified installation of that release yields over an installed copy
+holding exactly those bytes, or where its documentation does not state where the implementation
+carries the shipped-file digest. Each such failure is a release nonconformance, never a runtime
+state of the declaration: it MUST NOT be treated as making the declaration malformed or
+contradictory, and it does not change what a runtime check of the installed copy yields. A check of
+the documentation or the conformance reports of a release MUST compare each restatement, each
+shipped-file digest, and each installed-copy digest with that file's bytes as the release ships
+them, never with an installed copy. A fresh, unmodified installation of a release is one made as the
+documentation of that release directs and changed by nothing since, and a check that tests the
+runtime result of a conformance report MUST run the runtime check of such an installation whose
+installed copy holds exactly that file's bytes as the release ships them and compare the result it
+yields with that runtime result, never with the result of any other installation; where no such
+installation holds those bytes, as where the installer of that release rewrites that file, that
+check cannot establish that the runtime result differs, which section 17 discloses. An
+implementation that declares no class MUST be treated as upgrade-capable, and every upgrade
+requirement binds it. An unreadable, malformed, or contradictory declaration MUST yield
+cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or that
+omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
+MUST NOT authorize any store operation. A declaration that carries its release identity, its
+`spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
+declares no class: it MUST NOT be treated as malformed for that omission, and the implementation
+that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
+contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
+classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
+as it stands, a check of the documentation or the conformance reports MUST apply them to that file
+as the release ships it, and each check MUST NOT take a class or any other field from the
+documentation of the release or from a conformance report. Where that documentation or a conformance
+report of that release states a class that the file omits, the release does not conform to this
+section because that restatement states a field the file does not carry, and the file declares no
+class only where it omits its class and no other field: a file that is absent, or that also omits
+its release identity, its `spec_version`, its homes generation, or its worklog storage generation,
+is malformed and MUST yield cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2518,58 +2528,63 @@ The gates in this standard are strong where they are strong and say so where the
   `.working/`, which only the `import_status` item reaches. Admission parses only the section 16.1
   candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and
   14.2), and never reads beneath a path registered under `[unmanaged]` that section 14.2 permits, so
-  a listed item kept outside those candidates, such as a legacy-format inventory kept under such a
-  path or anywhere but the root of a staging or evidence run folder, goes undetected; an
-  `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave
-  a path unsearched. Admission recognizes only the adoption receipts of the implementation's own
-  section 14 adoption writer, so where another implementation's writer placed a store's adoption
-  receipt under `.working/imported/adoption/` at another path or in another format, and that area
-  holds no adoption receipt of the implementation's own writer, the check cannot establish whether
-  that store holds an adoption receipt, and a `partial` or `complete` `import_status` there is
-  cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format
-  adoption set that status. An adoption receipt kept outside `.working/imported/adoption/`, which
-  section 14.2 does not permit, decides nothing, so where that area holds no file, its store's
-  `partial` or `complete` `import_status` is refused as `unsupported-legacy-state`. A refusal at its
-  pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an
-  adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included,
-  needs an upgrade-capable implementation for that store. The lease and recovery steps of sections
-  5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that
-  follows them (section 16.1). The pre-scan refuses, before any write, a store whose manifest
-  declares a version or generation that the check refuses or that shows a listed legacy-state item,
-  the live bytes of an operand of an interrupted transaction included, and defers only the
-  cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of
-  such a transaction within the recovery bound, so a store that only the later check refuses or
-  cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own
-  result meets a refusal, or where something that does not take the lease changed the store between
-  the pre-scan and the recovery, may carry the effects of a completed recovery of the
-  implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the
-  section 5.7 reconciliation of a dead run's leftover lease. A command that writes and takes its
-  lease after admission rechecks admission once that lease is taken and observable and before any
-  other write; a stop there writes nothing but what section 5.7 requires to end the command's own
-  claim: it releases a `lease.toml` that carries its own claim and leaves untouched one that carries
-  another holder's claim. That stop restores nothing else, so a change that another process made and
-  the recheck detected stays in the tree; where the store has a sync target, that target's history
-  can keep the lease's claim and release, and where the concurrent-operation module is enabled the
-  `session_lease` record of that claim and its release remain. Within the section 16.1 recovery
-  bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1,
-  or 14.2 recovery does, to complete or roll back an interrupted transaction before admission runs;
-  a command that performs no such recovery, a read-only command included, reports a store with a
-  torn candidate as cannot-evaluate until a recovering command recovers it, and a clone without the
-  journal (section 4.2) stays cannot-evaluate. Only the transactions section 16.1 lists are
-  recovered that way: a candidate torn by any other write, such as a section 12 rotation or a
-  non-green outcome event appended to an adoption receipt, is classed like any other candidate even
-  where the implementation journals that write, so one left unparseable stays cannot-evaluate for
-  every command of a fresh-only implementation, its own writers included, until it is repaired by
-  hand, and one left parseable is not recognized as torn. A section 14.1 restore after a committed
-  apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's
-  store manifest apart from a foreign source at a candidate path binds only that first adoption, so
-  a restore that copies archived bytes to a candidate path, such as an importer-authored
+  a listed item defined by file content and kept outside those candidates, such as a legacy-format
+  inventory kept under such a path or anywhere but the root of a staging or evidence run folder,
+  goes undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input,
+  never a reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
+  implementation's own section 14 adoption writer, so where another implementation's writer placed a
+  store's adoption receipt under `.working/imported/adoption/` at another path or in another format,
+  and that area holds no adoption receipt of the implementation's own writer, the check cannot
+  establish whether that store holds an adoption receipt, and a `partial` or `complete`
+  `import_status` there is cannot-evaluate: never refused as legacy, but not admitted either, even
+  where a current-format adoption set that status. An adoption receipt kept outside
+  `.working/imported/adoption/`, which section 14.2 does not permit, decides nothing, so where that
+  area holds no file, a store at the supported version whose `import_status` is `partial` or
+  `complete` is refused as `unsupported-legacy-state`. A refusal at its pre-scan leaves a store
+  unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds
+  legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
+  implementation for that store. The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2
+  run after a read-only pre-scan and before the admission check that follows them (section 16.1).
+  The pre-scan refuses, before any write, a store whose manifest declares a version or generation
+  that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of
+  an interrupted transaction included, and defers only the cannot-evaluate classification of an
+  unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery
+  bound, together with a discovery outcome that such an operand alone decides, so a store that only
+  the later check refuses or cannot evaluate, as where such an operand stays contradictory after
+  recovery or the recovery's own result meets a refusal, or where something that does not take the
+  lease changed the store between the pre-scan and the recovery, may carry the effects of a
+  completed recovery of the implementation's own interrupted transaction, within the section 16.1
+  recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease. A command
+  that writes and takes its lease after admission confirms, once that lease is taken and observable
+  and before any other write, that the `lease.toml` carries its own claim and that every directory
+  listing, existence-probe result, and candidate the admission check read is unchanged apart from
+  exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what
+  section 5.7 requires to end the command's own claim: it releases a `lease.toml` that carries its
+  own claim and leaves untouched one that does not. That stop restores nothing else, so a change
+  that another process made and the recheck detected stays in the tree; where the store has a sync
+  target, that target's history can keep the lease's claim and release, and where the
+  concurrent-operation module is enabled the `session_lease` record of that claim and its release
+  remain. Within the section 16.1 recovery bound, a fresh-only implementation trusts its own
+  writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back
+  an interrupted transaction before the admission check that follows recovery runs; a command that
+  performs no such recovery, a read-only command included, reports a store with a candidate that an
+  interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering
+  command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate. Only the
+  transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such
+  as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed
+  like any other candidate even where the implementation journals that write, so one left
+  unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own
+  writers included, until something outside that implementation, such as a hand edit, repairs it,
+  and one left parseable is not recognized as torn. A section 14.1 restore after a committed apply
+  is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store
+  manifest apart from a foreign source at a candidate path binds only that first adoption, so a
+  restore that copies archived bytes to a candidate path, such as an importer-authored
   `worklog.toml` restored over the live one, leaves a store that every command of a fresh-only
-  implementation, its own writers included, then refuses as `unsupported-legacy-state` where those
-  bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable,
-  malformed, or contradictory. A change made after the recheck by
-  anything that does not take the lease, such as a hand edit or a branch switch, is outside
-  admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+  implementation, its own writers included, then refuses where those bytes show a listed item, as
+  `unsupported-legacy-state` where the store stays at the supported version, or reports as
+  cannot-evaluate where it classes them unreadable, malformed, or contradictory. A change made after
+  the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is
+  outside admission. Until validation tooling ships, a class claim is self-asserted (section 16).
 - The section 16.1 runtime check compares the installed copy of a release's declaration file with
   the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
   which yields cannot-evaluate. It does not detect a co-edit that changes both the installed copy
@@ -2590,30 +2605,40 @@ The gates in this standard are strong where they are strong and say so where the
   installed-copy digest is 64 lowercase hexadecimal digits and its runtime result is other than
   `cannot_evaluate`, so such a report that states `cannot_evaluate` over a runtime check that did
   not yield cannot-evaluate is reported neither as a release nonconformance nor as inconsistent with
-  the release. An installation whose emitter is altered, whether or not its installed copy is, can
-  put its reports in scope, where they can make the release as shipped nonconformant although it is
-  not at fault, because the scope test cannot tell an altered emitter from an unmodified
-  installation. Such an emitter can, for example, write the digest of the shipped bytes in place of
-  its installed copy's, omit the installed-copy digest or write it in any other form, write
-  `not-read` with a runtime result other than `cannot_evaluate`, or, over an installed copy that is
-  unchanged, write a wrong restatement or omit the runtime result. An anchor outside the
-  installation, such as a signature over that file that the implementation verifies or an
-  independent anchor like the one that section 14.1 has a plan's `manifest_sha256` checked against,
-  is the stronger option only against an edit that does not also change the implementation's
-  verification key or its anchor check; section 16.1 does not require one. An installer that
-  rewrites that file's bytes, such as by converting its line endings, makes every runtime check of
-  the rewritten copy yield cannot-evaluate (fail-closed) where the implementation carries the digest
-  of that file's bytes as the release ships them, and a report that installation emits with its
-  installed copy's digest is not a conformance report of the release, because that digest differs
-  from the digest of that file's bytes as the release ships them. Where a release's implementation
-  instead carries the digest of the rewritten bytes, each runtime check that reads a copy holding
-  exactly those bytes passes the byte comparison and then validates that copy as the declaration, so
-  it still yields cannot-evaluate where that copy is malformed or contradictory on other grounds.
-  Such a release carries no digest of that file's bytes as the release ships them, so it does not
-  conform to section 16.1, yet where no installed copy holds those shipped bytes and every emitter
-  writes the installed-copy digest and the runtime result as section 16.1 defines them, no report is
-  in scope to show that: a check of the conformance reports then finds no conformance report of the
-  release and reports as inconsistent with it each report that states a runtime result other than
+  the release. A conformance report whose installed-copy digest is the digest of that file's bytes
+  as the release ships them and whose runtime result differs from one that the runtime check of a
+  fresh, unmodified installation of that release yields over an installed copy holding exactly those
+  bytes, such as `cannot_evaluate` where that check authorizes store operations, makes the release
+  nonconformant (section 16.1), but a check of the conformance reports establishes that only by
+  running such an installation, and where no fresh, unmodified installation of that release holds
+  those bytes, as where its installer rewrites that file, no check of the conformance reports can
+  establish it. An installation whose runtime check or carried shipped-file digest is altered while
+  its installed copy is unchanged can emit such a report, as an installation whose emitter is
+  altered can, and so make the release as shipped nonconformant although the release is not at
+  fault. An installation whose emitter is altered, whether or not its installed copy is, can put its
+  reports in scope, where they can make the release as shipped nonconformant although it is not at
+  fault, because the scope test cannot tell an altered emitter from an unmodified installation. Such
+  an emitter can, for example, write the digest of the shipped bytes in place of its installed
+  copy's, omit the installed-copy digest or write it in any other form, write `not-read` with a
+  runtime result other than `cannot_evaluate`, or, over an installed copy that is unchanged, write a
+  wrong restatement or omit the runtime result. An anchor outside the installation, such as a
+  signature over that file that the implementation verifies or an independent anchor like the one
+  that section 14.1 has a plan's `manifest_sha256` checked against, is the stronger option only
+  against an edit that does not also change the implementation's verification key or its anchor
+  check; section 16.1 does not require one. An installer that rewrites that file's bytes, such as by
+  converting its line endings, makes every runtime check of the rewritten copy yield cannot-evaluate
+  (fail-closed) where the implementation carries the digest of that file's bytes as the release
+  ships them, and a report that installation emits with its installed copy's digest is not a
+  conformance report of the release, because that digest differs from the digest of that file's
+  bytes as the release ships them. Where a release's implementation instead carries the digest of
+  the rewritten bytes, each runtime check that reads a copy holding exactly those bytes passes the
+  byte comparison and then validates that copy as the declaration, so it still yields
+  cannot-evaluate where that copy is malformed or contradictory on other grounds. Such a release
+  carries no digest of that file's bytes as the release ships them, so it does not conform to
+  section 16.1, yet where no installed copy holds those shipped bytes and every emitter writes the
+  installed-copy digest and the runtime result as section 16.1 defines them, no report is in scope
+  to show that: a check of the conformance reports then finds no conformance report of the release
+  and reports as inconsistent with it each report that states a runtime result other than
   `cannot_evaluate`, and only an inspection of the implementation shows that the fault is the
   release's. A report that an installation emits and that lacks the installed-copy digest, or writes
   it in a form other than 64 lowercase hexadecimal digits or `not-read` with `cannot_evaluate`, is
