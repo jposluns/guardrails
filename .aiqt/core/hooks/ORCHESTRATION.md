@@ -174,9 +174,12 @@ directory below, and a declaration there arms slice confinement.
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,
 `backlog-checkpoint.json`, `attestations-validated.json`, and, when their events occur,
-`escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it) and the
+`escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it; each rename
+replaces the earlier `.surfaced` file and a failed rename leaves it to be raised again, so the lasting
+record of each ignored sentinel is its `guard-events.jsonl` row of kind `escape-spoof`) and the
 append-only `forced-exit.jsonl` (every non-closed-disposition forced exit appended as its own row,
-each surfaced exactly once, tracked by a companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
+each surfaced normally once, at least once if recording that it was surfaced fails, tracked by a
+companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
 scan), and is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` declaration line, or a JSON
 object with exactly a top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`). A
 leading byte-order mark is tolerated in both shapes (stripped once before any check). The `Operating-mode:`

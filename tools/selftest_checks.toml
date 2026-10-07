@@ -406,6 +406,8 @@ expected-check-ids = [
   "barrier/reader-names-directory-only-where-lstat-matches-its-fstat",
   "barrier/close-once-never-retried-earlier-bad-result-wins",
   "barrier/omitted-findings-line-names-surviving-forced-exit-log",
+  "barrier/omitted-findings-line-escape-record-survives-two-sentinels",
+  "barrier/omitted-findings-line-escape-record-failed-rename",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",

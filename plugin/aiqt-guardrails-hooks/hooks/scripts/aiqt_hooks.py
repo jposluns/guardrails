@@ -9476,8 +9476,8 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
     marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
     APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
-    unique key), so two forced exits before a resume are BOTH kept and each surfaced exactly once,
-    never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
+    unique key), so two forced exits before a resume are BOTH kept and each surfaced normally once (at
+    least once if recording that it was surfaced fails), never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
     ever suppresses this record. Returns '' on success, else the failure text the caller MUST append to
     its banner (the one record this design leans on can never fail silently). The verdict is never
     changed here."""
@@ -11013,7 +11013,7 @@ def _orch_validate_attestations(reg, root):
 
 
 def _orch_forced_exit_findings(sd):
-    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row exactly once. A companion
+    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row normally once. A companion
     forced-exit-surfaced.json records the keys already raised; a row whose key is not yet recorded
     becomes a finding, and the surfaced set advances only on a successful write. An unreadable log, a
     malformed line, or an unreadable/unwritable surfaced set re-fires next resume rather than losing
@@ -11054,10 +11054,13 @@ def _orch_forced_exit_findings(sd):
 
 
 def _orch_pending_artefact_findings(root):
-    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised once and renamed with
-    a .surfaced suffix, staying in the record; an unreadable one re-fires (chkfcl). Forced exits are an
-    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised exactly
-    once and never clobbered."""
+    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised, then renamed to
+    escape-spoof.json.surfaced, which replaces any earlier .surfaced file, so that file holds only the
+    latest sentinel whose rename succeeded; a failed rename leaves it at escape-spoof.json, raised again
+    next resume, as an unreadable one is (chkfcl). The lasting record of each ignored sentinel is its
+    append-only guard-events.jsonl row of kind escape-spoof (_orch_record_escape_spoof). Forced exits are
+    an append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised normally
+    once (at least once if recording that one was raised fails) and never clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "escape-spoof.json")
@@ -11214,17 +11217,29 @@ _ORCH_BARRIER_REST_RE = re.compile(
 
 def _orch_barrier_rest(count, sd):
     """The last line _orch_barrier_fit stores in place of the findings that do not fit (sd is the state
-    directory holding the barrier). It points only at evidence that outlives the audit: a forced-exit
-    finding and an ignored escape sentinel are raised once (_orch_pending_artefact_findings records them
-    as surfaced), so a later audit, the doctor's included, does not list them again; the line names the
-    files that keep those records in full. Every other finding is recomputed from the record by each
-    audit, so 'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
+    directory holding the barrier). It points only at evidence that outlives the audit. A forced-exit
+    finding is normally raised once (at least once: _orch_forced_exit_findings advances its surfaced set
+    only where that write succeeds), so a later audit, the doctor's included, does not list it again; the
+    line names forced-exit.jsonl, the append-only log that keeps every forced-exit record in full. An
+    ignored escape sentinel is raised from escape-spoof.json, which _orch_pending_artefact_findings then
+    renames to escape-spoof.json.surfaced: each later rename replaces that file, so it holds only the
+    latest sentinel whose rename succeeded, and a failed rename leaves the sentinel at escape-spoof.json,
+    where the next audit raises it again. So the line names guard-events.jsonl, whose append-only rows of
+    kind escape-spoof (_orch_record_escape_spoof) are the lasting record of each sentinel (a row that
+    could not be written was warned about when the sentinel was ignored), and says what the .surfaced
+    file and escape-spoof.json hold. Every other finding is recomputed from the record by each audit, so
+    'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
     return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes). A forced-exit "
-            "finding is raised only once: read every forced-exit record in full in {} (an ignored escape "
-            "sentinel is kept in {}). Every other finding still present is printed again by 'python3 "
+            "finding is normally raised once (at least once if recording that it was raised fails): read "
+            "every forced-exit record in full in {} (an ignored escape sentinel is likewise normally raised "
+            "once; its lasting record is its row of kind escape-spoof in {}, and a row that could not be "
+            "written was warned about when the sentinel was ignored; {} holds only the latest sentinel "
+            "whose rename succeeded, and a failed rename leaves it at {}, where the next audit raises it "
+            "again). Every other finding still present is printed again by 'python3 "
             "tools/orch_doctor.py --resume-audit'".format(
                 count, _ORCH_BARRIER_MAX_BYTES, os.path.join(sd, "forced-exit.jsonl"),
-                os.path.join(sd, "escape-spoof.json.surfaced")))
+                os.path.join(sd, "guard-events.jsonl"), os.path.join(sd, "escape-spoof.json.surfaced"),
+                os.path.join(sd, "escape-spoof.json")))
 
 
 def _orch_barrier_fit(obj, sd):

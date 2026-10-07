@@ -2851,7 +2851,10 @@ def _main_isolated(report_path=None):
         # same device, another inode), so the reader's fstat and its lstat disagree; _orch_barrier_read
         # names it "not a regular file" and the handler gives the generic note, never the
         # remove-the-directory note. Without the swap the same directory is named a directory and gets
-        # that note. Red when the reader calls _orch_barrier_nonregular(path) without its fstat.
+        # that note. Red when the reader calls _orch_barrier_nonregular(path) without its fstat. The swap
+        # stays on one filesystem, so this vector exercises only the inode half of the reader's
+        # (st_dev, st_ino) comparison; the device half is not tested here (a second filesystem is not
+        # practical in a self-test).
         _r18_real_open = os.open
         _r18_moved = rsd / "r18-dir-moved"
 
@@ -2981,6 +2984,63 @@ def _main_isolated(report_path=None):
                _r18_log == _r18_rows and all(row in _r18_log for row in _r18_omitted),
                "tools/orch_doctor.py --resume-audit" in _r18_line and "to list them all" not in _r18_line),
               ("warn", True, True, 1, False, True, True, True, True))
+        # ROUND 19, THE OMITTED-FINDINGS LINE NAMES THE LASTING ESCAPE RECORD: the count line a barrier
+        # too large to store gets (_orch_barrier_fit) is read for the files it names, and each one is read
+        # back. Two ignored escape sentinels in a row (T1, then T2) are each recorded, raised by the resume
+        # probe and renamed to escape-spoof.json.surfaced: the guard-events.jsonl the line names holds an
+        # escape-spoof row for T1 and for T2, and the .surfaced file it names holds T2, never T1 (the line
+        # says it holds only the latest sentinel whose rename succeeded). The line says a forced-exit
+        # finding is normally raised once, at least once if recording it fails, never "only once". Red
+        # when the line names .surfaced as keeping the escape records, or names a file the hook does not
+        # write.
+        _r19_fx = Fixture(tmp, "r19-escape")
+        _r19_root = str(_r19_fx.root)
+        _r19_sd = Path(aiqt_hooks._orch_state_dir_for_root(_r19_root))
+        _r19_line = aiqt_hooks._orch_barrier_fit(
+            dict(active=True, findings=["r19 " + "z" * 3000] * 40, warned=False), str(_r19_sd))["findings"][-1]
+
+        def _r19_named(pattern):
+            m = _r18_re.search(pattern, _r19_line)
+            return m.group(1) if m else None
+        _r19_events = _r19_named(r"its row of kind escape-spoof in (.+?), and a row that could not")
+        _r19_kept = _r19_named(r"was ignored; (.+?) holds only the latest sentinel whose rename succeeded")
+        _r19_left = _r19_named(r"a failed rename leaves it at (.+?), where the next audit raises it again")
+
+        def _r19_detail(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return json.load(fh).get("detail")
+            except (TypeError, OSError, ValueError):
+                return None
+
+        def _r19_spoofs():
+            rows = aiqt_hooks._orch_read_jsonl(_r19_events)[0] if _r19_events else None
+            return [row.get("detail") for row in rows or [] if row.get("kind") == "escape-spoof"]
+
+        def _r19_raise(detail):
+            warn = aiqt_hooks._orch_record_escape_spoof(_r19_root, detail)
+            return (warn, any(detail in f for f in aiqt_hooks._orch_pending_artefact_findings(_r19_root)))
+        check("barrier/omitted-findings-line-escape-record-survives-two-sentinels",
+              (aiqt_hooks._ORCH_BARRIER_REST_RE.match(_r19_line) is not None, _r19_raise("r19-T1"),
+               _r19_raise("r19-T2"), _r19_events == str(_r19_sd / "guard-events.jsonl"), _r19_spoofs(),
+               _r19_kept == str(_r19_sd / "escape-spoof.json.surfaced"), _r19_detail(_r19_kept),
+               "normally raised once (at least once if recording that it was raised fails)" in _r19_line,
+               "raised only once" in _r19_line or "is kept in" in _r19_line),
+              (True, ("", True), ("", True), True, ["r19-T1", "r19-T2"], True, "r19-T2", True, False))
+        # ROUND 19, A FAILED RENAME LEAVES THE SENTINEL WHERE THE LINE SAYS: with escape-spoof.json.surfaced
+        # a directory, a third sentinel (T3) is recorded and raised but its rename fails; the .surfaced
+        # path the line names is that directory (it holds no sentinel), the escape-spoof.json the line names
+        # still holds T3, the next probe raises T3 again, and the guard-events.jsonl the line names holds
+        # T1, T2 and T3 (red when the line names another file for the sentinel a failed rename leaves).
+        (_r19_sd / "escape-spoof.json.surfaced").unlink()
+        (_r19_sd / "escape-spoof.json.surfaced").mkdir()
+        check("barrier/omitted-findings-line-escape-record-failed-rename",
+              (_r19_raise("r19-T3"), bool(_r19_kept) and os.path.isdir(_r19_kept),
+               _r19_left == str(_r19_sd / "escape-spoof.json"), _r19_detail(_r19_left),
+               any("r19-T3" in f for f in aiqt_hooks._orch_pending_artefact_findings(_r19_root)),
+               _r19_spoofs()),
+              (("", True), True, True, "r19-T3", True, ["r19-T1", "r19-T2", "r19-T3"]))
+        (_r19_sd / "escape-spoof.json.surfaced").rmdir()
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
