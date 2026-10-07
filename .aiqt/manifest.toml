@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "424015ad1a02c7c44976c54bf692683cd6891e9772e79f0becef0dfe48d8c791"
+tree-sha256 = "da9a87899d0197be937a1d3e4911d3c3eacda4d8f69235f2d5b302f14b0d0ffe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -46,8 +46,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 11574
-sha256 = "e2cab917387da87327141c833fd96193b215d0a38e088bbdbc51d8b57780349b"
+bytes = 11618
+sha256 = "d14834a990bb1b6a11e749e39aec0e4a2337cce57c30325f6754b890d502a523"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257623
-sha256 = "c53c28f2dd9769cbefa84815d41784e5b9e8588a69b56d8060ce858127a87341"
+bytes = 258804
+sha256 = "c361fbb4f892ce25c7904c9c71ae5befd62773c2ffe6bc66fdf93cf331923fb5"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -101,8 +101,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 15812
-sha256 = "5779525a1b5bd2506d24aaae224806bfd04278a4226db9706772200cbef0b912"
+bytes = 16031
+sha256 = "f276088910faec9813d6fbcb117dac50e0dfa5dede9f288aee381760852ca733"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7335
-sha256 = "6b29dcd329f90ea34ca26121d38f23516687ef561d6bc8f9190d25eabdcfa9c0"
+bytes = 7370
+sha256 = "a7d01fc7b734f0995d216ae90040e75f76054f90eba23f7b14186e5d6575c71f"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -796,8 +796,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 350506
-sha256 = "062d95f7006943f7d83d196ce7bdc46e1ef150d485d7e7e87105e047ce9612f4"
+bytes = 352981
+sha256 = "e1af1edef3e212ac4186dc2f4fbd4d378cff886506fc1b8af69b8d86dc9b21fb"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2246,8 +2246,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41719
-sha256 = "70069c3fdae82a6d19d4ad0d0355f7ebabb17b9f7a556c181807f374f1a47bc3"
+bytes = 41759
+sha256 = "d61375dc238fb3dbd91c9463a393ba7a6554f70ef42a7c222b10e8106225f75c"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2311,8 +2311,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 205406
-sha256 = "ac5ad3f091d182236f81ca816f09fd6d7af2f2eaeb9a77d6fa247a7d819e7e93"
+bytes = 206636
+sha256 = "11f2e53bc4d89f3ae6fc0b4a11e1eafb6280c26468cbcf7c901c1f739df93466"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 254346
-sha256 = "ff04feedb1cc94639dea37a030b6ed33eddd7086498750fe94fcdce30c8951da"
+bytes = 256140
+sha256 = "86a13dfd70482b093cfeead4d981ef3b75f378ed61869db228f86e6a6bcfd484"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3223,6 +3223,11 @@ sha256 = "c6f56964a49788c534ca8bd9bd9be99a45401bfc37ad9a087a09c1bd7768fb01"
 path = "tools/check_branch_root.py"
 bytes = 25772
 sha256 = "8200fb8c8dbf53ee0a74f0a3c5ac1c0ea00ec84bf147cfa836b8f3f32fefe2d8"
+
+[[sources]]
+path = "tools/check_brief_claims.py"
+bytes = 59671
+sha256 = "3a46817f4d646763dea9814d1dd10b383c62a629cb5e482521795bcab6e9140f"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3621,8 +3626,8 @@ sha256 = "d85603f7325c71e095078da726bb5217bffa51aa35330f462ebe0c06997e6fe0"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 18828
-sha256 = "02beda472896e419a202df0ba665172eb9cdc2697d0510e9cf6e7350e733d939"
+bytes = 18981
+sha256 = "b778b03c13a0682ea0565b681a6921b7b50dc267973ccd59e179c663ccfc5326"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

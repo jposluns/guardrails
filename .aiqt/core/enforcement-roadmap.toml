@@ -204,7 +204,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "grdinp"
 status = "enforced"
-mechanisms = ["gate:aei-enumerator-selftest", "gate:derived-command-parameters"]
+mechanisms = ["gate:aei-enumerator-selftest", "gate:brief-claims", "gate:derived-command-parameters"]
 
 [[rule]]
 corpus-id = "hiasrv"
@@ -283,8 +283,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rdbchr"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:brief-claims"]
 
 [[rule]]
 corpus-id = "recfst"

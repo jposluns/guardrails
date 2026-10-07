@@ -73,7 +73,7 @@
 <section id="register">
   <div class="wrap">
         <p>This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.</p>
-        <p class="lead">Summary: <strong>35</strong> enforced, <strong>0</strong> pending, <strong>97</strong> none.</p>
+        <p class="lead">Summary: <strong>36</strong> enforced, <strong>0</strong> pending, <strong>96</strong> none.</p>
         <div class="tablewrap">
           <table class="dtable">
             <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th><th>How enforced or intended</th></tr></thead>
@@ -86,12 +86,12 @@
             <tr id="rule-cntprd"><td>A count carries its predicate</td><td><code>cntprd</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-dscres"><td>Disclose a guard's residual coverage</td><td><code>dscres</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-evgcmp"><td>Evidence-grounded completion</td><td><code>evgcmp</code></td><td>Enforced</td><td><a href="#mechanism-gate-selftest-execution"><code>gate:selftest-execution</code></a>, class a</td></tr>
-            <tr id="rule-grdinp"><td>A guard is only as good as its input</td><td><code>grdinp</code></td><td>Enforced</td><td><a href="#mechanism-gate-aei-enumerator-selftest"><code>gate:aei-enumerator-selftest</code></a>, class a; <a href="#mechanism-gate-derived-command-parameters"><code>gate:derived-command-parameters</code></a>, class c</td></tr>
+            <tr id="rule-grdinp"><td>A guard is only as good as its input</td><td><code>grdinp</code></td><td>Enforced</td><td><a href="#mechanism-gate-aei-enumerator-selftest"><code>gate:aei-enumerator-selftest</code></a>, class a; <a href="#mechanism-gate-brief-claims"><code>gate:brief-claims</code></a>, class c; <a href="#mechanism-gate-derived-command-parameters"><code>gate:derived-command-parameters</code></a>, class c</td></tr>
             <tr id="rule-estsep"><td>Measured and estimated figures stay separate</td><td><code>estsep</code></td><td>Enforced</td><td><a href="#mechanism-hook-orch-prompt-stamp"><code>hook:orch-prompt-stamp</code></a>, class c; <a href="#mechanism-hook-orch-yield-tool-guard"><code>hook:orch-yield-tool-guard</code></a>, class b</td></tr>
             <tr id="rule-nofabr"><td>No fabrication</td><td><code>nofabr</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-obsbeh"><td>Observe before asserting behaviour</td><td><code>obsbeh</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-prtwhl"><td>A partial read is not the whole</td><td><code>prtwhl</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-rdbchr"><td>Read before characterizing</td><td><code>rdbchr</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-rdbchr"><td>Read before characterizing</td><td><code>rdbchr</code></td><td>Enforced</td><td><a href="#mechanism-gate-brief-claims"><code>gate:brief-claims</code></a>, class c</td></tr>
             <tr id="rule-refcap"><td>Capture the reference when the claim is made</td><td><code>refcap</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-reprod"><td>Reproduce a defect before fixing it</td><td><code>reprod</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-tstamp"><td>A current timestamp is read from the clock</td><td><code>tstamp</code></td><td>Enforced</td><td><a href="#mechanism-hook-orch-prompt-stamp"><code>hook:orch-prompt-stamp</code></a>, class c; <a href="#mechanism-hook-orch-yield-tool-guard"><code>hook:orch-yield-tool-guard</code></a>, class b</td></tr>
@@ -269,6 +269,19 @@
             </ul>
             <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
             <blockquote class="ledger-residual" data-mech="gate:branch-root">Judges only the revision under gate against the derived protected ref: it does not scan the repository's other branches, cannot prove where a branch was originally cut (a branch cut from a sibling that itself descends from the protected line still resolves), passes a fork point that survives a partial rewrite unless the configured lag threshold catches it, does not fail on multiple merge bases, and where no threshold is configured the staleness layer reports and never blocks. With multiple merge bases the reported first-parent lag is the MINIMUM (most-lenient) across bases, so a criss-cross history is judged by its nearest fork point. Replace refs are neutralized in the scrubbed env (GIT_NO_REPLACE_OBJECTS=1) so a `git replace --graft` cannot mask an orphan as rooted through merge-base; the on-disk .git/info/grafts residual is out of scope (an accidental-case guardrail; full adversarial-grade parent-rewrite resistance is not this gate's remit). A shallow repository maps a merge-base miss to cannot-evaluate (exit 2) with a `git fetch --unshallow` remediation, never a false ORPHANED, because truncated history cannot be told from a genuinely absent root (the CI gate checks out at fetch-depth:0). When the protected ref is derived from the default origin/HEAD, a stale local origin/HEAD (not refreshed since the last fetch) can skew the derived protected tip, so both the orphaned and the first-parent-lag verdicts are only as current as the clone's remote-tracking state; pass --protected an authoritative ref, or refresh origin/HEAD, when that currency matters. A degenerate invocation naming the SAME ref for --protected and --head is a self-comparison that always resolves (a ref is rooted on itself); the caller supplies distinct refs. The gate scrubs the ambient GIT_* environment before every git call but resolves the `git` executable through the ambient PATH, so it trusts the toolchain's `git`; a hostile PATH entry shadowing `git` is a trusted-toolchain / execution-environment concern outside this gate's threat model, not a branch-root bypass it defends against.</blockquote>
+          </div>
+        </details>
+        <details class="more" id="mechanism-gate-brief-claims">
+          <summary><code>gate:brief-claims</code></summary>
+          <div class="inner">
+            <ul>
+              <li>Platform: <code>ci</code></li>
+              <li>Default: <code>block</code></li>
+              <li>Entry point: <code>tools/check_brief_claims.py</code></li>
+              <li>Class: <code>c</code></li>
+            </ul>
+            <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
+            <blockquote class="ledger-residual" data-mech="gate:brief-claims">An adopter-configured lint that binds a dispatch brief's restatements of named review files (a verdict token, a finding id or grade, a graded-finding count, an embedded verbatim review, a parenthetical carried over from a template) to the file each describes and compares them with that file (rdbchr read-before-characterizing, grdinp input-soundness). It ships NO family, file name, verdict or grade of its own: with no .aiqt/brief-claims.toml it is NOT APPLICABLE, and a present but unusable configuration, or a named file that is missing, unreadable, not UTF-8, a directory, or outside the input directory, fails closed. It covers a recognizable SUBSET (class c, partial): it sees only the claim shapes it parses, inside one line, binds only through file names it recognizes, and treats ids, grades and counts as advisory unless run with --strict. A claim in other wording, a multi-line parenthetical, and a count whose source wording it cannot pair are outside it, and its recall and true-negative rate are not measured.</blockquote>
           </div>
         </details>
         <details class="more" id="mechanism-gate-changelog-drift">

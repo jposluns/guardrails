@@ -8,9 +8,9 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Enforced | 35 |
+| Enforced | 36 |
 | Pending | 0 |
-| None | 97 |
+| None | 96 |
 
 ## Rules
 
@@ -24,12 +24,12 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A count carries its predicate | `cntprd` | None | Enforcement has not been built yet. |
 | Disclose a guard's residual coverage | `dscres` | None | Enforcement has not been built yet. |
 | Evidence-grounded completion | `evgcmp` | Enforced | `gate:selftest-execution`, class a |
-| A guard is only as good as its input | `grdinp` | Enforced | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
+| A guard is only as good as its input | `grdinp` | Enforced | `gate:aei-enumerator-selftest`, class a; `gate:brief-claims`, class c; `gate:derived-command-parameters`, class c |
 | Measured and estimated figures stay separate | `estsep` | Enforced | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | No fabrication | `nofabr` | None | Enforcement has not been built yet. |
 | Observe before asserting behaviour | `obsbeh` | None | Enforcement has not been built yet. |
 | A partial read is not the whole | `prtwhl` | None | Enforcement has not been built yet. |
-| Read before characterizing | `rdbchr` | None | Enforcement has not been built yet. |
+| Read before characterizing | `rdbchr` | Enforced | `gate:brief-claims`, class c |
 | Capture the reference when the claim is made | `refcap` | None | Enforcement has not been built yet. |
 | Reproduce a defect before fixing it | `reprod` | None | Enforcement has not been built yet. |
 | A current timestamp is read from the clock | `tstamp` | Enforced | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
@@ -207,6 +207,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 Judges only the revision under gate against the derived protected ref: it does not scan the repository's other branches, cannot prove where a branch was originally cut (a branch cut from a sibling that itself descends from the protected line still resolves), passes a fork point that survives a partial rewrite unless the configured lag threshold catches it, does not fail on multiple merge bases, and where no threshold is configured the staleness layer reports and never blocks. With multiple merge bases the reported first-parent lag is the MINIMUM (most-lenient) across bases, so a criss-cross history is judged by its nearest fork point. Replace refs are neutralized in the scrubbed env (GIT_NO_REPLACE_OBJECTS=1) so a `git replace --graft` cannot mask an orphan as rooted through merge-base; the on-disk .git/info/grafts residual is out of scope (an accidental-case guardrail; full adversarial-grade parent-rewrite resistance is not this gate's remit). A shallow repository maps a merge-base miss to cannot-evaluate (exit 2) with a `git fetch --unshallow` remediation, never a false ORPHANED, because truncated history cannot be told from a genuinely absent root (the CI gate checks out at fetch-depth:0). When the protected ref is derived from the default origin/HEAD, a stale local origin/HEAD (not refreshed since the last fetch) can skew the derived protected tip, so both the orphaned and the first-parent-lag verdicts are only as current as the clone's remote-tracking state; pass --protected an authoritative ref, or refresh origin/HEAD, when that currency matters. A degenerate invocation naming the SAME ref for --protected and --head is a self-comparison that always resolves (a ref is rooted on itself); the caller supplies distinct refs. The gate scrubs the ambient GIT_* environment before every git call but resolves the `git` executable through the ambient PATH, so it trusts the toolchain's `git`; a hostile PATH entry shadowing `git` is a trusted-toolchain / execution-environment concern outside this gate's threat model, not a branch-root bypass it defends against.
+```
+
+### `gate:brief-claims`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_brief_claims.py`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+An adopter-configured lint that binds a dispatch brief's restatements of named review files (a verdict token, a finding id or grade, a graded-finding count, an embedded verbatim review, a parenthetical carried over from a template) to the file each describes and compares them with that file (rdbchr read-before-characterizing, grdinp input-soundness). It ships NO family, file name, verdict or grade of its own: with no .aiqt/brief-claims.toml it is NOT APPLICABLE, and a present but unusable configuration, or a named file that is missing, unreadable, not UTF-8, a directory, or outside the input directory, fails closed. It covers a recognizable SUBSET (class c, partial): it sees only the claim shapes it parses, inside one line, binds only through file names it recognizes, and treats ids, grades and counts as advisory unless run with --strict. A claim in other wording, a multi-line parenthetical, and a count whose source wording it cannot pair are outside it, and its recall and true-negative rate are not measured.
 ```
 
 ### `gate:changelog-drift`

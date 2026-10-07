@@ -779,6 +779,14 @@
         {
           "class": "c",
           "default": "block",
+          "id": "brief-claims",
+          "platform": "ci",
+          "residue": "An adopter-configured lint that binds a dispatch brief's restatements of named review files (a verdict token, a finding id or grade, a graded-finding count, an embedded verbatim review, a parenthetical carried over from a template) to the file each describes and compares them with that file (rdbchr read-before-characterizing, grdinp input-soundness). It ships NO family, file name, verdict or grade of its own: with no .aiqt/brief-claims.toml it is NOT APPLICABLE, and a present but unusable configuration, or a named file that is missing, unreadable, not UTF-8, a directory, or outside the input directory, fails closed. It covers a recognizable SUBSET (class c, partial): it sees only the claim shapes it parses, inside one line, binds only through file names it recognizes, and treats ids, grades and counts as advisory unless run with --strict. A claim in other wording, a multi-line parenthetical, and a count whose source wording it cannot pair are outside it, and its recall and true-negative rate are not measured.",
+          "script": "tools/check_brief_claims.py"
+        },
+        {
+          "class": "c",
+          "default": "block",
           "id": "derived-command-parameters",
           "platform": "ci",
           "residue": "An adopter-parameterized scan that flags a hardcoded LITERAL value at an adopter-declared command sink (a command word plus an option name in a declared command-surface file), so a reusable command derives its target-specific parameter rather than baking one in (grdinp input-soundness, exetgt templated-target re-verification). It ships NO command, option, repository, or path of its own: with no .aiqt/derived-command-parameters.toml it is NOT APPLICABLE, and a present but unusable configuration fails closed. It covers a recognizable SUBSET (class c, partial): it proves only that the declared sink is NON-LITERAL (a reference to an allowed variable), never that the variable resolves at runtime to the correct target, which is exetgt's runtime confirmation outside any static scanner. Its lexical scanner does not model pipelines and grouping precisely, credits no command substitution as derived, matches a command by basename only (an alias, a function, a wrapper, or a dynamically constructed command word slips it), and reasons only over the option forms and reference-variable names the adopter declared, so an undeclared sink, an obfuscated or constructed literal, and a forge or tool the configuration does not name are outside it.",
@@ -961,10 +969,19 @@
     {
       "corpus-id": "rdbchr",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "brief-claims",
+          "platform": "ci",
+          "residue": "An adopter-configured lint that binds a dispatch brief's restatements of named review files (a verdict token, a finding id or grade, a graded-finding count, an embedded verbatim review, a parenthetical carried over from a template) to the file each describes and compares them with that file (rdbchr read-before-characterizing, grdinp input-soundness). It ships NO family, file name, verdict or grade of its own: with no .aiqt/brief-claims.toml it is NOT APPLICABLE, and a present but unusable configuration, or a named file that is missing, unreadable, not UTF-8, a directory, or outside the input directory, fails closed. It covers a recognizable SUBSET (class c, partial): it sees only the claim shapes it parses, inside one line, binds only through file names it recognizes, and treats ids, grades and counts as advisory unless run with --strict. A claim in other wording, a multi-line parenthetical, and a count whose source wording it cannot pair are outside it, and its recall and true-negative rate are not measured.",
+          "script": "tools/check_brief_claims.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/accur-read-before-characterizing.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "recfst",
