@@ -2123,6 +2123,8 @@ def _watchdog_completion_case(mode):
         try:
             assert _st_census_eio_raises(open_fds, held_fd), \
                 "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
         finally:
             os.close(held_fd)
         # A descriptor reopened at the same number to another file reads as
@@ -2131,6 +2133,14 @@ def _watchdog_completion_case(mode):
             "the descriptor census read a same-number replacement as unchanged"
         assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
             "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -3218,6 +3228,8 @@ def _watchdog_completion_case(mode):
         try:
             assert _st_census_eio_raises(open_fds, held_fd), \
                 "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
         finally:
             os.close(held_fd)
         # A descriptor reopened at the same number to another file reads as
@@ -3226,6 +3238,14 @@ def _watchdog_completion_case(mode):
             "the descriptor census read a same-number replacement as unchanged"
         assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
             "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -14847,15 +14867,36 @@ def _st_census_open(fd, fstat=None):
     return _st_census_stat(fd, fstat) is not None
 
 
+def _st_census_anon_kind(fd, readlink=None):
+    """The anonymous-inode kind of descriptor `fd` ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"), None
+    for any other file, from its /proc/self/fd link. Anonymous-inode descriptors of every kind share one
+    (st_dev, st_ino), so the kind is what tells an epoll descriptor from an eventfd put at its number. ENOENT
+    (the number has no entry: closed since its stat read) returns None; any other read error raises naming
+    `fd`, never read as closed. `readlink` defaults to os.readlink as bound when called."""
+    import errno
+    try:
+        target = (os.readlink if readlink is None else readlink)("/proc/self/fd/{}".format(fd))
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return None
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+    return target if target.startswith("anon_inode:") else None
+
+
 def _st_census_fds():
-    """This process's open descriptors as identities (number, st_dev, st_ino, file type), so a descriptor
-    closed and reopened at the same number to a different file reads as a change, never as unchanged. Only
-    EBADF reads as closed (the listing's own descriptor); any other read error raises naming the descriptor."""
+    """This process's open descriptors as identities (number, st_dev, st_ino, file type, anonymous-inode
+    kind), so a descriptor closed and reopened at the same number to a different file reads as a change,
+    never as unchanged, an anonymous-inode descriptor replaced by one of another kind (an epoll descriptor by
+    an eventfd, which share one st_dev and st_ino) included. Residual: two anonymous-inode descriptors of the
+    same kind share every field, so one replaced at its number by another of its own kind still reads as
+    unchanged. Only EBADF reads as closed (the listing's own descriptor); any other read error raises naming
+    the descriptor."""
     live = set()
     for name in os.listdir("/proc/self/fd"):
         info = _st_census_stat(int(name))
         if info is not None:
-            live.add((int(name), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)))
+            live.add((int(name), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                      _st_census_anon_kind(int(name))))
     return live
 
 
@@ -14876,25 +14917,57 @@ def _st_census_reuse_detected(scan):
         os.close(held)
 
 
-def _st_census_eio_raises(scan, fd):
+def _st_census_anon_reuse_detected(scan):
+    """(detected, shared) for an anonymous-inode replacement: a held epoll descriptor is in the baseline, then
+    an eventfd is put at its number (dup2). `detected` is whether `scan()` reads that as a change; `shared` is
+    whether the two have one (st_dev, st_ino, file type), where a census of those stat fields alone reads the
+    replacement as unchanged and only the anonymous-inode kind tells them apart."""
+    import select
+    poll = select.epoll()
+    try:
+        held = os.dup(poll.fileno())
+    finally:
+        poll.close()
+    try:
+        before = os.fstat(held)
+        baseline = scan()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)) == \
+            (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+        return scan() != baseline, shared
+    finally:
+        os.close(held)
+
+
+def _st_census_eio_raises(scan, fd, seam="fstat"):
     """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails EIO: it must raise
-    RuntimeError naming fd (read as closed, a leak would pass). os.fstat fails for fd only during the call. An
-    independent fstat must still see fd open afterwards, else the check proves nothing. The caller owns fd."""
+    RuntimeError naming fd (read as closed, a leak would pass). os.<seam> (fstat, or readlink of fd's
+    /proc/self/fd link) fails for fd only during the call. An independent fstat must still see fd open
+    afterwards, else the check proves nothing. The caller owns fd."""
     import errno
-    real_fstat = os.fstat
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
 
     def failing(number, *args, **kwargs):
-        if number == fd:
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
             raise OSError(errno.EIO, "injected census read failure")
-        return real_fstat(number, *args, **kwargs)
-    os.fstat = failing
+        return real_seam(number, *args, **kwargs)
+    if seam == "readlink":
+        os.readlink = failing
+    else:
+        os.fstat = failing
     try:
         scan()
         named = False
     except RuntimeError as exc:
         named = "descriptor {}:".format(fd) in str(exc)
     finally:
-        os.fstat = real_fstat
+        os.fstat, os.readlink = real_fstat, real_readlink
     try:
         real_fstat(fd)
     except OSError:

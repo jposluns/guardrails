@@ -3319,7 +3319,9 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
     one) releases the ones already opened and is this check's own named failure, never an escaping
     exception. The stack's release closes a number only while fstat still returns the identity recorded at
     its open, so a number this check expected released, and another lane reopened onto any other file, is
-    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    never closed by this check's cleanup either (#378 P1). Only EBADF reads as released there: any other
+    fstat error is a failure naming the number, which is left open (its file is unknown), never read as
+    released. `reuse`, when a leg passes one, is called with
     the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
     Returns the failures."""
     import contextlib
@@ -3348,8 +3350,11 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         """Close fd only while it still names the file recorded at its open, this check's own."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return                                        # released already: never closed again
+        except OSError as exc:
+            if exc.errno != errno.EBADF:                  # unreadable, never read as released: named, left open
+                failures.append("guardian-close-reuse setup failure: cleanup cannot evaluate descriptor {}: "
+                                "{!r}".format(fd, exc))
+            return                                        # EBADF: released already, never closed again
         if (st.st_dev, st.st_ino) != ident:
             return                                        # another file holds the number now: not ours
         try:
@@ -3410,8 +3415,9 @@ def _st_guardian_close_reuse():
     private directory, so a number it expected released is closed only while fstat shows that file's
     identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
     lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
-    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
-    is still reported and closed.
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, a genuine leak
+    is still reported and closed, and a cleanup leg shows an fstat EIO in the setup check's own release is
+    its failure naming that number, left open, never read as released.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3644,6 +3650,36 @@ def _st_guardian_close_reuse():
                             "file was not reported and closed")
             if identity(leaked) == ident:
                 os.close(leaked)
+        # The setup check's cleanup fails closed: fstat of the second descriptor it opened fails EIO in its
+        # ExitStack release alone (the check's own reads before it succeed), so that descriptor must be named
+        # cannot-evaluate and left open, never read as released; every other one is released. The check's
+        # own private directory is removed on return, but the open descriptor keeps its inode, so its
+        # identity stays unique; the leg then closes it while it still names the check's file.
+        seen = []
+
+        def capture(fresh):
+            seen.extend((fd, identity(fd)) for fd in fresh)
+        real_fstat = _os_census.fstat
+
+        def cleanup_unreadable(number, *args, **kwargs):
+            if len(seen) == 4 and number == seen[1][0] and sys._getframe(1).f_code.co_name == "release":
+                raise OSError(errno.EIO, "injected cleanup read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = cleanup_unreadable
+        try:
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=capture)
+        finally:
+            _os_census.fstat = real_fstat
+        if len(seen) != 4 or len(got) != 1 or "cleanup cannot evaluate descriptor {}:".format(seen[1][0]) \
+                not in got[0] or identity(seen[1][0]) != seen[1][1]:
+            failures.append("guardian-close-reuse setup failure with its cleanup fstat failing EIO: expected "
+                            "the unreadable descriptor named cannot-evaluate and left open, got "
+                            "{}".format(got or "green"))
+        for number, recorded_ident in seen[:1] + seen[2:]:
+            failures += left_open(number, recorded_ident, "guardian-close-reuse setup failure with its cleanup "
+                                                          "fstat failing EIO: descriptor {}".format(number))
+        if len(seen) == 4 and identity(seen[1][0]) == seen[1][1]:
+            os.close(seen[1][0])                          # the check's own file, left open by design
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
