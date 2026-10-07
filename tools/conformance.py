@@ -13,7 +13,10 @@ Exit convention (matches the repo's gates):
   0  clean, including a clean run where checks were NOT APPLICABLE
   1  a real conformance finding (drift, placement violation, mapping id not in its manifest)
   2  malformed input or a read error (fail-closed), or an interpreter older than Python 3.14
-     (refused before anything runs)
+     that can start this file (refused before anything runs)
+An older interpreter that cannot start this file fails with Python's own error first, and that exit
+is Python's: 1 for a compile failure, which reads as a finding, or 2 for an interpreter predating -I
+when run with it.
 
 Design of record (see the GA-2 SYNTHESIS, sections 4 and 6, divergence D0): this suite reuses the
 repo's PARAMETERIZED validation functions, re-orchestrated under --root. It never calls the
