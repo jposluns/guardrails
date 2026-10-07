@@ -11097,7 +11097,7 @@ def _orch_barrier_write(path, obj):
     always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
     first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
     before any file is created."""
-    obj = _orch_barrier_fit(obj)
+    obj = _orch_barrier_fit(obj, os.path.dirname(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
     created = False
@@ -11208,37 +11208,59 @@ _ORCH_BARRIER_MAX_BYTES = 64 * 1024  # _orch_barrier_write never stores more (_o
 _ORCH_BARRIER_FINDING_CHARS = 4000  # a stored finding is cut here, so the first one always fits the bound
 
 
-def _orch_barrier_rest(count):
-    return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes); run 'python3 "
-            "tools/orch_doctor.py --resume-audit' to list them all".format(count, _ORCH_BARRIER_MAX_BYTES))
+_ORCH_BARRIER_REST_RE = re.compile(
+    r"([0-9]+) more finding\(s\) not stored here \(the barrier file is bounded")
 
 
-def _orch_barrier_fit(obj):
+def _orch_barrier_rest(count, sd):
+    """The last line _orch_barrier_fit stores in place of the findings that do not fit (sd is the state
+    directory holding the barrier). It points only at evidence that outlives the audit: a forced-exit
+    finding and an ignored escape sentinel are raised once (_orch_pending_artefact_findings records them
+    as surfaced), so a later audit, the doctor's included, does not list them again; the line names the
+    files that keep those records in full. Every other finding is recomputed from the record by each
+    audit, so 'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
+    return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes). A forced-exit "
+            "finding is raised only once: read every forced-exit record in full in {} (an ignored escape "
+            "sentinel is kept in {}). Every other finding still present is printed again by 'python3 "
+            "tools/orch_doctor.py --resume-audit'".format(
+                count, _ORCH_BARRIER_MAX_BYTES, os.path.join(sd, "forced-exit.jsonl"),
+                os.path.join(sd, "escape-spoof.json.surfaced")))
+
+
+def _orch_barrier_fit(obj, sd):
     """The object _orch_barrier_write stores, so that its JSON (json.dumps, ASCII) never exceeds
     _ORCH_BARRIER_MAX_BYTES, the bound _orch_barrier_read refuses past. An object that already fits is
     returned unchanged. Otherwise, for a dict whose "findings" is a list of strings, a copy keeps the
     leading findings (each cut to _ORCH_BARRIER_FINDING_CHARS characters, marked " (cut)") that fit
     together with one last line counting the findings not stored (_orch_barrier_rest), so the barrier
-    stays armed, well-formed and readable and its warned flag can be recorded. Anything else that does
-    not fit (another shape, or other keys too large on their own) raises ValueError."""
+    stays armed, well-formed and readable and its warned flag can be recorded. A list that already ends
+    with such a count line (one this function stored earlier; matched by _ORCH_BARRIER_REST_RE) is re-fit
+    without it and its count is carried forward, so the new line counts every finding not stored, never
+    the old line as one. Anything else that does not fit (another shape, or other keys too large on their
+    own) raises ValueError."""
     if len(json.dumps(obj)) <= _ORCH_BARRIER_MAX_BYTES:
         return obj
     found = obj.get("findings") if isinstance(obj, dict) else None
     if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
         raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    carried = 0
+    prior = _ORCH_BARRIER_REST_RE.match(found[-1]) if found else None
+    if prior:
+        carried, found = int(prior.group(1)), found[:-1]
     cut = [f if len(f) <= _ORCH_BARRIER_FINDING_CHARS else f[:_ORCH_BARRIER_FINDING_CHARS] + " (cut)"
            for f in found]
     # With k findings the list encodes as the empty object's size plus each finding's encoding plus two
     # bytes (", ") per separator; the rest line is reserved at its largest (no finding stored).
-    size = len(json.dumps(dict(obj, findings=[]))) + len(json.dumps(_orch_barrier_rest(len(found))))
+    size = len(json.dumps(dict(obj, findings=[]))) + len(json.dumps(_orch_barrier_rest(len(found) + carried,
+                                                                                         sd)))
     kept = []
     for f in cut:
         size += len(json.dumps(f)) + 2
         if size > _ORCH_BARRIER_MAX_BYTES:
             break
         kept.append(f)
-    rest = len(found) - len(kept)
-    fitted = dict(obj, findings=kept + ([_orch_barrier_rest(rest)] if rest else []))
+    rest = len(found) - len(kept) + carried
+    fitted = dict(obj, findings=kept + ([_orch_barrier_rest(rest, sd)] if rest else []))
     if len(json.dumps(fitted)) > _ORCH_BARRIER_MAX_BYTES:
         raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
     return fitted

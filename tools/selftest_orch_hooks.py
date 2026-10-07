@@ -2829,6 +2829,158 @@ def _main_isolated(report_path=None):
         check("barrier/written-barrier-fits-bound-first-findings-plus-count", tuple(_r17_rows),
               ((True, True, True, True, True), ("warn", True, True, "allow"), True,
                ("ValueError", True, [])))
+        # ROUND 18, A RE-FIT CARRIES THE STORED COUNT FORWARD: the 400-finding barrier above, stored as its
+        # first findings plus a count line, is written again with a "ts" large enough that it no longer
+        # fits; the new count line counts every finding not stored (400 less the findings kept), never the
+        # old count line as one finding (red when the re-fit keeps the old line as a finding to count).
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=True, findings=_r17_many, warned=False))
+        _r18_once = json.loads(_r14_bar.read_text(encoding="utf-8"))
+        aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(_r18_once, ts="t" * 20000))
+        _r18_raw = _r14_bar.read_bytes()  # a regular file this check just wrote
+        _r18_twice = json.loads(_r18_raw.decode("utf-8"))
+        _r18_kept = _r18_twice["findings"][:-1]
+        check("barrier/refit-carries-stored-count-forward",
+              (len(_r18_raw) <= _r16_bound, 0 < len(_r18_kept) < len(_r18_once["findings"]) - 1,
+               _r18_kept == _r17_many[:len(_r18_kept)],
+               _r18_twice["findings"][-1].startswith(
+                   "{} more finding(s) not stored here (".format(400 - len(_r18_kept)))),
+              (True, True, True, True))
+        _r14_bar.unlink()
+        # ROUND 18, THE READER COMPARES THE LSTAT WITH WHAT IT OPENED: a directory at the barrier path is
+        # renamed away right after the reader's os.open of it and a new directory made at the path (the
+        # same device, another inode), so the reader's fstat and its lstat disagree; _orch_barrier_read
+        # names it "not a regular file" and the handler gives the generic note, never the
+        # remove-the-directory note. Without the swap the same directory is named a directory and gets
+        # that note. Red when the reader calls _orch_barrier_nonregular(path) without its fstat.
+        _r18_real_open = os.open
+        _r18_moved = rsd / "r18-dir-moved"
+
+        def _r18_swap_open(path, *a, **k):
+            fd = _r18_real_open(path, *a, **k)
+            if path == str(_r14_bar) and not os.path.lexists(str(_r18_moved)):
+                os.rename(str(_r14_bar), str(_r18_moved))
+                os.mkdir(str(_r14_bar))
+            return fd
+
+        def _r18_dir_row(swap):
+            _r14_bar.mkdir()
+            os.open = _r18_swap_open if swap else _r18_real_open
+            try:
+                read = aiqt_hooks._orch_barrier_read(str(_r14_bar))
+                pair = None
+                if swap:
+                    a_st, b_st = os.lstat(str(_r18_moved)), os.lstat(str(_r14_bar))
+                    pair = (a_st.st_dev == b_st.st_dev, a_st.st_ino != b_st.st_ino)
+            finally:
+                os.open = _r18_real_open
+                for d in (_r18_moved, _r14_bar):
+                    if d.is_dir():
+                        d.rmdir()
+            _r14_bar.mkdir()
+            os.open = _r18_swap_open if swap else _r18_real_open
+            try:
+                note = _r14_msg(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))
+            finally:
+                os.open = _r18_real_open
+                for d in (_r18_moved, _r14_bar):
+                    if d.is_dir():
+                        d.rmdir()
+            return (pair, read, "(not a regular file)" in note, "remove the directory" in note)
+        check("barrier/reader-names-directory-only-where-lstat-matches-its-fstat",
+              (_r18_dir_row(True), _r18_dir_row(False)),
+              (((True, True), ("bad", "not a regular file"), True, False),
+               (None, ("bad", "not a regular file: a directory"), False, True)))
+        # ROUND 18, THE DESCRIPTOR IS CLOSED EXACTLY ONCE AND AN EARLIER BAD RESULT WINS: with os.close
+        # wrapped so that closing the barrier's descriptor really closes it, is counted, and then raises
+        # EIO, a regular barrier reads ('bad', 'OSError'), and a directory and a FIFO at the barrier path
+        # read as their not-a-regular-file result, never the close error; each row closes the barrier's
+        # descriptor exactly once (red when the reader retries the close after an error, or lets the close
+        # error override an earlier bad result).
+        _r18_fds, _r18_calls = [], []
+        _r18_real_close = os.close
+
+        def _r18_open(path, *a, **k):
+            fd = _r18_real_open(path, *a, **k)
+            if path == str(_r14_bar):
+                _r18_fds.append(fd)
+            return fd
+
+        def _r18_close(fd):
+            if fd not in _r18_fds:
+                return _r18_real_close(fd)
+            _r18_calls.append(fd)
+            _r18_real_close(fd)
+            raise OSError(_r17_errno.EIO, "injected close EIO")
+
+        def _r18_close_row(make):
+            make()
+            del _r18_fds[:], _r18_calls[:]
+            os.open, os.close = _r18_open, _r18_close
+            try:
+                try:
+                    res = aiqt_hooks._orch_barrier_read(str(_r14_bar))
+                except Exception as exc:
+                    res = "raised " + type(exc).__name__
+            finally:
+                os.open, os.close = _r18_real_open, _r18_real_close
+                if _r14_bar.is_dir() and not _r14_bar.is_symlink():
+                    _r14_bar.rmdir()
+                else:
+                    os.unlink(str(_r14_bar))
+            return (res, len(_r18_fds), len(_r18_calls))
+        check("barrier/close-once-never-retried-earlier-bad-result-wins",
+              (_r18_close_row(lambda: _r14_bar.write_text(_r14_seed, encoding="utf-8")),
+               _r18_close_row(_r14_bar.mkdir), _r18_close_row(lambda: os.mkfifo(str(_r14_bar)))),
+              ((("bad", "OSError"), 1, 1), (("bad", "not a regular file: a directory"), 1, 1),
+               (("bad", "not a regular file"), 1, 1)))
+        # ROUND 18, THE OMITTED-FINDINGS LINE POINTS AT EVIDENCE THAT SURVIVES: a fixture with 400
+        # forced-exit records (each a finding of about 200 bytes) and a handoff naming another branch. The
+        # SessionStart audit stores the first findings plus a count line; the doctor's --resume-audit then
+        # no longer lists any omitted forced-exit finding (each is raised once), so the line must not send
+        # the operator there for them. The line names the forced-exit log by its path, and that file holds
+        # every one of the 400 records in full, the omitted ones included; the doctor prints the recurring
+        # handoff finding again, as the line says. Red when the line only says to run the doctor.
+        import re as _r18_re
+        _r18_fx = Fixture(tmp, "r18-omitted")
+        _r18_fx.handoff.write_text("Branch: r18-other-branch\n", encoding="utf-8")
+        _r18_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r18_fx.root)))
+        _r18_rows = [dict(key="r18-key-{:04d}".format(i), ts="r18-ts-{:04d}".format(i),
+                          open_ids=["R18-{:04d}-{}".format(i, j) + "x" * 24 for j in range(3)])
+                     for i in range(400)]
+        for _r18_row in _r18_rows:
+            aiqt_hooks._orch_append_jsonl(str(_r18_sd / "forced-exit.jsonl"), _r18_row)
+        _r18_old_env = os.environ.pop(_doc_env, None)
+        try:
+            _r18_ss = aiqt_hooks.orch_resume_audit(_r18_fx.payload("SessionStart"))
+            _r18_bar = json.loads((_r18_sd / "resume-barrier.json").read_text(encoding="utf-8"))
+            _doc.repo_root = lambda: Path(_r18_fx.root)
+            _r18_out, _r18_argv = io.StringIO(), sys.argv
+            sys.argv = [_r18_argv[0], "--resume-audit"]
+            try:
+                with contextlib.redirect_stdout(_r18_out):
+                    _r18_dcode = _doc.main()
+            finally:
+                sys.argv = _r18_argv
+                _doc.repo_root = _doc_root
+        finally:
+            if _r18_old_env is not None:
+                os.environ[_doc_env] = _r18_old_env
+        _r18_line = _r18_bar["findings"][-1]
+        _r18_stored = [f for f in _r18_bar["findings"][:-1] if "forced_unresolved at r18-ts-" in f]
+        _r18_omitted = _r18_rows[len(_r18_stored):]
+        _r18_m = _r18_re.search(r"read every forced-exit record in full in (.+?) \(an ignored", _r18_line)
+        _r18_named = _r18_m.group(1) if _r18_m else None
+        _r18_log = aiqt_hooks._orch_read_jsonl(_r18_named)[0] if _r18_named else None
+        _r18_doc_out = _r18_out.getvalue()
+        check("barrier/omitted-findings-line-names-surviving-forced-exit-log",
+              (_verdict(_r18_ss), 0 < len(_r18_stored) < 400,
+               _r18_line.startswith("{} more finding(s) not stored here (".format(len(_r18_omitted))),
+               _r18_dcode, any(row["ts"] in _r18_doc_out for row in _r18_omitted),
+               "handoff names branch r18-other-branch" in _r18_doc_out,
+               _r18_named == str(_r18_sd / "forced-exit.jsonl"),
+               _r18_log == _r18_rows and all(row in _r18_log for row in _r18_omitted),
+               "tools/orch_doctor.py --resume-audit" in _r18_line and "to list them all" not in _r18_line),
+              ("warn", True, True, 1, False, True, True, True, True))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
