@@ -199,15 +199,23 @@ def _st_fcntl():
     return fcntl
 
 
+class _StCensusError(RuntimeError):
+    """The descriptor census could not read a descriptor: cannot-evaluate, never a closed descriptor."""
+
+
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file."""
+    is reused by a different file. Only EBADF reads as closed; any other read error raises _StCensusError naming
+    the descriptor, never omitting it as closed (a leak check fails closed on input it cannot read)."""
+    import errno
     table = {}
     for fd in range(1024):
         try:
             st = os.fstat(fd)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
         table[fd] = (st.st_dev, st.st_ino)
     return table
 

@@ -2264,15 +2264,23 @@ def _st_fcntl():
     return fcntl
 
 
+class _StCensusError(RuntimeError):
+    """The descriptor census could not read a descriptor: cannot-evaluate, never a closed descriptor."""
+
+
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file."""
+    is reused by a different file. Only EBADF reads as closed; any other read error raises _StCensusError naming
+    the descriptor, never omitting it as closed (a leak check fails closed on input it cannot read)."""
+    import errno
     table = {}
     for fd in range(1024):
         try:
             st = os.fstat(fd)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
         table[fd] = (st.st_dev, st.st_ino)
     return table
 
@@ -2708,6 +2716,39 @@ def _st_n2d():
     return returned, closes == [-1]
 
 
+def _st_fd_table_eio():
+    """F1: the descriptor census fails closed. A held /dev/null descriptor is listed by _st_fd_table; with
+    its fstat failing EIO the table must raise _StCensusError naming it, never omit it as closed. An
+    independent fstat must still see it open afterwards, else the check proves nothing."""
+    import errno
+    fd = os.open(os.devnull, os.O_RDONLY)
+    saved_fstat = os.fstat
+
+    def failing_fstat(number, *args, **kwargs):
+        if number == fd:
+            raise OSError(errno.EIO, "injected census read failure")
+        return saved_fstat(number, *args, **kwargs)
+
+    try:
+        listed = fd in _st_fd_table()
+        os.fstat = failing_fstat
+        try:
+            _st_fd_table()
+            got = "omitted"
+        except _StCensusError as exc:
+            got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
+        finally:
+            os.fstat = saved_fstat
+        try:
+            saved_fstat(fd)
+            still_open = True
+        except OSError:
+            still_open = False
+    finally:
+        os.close(fd)
+    return listed and still_open and got == "raised"
+
+
 def _st_descriptor_helper_checks():
     """Descriptor-helper vectors, ported from the retired import engine's self-test (their only former
     home), each driving the helper directly, with a patched os primitive where the contract needs one:
@@ -2716,6 +2757,7 @@ def _st_descriptor_helper_checks():
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
       N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
+      F1         _st_fd_table fails closed: an EIO census read of a held descriptor raises naming it.
     No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
     leg's descriptors are its own, closed once. Returns (failures, checks)."""
     n2d_returned, n2d_single = _st_n2d()
@@ -2723,7 +2765,8 @@ def _st_descriptor_helper_checks():
                ("C1-osread-converts-to-journalerror", _st_c1_osread()),
                ("N2a-close-quietly-swallows-oserror", _st_n2a()),
                ("N2d-close-quietly-nonthrow", n2d_returned),
-               ("N2d-close-quietly-single-close", n2d_single))
+               ("N2d-close-quietly-single-close", n2d_single),
+               ("F1-fd-table-eio-fails-closed", _st_fd_table_eio()))
     return [name for name, ok in results if ok is not True], len(results)
 
 
@@ -2744,6 +2787,9 @@ def self_test():
         failures, runs = _st_close_check(globals(), vectors)
         drop_failures, drop_runs = _st_watch_drop_check()
         failures, runs = failures + drop_failures, runs + drop_runs
+    except _StCensusError as exc:
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     finally:
         shutil.rmtree(base, ignore_errors=True)
     helper_failures, checks = _st_descriptor_helper_checks()

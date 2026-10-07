@@ -644,6 +644,7 @@ def _fdopen_vectors(base):
     exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
     os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
     Returns (failures, runs)."""
+    import errno
     import importlib.util
     import inspect
     base.mkdir()
@@ -679,8 +680,10 @@ def _fdopen_vectors(base):
             for fd in opened:
                 try:
                     os.fstat(fd)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    if exc.errno == errno.EBADF:          # only EBADF reads as closed; any other error raises
+                        continue
+                    raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
             if any(name.endswith(".tmp") for name in os.listdir(dfd)):

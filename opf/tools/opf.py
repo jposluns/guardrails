@@ -2084,11 +2084,8 @@ def _watchdog_completion_case(mode):
         def open_fds():
             live = set()
             for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
+                if _st_census_open(int(name)):   # EBADF only (the listing's own); any other error raises
+                    live.add(int(name))
             return live
 
         def no_children():
@@ -2262,10 +2259,9 @@ def _watchdog_completion_case(mode):
             identity = (os.fstat(spare).st_dev, os.fstat(spare).st_ino)
 
             def probe():
-                try:
-                    stat = os.fstat(spare)
-                except OSError:
+                if not _st_census_open(spare):   # EBADF only reads as swept; any other read error raises
                     return "SWEPT"
+                stat = os.fstat(spare)
                 return "LEAKED" if (stat.st_dev, stat.st_ino) == identity else "SWEPT"
 
             real_listdir = os.listdir
@@ -3116,11 +3112,8 @@ def _watchdog_completion_case(mode):
         def open_fds():
             live = set()
             for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
+                if _st_census_open(int(name)):   # EBADF only (the listing's own); any other error raises
+                    live.add(int(name))
             return live
 
         def no_children():
@@ -14687,12 +14680,9 @@ def _cli_self_test():
                     if _wl_out != "valueerror":
                         failures.append("adopt --inputs with a failing parent close: expected the "
                                         "fail-closed ValueError, got {}".format(_wl_out))
-                    try:
-                        os.fstat(_wl_seen["wfd"])
+                    if _st_census_open(_wl_seen["wfd"]):   # EBADF only reads as closed; others raise
                         failures.append("adopt --inputs leaked the worksheet fd (fd {} still open "
                                         "after the parent close failed)".format(_wl_seen["wfd"]))
-                    except OSError:
-                        pass
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner
@@ -14805,6 +14795,21 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
+def _st_census_open(fd, fstat=None):
+    """Whether descriptor `fd` is open, for a self-test descriptor census or survivor scan. Only EBADF reads
+    as closed; any other read error (EIO, EACCES, ENOMEM) is cannot-evaluate, raised naming `fd`, never read
+    as a closed descriptor: a leak check fails closed on input it cannot read. `fstat` defaults to os.fstat
+    as bound when called, so a case can inject the census read failure."""
+    import errno
+    try:
+        (os.fstat if fstat is None else fstat)(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            return False
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+    return True
+
+
 def _retained_close_offpath_self_test():
     """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
     the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
@@ -14830,7 +14835,7 @@ def _retained_close_offpath_self_test():
     import _opf_adopt_observe
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
-    real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
+    real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
     failures = []
     ran = []
 
@@ -14887,13 +14892,8 @@ def _retained_close_offpath_self_test():
             finally:
                 os.supports_dir_fd.discard(_open)
                 os.open, os.dup, os.pipe, os.close = real_open, real_dup, real_pipe, real_close
-            left = []
-            for fd in sorted(set(state.opened)):
-                try:
-                    os.fstat(fd)
-                except OSError:
-                    continue
-                left.append(fd)
+            # Only EBADF reads as closed; any other census read error raises naming the descriptor.
+            left = [fd for fd in sorted(set(state.opened)) if _st_census_open(fd)]
             for fd in left:                   # a pre-fix run leaks; release so the suite itself stays clean
                 try:
                     real_close(fd)
@@ -14921,9 +14921,44 @@ def _retained_close_offpath_self_test():
         if not ok:
             failures.append(name)
 
+    def census_read_failure():
+        """The survivor census fails closed: a call leaves a recorded descriptor open and its census read
+        fails EIO; the sweep must raise naming it (read as closed, the leak would pass). An independent fstat
+        must still see the descriptor open, else the row proves nothing."""
+        kept, fails = [], []
+
+        def leave_open():
+            kept.append(os.open(os.devnull, os.O_RDONLY))
+
+        def fstat(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        try:
+            with mock.patch.object(os, "fstat", fstat):
+                sweep(leave_open)
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("the sweep raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("the sweep returned: the unreadable descriptor read as closed")
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        ran.append("offpath-census-read-failure")
+        print("  {} offpath-census-read-failure: EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "the sweep raised naming it"))
+        if fails:
+            failures.append("offpath-census-read-failure")
+
     base = Path(tempfile.mkdtemp(prefix="opf-retained-close-offpath-")).resolve()
     held = []
     try:
+        census_read_failure()
         # A render-clean empty-state store (the check_opf_drift fixture idiom), its views populated through
         # the engine's own planner, plus a store-control .gitignore for the write-guard reader.
         root = base / "store"
@@ -15231,7 +15266,7 @@ def _close_exc_safe_vectors_self_test():
     ANY = object()
     state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
                                   number=None, closes=0, probes=0, unrelated=None, want=None,
-                                  break_reuse=False)
+                                  break_reuse=False, census=real_fstat)
 
     def propagating(fd):
         """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
@@ -15376,11 +15411,8 @@ def _close_exc_safe_vectors_self_test():
         for fd in sorted(set(state.opened)):
             if fd == state.number and holds_unrelated(fd):
                 continue                      # the unrelated file: graded by REUSE, never as a survivor
-            try:
-                real_fstat(fd)
-            except OSError:
-                continue
-            left.append(fd)
+            if _st_census_open(fd, state.census):   # only EBADF reads as closed; any other read error raises
+                left.append(fd)
         for fd in left:                       # a failing vector leaks; release so the suite stays clean
             with contextlib.suppress(OSError):
                 real_close(fd)
@@ -15965,6 +15997,37 @@ def _close_exc_safe_vectors_self_test():
                                  "_opf_store._immediate_subdirs finally", fails))
             print("  {} forced-reuse-setup-failure body {} [_opf_store._immediate_subdirs finally]: {}".format(
                 "PASS" if ok else "FAIL", errno.errorcode[err], "; ".join(fails) if fails else "green"))
+        # The survivor census fails closed: a call leaves a recorded descriptor open and its census read fails
+        # EIO; run() must raise naming it (read as closed, the leak would pass). An independent fstat must
+        # still see the descriptor open, else the row proves nothing.
+        kept, fails = [], []
+
+        def census(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        state.census = census
+        try:
+            run(lambda: kept.append(os.open(os.devnull, os.O_RDONLY)))
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("census: run() raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("census: run() returned; the unreadable descriptor read as closed")
+        finally:
+            state.census = real_fstat
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("census: the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        checks += 1
+        if fails:
+            failures.append(("census-read-failure", "EIO", fails))
+        print("  {} census-read-failure EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "run() raised naming it"))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
