@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5d9714547417e96925e5dc7bc19ab4d37cab2d3c1724fb18d7fbc930a310fb7f"
+tree-sha256 = "9e7d313f40a5dec211e202d2d5e488a25db7cb0a555c9a4682a18141d828b010"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -76,8 +76,8 @@ sha256 = "23ca96686fb42cb4e25b4667674f43b9f798521c7f0212461966cf09ede1e55c"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
-bytes = 9243
-sha256 = "6cc81591fc9d78300c0b0c727bf89baac9d8541513611fc4e42547c1940ea2f9"
+bytes = 10160
+sha256 = "9688391ac0e730940fa8578ec02c2b22b28a3c97867fbca0609f1cfdaa7c14ee"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 338411
-sha256 = "7465c7f6c71656fb88f252ab1dac652e058c4172fa295cd0efe62ced6e18e5c7"
+bytes = 339328
+sha256 = "bbca2438e048e8e5678c104b5e937585551daf40a129638c1c3f120330c7d739"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2256,13 +2256,13 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 32634
-sha256 = "e6ae3f53aa6fcfcd1d56d9a7ddfdedb883e7633250c49986a47938f08e4ab317"
+bytes = 33585
+sha256 = "669a623f13700e933d9fc235bec4ff0f6c7dc9bafc91692821bc27f1784a20c3"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 809
-sha256 = "70c6bbf9665597fd99b67b0d37a6ae707f6e326dfc2e0445d8404d4c72de41b7"
+sha256 = "d96ab6da502901997353bcfd03bbde318774be0d7633c0638adee0464f07a61a"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2286,8 +2286,8 @@ sha256 = "815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f"
 
 [[sources]]
 path = ".preview/rerun-pass-check.py"
-bytes = 91031
-sha256 = "06df601f921ca90fe3fd8757318733e4673684839e5d50427a233762044e11bc"
+bytes = 101110
+sha256 = "1a49e9bcffb61e1ad2dc6642069c4aad1f92b46191bc68bc26f4ce76da60ff80"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
@@ -2321,8 +2321,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 195480
-sha256 = "f84f45f9c0e3ddde4108c1188509c701b9eae10d2af0fcacf3cd2f81c7594b10"
+bytes = 196395
+sha256 = "563f9657c51832c113343ff3888e6cd17a57055f4546cadfbe1247b65061f583"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 245902
-sha256 = "72e23c5bc94658e12a8da81c3fbb6c31c955518892eeaf4ae6e5528ecf6dc225"
+bytes = 246824
+sha256 = "559765e8da08c1daa89ba4696c2e3d42228a38185a82bedb767e996edf236d31"
 
 [[sources]]
 path = "site/evidence.html"
