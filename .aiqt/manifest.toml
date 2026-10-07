@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e30ca0cd5792addddd66898a8944cb1bc5f2cc49f8618da5b1acb85d12b800fc"
+tree-sha256 = "8f264fc6a2dba871ac5003d2ac1cd820559338f16d1b32e911a264a0a493cb31"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2566,8 +2566,8 @@ sha256 = "d2247bf246136735bef911aa3129a9e2895c0bc2297a0480b9d1daf2d8fdbd99"
 
 [[sources]]
 path = "opf/tools/_child_contract.py"
-bytes = 81463
-sha256 = "4ae6163e446d86dbe8d9ad409f8f263a325eaa015d4de2269e5edbb3ba4af723"
+bytes = 85712
+sha256 = "6460224d14514ee75624598322bf66884699b65daff7590520b3342d202eb7bf"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"

@@ -136,9 +136,14 @@ THE CONTRACT, in the order it runs:
    method of an object the record callback returned: each descriptor is converted to an exact int
    and each payload copied to exact bytes before the final check (QA r13, claude MINOR 2,
    reproduced: a bytes subclass whose __bytes__ returned itself ran its own slicing in the seal
-   loop). The price of reading no snapshotted object after the second read: a stream that reports
-   itself closed only through its own Python-level `closed`, and only after that read, is not
-   seen (restore_reporting states it; nothing writes the error stream after that read). After the
+   loop), and the handler releases its last reference to the callback's objects before that check
+   too, so none of their finalizers runs in the seal loop (QA r14, claude MINOR 1, reproduced: a
+   descriptor's __del__ ran when the seal loop rebound its names). The price of reading no
+   snapshotted object after the second read: a change to the error stream object's closed state,
+   made by the final check's last read or after it, anywhere but the original file object
+   captured at construction (its own Python-level `closed`, or a re-initialisation over another
+   buffer), is not seen (restore_reporting states it and the self-test measures both shapes;
+   nothing writes the error stream after that read). After the
    decision the handler runs only os.write on saved_stdout and saved_stderr (the seal, or a
    diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
    hook the loaded code added, which cannot be removed, does not run after the decision; no
@@ -398,10 +403,12 @@ class FailClosedChild:
         that read or anything since; with no such file object (an error stream that was not
         file-backed at construction) it reads nothing there, and the final check's own read
         stands. The price of running no loaded code after the final read (QA r13, claude MINOR
-        1, measured by the self-test): a stream that reports itself closed only at the Python
-        level, through its own `closed`, after the final check's last read is not seen, and the
-        record stands (on 87dd2a59 the last restore read that `closed` and refused). Nothing
-        writes the error stream after that read, so such a report hides no fault."""
+        1, and QA r14, claude MINOR 2, both shapes measured by the self-test): a change to the
+        error stream object's closed state, made by the final check's last read or after it,
+        anywhere but the original file object captured at construction (its own Python-level
+        `closed`, or a re-initialisation over another buffer), is not seen, and the record stands
+        (on 87dd2a59 the last restore read that object's `closed` and refused). Nothing writes
+        the error stream after that read, so such a change hides no fault."""
         swapped = []
         for owner, namespace, name, original in self._snapshot:
             plain = True
@@ -450,6 +457,10 @@ class FailClosedChild:
                 # below then runs no method of an object the callback returned (QA r13, claude
                 # MINOR 2; anything these conversions run is judged by the final check).
                 seal.append((_index(fd), _bytes(_memoryview(data))))
+            # The loop names still hold the callback's last pair: released HERE, so a finalizer of
+            # those objects runs before the final check, which judges it, and never in the seal
+            # loop's rebinding below (QA r14, claude MINOR 1).
+            fd = data = None
             # The callback returned normally, but it may have faulted without raising (module
             # docstring, contract step 5): the same checks again, the FINAL check, and a fault new
             # since the callback started voids the record (merge train 2 QA r8, codex MAJOR).
@@ -1344,7 +1355,10 @@ _LATE_STAGES = ("disarming the interpreter callbacks", "sealing the record")
 # descriptor that is not an int, whose __index__ does the same). On 03a9ac46 bytes() kept the
 # subclass and the seal loop ran its methods (the descriptor's __index__ ran in os.write), and the
 # child exited 0 with its seal and this report; now both are converted before the final check,
-# so those methods run only there: exit 0, record, seal, empty error stream.
+# so those methods run only there: exit 0, record, seal, empty error stream. Each also has a
+# finalizer that does the same (QA r14, claude MINOR 1): on 3320ccc7 the seal loop's rebinding
+# freed the callback's last pair and ran it after the final read; now the handler releases that
+# pair before the final check.
 _SEED_SEAL_OBJECTS = """
 getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
 ran = []
@@ -1376,6 +1390,9 @@ class Sealed(bytes):
         after_final_read()
         return bytes.__buffer__(self, flags)
 
+    def __del__(self):
+        after_final_read()
+
 
 class Descriptor:
     def __init__(self, fd):
@@ -1385,9 +1402,70 @@ class Descriptor:
         after_final_read()
         return self.fd
 
+    def __del__(self):
+        after_final_read()
+
 
 def seal_pairs(code):
     return [({fd}, {data})]
+"""
+# QA r14, claude MINOR 2: the same trade-off, MEASURED for a closed state that lives in no
+# Python-level `closed` at all. The re-initialised stream's `closed`, read by the final check's
+# last read (stage "after the record callback", collection settled), re-initialises the original
+# sys.stderr again over a buffer whose own file object it then closes, and reports False; from
+# then on that object reads closed through C getters alone. The last restore reads only the
+# original file object captured at construction, which is still open, so the child exits 0 with
+# its seal (an 87dd2a59-style last restore that reads the object's `closed` refuses it).
+_SEED_STDERR_REINIT_AT_FINAL_READ = """
+getframe = sys._getframe
+held = []
+real = sys.stderr.buffer
+
+
+def stage_and_settled():
+    frame, settled = getframe(), None
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        if frame.f_code.co_name == "_check":
+            settled = frame.f_locals.get("settled")
+        frame = frame.f_back
+    return (None if frame is None else frame.f_locals.get("stage")), settled
+
+
+class Stream(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def write(self, data):
+        return real.write(data)
+
+    def flush(self):
+        real.flush()
+
+    @property
+    def closed(self):
+        if not held and stage_and_settled() == ("after the record callback", True):
+            held.append(self)
+            buffer = io.BufferedWriter(io.FileIO(os.dup(2), "w"))
+            sys.stderr.__init__(buffer, encoding="utf-8", line_buffering=True)
+            buffer.raw.close()
+        return False
+
+
+sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
+"""
+# QA r14, claude MINOR 3: a settled code and a fail_code that are not exact ints (an object
+# with only __index__) are normalised where the handler takes them, so the record callback and
+# the exit see the exact int; without that the record would carry the object itself.
+_SEED_CODE = """
+class Code:
+    def __index__(self):
+        return {value}
 """
 _SEAL_FAULT = _CALLBACK_FAULT.format(skip="stage != \"sealing the record\"")
 # The handler's code after its final read of the interpreter callbacks (and on its failure paths
@@ -1496,6 +1574,14 @@ _CASES = (
     ("seal-descriptor-index-after-final-read", "", _SEAL_FAULT + _SEED_SEAL_OBJECTS.format(
         late=_LATE_STAGES, fd="Descriptor(contract.saved_stdout)",
         data="\"seal {}\\n\".format(code).encode(\"ascii\")"), 0, "record 0", (), True),
+    ("stderr-reinitialised-closed-at-final-read-passes", "",
+     _SEAL_FAULT + _SEED_STDERR_REINIT_AT_FINAL_READ, 0, "record 0", (), True),
+    ("settled-code-not-an-exact-int", "", _SEED_CODE.format(value=0) + "contract.settle(Code())\n",
+     0, "record 0", (), True),
+    ("fail-code-not-an-exact-int",
+     _SEED_CODE.format(value=2) + "contract = _child_contract.FailClosedChild(record=record, "
+     "fault_line=fault_line, fail_code=Code())\n", _SEED_FAULT, 2, "record 2",
+     ("child-contract-fault", "a cleanup fault reached sys.unraisablehook"), False),
     ("stderr-closed-by-cleanup", "", "atexit.register(sys.stderr.close)\n", 2, "record 2",
      ("sys.stderr (closed)",), False),
 )
@@ -1608,7 +1694,10 @@ def self_test():
           "reports itself closed only through its own `closed` after the final read passes "
           "with its seal, the measured price of not running it there, and a seal the callback "
           "returns as a bytes subclass or on a descriptor that is not an int runs none of its "
-          "methods after the final read (QA r13); no handler code "
+          "methods after the final read (QA r13), nor its finalizer; an error stream the final "
+          "check's last read re-initialises over a buffer it then closes passes with its seal, "
+          "the same measured price, and a settled code and a fail_code that are not exact ints "
+          "reach the record as exact ints (QA r14); no handler code "
           "after the final read creates a function (checked statically, and through a function "
           "watcher {}); and every passing child's stdout ends with the seal written after the "
           "final check)".format("that never runs there" if watcher else
