@@ -21,7 +21,10 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
 Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
   1  a real finding (a subset gate failed in isolation: closure is broken)
-  2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no interpreter
+  2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, no
+     interpreter, or a subset member KILLED at its time bound (a timeout is cannot-evaluate: the
+     member never finished, so closure was neither observed nor refuted; it is reported as
+     TIMEOUT, never as a closure finding)
 """
 import sys
 
@@ -72,7 +75,29 @@ _SUBSET = [
     ("commonmark-conformance", "selftest_commonmark_conformance.py", []),
 ]
 
-_SUBSET_TIMEOUT_S = 600  # generous: the conformance replay and fuzz legs are the slowest members.
+# The DEFAULT kill bound per subset member. Generous for every member except the tooling
+# self-test, which carries its own row below.
+_SUBSET_TIMEOUT_S = 600
+
+# Per-member kill bounds overriding the default (rule: a kill timeout OUTLIVES the wait it bounds,
+# sized from the member's measured end-to-end wall time, never the other way around).
+#
+# opf-tooling-selftest (opf.py --self-test, the subprocess unit runner of merge train 2):
+#   MEASURED: on a loaded 16-core build host under `nice -n 10` the full suite ran in 741.5 s
+#   (and 679.6 s with the round-17 per-unit bytecode cache); on GitHub-hosted CI runners the same
+#   suite step took 912 s and 825 s on the two most recent train runs (gh run view, 2026-10-05..07),
+#   so CI measured 1.11x to 1.23x the measuring host. The suite's cost is real test work, not
+#   runner overhead: its aggregator unit alone measures about 281-287 s and the watchdog pair
+#   about 240-300 s.
+#   ESTIMATED: the ASSUMED host-to-CI ratio is 2x (measured only 1.23x worst, but hosted runners
+#   are shared and their load varies run to run, so the assumed ratio doubles the worst measured
+#   one). The bound below is the measured CI worst (912 s) with that margin, rounded to 1800 s.
+#   The old flat 600 s sat BELOW the measured CI wall time, so it killed a HEALTHY member on
+#   every train run; 1800 s sits above every observed run with margin and still ends a genuinely
+#   hung suite within one CI step.
+_MEMBER_TIMEOUT_S = {
+    "opf-tooling-selftest": 1800,
+}
 
 
 def _check_pack_manifest_registration(subset):
@@ -135,6 +160,35 @@ def _adopt_observe_registration_self_test():
     print("RED closure-registration -> closure/adopt-observe-registration")
 
 
+def _check_member_timeout_rows(subset, table):
+    """The per-member bound table names only real members: a renamed or removed subset member must
+    not leave a stale override behind (the stale row would silently stop bounding anything while
+    its member fell back to the default). Covers exactly the (roster, table) pair it is given."""
+    names = set(row[0] for row in subset)
+    stale = sorted(set(table) - names)
+    if stale:
+        raise AssertionError("closure/member-timeout-rows: " + ", ".join(stale))
+    for name, bound in table.items():
+        if type(bound) is not int or bound <= 0:
+            raise AssertionError("closure/member-timeout-rows: " + name)
+
+
+def _member_timeout_rows_self_test():
+    _check_member_timeout_rows(_SUBSET, _MEMBER_TIMEOUT_S)
+    print("PASS closure/member-timeout-rows")
+    # Mutate a COPY of the real table: a row naming no member must go red.
+    changed = dict(_MEMBER_TIMEOUT_S)
+    changed["no-such-member"] = 60
+    try:
+        _check_member_timeout_rows(_SUBSET, changed)
+    except AssertionError as exc:
+        if not str(exc).startswith("closure/member-timeout-rows"):
+            raise
+    else:
+        raise AssertionError("closure/member-timeout-rows-not-red")
+    print("RED closure-registration -> closure/member-timeout-rows")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -154,33 +208,39 @@ def _materialize(opf_src, dest):
     return dest / "opf"
 
 
-def _run_one(opf_root, script, args, run_dir, env):
-    """Run one subset member isolated against the copied opf/tools/<script>. Returns (rc, tail_of_output).
-    cwd is run_dir, which is OUTSIDE any git repository and does not contain the tools/ tree, so only the
-    copied opf/tools/ is reachable to `python3 -I`."""
+def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S):
+    """Run one subset member isolated against the copied opf/tools/<script>, killed at `timeout_s`
+    seconds. Returns (rc, tail_of_output, timed_out): a member killed at its bound is rc 2 with
+    timed_out True, CANNOT-EVALUATE (the member never finished, so closure was neither observed nor
+    refuted), distinct from a member that ran and failed. cwd is run_dir, which is OUTSIDE any git
+    repository and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to
+    `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
-        return 2, "missing subset script in the copy: {}".format(target)
+        return 2, "missing subset script in the copy: {}".format(target), False
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(target), *args],
             cwd=str(run_dir), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=_SUBSET_TIMEOUT_S,
+            timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
-        return 2, "timed out after {}s".format(_SUBSET_TIMEOUT_S)
+        return 2, "timed out after {}s (cannot evaluate: the member never finished)".format(timeout_s), True
     except OSError as exc:
-        return 2, "could not launch the interpreter: {}".format(exc)
+        return 2, "could not launch the interpreter: {}".format(exc), False
     tail = (proc.stdout or b"").decode("utf-8", "replace").splitlines()[-3:]
-    return proc.returncode, "\n".join(tail)
+    return proc.returncode, "\n".join(tail), False
 
 
 def _run_subset(opf_root, run_dir):
-    """Run every subset member. Returns a list of (name, rc, tail)."""
+    """Run every subset member, each under its kill bound (_MEMBER_TIMEOUT_S row or the default).
+    Returns a list of (name, rc, tail, timed_out)."""
     _check_pack_manifest_registration(_SUBSET)
     _check_adopt_observe_registration(_SUBSET)
+    _check_member_timeout_rows(_SUBSET, _MEMBER_TIMEOUT_S)
     env = _isolated_env()
-    return [(name, *(_run_one(opf_root, script, args, run_dir, env)))
+    return [(name, *(_run_one(opf_root, script, args, run_dir, env,
+                              timeout_s=_MEMBER_TIMEOUT_S.get(name, _SUBSET_TIMEOUT_S))))
             for name, script, args in _SUBSET]
 
 
@@ -204,14 +264,26 @@ def run(root):
         except AssertionError as exc:
             print("STANDALONE CLOSURE: FAILED:", str(exc), file=sys.stderr)
             return 1
-        failed = [(name, rc, tail) for name, rc, tail in results if rc != 0]
-        for name, rc, tail in results:
-            print("  {:32s} {}".format(name, "OK" if rc == 0 else "FAILED rc={}".format(rc)))
+        timed_out = [(name, rc, tail) for name, rc, tail, expired in results if expired]
+        failed = [(name, rc, tail) for name, rc, tail, expired in results if rc != 0 and not expired]
+        for name, rc, tail, expired in results:
+            verdict = "OK" if rc == 0 else (
+                "TIMEOUT (cannot evaluate)" if expired else "FAILED rc={}".format(rc))
+            print("  {:32s} {}".format(name, verdict))
         if failed:
             print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
                   file=sys.stderr)
             for name, rc, tail in failed:
                 print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+        if timed_out:
+            # A member killed at its bound is CANNOT-EVALUATE (exit 2), never a closure finding:
+            # the member did not finish, so this run observed neither closure nor its absence.
+            print("STANDALONE CLOSURE: CANNOT EVALUATE (a subset member was killed at its time "
+                  "bound before it finished):", file=sys.stderr)
+            for name, rc, tail in timed_out:
+                print("  {}: {}".format(name, tail.replace("\n", " | ")), file=sys.stderr)
+            return 2
+        if failed:
             return 1
         print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
         return 0
@@ -228,6 +300,7 @@ def self_test_main():
     try:
         _pack_manifest_registration_self_test()
         _adopt_observe_registration_self_test()
+        _member_timeout_rows_self_test()
     except AssertionError as exc:
         print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
         return 1
@@ -252,7 +325,9 @@ def self_test_main():
         else:
             store.write_text(flipped, encoding="utf-8")
             env = _isolated_env()
-            rc, _tail = _run_one(opf_root, "opf.py", ["--self-test"], tmp, env)
+            rc, _tail, _expired = _run_one(
+                opf_root, "opf.py", ["--self-test"], tmp, env,
+                timeout_s=_MEMBER_TIMEOUT_S.get("opf-tooling-selftest", _SUBSET_TIMEOUT_S))
             if rc == 0:
                 failures.append("negative: a re-introduced upward edge (import check_versions) was NOT "
                                 "caught in isolation (the gate would give no coverage)")
