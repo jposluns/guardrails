@@ -2128,9 +2128,12 @@ installed copy because it is absent or unreadable, the token `not-read`, which a
 carry with any runtime result other than `cannot_evaluate`. A restatement differs from that file's
 declaration where it gives a different value for any field the file carries, or states a field the
 file does not carry. The execution environment of an installation or of a run of a release is
-unaltered where it is the stock platform that the documentation of that release names, or, where
-that documentation names none, a stock install of the platform the installation or run uses, as that
-platform's own installer leaves it, changed only as that documentation directs. Every default of
+unaltered where it is a stock install of a platform and version within what the documentation of
+that release names, a family of platforms or a range of versions included, or, where that
+documentation names none, a stock install of the platform the installation or run uses, as that
+platform's own installer leaves it, changed only as that documentation directs; a failure that any
+such stock install shows under the rules below is the release's, whichever platform and version
+within that naming a checker used. Every default of
 that stock platform that the documentation does not exclude, by directing that it be changed or by
 naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the
 release's job, a stock version-control line-ending setting such as `core.autocrlf`, an interpreter's
@@ -2142,23 +2145,54 @@ documentation directs, such as an environment variable, a preloaded or substitut
 interpreter, an interpreter or version-control configuration file or setting, or a package-manager
 configuration file, index, or resolver, and the test is counterfactual: such an addition, removal,
 or replacement alters the environment exactly where remaking the installation or run without it,
-under the same record otherwise, changes what a step reads, resolves, or writes, and one whose
-undoing changes none of that leaves the environment unaltered. A checker MUST record, with each
-installation and each run it offers as evidence under this section, each documented installation and
-run attempt and each run that shows a failure included, at least these fields, so that another
-checker can remake that installation or run under the record and apply each test this section sets
-to it: the platform and version that the documentation of that release names, if any, and the
-platform and version used; the account the steps ran as; the umask; the locale and character
-encoding; every environment variable set, with its value; the path and SHA-256 digest of each
+under the same record otherwise, changes one of the observations named below, and one whose undoing
+changes none of them leaves the environment unaltered. Of the two tests above, the stock install is
+the baseline and the counterfactual test decides: an environment that differs from that stock
+install is altered only where a difference alters it under that test, and is otherwise unaltered.
+The observations that test compares are, for each step, the sources it resolves and the bytes it
+obtains from them, the installed files as the rule below on making an installation as a record
+states compares them, and, for a run, the report it emits and its runtime result, each compared
+apart from a value that differs only in naming the account, a time, or a scratch location, so a
+component that changes no more than such a value, as a checker's temporary directory changes where
+temporary files are written, leaves the environment unaltered. Where an observation can differ
+between remakings made under the same record, the checker MUST either replay each step's recorded
+inputs, the bytes each source served included, where the record holds them, or repeat the remaking
+with the component and the remaking without it each a number of times stated in advance and
+recorded; the component then alters the environment where, for some observation, no value that the
+remakings without it yield is one that the remakings with it yield, leaves it unaltered where every
+remaking, with it and without it, yields the same value of each observation, and otherwise has an
+undecided effect. Where a component's effect is undecided, or a remaking the test needs cannot be
+made, whether the environment is altered is cannot-evaluate: an attempt or run whose standing turns
+on it MUST NOT be counted as made in an unaltered or in an altered execution environment, a failure
+that it alone would show or establish is unresolved under the outcome states below, and section 17
+discloses that residual. A checker MUST record each documented installation and run attempt of a
+release that it makes under this section, whether or not it offers that attempt or its outcome as
+evidence, and each installation and run it offers as evidence under this section, each run that
+shows a failure included, with at least these fields, so that another checker can remake that
+installation or run under the record and apply each test this section sets to it: the platform and
+version that the documentation of that release names, if any, and the platform and version used; the
+account the steps ran as and whether it held administrative privilege; the umask; the locale and
+character encoding; every environment variable set, with its value, except that a value that bears a
+secret, such as a credential, a token, a password, or a private key, MUST be recorded as the
+variable's name and a redaction marker in place of the value; the path and SHA-256 digest of each
 interpreter, version-control, and package-manager configuration file that a step read; each package
-index or other source that a step used; the documented steps followed and the commands run; the
-interpreter and tool versions; the list of files the installation installed, with the SHA-256 digest
-of each; and each setting or component that the checker knows was added, removed, or replaced
-relative to the stock platform. An execution environment matches a recorded one where each of those
-fields other than the list of installed files holds the value or digest the record states, apart
-from a value that differs only in naming the account, a time, or a scratch location; an installation
-is made as a record states where it follows the recorded steps and commands and its list of
-installed files, with their digests, equals the recorded list, apart from such names. That record
+index or other source that a step used, any credential in its address replaced by a redaction
+marker; the documented steps followed and the commands run; the interpreter and tool versions; the
+store that a run read, as the path relative to the store root and the SHA-256 digest of each of its
+files that the run read; the list of files the installation installed, named relative to the
+installation's root, with the SHA-256 digest of each and whether the release ships it, a source the
+documentation directs served it, or a step wrote it; and each setting or component that the checker
+knows was added, removed, or replaced relative to the stock platform. An execution environment
+matches a recorded one where each of those fields other than the account and the list of installed
+files holds the value or digest the record states, apart from a value that differs only in naming
+the account, a time, or a scratch location, a value recorded as redacted being compared by its name
+alone, and where the account the steps ran as held administrative privilege exactly where the
+recorded one did, whatever either account is named; an installation is made as a record states where
+it follows the recorded steps and commands, its list of installed files names the same files, apart
+from such names, and each installed file that the release ships or that a source the documentation
+directs served holds the digest the record states, while an installed file that a step wrote, such
+as a script that embeds the installation's own location, is compared by name alone and its content
+is judged only as part of the execution environment, by the counterfactual test above. That record
 and the counterfactual test reach only alterations that a checker detects: one that no checker
 detected, such as an organization-wide package-manager configuration file that a checker took for
 part of the stock platform, makes an attempt in an altered environment look unaltered until another
@@ -2180,13 +2214,20 @@ of such a file, reference runs of the release can differ as the bytes its direct
 differ, a residual of the release's own documentation that section 17 discloses; a run over such a
 file whose bytes the checker chose or substituted, rather than obtained that way, is outside these
 conditions. A file the run reads that the release neither ships nor its documentation directs be
-installed, such as the interpreter's standard library, a system library, or a store that the
-documented run reads, is part of the execution environment, not of those byte conditions, and is
-judged by the test above for an unaltered execution environment. A run outside those conditions, one
-made in an altered execution environment, one of an installation made in an altered execution
-environment, or one whose installed copy it cannot read included, is not a reference run, and this
-section establishes nothing from its report or its runtime result: neither establishes nor counters
-any conformance or nonconformance of any release. The rule below on the conditions that gate a
+installed, other than a file of a store that the run reads, such as the interpreter's standard
+library or a system library, is part of the execution
+environment, not of those byte conditions, and is judged by the test above for an unaltered
+execution environment. A store that the run reads is neither part of those byte conditions nor part
+of the execution environment, since its content is never the stock platform's: a reference run reads
+the store that the documentation of the release directs it to read or to create, made as that
+documentation directs, or, where that documentation directs none, a store whose files the run's
+record lists with their SHA-256 digests, so a run over any other store is not a reference run, and
+runs whose recorded store files or digests differ are not made under the same conditions. A run
+outside those conditions, one made in an altered execution environment, one of an installation made
+in an altered execution environment, or one whose installed copy it cannot read included, is not a
+reference run, and this section establishes nothing from its report or its runtime result: neither
+its report nor its runtime result establishes or counters any conformance or nonconformance of any
+release. The rule below on the conditions that gate a
 reference run takes precedence over that sentence for one kind of such run alone: a documented
 installation and run attempt, made and recorded in an unaltered execution environment, that yields a
 run outside those conditions, such as one whose installed copy it cannot read, is evidence of
@@ -2259,22 +2300,28 @@ of the same installation outside those conditions, is a failed availability atte
 for which a failure of availability is established under the next sentence does not conform to this
 section, and a conformance claim MUST NOT be made for such a release. A failure of availability is
 shown where one failed availability attempt is made, and established where a second attempt, made
-under the first attempt's recorded conditions, fails too, whatever the reason each time and
-whichever checker makes each attempt; attempts that yield a reference run, however many, do not
-counter it, and it establishes that the documented installation and run do not reliably yield a
-reference run, not that no attempt can yield one; an attempt made in an altered execution
-environment shows and establishes nothing here, so a locally altered installation or execution
-environment cannot make an authentic release nonconformant, and a release cannot take its reports
-outside the rules of this section through its own installation procedure. Each failure under the two
-rules above, a failure of availability included, is, whenever a checker reports on it, in one of
-three outcome states: established, where it has been shown and reproduced as those rules require, by
-any checkers; unresolved, where it has been shown and not reproduced; or not shown. Any checker that
-reports on a shown failure MUST report the state it is in, naming what was shown and the recorded
-conditions: it MUST report an established failure as established, whether or not its own runs or
-attempts reproduced it, and an unresolved one as unresolved, naming the reproduction procedure it
-ran, if any, stated in advance as a number of further reference runs or installation attempts under
-the same recorded conditions or a time spent making them, and it MUST NOT report an unresolved
-failure as established, as countered, or as conformance of the release. A check under those rules
+under the first attempt's recorded conditions, meaning in an execution environment that matches the
+first attempt's recorded environment and by following its recorded steps and commands, whether or
+not its list of installed files equals the recorded one, since a failing attempt can install other
+files or none, fails too, whatever the reason each time and whichever checker makes each attempt;
+attempts that yield a reference run, however many, do not counter it, and it establishes that the
+documented installation and run do not reliably yield a reference run, not that no attempt can yield
+one; an attempt made in an altered execution environment shows and establishes nothing here, so a
+locally altered installation or execution environment cannot make an authentic release
+nonconformant, and a release cannot take its reports outside the rules of this section through its
+own installation procedure. Each failure under the two rules above, a failure of availability
+included, is, whenever a checker reports on it, in one of three outcome states: established, where
+it has been shown and reproduced as those rules require, by any checkers; unresolved, where it has
+been shown and not reproduced, or where it would be shown or established but for an environment
+attribution that the counterfactual test above leaves cannot-evaluate; or not shown. Any checker
+that reports on a shown failure MUST report the state that the evidence known to it shows, naming
+that evidence, its own runs and attempts and each record of another checker's that it relied on,
+what was shown, and the recorded conditions: it MUST report a failure that this evidence shows
+established as established, whether or not its own runs or attempts reproduced it, and an unresolved
+one as unresolved, naming the reproduction procedure it ran, if any, stated in advance as a number
+of further reference runs or installation attempts under the same recorded conditions or a time
+spent making them, and it MUST NOT report an unresolved failure as established, as countered, or as
+conformance of the release. A check under those rules
 therefore ends in one of three outcomes,
 established, unresolved, or not shown, and an unresolved outcome neither establishes nor counters
 any conformance or nonconformance of the release. These rules do not remove nondeterministic
@@ -2731,18 +2778,32 @@ The gates in this standard are strong where they are strong and say so where the
   run over such a file whose bytes the checker chose or substituted rather than obtained from that
   source in an unaltered execution environment is not a reference run, and a failure reference runs
   show makes the release nonconformant only where a reference run under the same recorded conditions
-  reproduces it. Section 16.1 counts every default of the stock platform that a release's
-  documentation names, or of a stock install where it names none, as part of an unaltered execution
-  environment unless that documentation excludes it, so a stock `core.autocrlf` setting, an
-  interpreter's default newline translation, a default umask, or a PEP 668 marker is the release's
-  to meet, and an environment is altered only by what someone added, removed, or replaced relative
-  to that platform, judged by remaking without it: two honest checkers then decide those cases
-  alike, at the cost that a release whose documentation names no platform must meet every default of
-  a stock install of whichever platform a checker uses, and the test reaches only alterations that a
-  checker records and recognizes, so one that nobody detected, such as an organization-wide
-  package-manager configuration file taken for part of the stock platform, can make an authentic
-  release look nonconformant, or hide a failure of a release, until a checker compares the recorded
-  files with that stock platform (section 16.1). The scope of the conformance reports of a release
+  reproduces it. Section 16.1 counts every default of each stock install within what a release's
+  documentation names, a family of platforms or a range of versions included, or of a stock install
+  where it names none, as part of an unaltered execution environment unless that documentation
+  excludes it, so a stock `core.autocrlf` setting, an interpreter's default newline translation, a
+  default umask, or a PEP 668 marker is the release's to meet, and an environment is altered only by
+  what someone added, removed, or replaced relative to that platform, judged by remaking without it
+  and comparing the observations that section names, apart from names of the account, times, and
+  scratch locations: two honest checkers that replay the same recorded inputs to a step whose
+  observations those inputs determine then decide those cases alike, while checkers that instead
+  repeat the remakings of a nondeterministic step can reach different decisions, or none, and a case
+  that the test leaves undecided is unresolved, neither establishing nor countering any conformance
+  or nonconformance, at the cost that a release whose documentation names no platform must meet
+  every default of a stock install of whichever platform a checker uses, and one whose documentation
+  names a family or a range must meet those of every platform and version within it, and the test
+  reaches only alterations that a checker records and recognizes, so one that nobody detected, such
+  as an organization-wide package-manager configuration file taken for part of the stock platform,
+  can make an authentic release look nonconformant, or hide a failure of a release, until a checker
+  compares the recorded files with that stock platform (section 16.1). Section 16.1 compares by
+  digest only the installed files whose bytes the release ships or a directed source serves, and
+  compares a file that a step wrote, such as a script that embeds the installation's location, by
+  name alone, so two installations whose written files differ in content can both be made as one
+  record states, and such a difference counts only where the counterfactual test attributes it to an
+  alteration (section 16.1). A record carries a secret-bearing value, an environment variable's
+  value or a credential in a source's address, as a name and a redaction marker alone, so such a
+  value is compared by name alone and two environments that differ only in it match, though it can
+  change what a source serves (section 16.1). The scope of the conformance reports of a release
   rests on what a reference run of
   the release emits, never on the installation that emitted a report: a report is in scope only
   where its restatement, its two digests, and its runtime result, compared as written, equal those
@@ -2763,10 +2824,11 @@ The gates in this standard are strong where they are strong and say so where the
   other than the one the run's runtime check yielded; a check of the conformance reports tells a
   report in scope from one out of scope only by making reference runs, and where every documented
   installation and run attempt yields no reference run, as where its installer rewrites that file, a
-  check finds no conformance report of the release and two such attempts establish that the release
-  itself does not conform, while a release whose installer fails twice and succeeds once does not
-  conform and a report of the content that its one reference run emits is still in scope (section
-  16.1). Where reference runs of a release
+  check finds no conformance report of the release and two such attempts, the second made under the
+  first one's recorded conditions, establish that the release itself does not conform, while a
+  release whose installer, under the same recorded conditions, fails twice and succeeds once does
+  not conform and a report of the content that its one reference run emits is still in scope
+  (section 16.1). Where reference runs of a release
   differ, a report is in scope where at least one of them emits a report of the same content, and
   section 16.1 makes the release nonconformant where a reference run yields a runtime result other
   than the one that section requires, or emits a report that breaks its report rules, and a
