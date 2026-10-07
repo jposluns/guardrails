@@ -27,8 +27,11 @@ guard with THREE outcomes (allow/ask/deny); under the key above its former ASK i
 verb, ASK unless the command is a PRISTINE SINGLE BARE `git <verb>` invocation (no shell metacharacter
 anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a command word literally `git`)
 AND either its form is genuinely non-destructive or the whole tree is PROVABLY CLEAN, in which case ALLOW (no
-in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, grants nothing the same command
-without it, or with any other leading assignment of the same value, would not get); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, is an ordinary assignment no
+code reads to permit anything - a pristine prefixed command gets the bare command's decision, a value the raw
+scans read routes the command exactly where any other leading assignment of the same value routes it, those
+routes snapshot every not-provably-clean resolved base before an allow of a destructive form, and every
+destructive route DENIES, fail closed, when no session cwd resolves - the rmo and fcl vectors pin this); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -1934,9 +1937,14 @@ def _main_isolated(monitor):
         # The prefix was writable by the guarded actor and skipped the recovery snapshot, so it is removed; a
         # leading assignment of it is an ordinary env assignment whose value no code reads to permit
         # anything: on a pristine command whose unprefixed form is in scope it gets the unprefixed command's
-        # decision (rmo-1), and where the raw scans read its value (a metacharacter, rmo-6; a target-redirect
-        # word on an unparseable command or a lossy keyword, rmo-8) it gets exactly what FOO=<the same value>
-        # gets, which can differ from the unprefixed command's decision.
+        # decision (rmo-1); where the raw scans read its value as a metacharacter (rmo-6) or a target-redirect
+        # word on an unparseable command (rmo-8 case c) it gets exactly what FOO=<the same value> gets
+        # (decision, reason text and snapshot count); and a lossy keyword in the value (rmo-8 case d) brings
+        # the command into scope exactly as FOO does and gets FOO's allow-or-deny decision with the reason
+        # text free to differ (the prefix is the one leading assignment the dir-simple check treats as
+        # benign, so it stays on the pristine path where FOO takes the view-override branch). Any of these
+        # can differ from the unprefixed command's decision, never toward an unsnapshotted allow of a
+        # destructive form with no session cwd (those routes deny: rmo-6, fcl).
         _rmo = "GUARDRAIL_ALLOW_DISCARD=1 "
         _rmo_note = (getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_NOTE", None)
                      or "(the removed-prefix migration note is missing)").strip()
@@ -2084,7 +2092,7 @@ def _main_isolated(monitor):
         # gets (decision, reason text with the snapshot ref name normalised, and recovery-snapshot count), on the dirty session tree and with no
         # session cwd. That is the existing non-pristine path, which the bare command does not take (it
         # denies, rmo-1): with a dirty session tree it snapshots then allows with a note, and with no session
-        # cwd it currently allows with a note and takes no snapshot, for FOO and the prefix alike.
+        # cwd it DENIES and takes no snapshot (the ROUND-8 fail-closed route), for FOO and the prefix alike.
         _rmo_snaps = []
 
         def _rmo_count(repo, verb):
@@ -2101,11 +2109,13 @@ def _main_isolated(monitor):
                         _dec, _text = _rmo_text("{}={} git reset --hard".format(_name, _v), _cwd)
                         _got.append((_dec, re.sub(r"refs/aiqt-recovery/[0-9A-Za-z-]+", "refs/aiqt-recovery/<id>",
                                                   _text), len(_rmo_snaps)))
-                    if (_got[0] != _got[1] or _got[0][0] != "allow-note"
+                    _want_dec = "allow-note" if _where == "cwd" else "deny"
+                    if (_got[0] != _got[1] or _got[0][0] != _want_dec
                             or (_where == "cwd") != (_got[0][2] > 0)):
                         failures.append("(rmo-6-{}-{}) the prefix with a metacharacter value must get exactly "
-                                        "what FOO with that value gets (a noted allow, snapshotted only with a "
-                                        "session cwd), got {!r}".format(_where, _v, _got))
+                                        "what FOO with that value gets (with a session cwd a snapshotted noted "
+                                        "allow; with none a deny and no snapshot), got {!r}"
+                                        .format(_where, _v, _got))
         finally:
             aiqt_hooks._record_recovery = _orig_rmo_rec
         # (rmo-7) The prefix pattern accepts the token shapes _ENV_ASSIGN_RE treats as a leading assignment:
@@ -2136,7 +2146,9 @@ def _main_isolated(monitor):
             failures.append("(rmo-7-append) the '+=' prefixed dirty clobber must deny like the bare command, "
                             "with the migration sentence, got {} {!r}".format(_dec, _text))
         # (rmo-8) Bounded equivalence (the residue's cases c and d): the raw scans read the prefix's value as
-        # text, so where they match it the prefixed command gets exactly what FOO=<the same value> gets, and
+        # text, so where they match it the prefixed command gets what FOO=<the same value> gets - case (c)
+        # exactly, and case (d) the same deny DECISION with the reason text differing (the prefix stays on
+        # the pristine dir-simple path; FOO takes the view-override branch) - and
         # that can differ from the unprefixed command's decision. (c) On an unparseable command (an unquoted <<EOF heredoc whose body holds a lone quote) the
         # fallback's target-redirect scan matches '-C' in the value and denies, where the unprefixed command
         # snapshots then allows with a note. (d) A lossy keyword in the value brings 'git log -1' into scope
@@ -2150,6 +2162,52 @@ def _main_isolated(monitor):
             if _got_bare != _want_bare or _got != [_want_pref, _want_pref]:
                 failures.append("(rmo-8-{}) expected the unprefixed command {} and the prefix and FOO both {}, "
                                 "got {} and {}".format(_case, _want_bare, _want_pref, _got_bare, _got))
+        # (fcl) ROUND-8 FAIL-CLOSED (the orchestrator-confirmed fail-open): a work-losing git verb is never
+        # MORE permissive with a leading assignment than without one. With NO session cwd every destructive
+        # route DENIES with no snapshot, as the bare pristine command does on an unresolvable worktree: the
+        # non-pristine path (a metacharacter in the assignment value: ; | & $ ( and the compound/stash
+        # shapes), the view-override branch (a quote-only or benign assignment value, a -c global option, an
+        # ambient GIT_* var), and the prefix spellings of both. An unreadable/nonexistent session cwd denies
+        # through the failed probe/snapshot on both paths (fcl-badcwd).
+        _fcl_nocwd = (
+            ("np-semicolon", "FOO=';' git reset --hard"),
+            ("np-pipe", "FOO='|' git reset --hard"),
+            ("np-amp", "FOO='&' git clean -fd"),
+            ("np-dollar", "FOO='$x' git rm -rf ."),
+            ("np-paren", "FOO='(' git restore ."),
+            ("np-rmo-semicolon", "GUARDRAIL_ALLOW_DISCARD=';' git reset --hard"),
+            ("np-stash", "FOO=';' git stash drop"),
+            ("np-bare-compound", "git reset --hard ; true"),
+            ("vo-quote-value", "FOO=\"'\" git reset --hard"),
+            ("vo-plain-assign", "FOO=1 git reset --hard"),
+            ("pr-rmo-quote", "GUARDRAIL_ALLOW_DISCARD=\"'\" git checkout -f"),
+            ("vo-c-option", "git -c core.pager=cat reset --hard"),
+        )
+        aiqt_hooks._record_recovery = _rmo_count
+        try:
+            for _case, _cmd in _fcl_nocwd:
+                del _rmo_snaps[:]
+                _dec, _ = _rmo_text(_cmd)
+                if _dec != "deny" or _rmo_snaps:
+                    failures.append("(fcl-nocwd-{}) expected a no-snapshot deny with no session cwd, got {} "
+                                    "with {} snapshot(s)".format(_case, _dec, len(_rmo_snaps)))
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        os.environ["GIT_NAMESPACE"] = "fail-closed-selftest"
+        try:
+            _dec, _ = _rmo_text("git reset --hard")
+        finally:
+            os.environ.pop("GIT_NAMESPACE", None)
+        if _dec != "deny":
+            failures.append("(fcl-nocwd-ambient) expected a deny for an ambient-GIT_*-overridden destructive "
+                            "discard with no session cwd, got {}".format(_dec))
+        _fcl_badcwd = str(tmp / "fcl-missing-dir")  # never created: the probe and snapshot both fail there
+        for _case, _cmd in (("np", "FOO=';' git reset --hard"), ("vo", "FOO=1 git reset --hard"),
+                            ("bare", "git reset --hard")):
+            _dec, _ = _rmo_text(_cmd, _fcl_badcwd)
+            if _dec != "deny":
+                failures.append("(fcl-badcwd-{}) expected a deny on an unreadable/nonexistent session cwd, "
+                                "got {}".format(_case, _dec))
         # (rmo-5) Dead code: the retired opt-out names are bound in neither script copy (the source module
         # live, and both files by their top-level bindings), so no future caller resurrects the path.
         _rmo_dead = ("_DISCARD_OPTOUT_RE", "_DISCARD_FALSY", "_segment_has_optout", "_OPTOUT_PRISTINE",

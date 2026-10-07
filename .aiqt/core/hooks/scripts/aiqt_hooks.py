@@ -2299,13 +2299,14 @@ def bash_absolute_paths(data):
 # code reads its value to permit anything: only _segment_dir_simple (benign, it redirects nothing) and
 # _removed_prefix_note (reason text only) read the name. When the command without it already names a
 # recognized work-losing git verb and the prefixed command is pristine (it parses and _SHELL_META_RE finds
-# nothing in the raw string), the pristine path reads only the token list, so the prefixed command gets the
+# nothing in the raw string), the pristine path decides from the token list plus the raw-scan flag raw_lossy,
+# which the bare command already set (it names a work-losing verb), so the prefixed command gets the
 # decision of the command without it. Outside that bound the value is raw text the raw scans read: a
 # metacharacter, even quoted, makes the command non-pristine; an unbalanced quote makes it unparseable;
-# _RAW_DISCARD_REDIRECT_RE in the unparseable fallback matches a -C/--git-dir/--work-tree/GIT_DIR=/
-# GIT_WORK_TREE= inside it; and _raw_has_lossy_git matches a lossy keyword inside it, so the decision can
-# differ from the bare one. Neither the non-pristine path nor the fallback reads the name, so there it gets
-# what FOO=<the same value> gets. The pattern accepts
+# _RAW_DISCARD_REDIRECT_RE in the unparseable fallback matches a cd/pushd or a -C/--git-dir/--work-tree/
+# GIT_DIR=/GIT_WORK_TREE= inside it; and _raw_has_lossy_git matches a lossy keyword inside it, so the
+# decision can differ from the bare one. Neither the non-pristine path nor the fallback reads the name, so
+# there it gets what FOO=<the same value> gets. The pattern accepts
 # both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
 # _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
 # empty final assignment (bash last-wins) and fold a '+=' append.
@@ -4559,7 +4560,9 @@ def _nonpristine_discard_actions(segments, cwd):
     destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
     snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
     (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
-    its existing best-effort session-cwd snapshot."""
+    its existing best-effort session-cwd snapshot. With an UNKNOWN session cwd the caller DENIES outright
+    before reading these results (ROUND-8 fail-closed), so the eff-is-None branches below only shape the
+    walk, never an allow."""
     depth = 0
     session_cwd = cwd if isinstance(cwd, str) and cwd else None
     eff = session_cwd
@@ -4728,11 +4731,15 @@ def git_discard(data):
     GUARDRAIL_ALLOW_DISCARD assignment, the removed override, is an ordinary assignment whose value no code
     reads to permit anything: when the command without it names a recognized work-losing verb and the
     prefixed command is pristine, it gets the decision of the command without it; otherwise its value is raw
-    text the raw scans read like any other, so a metacharacter value takes the existing non-pristine path,
+    text the raw scans read like any other: a metacharacter value takes the existing non-pristine path and
     an unbalanced quote or a value with a target-redirect word on an unparseable command takes the fallback,
-    and a lossy keyword in the value brings a command into scope, each exactly as FOO=<the same value>
-    would; the non-pristine path with no session cwd and no resolved redirect target takes no snapshot and
-    allows with a note); the guarantee is bounded to
+    each exactly as FOO=<the same value> would (decision, reason text and snapshot count), while a lossy
+    keyword in the value brings a command into scope exactly as FOO=<the same value> does and then gets the
+    same allow-or-deny outcome class as that FOO form, with the reason text and note free to differ (the
+    prefix is the one leading assignment _segment_dir_simple treats as benign, so it stays on the pristine
+    dir-simple path where FOO takes the view-override branch); the non-pristine path, the view-override
+    branch for a destructive verb, and the unparseable fallback each DENY (fail closed) when no session cwd
+    resolves, as the bare command does on an unresolvable worktree); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
@@ -4762,7 +4769,8 @@ def git_discard(data):
     NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
     BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
     command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
-    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    a same-repo cd is still captured by the whole-tree add --all), and with NO session cwd it DENIES (fail
+    closed: no catch-all snapshot is possible). See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
@@ -4881,6 +4889,22 @@ def git_discard(data):
                 "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
                 "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
                 "stash first.")
+        # ROUND-8 (orchestrator-confirmed fail-open): with NO session cwd the catch-all snapshot below is
+        # impossible, and a raw-scan-flagged verb the walk cannot see may still act on that unknown cwd, so
+        # a non-pristine in-scope discard with no resolvable session directory DENIES (fail closed). The old
+        # unsnapshotted allow-note made "FOO=';' git reset --hard" (any leading assignment whose value
+        # carries a shell metacharacter) MORE permissive with no cwd than the bare command, which denies on
+        # an unresolvable worktree. A resolved -C/cd target does not lift this: the unknown session cwd
+        # itself stays an unsnapshottable potential target.
+        if np_base is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/wrapped/redirected "
+                "command and no session working directory is available, so this guard can neither prove any "
+                "target tree clean nor take the session-directory recovery snapshot; denied rather than run "
+                "on a possibly unrecoverable discard. Re-issue it as a plain 'git <verb>' command from the "
+                "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a compound/wrapped/redirected git discard with no session directory "
+                "to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
         # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
         # recovery that omits the cleared stash (round-3 finding 2).
@@ -4923,8 +4947,10 @@ def git_discard(data):
                   "resolved plus the session directory before allowing", np_snap)
 
     # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
-    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD, and nothing reads the raw
-    # command string, so the prefix changes no decision below. MIGRATION (this release only): every
+    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD by name; the raw command string
+    # is read below only through raw_lossy, the scope flag a prefix value can only switch ON (routing to the
+    # F-97 denies), so the prefix's value can make the decision below stricter, never more permissive.
+    # MIGRATION (this release only): every
     # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
     # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
     note = _removed_prefix_note(pristine)
@@ -4945,7 +4971,8 @@ def git_discard(data):
     # safe. Nothing bypasses it (no in-band override exists). A best-effort snapshot of
     # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
     # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
-    # non-redirecting case), but may NOT capture a redirected tree.
+    # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
+    # target a DESTRUCTIVE form DENIES below (fail closed, ROUND-8): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
@@ -5086,6 +5113,22 @@ def git_discard(data):
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
         target_desc = ("the -C target ({})".format(repo_dir)
                        if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        # ROUND-8 (class-width of the orchestrator-confirmed fail-open): a DESTRUCTIVE verb deciding on this
+        # view-override branch with NO resolvable base (no session cwd and no resolved -C target: a benign
+        # leading assignment such as FOO=1, a -c or other global option, or an ambient GIT_* override, each
+        # with no cwd) used to allow-note with NO snapshot, making the command MORE permissive than its bare
+        # form, which denies on an unresolvable worktree. It now DENIES (fail closed); a non-destructive
+        # form below keeps its ref-level allow-note, matching the bare command.
+        if destructive and target_base is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs under a repository-view override or a "
+                "command-local redirect and no session working directory is available, so this guard can "
+                "neither prove the target tree clean nor take a recovery snapshot; denied rather than run on "
+                "a possibly unrecoverable discard. Re-issue it as a plain git command from the target "
+                "repository, or commit or stash your work first. {}"
+                .format(kind or "a git work-losing verb", alts),
+                "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
+                "(rule prsunc); run it from the target repo, or commit or stash first.")
         ao_snap = None
         if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
             ao_snap = _record_recovery(target_base, sub)
