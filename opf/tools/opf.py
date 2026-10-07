@@ -1199,10 +1199,21 @@ def _watchdog_bound_faults(bounds, budgets):
 # exempt ONLY while the sleeping thread is inside an unexpired deadline it
 # opened through _watchdog_deadline (a polling step that deadline already
 # charged); anywhere else it charges its full value. Waits a thread makes
-# while it is itself inside a charged wait (the fixture machinery under a
+# while it is itself inside a REGISTERED call (the fixture machinery under a
 # run_bounded or _run_fixture_process call, Condition.wait under Event.wait
-# or Queue.get) belong to that outer charge and are not charged twice; waits
-# OTHER threads make during that call are charged normally. A leg whose
+# or Queue.get) belong to that outer call and are not charged twice; waits
+# OTHER threads make during that call are charged normally. Both the sub-tick
+# exemption and that suppression are keyed by the Thread OBJECT (the thread's
+# lifetime identity), never threading.get_ident(), whose OS-level ident is
+# recycled once a thread exits and would hand a dead thread's exemption to an
+# unrelated successor; every ledger read-modify-write happens under the
+# ledger's own lock, and no registered primitive's real call runs while that
+# lock is held. Charges go to the
+# INNERMOST live ledger in this process: while a nested _watchdog_leg_entry
+# runs, EVERY thread's registered wait, including an outer leg's concurrent
+# background wait, charges the nested leg's ledger and is absent from the
+# outer leg's own accounting (the launcher legs' budgets carry margin for
+# exactly that gap). A leg whose
 # charged waits exceed its declared budget, or that makes a wait whose
 # timeout is not a finite number (including a fixture call whose timeout the
 # ledger cannot introspect), FAILS as a test failure; the runner's kill bound
@@ -1232,27 +1243,40 @@ _WATCHDOG_LEDGERS = []
 _WATCHDOG_ORIGINALS = []
 
 
-def _watchdog_charge(seconds, what):
+def _watchdog_charge(seconds, what, suppressible=True):
     """Charge one bounded wait to the running leg's ledger (a no-op outside a
-    leg, in a forked child of the leg, or on a thread that is itself inside a
-    charged wait; OTHER threads' waits are charged even while this one is
-    inside a charged fixture call)."""
+    leg or in a forked child of the leg). Suppression depth counts the
+    REGISTERED calls (charged or untimed) the current thread is inside, keyed
+    by the Thread object (lifetime identity, never a recyclable OS ident): a
+    suppressible charge made at depth > 0 belongs to the outer call and is
+    dropped, while OTHER threads' waits are charged even during this one's
+    call. An unsuppressible record (suppressible=False: a fixture timeout the
+    ledger cannot introspect) is written to `uncountable` at ANY depth, so an
+    unknown fixture timeout fails the leg even from inside a charged wait.
+    Every ledger read-modify-write happens under the ledger's lock."""
     import threading
     if not _WATCHDOG_LEDGERS:
         return
     ledger = _WATCHDOG_LEDGERS[-1]
-    if ledger["pid"] != os.getpid() or ledger["depth"].get(threading.get_ident()):
+    if ledger["pid"] != os.getpid():
         return
-    if not _watchdog_finite_seconds(seconds) and seconds != 0:
-        ledger["uncountable"].append(what)
-        return
-    ledger["charged"] += seconds
-    ledger["waits"].append((what, seconds))
+    with ledger["lock"]:
+        if not suppressible:
+            ledger["uncountable"].append(what)
+            return
+        if ledger["depth"].get(threading.current_thread()):
+            return
+        if not _watchdog_finite_seconds(seconds) and seconds != 0:
+            ledger["uncountable"].append(what)
+            return
+        ledger["charged"] += seconds
+        ledger["waits"].append((what, seconds))
 
 
 def _watchdog_deadline(seconds):
     """A polling deadline `seconds` from now, charged to the running leg. While
-    it is unexpired, the opening thread's sub-tick sleeps are polling steps the
+    it is unexpired, the opening thread's (lifetime identity: this Thread
+    object's, never a recycled ident's) sub-tick sleeps are polling steps the
     deadline's own charge already covers."""
     import threading
     import time
@@ -1260,9 +1284,10 @@ def _watchdog_deadline(seconds):
     if _WATCHDOG_LEDGERS and _watchdog_finite_seconds(seconds):
         ledger = _WATCHDOG_LEDGERS[-1]
         if ledger["pid"] == os.getpid():
-            ident = threading.get_ident()
-            ledger["ticks"][ident] = max(ledger["ticks"].get(ident, 0),
-                                         time.monotonic() + seconds)
+            me = threading.current_thread()
+            with ledger["lock"]:
+                ledger["ticks"][me] = max(ledger["ticks"].get(me, 0),
+                                          time.monotonic() + seconds)
     return time.monotonic() + seconds
 
 
@@ -1299,9 +1324,11 @@ def _watchdog_install_charges():
         def wrapper(*args, **kwargs):
             timeout = timeout_of(args, kwargs)
             if timeout is unknown:
-                # Recorded BEFORE the suppression below: a fixture call whose
-                # timeout cannot be introspected never runs uncounted.
-                _watchdog_charge(float("nan"), "%s(<unknown timeout>)" % name)
+                # Unsuppressible: a fixture call whose timeout cannot be
+                # introspected never runs uncounted, at ANY suppression depth
+                # (a nested unknown-default call still fails the leg).
+                _watchdog_charge(float("nan"), "%s(<unknown timeout>)" % name,
+                                 suppressible=False)
             elif timeout is not None:
                 try:
                     seconds = float(timeout)
@@ -1313,24 +1340,30 @@ def _watchdog_install_charges():
                                if _watchdog_finite_seconds(seconds) else 0)
                 elif name == "sleep" and 0 <= seconds < _WATCHDOG_POLL_TICK:
                     ledger = _WATCHDOG_LEDGERS[-1] if _WATCHDOG_LEDGERS else None
-                    tick = (ledger["ticks"].get(threading.get_ident())
-                            if ledger is not None else None)
+                    tick = None
+                    if ledger is not None:
+                        with ledger["lock"]:
+                            tick = ledger["ticks"].get(threading.current_thread())
                     if tick is not None and time.monotonic() < tick:
                         seconds = 0  # a polling step its charged deadline covers
                 _watchdog_charge(seconds, "%s(%r)" % (name, timeout))
-            # Per-thread suppression: while THIS thread is inside the real
-            # call, its nested waits (fixture machinery, Condition.wait under
-            # Event.wait or Queue.get) belong to the charge above. Other
-            # threads' waits keep charging.
+            # Per-thread suppression, keyed by the Thread object (lifetime
+            # identity, never a recyclable ident): while THIS thread is inside
+            # the real call, its nested waits (fixture machinery,
+            # Condition.wait under Event.wait or Queue.get) belong to the
+            # charge above. Other threads' waits keep charging. Depth counts
+            # every registered call, charged or untimed.
             ledger = _WATCHDOG_LEDGERS[-1] if _WATCHDOG_LEDGERS else None
-            ident = threading.get_ident()
+            me = threading.current_thread()
             if ledger is not None:
-                ledger["depth"][ident] = ledger["depth"].get(ident, 0) + 1
+                with ledger["lock"]:
+                    ledger["depth"][me] = ledger["depth"].get(me, 0) + 1
             try:
                 return real(*args, **kwargs)
             finally:
                 if ledger is not None:
-                    ledger["depth"][ident] -= 1
+                    with ledger["lock"]:
+                        ledger["depth"][me] -= 1
         _WATCHDOG_ORIGINALS.append((owner, name, real))
         setattr(owner, name, wrapper)
 
@@ -1367,7 +1400,9 @@ def _watchdog_leg_entry(budget, case, *args):
         print("opf watchdog leg: FAIL (declared budget %r is not a finite positive number)"
               % (budget,))
         return EXIT_FINDING
-    ledger = dict(pid=os.getpid(), depth={}, ticks={}, charged=0, waits=[], uncountable=[])
+    import threading
+    ledger = dict(pid=os.getpid(), lock=threading.Lock(), depth={}, ticks={},
+                  charged=0, waits=[], uncountable=[])
     if not _WATCHDOG_LEDGERS:
         _watchdog_install_charges()
     _WATCHDOG_LEDGERS.append(ledger)
@@ -11408,16 +11443,22 @@ def _watchdog_regression_self_test():
     # Every leg's budget is DECLARED here and checked on every run: the leg
     # runs under _watchdog_leg_entry, which charges each bounded wait it makes
     # at its full timeout and fails the leg when the charges exceed this
-    # budget. Each number is the larger of the leg's prior budget and the
-    # charges its passing path made under PER-THREAD accounting (three ledger
-    # runs, 2026-10-06: every leg stable to within 25 ms except
-    # escalation-subject, whose load-dependent cleanup ticks spread 80 ms and
-    # carry about a 2 s cushion). The overlap legs and overdue-success rose
-    # here because one thread's fixture call no longer hides the other
-    # threads' charged waits; close-cancel alone had dropped, its one-hour
-    # fixture deadline replaced by the fixture hold.
+    # budget. Each raised budget is written at its definition as MEASURED BASE
+    # + MARGIN, never a blended number. The overlap legs and overdue-success
+    # rose under PER-THREAD accounting (one thread's fixture call no longer
+    # hides the other threads' charged waits): their bases are the exact sums
+    # of their declared timeouts (overlap 21+20+20+20+11+10 = 102.0;
+    # overdue-success 4 x deadline(30) + join(30) + fixture allowance 11 =
+    # 161.0, reproduced to the millisecond across three 2026-10-06 ledger
+    # runs), and their margin is 0.01, headroom against float summation of
+    # those charges, not a timing allowance. close-cancel alone had dropped,
+    # its one-hour fixture deadline replaced by the fixture hold. Raising a
+    # budget delays only the leg's independent KILL bound (budget + launch
+    # margin, a detection-latency trade); it never loosens the accounting,
+    # because any regression's extra charged wait still exceeds the budget and
+    # fails the leg at report time, long before the kill bound matters.
     budgets = dict((mode, deadline_budget) for mode in deadline_modes)
-    budgets.update(("overlap-" + mode, 102.01) for mode in overlap_modes)
+    budgets.update(("overlap-" + mode, 102.0 + 0.01) for mode in overlap_modes)
     budgets.update((mode, deadline_budget) for mode in safety_modes)
     budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
     # A launcher case runs its nested runner twice with every launch patched
@@ -11431,11 +11472,18 @@ def _watchdog_regression_self_test():
         ("premature-exit", 80), ("nested-timeout", 11), ("nested-cancel", 11),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
-        ("subject-setup", 22), ("overdue-success", 161.01), ("launch-ownership", 60),
+        ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
         ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 1658),
-        ("pdeathsig", 32), ("escalation-subject", 890), ("escalate-reaped", 784),
+        # escalation-subject: base 884 is the leg's deterministic declared
+        # timeouts; margin 6 is the structural bound on its load-dependent
+        # cleanup ticks (the leg patches _FIXTURE_CLEANUP_GRACE to 1.0 s, so
+        # each of its two exercises adds at most about 3 s of charged sub-tick
+        # cleanup ticks). The three 2026-10-06 ledger runs measured 887.78 to
+        # 887.95 total, i.e. base 884 plus 3.78 to 3.95 s of ticks, inside
+        # that bound.
+        ("pdeathsig", 32), ("escalation-subject", 884 + 6), ("escalate-reaped", 784),
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
         ("census-exception", 780), ("receipt-high-fd", 10)))
@@ -11529,15 +11577,26 @@ def _watchdog_regression_self_test():
     # The runtime ledger: a leg whose charged waits exceed its declared budget,
     # whose wait has no finite timeout, or whose budget is unusable fails; a
     # leg inside its budget keeps its own result; a wait a thread makes inside
-    # its own charged wait is not charged twice, while another thread's
-    # concurrent wait IS charged; and a sub-tick sleep is exempt only inside
-    # an unexpired charged deadline. Every registered primitive has an
-    # over-budget and a within-budget vector (positional and keyword forms
-    # where the primitive accepts a keyword timeout; time.sleep and
-    # select.select are positional-only in CPython), so deleting one
-    # registration, misreading its argument index, or inflating the poll tick
-    # turns at least one vector red. Every vector leg returns an explicit int
-    # verdict, the comparison requires an int, and each fixture outcome is
+    # its own registered call is not charged twice, while another thread's
+    # concurrent wait IS charged (and an UNSET Event.wait's nested
+    # Condition.wait is the suppression's own within-budget vector); a
+    # sub-tick sleep is exempt only on the thread lifetime that opened a
+    # still-unexpired charged deadline (an expired deadline, another live
+    # thread's deadline, and a dead thread's recycled ident each charge);
+    # concurrent charges are atomic (charge-atomic suspends one thread's
+    # read-modify-write while another charges); and an unknown fixture
+    # timeout fails the leg even from inside another charged wait. Every
+    # registered primitive has an over-budget and a within-budget vector,
+    # with over-budget vectors in BOTH positional and keyword form where the
+    # primitive accepts both (time.sleep and select.select are
+    # positional-only in CPython; _run_fixture_process is keyword-only), so
+    # deleting one registration, misreading its argument index, reading only
+    # positional timeouts, or inflating the poll tick turns at least one
+    # vector red. No vector's EXPECTED verdict depends on wall-clock timing:
+    # each over-budget verdict follows from declared timeouts alone, and the
+    # within-budget exemption vectors carry seconds of slack against stalls.
+    # Every vector leg returns an explicit int verdict, the comparison
+    # (vector_red) requires an exact int, and each fixture outcome is
     # asserted separately: a fixture that never exercised its path fails the
     # vector even where the budget verdict alone would mask it.
     def probe(*charges):
@@ -11553,8 +11612,10 @@ def _watchdog_regression_self_test():
         fixture_outcomes.append((got, want))
         return EXIT_OK if got == want else 3  # a dead path is never EXIT_OK
 
-    def bounded(timeout_s, body, want):
-        return lambda: outcome(_opf_emit.run_bounded(body, timeout_s=timeout_s), want)
+    def bounded(timeout_s, body, want, keyword=True):
+        if keyword:
+            return lambda: outcome(_opf_emit.run_bounded(body, timeout_s=timeout_s), want)
+        return lambda: outcome(_opf_emit.run_bounded(body, timeout_s), want)
 
     def opened_deadline(seconds):
         def leg():
@@ -11594,10 +11655,13 @@ def _watchdog_regression_self_test():
                 os.close(write_fd)
         return leg
 
-    def waited_event(seconds, keyword):
+    def waited_event(seconds, keyword, preset=True):
         def leg():
             event = threading.Event()
-            event.set()  # charged at its full timeout, returning at once
+            if preset:
+                event.set()  # charged at its full timeout, returning at once
+            # Unset, the wait really elapses and its nested Condition.wait is
+            # suppressed: only the Event charge itself may reach the ledger.
             if keyword:
                 event.wait(timeout=seconds)
             else:
@@ -11659,6 +11723,42 @@ def _watchdog_regression_self_test():
     def opaque_leg():
         return outcome(_opf_emit.run_bounded(lambda: "x"), "ran")
 
+    def opaque_fixture(argv, **kwargs):
+        return "held"
+    opaque_fixture.__signature__ = "unintrospectable"
+
+    def no_default_bounded(body, timeout_s):
+        return body()
+
+    def no_default_leg():
+        # The stub's timeout_s has no default, so the install-time extractor
+        # must yield `unknown` (never inspect.Parameter.empty): the omitted
+        # timeout is recorded uncountable even though the real call then
+        # raises for the missing required argument.
+        try:
+            _opf_emit.run_bounded(lambda: "x")
+        except TypeError:
+            return outcome("typeerror", "typeerror")
+        return outcome("call succeeded", "typeerror")
+
+    def nested_unknown(call, want):
+        # The unknown-timeout fixture call happens INSIDE a charged Queue.get
+        # (this thread's suppression depth is raised): the uncountable record
+        # must survive that suppression and fail the leg.
+        nested = []
+
+        class Carrier(queue.Queue):
+            def _get(self):
+                nested.append(call())
+                return super()._get()
+
+        def leg():
+            channel = Carrier()
+            channel.put("x")
+            got = channel.get(timeout=0.01)
+            return outcome((got, tuple(nested)), ("x", (want,)))
+        return leg
+
     def bounded_stub(body, timeout_s=30):
         return body()
 
@@ -11693,6 +11793,85 @@ def _watchdog_regression_self_test():
         worker.join()  # untimed: never charged
         return EXIT_OK
 
+    def recycled_ident_leg():
+        # A thread opens a deadline and EXITS; a later thread, which CPython
+        # typically hands the dead thread's recycled OS ident, then sleeps
+        # sub-tick. Keyed by thread lifetime, that sleep always charges
+        # (1 + 0.05 = 1.05 over the 1.01 budget); keyed by recycled ident it
+        # would inherit the dead thread's exemption and escape.
+        opener = threading.Thread(target=lambda: _watchdog_deadline(1))
+        opener.start()
+        opener.join()  # untimed: never charged
+        sleeper = threading.Thread(target=lambda: time.sleep(0.05))
+        sleeper.start()
+        sleeper.join()  # untimed: never charged
+        return EXIT_OK
+
+    def cross_thread_subtick_leg():
+        # One LIVE thread opens a deadline while the main thread sleeps
+        # sub-tick: another thread's deadline never exempts this one, so the
+        # sleep charges (5 + 0.05 = 5.05 over the 5.01 budget) whatever the
+        # wall clock does.
+        opened, release = threading.Event(), threading.Event()
+
+        def opener():
+            _watchdog_deadline(5)
+            opened.set()
+            release.wait()  # untimed: never charged
+
+        worker = threading.Thread(target=opener)
+        worker.start()
+        opened.wait()  # untimed: never charged
+        time.sleep(0.05)
+        release.set()
+        worker.join()  # untimed: never charged
+        return EXIT_OK
+
+    def expired_deadline_leg():
+        # The exemption dies with its deadline. The first sleep outlasts the
+        # 0.02 s deadline by construction (sleep suspends at least 0.03 s), so
+        # the second sub-tick sleep must charge. The expected verdict is
+        # timing-free: whether or not the FIRST sleep still caught the
+        # unexpired deadline, the charges (at least 0.02 + 0.05) exceed the
+        # 0.03 budget.
+        _watchdog_deadline(0.02)
+        time.sleep(0.03)
+        time.sleep(0.05)
+        return EXIT_OK
+
+    def racing_charges():
+        # Deterministic lost-update probe for ledger atomicity: thread A's
+        # read-modify-write of ledger["charged"] is suspended between its
+        # load and its store (a float subclass whose __radd__ hands control
+        # to thread B through UNREGISTERED Locks, so the handshake itself
+        # charges nothing) while B charges 3. Atomic updates total
+        # 2 + 3 = 5 over the 4.5 budget; an unlocked += would store A's
+        # stale sum and lose B's charge (total 2, inside budget).
+        a_inside = threading.Lock()
+        a_inside.acquire()
+        b_done = threading.Lock()
+        b_done.acquire()
+
+        class Suspended(float):
+            def __radd__(self, other):
+                a_inside.release()
+                # Bounded: with the ledger lock held, B cannot finish.
+                b_done.acquire(timeout=0.3)
+                return float(other) + float(self)
+
+        def charger():
+            a_inside.acquire()
+            _watchdog_charge(3.0, "b")
+            b_done.release()
+
+        def leg():
+            worker = threading.Thread(target=charger)
+            worker.start()
+            _watchdog_charge(Suspended(2.0), "a")
+            worker.join()  # untimed: never charged
+            return EXIT_OK
+        return leg
+
     tick = _WATCHDOG_POLL_TICK
     installed = (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS))
     pristine = (time.sleep, threading.Thread.join, threading.Event.wait,
@@ -11709,8 +11888,19 @@ def _watchdog_regression_self_test():
             ("deadline-over", _watchdog_leg_entry(1, opened_deadline(2)), EXIT_FINDING),
             ("subtick-sleep-no-deadline",
              _watchdog_leg_entry(tick / 100, slept(None, tick / 20)), EXIT_FINDING),
+            # The 5 s deadline leaves seconds of slack before the exemption
+            # expires: the expected verdict never flips under host load (the
+            # old 0.2 s deadline left about 0.1 s and did). The vector still
+            # kills a deadline that sets no tick: 5 + 0.05 + 0.05 > 5.
             ("subtick-sleep-inside-deadline",
-             _watchdog_leg_entry(0.2, slept(0.2, 0.05, 0.05)), EXIT_OK),
+             _watchdog_leg_entry(5, slept(5, 0.05, 0.05)), EXIT_OK),
+            ("expired-deadline-subtick",
+             _watchdog_leg_entry(0.03, expired_deadline_leg), EXIT_FINDING),
+            ("recycled-thread-sleep",
+             _watchdog_leg_entry(1.01, recycled_ident_leg), EXIT_FINDING),
+            ("cross-thread-subtick",
+             _watchdog_leg_entry(5.01, cross_thread_subtick_leg), EXIT_FINDING),
+            ("charge-atomic", _watchdog_leg_entry(4.5, racing_charges()), EXIT_FINDING),
             ("above-tick-sleep-inside-deadline",
              _watchdog_leg_entry(0.2, slept(0.2, 0.15)), EXIT_FINDING),
             ("sleep-positional-over", _watchdog_leg_entry(0.1, slept(None, 0.15)), EXIT_FINDING),
@@ -11718,19 +11908,31 @@ def _watchdog_regression_self_test():
             ("join-positional-over", _watchdog_leg_entry(1, joined(2, False)), EXIT_FINDING),
             ("join-positional-within", _watchdog_leg_entry(2, joined(2, False)), EXIT_OK),
             ("join-keyword-over", _watchdog_leg_entry(1, joined(2, True)), EXIT_FINDING),
+            ("join-keyword-within", _watchdog_leg_entry(2, joined(2, True)), EXIT_OK),
             ("select-positional-over", _watchdog_leg_entry(1, selected(2)), EXIT_FINDING),
             ("select-positional-within", _watchdog_leg_entry(2, selected(2)), EXIT_OK),
             ("event-positional-over", _watchdog_leg_entry(1, waited_event(1.5, False)), EXIT_FINDING),
+            ("event-keyword-over", _watchdog_leg_entry(1, waited_event(1.5, True)), EXIT_FINDING),
             ("event-keyword-within", _watchdog_leg_entry(1.5, waited_event(1.5, True)), EXIT_OK),
+            # Unset: the wait elapses and its nested Condition.wait must be
+            # suppressed, or the charge doubles to 0.02 and overruns.
+            ("event-unset-single-charge",
+             _watchdog_leg_entry(0.01, waited_event(0.01, False, preset=False)), EXIT_OK),
             ("condition-positional-over",
              _watchdog_leg_entry(0.1, waited_condition(0.15, False)), EXIT_FINDING),
+            ("condition-keyword-over",
+             _watchdog_leg_entry(0.1, waited_condition(0.15, True)), EXIT_FINDING),
             ("condition-keyword-within",
              _watchdog_leg_entry(0.15, waited_condition(0.15, True)), EXIT_OK),
             ("queue-positional-over", _watchdog_leg_entry(1, queue_got(2, True, False)), EXIT_FINDING),
+            ("queue-keyword-over", _watchdog_leg_entry(1, queue_got(2, True, True)), EXIT_FINDING),
             ("queue-keyword-within", _watchdog_leg_entry(2, queue_got(2, True, True)), EXIT_OK),
             ("queue-single-charge", _watchdog_leg_entry(0.15, queue_got(0.15, False, True)), EXIT_OK),
             ("run-bounded-over", _watchdog_leg_entry(
                 _deadline_case_budget(0.5) - 0.5, bounded(0.5, lambda: "ok", "ok")), EXIT_FINDING),
+            ("run-bounded-positional-over", _watchdog_leg_entry(
+                _deadline_case_budget(60) - 0.5,
+                bounded(60, lambda: "ok", "ok", keyword=False)), EXIT_FINDING),
             ("run-bounded-timeout-within", _watchdog_leg_entry(
                 _deadline_case_budget(0.5),
                 bounded(0.5, lambda: time.sleep(4) or "ok", "TIMEOUT")), EXIT_OK),
@@ -11745,6 +11947,21 @@ def _watchdog_regression_self_test():
                  stubbed("_run_fixture_process", fixture_stub, hold, fixture_leg), EXIT_OK),
                 ("opaque-fixture-default",
                  stubbed("run_bounded", opaque_bounded, 50, opaque_leg), EXIT_FINDING),
+                ("opaque-fixture-process-default",
+                 stubbed("_run_fixture_process", opaque_fixture, 50,
+                         lambda: outcome(_opf_emit._run_fixture_process(["probe"]),
+                                         "held")), EXIT_FINDING),
+                ("opaque-nested-bounded",
+                 stubbed("run_bounded", opaque_bounded, 50,
+                         nested_unknown(lambda: _opf_emit.run_bounded(lambda: "x"),
+                                        "ran")), EXIT_FINDING),
+                ("opaque-nested-fixture",
+                 stubbed("_run_fixture_process", opaque_fixture, 50,
+                         nested_unknown(lambda: _opf_emit._run_fixture_process(["probe"]),
+                                        "held")), EXIT_FINDING),
+                ("no-default-fixture",
+                 stubbed("run_bounded", no_default_bounded, 50, no_default_leg),
+                 EXIT_FINDING),
                 ("pinned-allowance",
                  stubbed("run_bounded", bounded_stub, _deadline_case_budget(0.25) - 0.5,
                          patched_allowance_leg), EXIT_FINDING),
@@ -11755,9 +11972,17 @@ def _watchdog_regression_self_test():
                  stubbed("run_bounded", bounded_stub, _deadline_case_budget(0.5) + 0.15,
                          cross_thread_leg), EXIT_OK),
             ])
+    def vector_red(got, want):
+        # The verdict comparison: only an EXACT int (never a bool, whose True
+        # compares equal to EXIT_FINDING) equal to the expected verdict passes.
+        return type(got) is not int or got != want
+
     flip_missed.extend("runtime ledger vector %s" % name
                        for name, got, want in ledger_vectors
-                       if type(got) is not int or got != want)
+                       if vector_red(got, want))
+    if (not vector_red(True, EXIT_FINDING) or not vector_red(EXIT_OK, EXIT_FINDING)
+            or vector_red(EXIT_OK, EXIT_OK)):
+        flip_missed.append("verdict comparison accepts a bool or a wrong verdict")
     flip_missed.extend("runtime ledger fixture outcome %r != %r" % pair
                        for pair in fixture_outcomes if pair[0] != pair[1])
     if (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS)) != installed:
