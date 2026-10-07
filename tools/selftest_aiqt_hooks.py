@@ -17,7 +17,10 @@ denied only if that snapshot cannot be made), and a confirmed or genuinely-ambig
 DENIES-and-educates. Every reducer delegates to _reduce_result, which keeps three allow shapes apart: a
 silent allow (exit 0, no stdout object) is "allow"; an allow-with-note (a systemMessage holding non-whitespace
 text and no hookSpecificOutput) is "allow-note"; an explicit permissionDecision "allow", with or without a
-note, is "explicit-allow", which no expectation accepts (the hooks' own _allow never emits one). The PASS
+note, is "explicit-allow", which no expectation accepts (the hooks' own _allow never emits one). A check
+that reads a handler's result in memory beside its own message test goes through _site_ok (the same
+reducer, plus "block2" for exit 2 with no stdout object), keyed in _SITE_REDUCTIONS, whose (ims-*) fixtures
+hold a malformed result per site. The PASS
 banner enumerates the current per-guard outcomes. The value "ask" survives only in the reducers'
 vocabulary and in the invariant that proves it never occurs.
 
@@ -234,7 +237,8 @@ def _generated_deny_ok(stdout, rule, detail):
     """True when stdout (the generated entry point's output for one PreToolUse call) is ONE strict JSON object
     (_strict_hook_json) of EXACTLY the _deny shape: top-level keys {"hookSpecificOutput", "systemMessage"}
     with a non-blank string banner, and hookSpecificOutput keys {"hookEventName", "permissionDecision",
-    "permissionDecisionReason"} holding "PreToolUse", "deny" and a string reason that names rule and detail.
+    "permissionDecisionReason"} holding "PreToolUse", "deny" and a string reason holding non-whitespace text
+    that names rule and detail (a blank reason is refused even when rule and detail are both empty).
     Any other key (a top-level "decision" of "block" or "approve", a "continue": false) or a non-standard
     member is refused: the platform may act on such a key or refuse the whole output, so a check that
     ignored it would accept a deny the platform need not apply as written."""
@@ -249,8 +253,8 @@ def _generated_deny_ok(stdout, rule, detail):
             and isinstance(banner, str) and banner.strip()):
         return False
     reason = specific["permissionDecisionReason"]
-    return (specific["hookEventName"] == "PreToolUse" and specific["permissionDecision"] == "deny"
-            and isinstance(reason, str) and rule in reason and detail in reason)
+    return bool(specific["hookEventName"] == "PreToolUse" and specific["permissionDecision"] == "deny"
+                and isinstance(reason, str) and reason.strip() and rule in reason and detail in reason)
 
 
 def _decision(handler, command, tool="Bash", cwd=None):
@@ -263,6 +267,40 @@ def _decision(handler, command, tool="Bash", cwd=None):
         data["cwd"] = cwd
     code, stdout_obj, _stderr = handler(data)
     return _reduce_result(code, stdout_obj)
+
+
+# Every in-memory judge site that reads a handler's (code, stdout_obj) itself rather than through
+# _decision, keyed by the site, with the reductions (_site_reduction) it accepts. Each site calls
+# _site_ok with its key, and _test_inmemory_judge_sites holds a malformed-result fixture for every key.
+_SITE_REDUCTIONS = {
+    "rec-probeuncertain": ("deny",),
+    "rec-refcollision": ("deny",),
+    "f17-guard": ("allow", "allow-note"),
+    "f17-outside": ("allow-note",),
+    "sr-missing-tool": ("deny",),
+    "sr-unreadable": ("allow-note",),
+    "sr-silent": ("allow",),
+    "f4-note-rule": ("allow-note",),
+    "robust-a": ("allow",),
+    "cf4-stash-bound": ("allow-note",),
+    "pl-y3c-reason": ("deny",),
+    "gd146-reason": ("deny",),
+    "gs-s": ("block2",),
+    "noask-sweep": ("block2",),
+}
+
+
+def _site_reduction(code, stdout_obj):
+    """_reduce_result, plus "block2" for the one exit-2 shape the hooks emit: exit 2 with NO stdout
+    object (a mis-wired event's hard block). Exit 2 beside a stdout object is "unexpected"."""
+    if code == 2 and stdout_obj is None:
+        return "block2"
+    return _reduce_result(code, stdout_obj)
+
+
+def _site_ok(site, code, stdout_obj):
+    """True when the in-memory judge site's result reduces to one of _SITE_REDUCTIONS[site]."""
+    return _site_reduction(code, stdout_obj) in _SITE_REDUCTIONS[site]
 
 
 def _declared_names(tree, name):
@@ -999,8 +1037,80 @@ def _test_reducer_deny_schema(failures):
         elif not _reduce_result(0, obj).startswith("unexpected"):
             failures.append("(rd-{}) expected an unexpected reduction, got {}".format(
                 label, _reduce_result(0, obj)))
+    # A reducer-level row only (the former reducer refused this object too); the expect_warn change it
+    # backs is held by _test_git_stash_ref's (sr-w-block) fixture, which drives expect_warn itself.
     if _reduce_result(0, {"systemMessage": "stash@{0}", "decision": "block"}) == "allow-note":
         failures.append("(rd-note-decision-block) a note beside decision=block reduced to allow-note")
+
+
+def _test_inmemory_judge_sites(failures):
+    """(ims-*) Each in-memory judge site in _SITE_REDUCTIONS, with a malformed result the site's FORMER
+    predicate (replayed here) accepted and _site_ok must refuse: a deny beside "continue": false or a
+    top-level "decision", a note beside "decision": "block", an exit 1 or an exit 2 carrying a stdout
+    object. Two sites (sr-silent, robust-a) already required exit 0 with NO stdout object, which no
+    malformed object passes, so their fixtures show the former predicate refusing too. Every key must
+    be called by its site (a literal _site_ok("<key>" in this file), so a fixture cannot outlive its
+    site."""
+    spec = {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "r"}
+
+    def deny(reason="r", **extra):
+        obj = {"hookSpecificOutput": dict(spec, permissionDecisionReason=reason), "systemMessage": "b"}
+        obj.update(extra)
+        return obj
+
+    def lenient_dec(obj):
+        return obj.get("hookSpecificOutput", {}).get("permissionDecision") if isinstance(obj, dict) else None
+
+    def lenient_reason(obj):
+        return (obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                if isinstance(obj, dict) else "")
+
+    def lenient_note(obj):
+        return obj.get("systemMessage", "") if isinstance(obj, dict) else ""
+
+    missing_deny = aiqt_hooks._deny_missing_tool_name("expbnd")
+    mutated_deny = (missing_deny[0], dict(missing_deny[1], **{"continue": False}))
+    bind = "git -C /r stash apply"
+    fixtures = {
+        "rec-probeuncertain": (lambda c, o: c == 0 and lenient_dec(o) == "deny",
+                               (0, deny(**{"continue": False}))),
+        "rec-refcollision": (lambda c, o: c == 0 and lenient_dec(o) == "deny", (0, deny(decision="approve"))),
+        "f17-guard": (lambda c, o: lenient_dec(o) != "deny", (1, {"decision": "block"})),
+        "f17-outside": (lambda c, o: isinstance(o, dict), (0, {"decision": "block"})),
+        # The former check compared the result to the production constructor's own output, so a
+        # constructor that gains a key passes it: replayed with that mutated constructor's output.
+        "sr-missing-tool": (lambda c, o: (c, o, None) == mutated_deny + (None,), mutated_deny),
+        "sr-unreadable": (lambda c, o: (c == 0 and isinstance(o, dict) and isinstance(o.get("systemMessage"), str)
+                                        and o["systemMessage"] and "hookSpecificOutput" not in o
+                                        and "permissionDecision" not in o),
+                          (0, {"systemMessage": "unreadable", "continue": False})),
+        "sr-silent": (lambda c, o: c == 0 and o is None, (0, {"systemMessage": "n", "decision": "block"})),
+        "f4-note-rule": (lambda c, o: "prsunc" in lenient_note(o),
+                         (0, {"systemMessage": "rule prsunc", "decision": "block"})),
+        "robust-a": (lambda c, o: c == 0 and o is None, (0, {"decision": "block"})),
+        "cf4-stash-bound": (lambda c, o: bind in lenient_note(o),
+                            (0, {"systemMessage": bind, "decision": "block"})),
+        "pl-y3c-reason": (lambda c, o: "prune" in lenient_reason(o), (0, deny("prune", decision="approve"))),
+        "gd146-reason": (lambda c, o: "DELETES" in lenient_reason(o),
+                         (0, deny("DELETES", **{"continue": False}))),
+        "gs-s": (lambda c, o: c == 2, (2, {"decision": "approve"})),
+        "noask-sweep": (lambda c, o: c == 2, (2, {"decision": "approve"})),
+    }
+    exact_before = ("sr-silent", "robust-a")
+    if set(fixtures) != set(_SITE_REDUCTIONS):
+        failures.append("(ims-coverage) the fixture keys {} differ from _SITE_REDUCTIONS {}".format(
+            sorted(fixtures), sorted(_SITE_REDUCTIONS)))
+    source = Path(__file__).read_text(encoding="utf-8")
+    for site, (former, (code, obj)) in sorted(fixtures.items()):
+        if '_site_ok("{}"'.format(site) not in source:
+            failures.append("(ims-{}) no site calls _site_ok with this key".format(site))
+        if former(code, obj) == (site in exact_before):
+            failures.append("(ims-{}) the fixture does not {}: the former predicate {} {!r}".format(
+                site, "show the former check exact" if site in exact_before else "discriminate",
+                "accepts" if site in exact_before else "refuses", (code, obj)))
+        if _site_ok(site, code, obj):
+            failures.append("(ims-{}) the site's judge accepts the malformed result {!r}".format(
+                site, (code, obj)))
 
 
 def _test_strict_rule_parity(failures):
@@ -1010,7 +1120,7 @@ def _test_strict_rule_parity(failures):
     note (check_python_floor.warning_note, selftest_orch_hooks._stop_warning, and _strict_hook_json with
     _reduce_result's allow-note) and the deny (check_hooks_preview._deny_object with the banner shape,
     _generated_deny_ok, _strict_hook_json with _reduce_result's deny, selftest_orch_hooks._verdict). Each
-    tool keeps its own copy (stdlib-only and self-contained); this check holds them together."""
+    tool keeps its own copy (self-contained); this check holds them together."""
     import check_hooks_preview as preview_gate
     import check_python_floor as floor_gate
     import selftest_orch_hooks as orch
@@ -1066,7 +1176,13 @@ def _test_strict_rule_parity(failures):
         '{"hookSpecificOutput": {' + spec + '}, "systemMessage": ""}',
         '{"hookSpecificOutput": {' + spec + '}}',
         '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny"}, '
-        '"systemMessage": "b"}')
+        '"systemMessage": "b"}',
+        '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+        '"permissionDecisionReason": " "}, "systemMessage": "b"}',
+        '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+        '"permissionDecisionReason": ""}, "systemMessage": "b"}',
+        '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+        '"permissionDecisionReason": "\\u0085"}, "systemMessage": "b"}')
     accepted = {"note": 0, "deny": 0}
     for index, text in enumerate(corpus):
         parses = [parsed(parse, text) for parse in (floor_gate.strict_json, preview_gate.strict_json,
@@ -1679,10 +1795,10 @@ def _init_repo(path):
 
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
-    handler = aiqt_hooks.git_stash_ref
+    handler = [aiqt_hooks.git_stash_ref]
 
     def run(label, data):
-        result = handler(data)
+        result = handler[0](data)
         _code, stdout_obj, _stderr = result
         if isinstance(stdout_obj, dict):
             specific = stdout_obj.get("hookSpecificOutput")
@@ -1695,16 +1811,16 @@ def _test_git_stash_ref(failures):
         return {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                 "tool_input": {"command": command}}
 
-    def expect_warn(label, command):
+    def expect_warn(label, command, sink=failures):
         code, stdout_obj, stderr = run(label, payload(command))
         if not (_reduce_result(code, stdout_obj) == "allow-note" and
                 "stash@{" in stdout_obj["systemMessage"] and stderr is None):
-            failures.append("{}: expected stash warning only, got {!r}"
+            sink.append("{}: expected stash warning only, got {!r}"
                             .format(label, (code, stdout_obj, stderr)))
 
     def expect_silent(label, command):
         code, stdout_obj, stderr = run(label, payload(command))
-        if not (code == 0 and stdout_obj is None and stderr is None):
+        if not (_site_ok("sr-silent", code, stdout_obj) and stderr is None):
             failures.append("{}: expected silent allow, got {!r}"
                             .format(label, (code, stdout_obj, stderr)))
 
@@ -1733,6 +1849,26 @@ def _test_git_stash_ref(failures):
             ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
             ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
         expect_warn(label, command)
+        # (sr-w-block) expect_warn itself refuses the same stash warning with a top-level "decision":
+        # "block" injected, which the former expect_warn (exit 0 and the stash@{ text in the
+        # systemMessage, replayed here) accepted.
+        def blocking(data):
+            code, stdout_obj, stderr = aiqt_hooks.git_stash_ref(data)
+            return code, dict(stdout_obj, decision="block") if isinstance(stdout_obj, dict) else stdout_obj, stderr
+        handler[0] = blocking
+        try:
+            sink = []
+            expect_warn(label, command, sink)
+            code, stdout_obj, stderr = blocking(payload(command))
+        finally:
+            handler[0] = aiqt_hooks.git_stash_ref
+        if not (code == 0 and isinstance(stdout_obj, dict) and stderr is None
+                and "stash@{" in stdout_obj.get("systemMessage", "")):
+            failures.append("(sr-w-block-control) {}: the fixture does not discriminate: the former expect_warn "
+                            "refuses {!r}".format(label, stdout_obj))
+        if not sink:
+            failures.append("(sr-w-block) {}: expect_warn accepted a stash warning beside decision=block"
+                            .format(label))
 
     for label, command in (
             ("(sr-a1) unquoted opaque ref", "git stash pop stash@{2}"),
@@ -1794,7 +1930,8 @@ def _test_git_stash_ref(failures):
              {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
               "tool_input": {"command": "git stash pop"}})):
         result = run(label, data)
-        if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
+        if (result != aiqt_hooks._deny_missing_tool_name("expbnd")
+                or not _site_ok("sr-missing-tool", result[0], result[1])):
             failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
 
     # These payloads take the sibling's exact unreadable-command note path.
@@ -1803,12 +1940,8 @@ def _test_git_stash_ref(failures):
                 "tool_input": tool_input}
         result = run("(sr-unreadable)", data)
         code, stdout_obj, stderr = result
-        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
-                isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
+        if not (result == aiqt_hooks.git_explicit_binding(data)
+                and _site_ok("sr-unreadable", code, stdout_obj) and stderr is None):
             failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
                             .format(tool_input, result))
 
@@ -2324,7 +2457,7 @@ def _main_isolated(monitor):
                 "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
         _f4c, _f4o, _ = handler(_f4d)
         _f4banner = _f4o.get("systemMessage", "") if isinstance(_f4o, dict) else ""
-        if "prsunc" not in _f4banner:
+        if not _site_ok("f4-note-rule", _f4c, _f4o) or "prsunc" not in _f4banner:
             failures.append("(f4-note-rule) the same-repo -C redirect allow-note must name the prsunc rule")
 
         # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
@@ -2602,7 +2735,7 @@ def _main_isolated(monitor):
         # discard, only input it cannot recognize as one.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
-        if not (code == 0 and stdout_obj is None):
+        if not _site_ok("robust-a", code, stdout_obj):
             failures.append("(robust-a) malformed tool_input: expected allow, got code={!r}, stdout={!r}"
                             .format(code, stdout_obj))
         # No cwd and a dir-simple lossy verb: the worktree cannot be resolved -> ASK, never silent-allow.
@@ -2951,11 +3084,10 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._tree_is_clean = _orig_clean
             aiqt_hooks._record_recovery = _orig_rec
-        dec_unc = obj_unc.get("hookSpecificOutput", {}).get("permissionDecision") \
-            if isinstance(obj_unc, dict) else None
+        dec_unc = _site_reduction(code_unc, obj_unc)
         reason_unc = obj_unc.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
             if isinstance(obj_unc, dict) else ""
-        if not (code_unc == 0 and dec_unc == "deny"):
+        if not _site_ok("rec-probeuncertain", code_unc, obj_unc):
             failures.append("(rec-probeuncertain) probe-uncertain scoped discard with a failed snapshot must "
                             "DENY (unrecoverable), got code={!r} dec={!r}".format(code_unc, dec_unc))
         if "no pre-command recovery snapshot could be created" not in reason_unc:
@@ -3262,15 +3394,14 @@ def _main_isolated(monitor):
             code_col2, obj_col2, _ = handler(data_col2)
         finally:
             aiqt_hooks.datetime = _orig_dt
-        dec_col2 = obj_col2.get("hookSpecificOutput", {}).get("permissionDecision") \
-            if isinstance(obj_col2, dict) else None
+        dec_col2 = _site_reduction(code_col2, obj_col2)
         reason_col2 = obj_col2.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
             if isinstance(obj_col2, dict) else ""
         refs_after2 = _recovery_refs(rec_col)
         if got_col1 != "allow-note" or len(refs_after1) != 1:
             failures.append("(rec-refcollision-setup) expected one ref after the first snapshot and a "
                             "snapshot-then-allow, got dec={} refs={}".format(got_col1, refs_after1))
-        if not (code_col2 == 0 and dec_col2 == "deny"):
+        if not _site_ok("rec-refcollision", code_col2, obj_col2):
             failures.append("(rec-refcollision) a create-only ref collision fails the snapshot, so the discard "
                             "must DENY (unrecoverable), got code={!r} dec={!r}".format(code_col2, dec_col2))
         if "no pre-command recovery snapshot could be created" not in reason_col2:
@@ -3861,7 +3992,7 @@ def _main_isolated(monitor):
             _cf3code, _cf3obj, _ = aiqt_hooks._stash_drop_clear_outcome(str(cf3), "clear")
             _cf3msg = _cf3obj.get("systemMessage", "") if isinstance(_cf3obj, dict) else ""
             _cf3bind = "git -C {} stash apply".format(shlex.quote(str(cf3)))
-            if _cf3bind not in _cf3msg:
+            if not _site_ok("cf4-stash-bound", _cf3code, _cf3obj) or _cf3bind not in _cf3msg:
                 failures.append("(cf4-stash-bound) the stash recovery command must bind to the target repo "
                                 "'git -C <quoted repo> stash apply' (codex finding 4); got {!r}"
                                 .format(_cf3msg))
@@ -5455,19 +5586,19 @@ def _main_isolated(monitor):
                       aiqt_hooks.commit_msg_subst, aiqt_hooks.git_discard):
             _f17c, _f17o, _ = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                      "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
-            _f17d = (_f17o.get("hookSpecificOutput", {}).get("permissionDecision")
-                     if isinstance(_f17o, dict) else None)
-            if _f17d == "deny":
+            if not _site_ok("f17-guard", _f17c, _f17o):
                 failures.append("(f17-guard-{}) a lexical guard must not fire on quoted-heredoc prose "
-                                "(finding 17); got deny".format(getattr(_f17g, "__name__", _f17g)))
+                                "(finding 17): expected allow or allow-note, got {}".format(
+                                    getattr(_f17g, "__name__", _f17g), _site_reduction(_f17c, _f17o)))
         # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc is still caught (body-strip preserves
         # everything outside the body), so the allow above is the body exclusion, not a blanket pass.
         _f17r, _f17ro, _ = aiqt_hooks.git_discard(
             {"hook_event_name": "PreToolUse", "tool_name": "Bash",
              "tool_input": {"command": "git reset --hard <<'EOF'\nnote\nEOF"}, "cwd": brr})
-        if not (isinstance(_f17ro, dict)):
+        if not _site_ok("f17-outside", _f17r, _f17ro):
             failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
-                            "in scope (not a boundary allow); finding 17 preserves it")
+                            "in scope (not a boundary allow); finding 17 preserves it; got {}".format(
+                                _site_reduction(_f17r, _f17ro)))
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
@@ -5911,7 +6042,7 @@ def _main_isolated(monitor):
         _pm_code, _pm_obj, _pm_err = plg(_pm_data)
         _pm_reason = _pm_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
             if isinstance(_pm_obj, dict) else ""
-        if "prune" not in _pm_reason:
+        if not _site_ok("pl-y3c-reason", _pm_code, _pm_obj) or "prune" not in _pm_reason:
             failures.append("(pl-y3c-reason) --prune origin : ASK reason must name the prune deletion, "
                             "got: {!r}".format(_pm_reason))
         pexpect("(pl-y4) a wrapped clustered '-dv' delete denies via the widened fallback",
@@ -6016,8 +6147,9 @@ def _main_isolated(monitor):
             _d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                   "tool_input": {"command": command}, "cwd": cwd}
             _c, _o, _e = plg(_d)
-            return _o.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
-                if isinstance(_o, dict) else ""
+            if not _site_ok("gd146-reason", _c, _o):
+                return "not a deny: " + _site_reduction(_c, _o)
+            return _o["hookSpecificOutput"]["permissionDecisionReason"]
         _m26 = _reason("git -c remote.origin.mirror=true push origin", plf)
         if _mkey not in _m26 or "DELETES" not in _m26:
             failures.append("(gd146-m26) direct-config ASK detail must name the {} key and the "
@@ -6909,9 +7041,9 @@ def _main_isolated(monitor):
         _hb_code, _hb_out, _hb_err = aiqt_hooks.gensrc_guard(
             {"hook_event_name": "PostToolUse", "tool_name": "Write",
              "tool_input": {"file_path": os.path.join(gr, "GEN.md")}, "cwd": gr})
-        if _hb_code != 2:
-            failures.append("(gs-s) a mis-wired event hard-blocks (exit 2): expected 2, got {}"
-                            .format(_hb_code))
+        if not _site_ok("gs-s", _hb_code, _hb_out):
+            failures.append("(gs-s) a mis-wired event hard-blocks (exit 2 with no stdout object): got {}"
+                            .format(_site_reduction(_hb_code, _hb_out)))
         # ALLOW with a note: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched
         # (a MISSING tool_name denies instead, gs-k). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
         gexpect("(gs-t1) an empty-string tool_name allows with a note (unreadable, not a miss)", "allow-note",
@@ -7820,6 +7952,7 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_hook_stdout_strict(failures)
         _test_reducer_deny_schema(failures)
+        _test_inmemory_judge_sites(failures)
         _test_strict_rule_parity(failures)
         _test_note_shape_pins(failures, tmp)
 
@@ -8485,9 +8618,12 @@ def _main_isolated(monitor):
     # discriminating backstop: it fails if any guard is reverted to an ask outcome or if _ask is restored.
     def _decision_any(handler, data):
         code, stdout_obj, _stderr = handler(data)
-        if code == 2:
-            return "hard_block"  # a deliberate exit-2 (mis-wired event), never an ask
-        return _reduce_result(code, stdout_obj)
+        # A deliberate exit 2 (mis-wired event) with NO stdout object is a hard block, never an ask; an
+        # exit 2 beside a stdout object reduces to an "unexpected" string, which the sweep refuses.
+        got = _site_reduction(code, stdout_obj)
+        if got == "block2" and _site_ok("noask-sweep", code, stdout_obj):
+            return "hard_block"
+        return got
 
     # (noask-vocab) the sweep's reducer flags an explicit allow, a whitespace-only note, and a note beside an
     # extra top-level key (decision, continue) as shapes the sweep rejects (explicit-allow / unexpected), and

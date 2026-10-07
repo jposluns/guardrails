@@ -454,7 +454,7 @@ def _reject_duplicate_keys(pairs):
 def strict_json(text):
     """text parsed as strict JSON: NaN, Infinity, -Infinity and a duplicate object key (at any
     depth) raise ValueError, as malformed JSON does. The same rule as tools/check_python_floor.py's
-    strict_json, carried here so this gate stays stdlib-only and self-contained; the hooks suite
+    strict_json, carried here so this gate stays self-contained; the hooks suite
     (tools/selftest_aiqt_hooks.py) checks the copies agree on one fixture corpus."""
     return json.loads(text, parse_constant=_reject_json_constant,
                       object_pairs_hook=_reject_duplicate_keys)

@@ -14,6 +14,18 @@ format-version = 1
 id = "orch-behaviour-selftest"
 runner = "tools/selftest_orch_hooks.py"
 expected-check-ids = [
+  # ---------- in-memory judge sites: a malformed result per site ----------
+  "inmemory/coverage",
+  "inmemory/forced/failed-record-in-banner",
+  "inmemory/ledger/unbound-taskoutput-surfaced",
+  "inmemory/spoof6/stop-awf-surfaces",
+  "inmemory/spoof6/stop-deny-surfaces",
+  "inmemory/spoof6/yield-allow-surfaces",
+  "inmemory/spoof6/yield-deny-surfaces",
+  "inmemory/stamp/exit0",
+  "inmemory/stop/actionable-denies",
+  "inmemory/stop/spoof-record-failure-surfaces",
+  "inmemory/dispatch-exit2-stdout",
   # ---------- component 1: the stop guard ----------
   "stop/registry-absent",
   "stop/no-lease",
@@ -1118,7 +1130,9 @@ expected-check-ids = [
   "launcher/acquire-error-text-fault-injection",
   "launcher/acquire-unmapped-exception-mode-rule",
   "launcher/main-setup-fault-mode-rule",
+  "launcher/dispatch-fault-mode-rule",
   "launcher/acquire-refusal-fault-injection",
+  "launcher/refusal-fault-injection-stdout-mutant",
   "launcher/refusal-stdout-buffer-fd-closed",
   "launcher/dispatcher-refusal-fd-states",
   "launcher/newer-syntax-findings",

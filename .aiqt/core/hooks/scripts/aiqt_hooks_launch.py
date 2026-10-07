@@ -54,19 +54,26 @@ launcher steps, and no others, run outside any protected block, so a fault in on
 MemoryError, for example) exits 1, which does not block a PreToolUse call: the module imports (sys
 before the floor guard; os, stat and types after it), the FLOOR_FAIL_OPEN_MODES assignment, the
 floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor guard's own steps before its try (its
-`import os`, its status decision and the def statement for _floor_tail), the def statements for
-_deliver_tail, _deliver and _acquire_hook, the _hook path computation, the acquisition refusal's own
-status decision (the mode test on sys.argv), and, after it, the `_got = ("the acquisition raised",
-None)` sentinel assignment, the `isinstance(_got, tuple)` test that selects the refusal, the
-refusal's closing os._exit call, and the exec statement's own evaluation (loading exec, _got and
-_module.__dict__) before the hook's first statement runs. The __main__ setup between the acquisition
-and the exec (the sys.argv[0] rewrite, the module allocation, its __file__, __package__ and
-__cached__ assignments and its sys.modules install) runs inside the acquisition's protected block
-and is refused by the same mode rule. Each fail-open refusal (the floor guard's and the acquisition
-refusal's) delivers its stderr diagnostic FIRST and imports json only after it, inside the protected
-block: if that `import json` fails (a MemoryError, for example), the stderr diagnostic has already
-been delivered and the exit status still holds, but the JSON systemMessage warning is not written to
-stdout, so the platform shows no warning for that refusal.
+`import os`, its status decision and the def statement for _floor_tail) and its closing
+`os._exit(_floor_status)` after that try, the def statements for _deliver_tail, _deliver and
+_acquire_hook, the _hook path computation, and the acquisition refusal's own status decision (the
+mode test on sys.argv). Every later launcher statement runs inside the dispatch's one outer
+try/except BaseException, whose handler is the acquisition refusal and applies the same mode rule:
+the `_got = ("the acquisition raised", None)` sentinel assignment, the acquisition, the __main__
+setup (the sys.argv[0] rewrite, the module allocation, its __file__, __package__ and __cached__
+assignments and its sys.modules install), the `isinstance(_got, tuple)` test and the raise that
+selects the refusal. The refusal's closing os._exit is retried once under its own try/except
+BaseException, so a fault there exits 1 only when the retry faults too. A line trace can also raise
+at a bare `try:` or `except BaseException:` clause line of the dispatch (those lines call no
+function; the except clause loads and matches the name BaseException), and such an injected fault
+exits 1. The hook's own execution, the exec statement (its evaluation of exec, _got and
+_module.__dict__ included) and the hook's code, keeps the platform's exit semantics as any hook
+does: an exception it does not catch exits 1, as when aiqt_hooks.py is launched directly. Each
+fail-open refusal (the floor guard's and the acquisition refusal's) delivers its stderr diagnostic
+FIRST and imports json only after it, inside the protected block: if that `import json` fails (a
+MemoryError, for example), the stderr diagnostic has already been delivered and the exit status
+still holds, but the JSON systemMessage warning is not written to stdout, so the platform shows no
+warning for that refusal.
 
 SOURCE tree copy: tools/gen_hooks.py copies this file byte-identical into the plugin surface beside
 the dispatcher; edit the source, never the generated copy.
@@ -203,28 +210,38 @@ def _acquire_hook(path):
 _refusal_status = 2
 if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
     _refusal_status = 0
-_got = ("the acquisition raised", None)
+# One outer try/except BaseException holds every step from the sentinel assignment to the raise
+# that selects the refusal, so a fault at the sentinel, at the isinstance test or at that raise is
+# refused by the same mode rule (as "the launcher's dispatch raised" when no acquisition reason is
+# bound). That outer handler is the only refusal, and its closing os._exit is retried once under its
+# own try/except BaseException. Only a completed acquisition and setup leaves the try normally, and
+# the exec statement follows it directly.
 try:
-    _code = _acquire_hook(_hook)
-    if not isinstance(_code, tuple):
-        # The __main__ setup: the acquired content runs in a NEW module installed as
-        # sys.modules["__main__"] (as a direct launch presents it), so code that resolves names
-        # through the main module (a dataclass string annotation, for example) sees the hook's
-        # globals, never this launcher's. A fault in any setup step leaves _got a refusal reason.
-        _got = ("the launcher's __main__ setup for it raised", None)
-        sys.argv[0] = _hook
-        _module = types.ModuleType("__main__")
-        _module.__file__ = _hook
-        _module.__package__ = ""
-        _module.__cached__ = None
-        sys.modules["__main__"] = _module
-    _got = _code
-except BaseException:
-    pass
-if isinstance(_got, tuple):
+    _got = ("the acquisition raised", None)
     try:
-        _reason = _got[0]
+        _code = _acquire_hook(_hook)
+        if not isinstance(_code, tuple):
+            # The __main__ setup: the acquired content runs in a NEW module installed as
+            # sys.modules["__main__"] (as a direct launch presents it), so code that resolves names
+            # through the main module (a dataclass string annotation, for example) sees the hook's
+            # globals, never this launcher's. A fault in any setup step leaves _got a refusal reason.
+            _got = ("the launcher's __main__ setup for it raised", None)
+            sys.argv[0] = _hook
+            _module = types.ModuleType("__main__")
+            _module.__file__ = _hook
+            _module.__package__ = ""
+            _module.__cached__ = None
+            sys.modules["__main__"] = _module
+        _got = _code
+    except BaseException:
+        pass
+    if isinstance(_got, tuple):
+        raise LookupError("the hook file was not acquired")
+except BaseException:
+    try:
+        _reason = "the launcher's dispatch raised"
         try:
+            _reason = _got[0]
             if _got[1] is not None:
                 _reason = "%s: %s" % (_got[0], _got[1])
         except BaseException:
@@ -239,9 +256,12 @@ if isinstance(_got, tuple):
                 "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")
     except BaseException:
         pass
-    os._exit(_refusal_status)
-# The exec statement stays outside every protected block: an exception the dispatcher raises and
-# does not catch propagates out of it, the traceback prints and the process exits 1, exactly as
-# when aiqt_hooks.py is launched directly (a direct `python3 -I` launch does not put the hook's
-# directory on sys.path, and neither does this).
+    try:
+        os._exit(_refusal_status)
+    except BaseException:
+        os._exit(_refusal_status)
+# The exec statement stays outside every protected block: it starts the hook's own execution, so an
+# exception the dispatcher raises and does not catch propagates out of it, the traceback prints and
+# the process exits 1, exactly as when aiqt_hooks.py is launched directly (a direct `python3 -I`
+# launch does not put the hook's directory on sys.path, and neither does this).
 exec(_got, _module.__dict__)

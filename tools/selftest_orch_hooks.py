@@ -127,17 +127,19 @@ def _finite_json(obj):
 
 
 def _verdict(result):
-    """Reduce a handler result tuple to one of: allow, warn, ask, deny, block2, explicit-allow, matching
-    selftest_aiqt_hooks._reduce_result. "warn" is ONLY exit 0 with a stdout object whose keys are exactly
-    systemMessage, holding non-whitespace text (the allow-with-note shape). "deny" and "ask" require the
-    exact _deny shape: top-level keys EXACTLY {"hookSpecificOutput", "systemMessage"}, hookSpecificOutput
-    keys EXACTLY DENY_SPECIFIC_KEYS, the PreToolUse event, and a reason and banner holding non-whitespace
-    text, so a "decision", a "continue", an "updatedInput" or another event beside the decision is not a
-    deny. The object must also serialize as strict JSON (_finite_json). An explicit permissionDecision
-    "allow", with or without a note, is "explicit-allow", which no check expects (the hooks' _allow never
-    emits one). Any other shape is an "unexpected" string."""
+    """Reduce a handler result tuple to one of: allow, warn, ask, deny, block2, explicit-allow,
+    matching selftest_aiqt_hooks._reduce_result. "block2" is ONLY exit 2 with NO stdout object (the
+    hooks' blocking exit carries its reason on stderr); exit 2 beside a stdout object is
+    "unexpected". "warn" is ONLY exit 0 with a stdout object whose keys are exactly systemMessage,
+    holding non-whitespace text (the allow-with-note shape). "deny" and "ask" require the exact
+    _deny shape: top-level keys EXACTLY {"hookSpecificOutput", "systemMessage"}, hookSpecificOutput
+    keys EXACTLY DENY_SPECIFIC_KEYS, the PreToolUse event, and a reason and banner holding
+    non-whitespace text, so a "decision", a "continue", an "updatedInput" or another event beside
+    the decision is not a deny. The object must also serialize as strict JSON (_finite_json). An
+    explicit permissionDecision "allow", with or without a note, is "explicit-allow", which no check
+    expects (the hooks' _allow never emits one). Any other shape is an "unexpected" string."""
     code, obj, _err = result
-    if code == 2:
+    if code == 2 and obj is None:
         return "block2"
     if code == 0 and obj is None:
         return "allow"
@@ -158,6 +160,78 @@ def _verdict(result):
             if isinstance(note, str) and note.strip():
                 return "warn"
     return "unexpected({!r})".format(result)
+
+
+# Every in-memory site that reads a handler's result beside (or instead of) its verdict, keyed by its
+# check id, with the verdict it requires. Each site is a literal check("<id>", (_verdict(...), <its own
+# message test>), (_SITE_VERDICTS["<id>"], True)), and _check_inmemory_sites holds a malformed result the
+# site's former predicate accepted for every id.
+_SITE_VERDICTS = {
+    "stop/actionable-denies": "block2",
+    "stop/spoof-record-failure-surfaces": "warn",
+    "ledger/unbound-taskoutput-surfaced": "warn",
+    "stamp/exit0": "allow",
+    "forced/failed-record-in-banner": "warn",
+    "spoof6/stop-deny-surfaces": "block2",
+    "spoof6/stop-awf-surfaces": "warn",
+    "spoof6/yield-deny-surfaces": "deny",
+    "spoof6/yield-allow-surfaces": "warn",
+}
+
+
+def _check_inmemory_sites():
+    """(inmemory/*) For each _SITE_VERDICTS id, a malformed result the site's former predicate
+    (replayed here) accepted, which its verdict must now refuse; and (inmemory/coverage) every id has
+    its literal check("<id>", (_verdict( site reading _SITE_VERDICTS["<id>"] in this file."""
+    def note(obj):
+        return obj.get("systemMessage", "") if isinstance(obj, dict) else ""
+    deny = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": "SPOOF-UNRECORDED"},
+            "systemMessage": "b", "continue": False}
+    seen = []
+    for check_id, name, former, result in (
+        ("inmemory/stop/actionable-denies", "stop/actionable-denies", lambda c, o, e: c == 2,
+         (2, {"decision": "approve"}, "A-1 blocker")),
+        ("inmemory/stop/spoof-record-failure-surfaces", "stop/spoof-record-failure-surfaces",
+         lambda c, o, e: c == 0 and isinstance(o, dict) and "could not be fully recorded" in note(o),
+         (0, {"systemMessage": "could not be fully recorded", "decision": "block"}, None)),
+        ("inmemory/ledger/unbound-taskoutput-surfaced", "ledger/unbound-taskoutput-surfaced",
+         lambda c, o, e: "unbound" in note(o).lower(), (0, {"systemMessage": "unbound", "continue": False}, None)),
+        ("inmemory/stamp/exit0", "stamp/exit0", lambda c, o, e: c == 0, (0, {"decision": "block"}, None)),
+        ("inmemory/forced/failed-record-in-banner", "forced/failed-record-in-banner",
+         lambda c, o, e: (c == 0 and isinstance(o, dict)
+                          and "forced-exit record could not be fully persisted" in note(o)),
+         (0, {"systemMessage": "forced-exit record could not be fully persisted", "decision": "block"}, None)),
+        ("inmemory/spoof6/stop-deny-surfaces", "spoof6/stop-deny-surfaces",
+         lambda c, o, e: "SPOOF-UNRECORDED" in (e or ""), (0, None, "SPOOF-UNRECORDED")),
+        ("inmemory/spoof6/stop-awf-surfaces", "spoof6/stop-awf-surfaces",
+         lambda c, o, e: "SPOOF-UNRECORDED" in note(o),
+         (0, {"systemMessage": "SPOOF-UNRECORDED", "decision": "block"}, None)),
+        ("inmemory/spoof6/yield-deny-surfaces", "spoof6/yield-deny-surfaces",
+         lambda c, o, e: "SPOOF-UNRECORDED" in (o or {}).get("hookSpecificOutput", {}).get(
+             "permissionDecisionReason", ""), (0, deny, None)),
+        ("inmemory/spoof6/yield-allow-surfaces", "spoof6/yield-allow-surfaces",
+         lambda c, o, e: "SPOOF-UNRECORDED" in note(o),
+         (0, {"systemMessage": "SPOOF-UNRECORDED", "continue": False}, None))):
+        seen.append(name)
+        check(check_id, (former(*result), _verdict(result) == _SITE_VERDICTS.get(name)), (True, False))
+    source = Path(__file__).read_text(encoding="utf-8")
+    check("inmemory/coverage", (sorted(seen), [
+        name for name in sorted(_SITE_VERDICTS)
+        if 'check("{}", (_verdict('.format(name) not in source
+        or '_SITE_VERDICTS["{}"]'.format(name) not in source]), (sorted(_SITE_VERDICTS), []))
+    # The two real-dispatcher fail-closed rows (_blocking_exit): a process that exits 2 naming the
+    # exception but prints a stdout object passed the former (exit, stderr) pair and fails now.
+    printed = subprocess.CompletedProcess([], 2, stdout='{"decision": "approve"}\n', stderr="RecursionError")
+    check("inmemory/dispatch-exit2-stdout",
+          ((printed.returncode, "RecursionError" in printed.stderr) == (2, True),
+           _blocking_exit(printed, "RecursionError") == (2, True, "")), (True, False))
+
+
+def _blocking_exit(proc, needle):
+    """(exit status, needle named on stderr, stdout) of a dispatcher subprocess: a fail-closed exit is
+    (2, True, ""), since the blocking exit carries its reason on stderr and prints no stdout object."""
+    return (proc.returncode, needle in proc.stderr, proc.stdout)
 
 
 def _strict_constant(name):
@@ -354,6 +428,8 @@ def _main_isolated(report_path=None):
         f = Fixture(tmp, "stop")
         stop = lambda: aiqt_hooks.orch_stop_guard(f.payload("Stop"))
 
+        _check_inmemory_sites()
+
         # registry absent -> inert allow
         bare = tmp / "bare"
         bare.mkdir()
@@ -371,7 +447,8 @@ def _main_isolated(report_path=None):
         # one granted open unblocked item -> deny naming it
         f.set_items([item("A-1", title="do the thing")])
         code, obj, err = stop()
-        check("stop/actionable-denies", code, 2)
+        check("stop/actionable-denies", (_verdict((code, obj, err)), True),
+              (_SITE_VERDICTS["stop/actionable-denies"], True))
         check("stop/deny-names-item", "A-1" in (err or ""), True)
         check("stop/deny-names-exits", "blocker" in (err or "").lower(), True)
 
@@ -613,9 +690,9 @@ def _main_isolated(report_path=None):
             f.set_turn_state({})
             (sd / "ESCAPE-ALLOW-YIELD").write_text("operator\n", encoding="utf-8")
             scode, sobj, _serr = stop()
-            check("stop/spoof-record-failure-surfaces",
-                  scode == 0 and isinstance(sobj, dict)
-                  and "could not be fully recorded" in sobj.get("systemMessage", ""), True)
+            check("stop/spoof-record-failure-surfaces", (_verdict((scode, sobj, _serr)), isinstance(sobj, dict) and (
+                "could not be fully recorded" in sobj.get("systemMessage", ""))),
+                  (_SITE_VERDICTS["stop/spoof-record-failure-surfaces"], True))
         finally:
             aiqt_hooks._orch_write_json = _o_wj
             aiqt_hooks._orch_append_jsonl = _o_aj
@@ -1499,8 +1576,7 @@ def _main_isolated(report_path=None):
         hook_py = str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py")
         dp = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_truncation_guard"], input=deep,
                             capture_output=True, text=True, timeout=120)
-        check("trunc/dispatch-deep-json-fails-closed", (dp.returncode, "RecursionError" in dp.stderr),
-              (2, True))
+        check("trunc/dispatch-deep-json-fails-closed", _blocking_exit(dp, "RecursionError"), (2, True, ""))
         ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
                             capture_output=True, text=True, timeout=120)
 
@@ -1576,7 +1652,7 @@ def _main_isolated(report_path=None):
             return subprocess.run([sys.executable, "-I", "-B", str(mem_launcher), str(Path(hook_py).parent), mode],
                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
         mp = _memerr_dispatch("orch_truncation_guard")
-        check("trunc/dispatch-memoryerror-fails-closed", (mp.returncode, "MemoryError" in mp.stderr), (2, True))
+        check("trunc/dispatch-memoryerror-fails-closed", _blocking_exit(mp, "MemoryError"), (2, True, ""))
         ms = _memerr_dispatch("orch_stop_guard")
         ms_shape, ms_note = _stop_warning(ms.stdout)
         check("trunc/dispatch-memoryerror-stop-warns", (ms.returncode, ms_shape, "MemoryError" in ms_note),
@@ -1797,7 +1873,8 @@ def _main_isolated(report_path=None):
         _unb = aiqt_hooks.orch_dispatch_ledger(t.payload("PostToolUse", "TaskOutput", {}))
         _unb_msg = _unb[1].get("systemMessage", "") if isinstance(_unb, tuple) \
             and len(_unb) > 1 and isinstance(_unb[1], dict) else ""
-        check("ledger/unbound-taskoutput-surfaced", "unbound" in _unb_msg.lower(), True)
+        check("ledger/unbound-taskoutput-surfaced", (_verdict(_unb), "unbound" in _unb_msg.lower()),
+              (_SITE_VERDICTS["ledger/unbound-taskoutput-surfaced"], True))
 
         # ---------- component 5: the resume audit and barrier ----------
         r = Fixture(tmp, "resume")
@@ -1851,8 +1928,7 @@ def _main_isolated(report_path=None):
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
                                                    extra={"prompt": "hello"}))
-        code, obj, _ = p
-        check("stamp/exit0", code, 0)
+        check("stamp/exit0", (_verdict(p), True), (_SITE_VERDICTS["stamp/exit0"], True))
         st = r.turn_state()
         check("stamp/human-input-stamped", bool(st.get("last_human_input_utc")), True)
         check("stamp/counters-reset", st.get("stop_denials", 0), 0)
@@ -2243,10 +2319,9 @@ def _main_isolated(report_path=None):
             d.set_items([item("FX-2")])
             d.set_turn_state({"stop_denials": 2})
             fcode, fobj, _ferr = dstop()
-            check("forced/failed-record-in-banner",
-                  fcode == 0 and isinstance(fobj, dict)
-                  and "forced-exit record could not be fully persisted"
-                  in fobj.get("systemMessage", ""), True)
+            check("forced/failed-record-in-banner", (_verdict((fcode, fobj, _ferr)), isinstance(fobj, dict) and (
+                "forced-exit record could not be fully persisted" in fobj.get("systemMessage", ""))),
+                  (_SITE_VERDICTS["forced/failed-record-in-banner"], True))
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
 
@@ -2332,26 +2407,29 @@ def _main_isolated(report_path=None):
             g.set_items([item("SP-1")])
             g.set_turn_state({})
             _c, _o, gerr = gstop()
-            check("spoof6/stop-deny-surfaces", "SPOOF-UNRECORDED" in (gerr or ""), True)
+            check("spoof6/stop-deny-surfaces", (_verdict((_c, _o, gerr)), "SPOOF-UNRECORDED" in (gerr or "")),
+                  (_SITE_VERDICTS["spoof6/stop-deny-surfaces"], True))
             # (2) stop ALLOW_WITH_FINDINGS (loop bound reached): warning rides the warn banner
             g.set_items([item("SP-1")])
             g.set_turn_state({"stop_denials": aiqt_hooks._ORCH_LOOP_BOUND})
             _c, gobj, _e = gstop()
-            check("spoof6/stop-awf-surfaces",
-                  "SPOOF-UNRECORDED" in (gobj or {}).get("systemMessage", ""), True)
+            check("spoof6/stop-awf-surfaces", (_verdict((_c, gobj, _e)),
+                                               "SPOOF-UNRECORDED" in (gobj or {}).get("systemMessage", "")),
+                  (_SITE_VERDICTS["spoof6/stop-awf-surfaces"], True))
             # (3) yield DENY (schedule past an actionable backlog): warning rides the deny reason
             g.set_items([item("SP-1")])
             g.set_turn_state({})
             _c, gyd, _e = gsched({"prompt": "recheck SP-1"})
-            check("spoof6/yield-deny-surfaces",
-                  "SPOOF-UNRECORDED" in (gyd or {}).get(
-                      "hookSpecificOutput", {}).get("permissionDecisionReason", ""), True)
+            check("spoof6/yield-deny-surfaces", (_verdict((_c, gyd, _e)), "SPOOF-UNRECORDED" in (gyd or {}).get(
+                "hookSpecificOutput", {}).get("permissionDecisionReason", "")),
+                  (_SITE_VERDICTS["spoof6/yield-deny-surfaces"], True))
             # (4) yield ALLOW (blocked-only backlog, clean allow): warning rides systemMessage
             g.set_items([gblk("SP-2")])
             g.set_turn_state({})
             _c, gya, _e = gsched({"prompt": "recheck SP-2"})
-            check("spoof6/yield-allow-surfaces",
-                  "SPOOF-UNRECORDED" in (gya or {}).get("systemMessage", ""), True)
+            check("spoof6/yield-allow-surfaces", (_verdict((_c, gya, _e)),
+                                                  "SPOOF-UNRECORDED" in (gya or {}).get("systemMessage", "")),
+                  (_SITE_VERDICTS["spoof6/yield-allow-surfaces"], True))
             # (5) yield ALLOW_WITH_FINDINGS (schedule cap-relieved past an actionable backlog): the
             # spoof warning rides the systemMessage on the cap-relief branch too, not only clean ALLOW.
             # Three denials on an unchanged basis reach the cap; the fourth call is cap-relieved.

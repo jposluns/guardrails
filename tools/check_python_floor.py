@@ -2869,8 +2869,8 @@ def _self_test_cases(base):
                 for fault in ("import-json", "format", "serialize"):
                     rc, out, err = _child(inject_runner,
                                           [fault, str(ROOT / rel), "%d.%d.%d" % old, mode], (), base)
-                    inject_got.append((rel, kind, fault, rc, "Traceback" not in err))
-                    inject_want.append((rel, kind, fault, rc_want, True))
+                    inject_got.append((rel, kind, fault, rc, "Traceback" not in err, out))
+                    inject_want.append((rel, kind, fault, rc_want, True, ""))
         acq_inject_got, acq_inject_want = [], []
         for rel in sorted(LAUNCHERS):
             for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
@@ -2879,8 +2879,8 @@ def _self_test_cases(base):
                     args = _acquire_fd_args(rel, mode)
                     rc, out, err = _child(inject_runner, [fault, args[0], "real", mode], (), base)
                     acq_inject_got.append((rel, kind, fault, rc, "cannot acquire" in err,
-                                           "Traceback" not in err))
-                    acq_inject_want.append((rel, kind, fault, rc_want, True, True))
+                                           "Traceback" not in err, out))
+                    acq_inject_want.append((rel, kind, fault, rc_want, True, True, ""))
         buffer_got, buffer_want = [], []
         for rel in sorted(LAUNCHERS):
             for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
@@ -2953,6 +2953,33 @@ def _self_test_cases(base):
                                               True if kind == "fail_open" else ""))
     check("launcher/floor-refusal-fault-injection", inject_got, inject_want)
     check("launcher/acquire-refusal-fault-injection", acq_inject_got, acq_inject_want)
+    # The two rows above also require an EMPTY stdout: no injected fault leaves a warning to print. A
+    # core launcher mutated to print a stdout object from its floor guard's or its acquisition
+    # refusal's handler still exits by the mode rule with no traceback, so the former (exit,
+    # traceback) judgement passed it; the stdout term refuses it.
+    if os.name != "posix":
+        junk_got = junk_want = "skipped (the injection child needs posix)"
+    else:
+        core_rel = sorted(LAUNCHERS)[0]
+        junk = "os.write(1, b'{\"decision\": \"block\"}\\n')"
+        core_text = _read_text(ROOT / core_rel)
+        mutants = (
+            ("floor", "    except BaseException:\n        pass\n    os._exit(_floor_status)\n",
+             "    except BaseException:\n        " + junk + "\n    os._exit(_floor_status)\n", "format",
+             "%d.%d.%d" % old),
+            ("acquire", "        pass\n    try:\n        os._exit(_refusal_status)\n",
+             "        pass\n    " + junk + "\n    try:\n        os._exit(_refusal_status)\n", "serialize", "real"))
+        junk_got, junk_want = [], []
+        for leg_name, before, after, fault, version in mutants:
+            spot = Path(tempfile.mkdtemp(prefix="stdout-junk-", dir=base))
+            (spot / Path(core_rel).name).write_text(core_text.replace(before, after, 1), encoding="utf-8")
+            (spot / "aiqt_hooks.py").write_text("", encoding="utf-8")
+            rc, out, err = _child(inject_runner, [fault, str(spot / Path(core_rel).name), version,
+                                                  "orch_stop_guard"], (), spot)
+            junk_got.append((leg_name, core_text.count(before), (rc, "Traceback" not in err) == (0, True),
+                             (rc, "Traceback" not in err, out) == (0, True, "")))
+            junk_want.append((leg_name, 1, True, False))
+    check("launcher/refusal-fault-injection-stdout-mutant", junk_got, junk_want)
     check("launcher/refusal-stdout-buffer-fd-closed", buffer_got, buffer_want)
     check("launcher/dispatcher-refusal-fd-states", dispatcher_got, dispatcher_want)
     check("launcher/acquire-error-text-fault-injection", text_got, text_want)
@@ -3020,6 +3047,71 @@ def _self_test_cases(base):
                         setup_want.append((rel, kind, statement, fault, rc_want, True, True, True,
                                            True if kind == "fail_open" else ""))
     check("launcher/main-setup-fault-mode-rule", setup_got, setup_want)
+    # The dispatch steps around the acquisition (the sentinel assignment, the isinstance test, the
+    # raise that selects the refusal and the refusal's first os._exit) run inside the dispatch's one
+    # outer try/except BaseException: a fault injected by a line trace AT each of them (MemoryError,
+    # or SystemExit(0)) is refused by the mode rule, the hook never runs, and no traceback is
+    # printed. The parent finds each statement's line itself and refuses a statement found on any
+    # other number of lines than expected, so a renamed or removed step fails this check. The
+    # sentinel and the isinstance test run with the hook present (a fault there leaves no acquisition
+    # reason bound, so the refusal names the dispatch); the isinstance test again, the raise and the
+    # os._exit run with the hook missing, so the refusal names the open failure.
+    dispatch_runner = (
+        "import os, runpy, sys\n"
+        "fault, path, lineno = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
+        "sys.argv = [path] + sys.argv[4:]\n"
+        "def _local(frame, event, arg):\n"
+        "    if event == 'line' and frame.f_lineno == lineno:\n"
+        "        if fault == 'memoryerror':\n"
+        "            raise MemoryError('injected at the dispatch')\n"
+        "        raise SystemExit(0)\n"
+        "    return _local\n"
+        "def _global(frame, event, arg):\n"
+        "    if frame.f_code.co_filename == path and frame.f_code.co_name == '<module>':\n"
+        "        return _local\n"
+        "    return None\n"
+        "sys.settrace(_global)\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+    dispatch_raised = "(the launcher's dispatch raised)"
+    dispatch_missing = "(cannot open or read it without following a symbolic link"
+    dispatch_steps = (
+        ('_got = ("the acquisition raised", None)', 1, True, dispatch_raised),
+        ("if isinstance(_got, tuple):", 1, True, dispatch_raised),
+        ("if isinstance(_got, tuple):", 1, False, dispatch_missing),
+        ('raise LookupError("the hook file was not acquired")', 1, False, dispatch_missing),
+        ("os._exit(_refusal_status)", 2, False, dispatch_missing))
+    if os.name != "posix":
+        dispatch_got = dispatch_want = "skipped (the line-trace child needs posix)"
+    else:
+        dispatch_got, dispatch_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            lines = _read_text(ROOT / rel).splitlines()
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+                for statement, count, present, reason in dispatch_steps:
+                    found = [n for n, text in enumerate(lines, 1) if text.strip() == statement]
+                    for fault in ("memoryerror", "systemexit"):
+                        if len(found) != count:
+                            dispatch_got.append((rel, kind, statement, present, fault,
+                                                 "found on %d lines" % len(found)))
+                            dispatch_want.append((rel, kind, statement, present, fault,
+                                                  "found on %d lines" % count))
+                            continue
+                        spot = Path(tempfile.mkdtemp(prefix="dispatch-", dir=base))
+                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                        if present:
+                            (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                        rc, out, err = _child(dispatch_runner,
+                                              [fault, str(spot / Path(rel).name), str(found[0]), mode],
+                                              (), spot)
+                        seen = _warning(out, reason) if kind == "fail_open" else out
+                        dispatch_got.append((rel, kind, statement, present, fault, rc, reason in err,
+                                             "Traceback" not in err, "HOOK_RAN" not in out, seen))
+                        dispatch_want.append((rel, kind, statement, present, fault, rc_want, True, True,
+                                              True, True if kind == "fail_open" else ""))
+    check("launcher/dispatch-fault-mode-rule", dispatch_got, dispatch_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
