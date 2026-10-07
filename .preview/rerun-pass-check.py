@@ -137,7 +137,7 @@ WHAT IT DOES
     session_id, else transcript_path) in AIQT_HOOK_STATE_DIR/rerun-pass-check when that is an absolute path,
     else $XDG_STATE_HOME/aiqt-guardrails/rerun-pass-check, else $HOME/.local/state/aiqt-guardrails/
     rerun-pass-check (created 0700, written by an atomic replace), with its lock file (the same name plus .lock)
-    beside it.
+    beside it. Nothing removes either file, so each session leaves one small state file and one empty lock file.
 
 FAILURE DIRECTION
     After a tool call the safe direction is to inform: a rerun the hook recognizes is noted even when its state
@@ -154,10 +154,19 @@ FAILURE DIRECTION
     (at the cap, a conclusive stop is allowed with the warning).
     STATE LOCK. Each run holds an exclusive lock (flock) on the lock file beside the state file, opened without
     following a symbolic link, over its whole load, update and save, so a tool call cannot write back a count
-    that a Stop saved meanwhile. A run that cannot take the lock within LOCK_WAIT (2) seconds, or at all (a lock
-    path that is a symbolic link or not a regular file, a platform without flock), saves nothing, as after a
-    failed save: a Stop that would refuse is allowed with a warning that names the lock, a tool call still gives
-    its note, and a prompt does not reset the count. With no state
+    that a Stop saved meanwhile. Before each save the run checks that the lock path still names the file it
+    locked (the same device and inode, read without following a link): a lock file deleted or replaced while a
+    run holds it makes that run save nothing, as after a failed save, so a run that locked the new file is not
+    overwritten, and a run that took its lock on a file the path no longer names opens the path again within
+    the same LOCK_WAIT. A deletion that lands between that check and the write (a few system calls) can still
+    let one stale save through. A run that cannot take the lock within LOCK_WAIT (2) seconds, or at all (a lock
+    path that is a symbolic link, a FIFO or another file that is not a regular file, a lock file that cannot be
+    opened, a filesystem that refuses flock, a platform without flock), saves nothing, as after a failed save:
+    a Stop that would refuse is allowed with a warning that names the lock (also on an explicit false, at the
+    cap or with an unknown count), a tool call still gives its note, and a prompt does not reset the count.
+    While the lock cannot be taken at all, the hook keeps no state: it only notes after each tool call and
+    records no rerun, so every turn end passes silently (a missed refusal); only the outstanding reruns of a
+    state saved before then, or a state file that cannot be read, still bring a warning. With no state
     location at all (no session key in the payload, or no absolute state directory) nothing is ever kept, so
     every stop is allowed silently. A state file longer than STATE_MAX_BYTES, or with a negative
     counter or a non-text flag, is malformed and read as no state (it is never parsed from a cut prefix). A
@@ -226,9 +235,11 @@ RESIDUAL COVERAGE
     ("could not get it verified") is refused, and a message naming any disclosure word passes and clears the reruns,
     whether or not it records the failure and wherever the word stands, also inside a denial, a quotation or a
     negation ("I did not rerun CI"). It does not record or investigate the failure itself. Concurrent hook runs in
-    one session are serialized by the state lock; a run that cannot take it within LOCK_WAIT seconds saves
-    nothing, so its update is lost (a change or a rerun of that tool call is not recorded, a prompt does not reset
-    the count), and a refusal it would give is allowed with a warning (a missed refusal). A state file written by
+    one session are serialized by the state lock; a run that cannot take it within LOCK_WAIT seconds, or whose
+    lock file is deleted or replaced while it holds it, saves nothing, so its update is lost (a change or a rerun
+    of that tool call is not recorded, a prompt does not reset the count), and a refusal it would give is allowed
+    with a warning (a missed refusal). While the lock cannot be taken at all (STATE LOCK in FAILURE DIRECTION),
+    the hook keeps no state, so it only notes and every turn end passes silently. A state file written by
     an earlier revision (without the current
     STATE_VERSION) is discarded, so a local rerun across it is missed. The state file is trusted: a hand-edited
     state of the current STATE_VERSION whose flags carry a prefix this version keeps still arms a refusal, and a
@@ -419,8 +430,9 @@ def load_state(path):
         return unknown_state(), False
 
 
-def save_state(path, state):
-    """Write the state by an atomic replace; True on success, False on any failure (never raises)."""
+def save_state(path, state, lock=None):
+    """Write the state by an atomic replace; True on success, False on any failure (never raises). With a lock
+    (a descriptor from lock_state) nothing is written unless that lock still holds (lock_held)."""
     if path is None:
         return False
     tmp = None
@@ -430,6 +442,8 @@ def save_state(path, state):
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
+        if lock is not None and not lock_held(lock, path):
+            raise OSError("the state lock file was deleted or replaced while this run held it")
         os.replace(tmp, path)
         return True
     except Exception:
@@ -441,28 +455,49 @@ def save_state(path, state):
         return False
 
 
+def lock_held(fd, path):
+    """True when the descriptor fd locks the file that the lock path (path plus .lock) names now; False when
+    that path is gone or names another file (deleted or replaced meanwhile), or on any error (never raises).
+    The path is examined without following a symbolic link, so a link planted there never matches."""
+    try:
+        held, now = os.fstat(fd), os.lstat(path + ".lock")
+        return (held.st_dev, held.st_ino) == (now.st_dev, now.st_ino)
+    except Exception:
+        return False
+
+
 def lock_state(path):
     """An open descriptor that holds an exclusive flock on the lock file beside the state file (its name plus
     .lock), so one run's whole load, update and save cannot interleave with another's; None when the lock is
-    not taken within LOCK_WAIT seconds or cannot be taken at all (never raises). Closing it releases the lock."""
+    not taken within LOCK_WAIT seconds or cannot be taken at all (never raises). Closing it releases the lock.
+    A lock taken on a file the lock path no longer names (deleted or replaced while this run waited) is
+    dropped and the path opened again within the same LOCK_WAIT, and save_state with the lock writes nothing
+    once the lock path stops naming the locked file (STATE LOCK in the docstring)."""
     if path is None or fcntl is None:
         return None
     fd = None
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("the state lock is not a regular file")
         deadline = time.monotonic() + LOCK_WAIT
         while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("the state lock is not a regular file")
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.02)
+            if lock_held(fd, path):
                 return fd
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
+            stale, fd = fd, None
+            os.close(stale)
+            if time.monotonic() >= deadline:
+                raise OSError("the state lock file kept being deleted or replaced")
     except Exception:
         if fd is not None:
             try:
@@ -869,22 +904,24 @@ NO_MESSAGE = ("rerun-pass-check: turn end allowed unchecked; the payload carries
               "as failed, or saw a check pass on a rerun after a recorded failure")
 
 
-def at_stop(payload, state, readable, path, locked=True):
+def at_stop(payload, state, readable, path, locked=True, lock=None):
     """The Stop output, or None. A reset signal (a disclosure word, or stop_hook_active explicitly false) is
     processed and saved before any return that lets the stop pass, and a stop let pass where a refusal could be
-    due gets a warning (FAILURE DIRECTION). Without the state lock (locked False) nothing is saved, and a
-    refusal, which could not be counted, is allowed with a warning that names the lock."""
+    due gets a warning (FAILURE DIRECTION). Without the state lock (locked False) nothing is saved, an explicit
+    false still resets the count in memory for this Stop, and a refusal, which could not be counted, is allowed
+    with a warning that names the lock. Each save is made with `lock` (save_state)."""
     msg = payload.get("last_assistant_message")
     msg = msg if isinstance(msg, str) else None
     new_turn = payload.get("stop_hook_active") is False  # an absent field is not a new turn (see 4 in the docstring)
     if msg is not None and DISCLOSED_RE.search(msg):
         if locked and (state["flags"] or state["blocks"] != 0):
             state["flags"], state["blocks"] = [], 0
-            save_state(path, state)
+            save_state(path, state, lock)
         return None
-    if locked and new_turn and state["blocks"] != 0:
-        state["blocks"] = 0
-        save_state(path, state)  # on a failed save the stored count stays, and the refusal below is not saved
+    if new_turn and state["blocks"] != 0:
+        state["blocks"] = 0  # in memory also without the lock, so the warning below names the lock, not the cap
+        if locked:
+            save_state(path, state, lock)  # on a failed save the stored count stays, and the refusal is not saved
     claim = msg is not None and conclusive(msg)
     if not readable:
         return dict(systemMessage=UNREAD) if path is not None and (msg is None or claim) else None
@@ -906,7 +943,7 @@ def at_stop(payload, state, readable, path, locked=True):
     if not locked:  # a refusal that is not counted could exceed the cap
         return dict(systemMessage=allowed + " (refusal count cannot be saved: the state lock " + str(path)
                     + ".lock was not taken)")
-    if not save_state(path, state):  # also on an explicit false: an unsaved refusal could exceed the cap
+    if not save_state(path, state, lock):  # also on an explicit false: an unsaved refusal could exceed the cap
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
     return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
                 "but this session ran a command that names a CI rerun and was not reported as failed, or saw a "
@@ -925,15 +962,15 @@ def decide(payload, env):
         locked = lock is not None
         state, readable = load_state(path)
         if event == "Stop":
-            return at_stop(payload, state, readable and path is not None, path, locked)
+            return at_stop(payload, state, readable and path is not None, path, locked, lock)
         if event == "UserPromptSubmit":  # a prompt the user submitted starts a new turn: the count restarts
             if locked and state["blocks"] != 0:
                 state["blocks"] = 0
-                save_state(path, state)  # on a failed save the stored count stays (the next Stop may warn)
+                save_state(path, state, lock)  # on a failed save the stored count stays (the next Stop may warn)
             return None
         what = after_tool(payload, state, event)
         if locked:
-            save_state(path, state)  # a failed save still notes below; a failed load is saved as an unknown count
+            save_state(path, state, lock)  # a failed save still notes below; a failed load is saved as unknown
         return note(event, what) if what else None
     finally:
         unlock_state(lock)
@@ -1032,6 +1069,29 @@ def _self_test():
                   "git commit -m \"fix: gh run rerun is not needed\"", "gh > run rerun 7", "echo x #\n# gh run rerun 2",
                   "echo '$(gh run rerun 5)'", "gh > run rerun 7 # (", "echo \"use gh run rerun to retry\"",
                   "echo ok # ; gh run rerun 123", "echo \"\\$(gh run rerun 6)\"", "echo \"gh\" 'run rerun'")
+
+    class MetFlock:
+        """The fcntl module with a seam: its flock sets the event `met` when it finds the lock held."""
+
+        def __init__(self, real, met):
+            self.real, self.met = real, met
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def flock(self, fd, op):
+            try:
+                return self.real.flock(fd, op)
+            except BlockingIOError:
+                self.met.set()
+                raise
+
+    def contended(met, thread):
+        """True once `met` is set or `thread` has finished; False when neither happens within about 10 seconds."""
+        for _ in range(1000):
+            if met.wait(0.01) or not thread.is_alive():
+                return True
+        return False
 
     class T(unittest.TestCase):
         def setUp(self):
@@ -2111,16 +2171,21 @@ def _self_test():
             # Round 23 (codex MAJOR): a tool call loaded the state, a conclusive Stop saved count 1, and the tool
             # call then saved its stale copy with count 0, so the interleaving repeated gave "refusal 1 of at most
             # 2" without end. Each round below holds a tool call between its load and its save while a Stop runs.
+            # Round 24 (codex MEDIUM): the tool call is released only once the Stop has met the held lock (seen
+            # through the flock seam) or has finished, never after a fixed wait, so a slow scheduler cannot let
+            # the Stop run after the tool call's save; a Stop that does neither within the bound fails the test.
             import threading
             path = state_path(dict(session_id="s"), self.env)
             self.prompt()
             self.bash("gh run rerun 7")
             g = globals()
-            real = g["after_tool"]
+            real, real_fcntl = g["after_tool"], g.get("fcntl")
             outs = []
             try:
                 for _ in range(BLOCK_CAP + 3):
-                    loaded, release = threading.Event(), threading.Event()
+                    loaded, release, met = threading.Event(), threading.Event(), threading.Event()
+                    if real_fcntl is not None:
+                        g["fcntl"] = MetFlock(real_fcntl, met)
 
                     def slow(payload, state, event, loaded=loaded, release=release):
                         loaded.set()
@@ -2133,13 +2198,16 @@ def _self_test():
                     self.assertTrue(loaded.wait(10))
                     stop = threading.Thread(target=lambda: outs.append(self.stop("All tests pass.", active=None)))
                     stop.start()
-                    stop.join(0.3)  # without the lock the Stop saves its count here, before the tool call's save
+                    self.assertTrue(contended(met, stop), "the Stop neither met the held lock nor finished")
                     release.set()
                     tool.join(15)
                     stop.join(15)
+                    self.assertFalse(tool.is_alive() or stop.is_alive())
                     g["after_tool"] = real
             finally:
                 g["after_tool"] = real
+                if real_fcntl is not None:
+                    g["fcntl"] = real_fcntl
             self.assertEqual(len(outs), BLOCK_CAP + 3)
             self.assertEqual(len([o for o in outs if o.get("decision") == "block"]), BLOCK_CAP)
             self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
@@ -2219,6 +2287,106 @@ def _self_test():
                 self.assertNotIn("restarts the turn end is allowed with a warning instead of refused", text)
                 self.assertNotIn("missed and the stop is allowed with a warning", text)
                 self.assertIn("any other is silent, and a lost record of earlier reruns is silent", text)
+
+        def test_58_a_lock_file_deleted_mid_run_does_not_let_two_runs_interleave(self):
+            # Round 24 (claude MEDIUM): the lock file deleted while a tool call held it let a Stop lock a new file
+            # and the tool call then save its stale count back, so the count stayed 0 every round. Now a run saves
+            # only while the lock path still names the file it locked.
+            if fcntl is None:
+                self.skipTest("SKIPPED, no flock on this platform")
+            import threading
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            g = globals()
+            real = g["after_tool"]
+            outs = []
+            try:
+                for _ in range(BLOCK_CAP + 3):
+                    loaded, release = threading.Event(), threading.Event()
+
+                    def slow(payload, state, event, loaded=loaded, release=release):
+                        loaded.set()
+                        release.wait(10)
+                        return real(payload, state, event)
+
+                    g["after_tool"] = slow
+                    tool = threading.Thread(target=self.bash, args=("gh run rerun 7",))
+                    tool.start()
+                    self.assertTrue(loaded.wait(10))
+                    os.unlink(path + ".lock")
+                    outs.append(self.stop("All tests pass.", active=None))  # locks a new file and saves
+                    release.set()
+                    tool.join(15)
+                    self.assertFalse(tool.is_alive())
+                    g["after_tool"] = real
+            finally:
+                g["after_tool"] = real
+            self.assertEqual(len([o for o in outs if o.get("decision") == "block"]), BLOCK_CAP)
+            self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
+            # A run that waited on the old file and took it after the deletion opens the path again: its refusal
+            # is saved on the new file, not dropped as unsaveable.
+            self.assertIsNone(self.prompt())
+            met = threading.Event()
+            g["fcntl"] = MetFlock(fcntl, met)
+            fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                stop = threading.Thread(target=lambda: outs.append(self.stop("All tests pass.", active=None)))
+                stop.start()
+                self.assertTrue(contended(met, stop))
+                self.assertTrue(met.is_set())
+                os.unlink(path + ".lock")
+            finally:
+                os.close(fd)
+                g["fcntl"] = fcntl
+            stop.join(15)
+            self.assertFalse(stop.is_alive())
+            self.assertIn("(refusal 1 of", outs[-1]["reason"])
+            self.assertEqual(load_state(path)[0]["blocks"], 1)
+
+        def test_59_a_lock_path_that_is_not_a_regular_file_is_never_locked(self):
+            # Round 24 (claude MINOR): a FIFO at the lock path is refused like a symbolic link.
+            if fcntl is None or not hasattr(os, "mkfifo"):
+                self.skipTest("SKIPPED, no flock or no mkfifo on this platform")
+            path = state_path(dict(session_id="s"), self.env)
+            self.prompt()
+            self.bash("gh run rerun 7")
+            os.unlink(path + ".lock")
+            os.mkfifo(path + ".lock", 0o600)
+            before = load_state(path)
+            out = self.stop("All tests pass.", active=None)
+            self.assertIn("(refusal count cannot be saved: the state lock " + path + ".lock was not taken)",
+                          out["systemMessage"])
+            self.assertEqual(load_state(path), before)
+            os.unlink(path + ".lock")
+            self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
+
+        def test_60_an_explicit_false_without_the_lock_names_the_lock(self):
+            # Round 24 (codex and claude MINOR): without the lock an explicit false at the cap or with an unknown
+            # count was reported as the cap or the unknown count; the reset now holds in memory for that Stop.
+            if fcntl is None:
+                self.skipTest("SKIPPED, no flock on this platform")
+            path = state_path(dict(session_id="s"), self.env)
+            g = globals()
+            wait = g["LOCK_WAIT"]
+            for blocks in (BLOCK_CAP, None):
+                self.assertTrue(save_state(path, dict(new_state(), flags=["CI rerun command: gh run rerun 7"],
+                                                      blocks=blocks)))
+                before = load_state(path)
+                g["LOCK_WAIT"] = 0.05
+                fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    out = self.stop("All tests pass.", active=False)
+                    self.assertIn("(refusal count cannot be saved: the state lock " + path + ".lock was not taken)",
+                                  out["systemMessage"], blocks)
+                    self.assertIn(("(loop cap)" if blocks else "(refusal count unknown)"),
+                                  self.stop("All tests pass.", active=None)["systemMessage"], blocks)
+                finally:
+                    os.close(fd)
+                    g["LOCK_WAIT"] = wait
+                self.assertEqual(load_state(path), before, blocks)  # nothing saved
 
         def test_51_an_explicit_false_resets_before_the_early_returns(self):
             # Round 21 (codex MEDIUM): an explicit false on a stop that presents no pass as conclusive was discarded,
