@@ -29,11 +29,15 @@ Exit convention (matches the repo's gates):
      completion, so closure was neither observed nor refuted, and it is never reported as a closure
      finding.
 
---self-test exits 0 (both legs held), 1 (a leg was refuted: the real opf/ did not verify, or the
-flipped copy was not caught for the intended reason; failure-first, whatever else could not be
-evaluated) or 2 (no leg was refuted but one could not be evaluated: run() returned 2, the flipped
-copy timed out or could not be launched, its scratch directory or copy could not be made, or a
-stubbed case could not be set up, for example with no opf/ subtree).
+--self-test runs in two stages. First the preflight: the registration cases and the stubbed cases (no
+subset member runs), each run on its own so that a case that could not be set up never hides another
+case's refutation. When any preflight case was refuted the self-test exits 1; otherwise, when one could
+not be set up (for example with no opf/ subtree, or a scratch directory or copy that could not be
+made), it exits 2. In both of those outcomes the closure legs never run. Then the two closure legs:
+exit 0 (both legs held), 1 (a leg was refuted: the real opf/ did not verify, or the flipped copy was
+not caught for the intended reason; failure-first, whatever else could not be evaluated) or 2 (no leg
+was refuted but one could not be evaluated: run() returned 2, the flipped copy timed out or could not
+be launched, or its scratch directory or copy could not be made).
 """
 import sys
 
@@ -239,30 +243,36 @@ _TIMEOUT = "TIMEOUT"
 _HARNESS = "HARNESS ERROR"
 
 
-def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, full_output=False):
+def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, separate_streams=False):
     """Run one subset member isolated against the copied opf/tools/<script>, killed at `timeout_s`
-    seconds. Returns (rc, text, cannot): `text` is the last three output lines (the whole output
-    when full_output is True), and `cannot` is None when the member ran to completion, _TIMEOUT when
-    it was killed at its bound, or _HARNESS when its script is missing from the copy or the
-    interpreter could not be launched. A non-None `cannot` is rc 2 and CANNOT-EVALUATE (closure was
-    neither observed nor refuted), distinct from a member that ran and failed. cwd is run_dir, which
-    is OUTSIDE any git repository and does not contain the tools/ tree, so only the copied
-    opf/tools/ is reachable to `python3 -I`."""
+    seconds. Returns (rc, text, cannot): `text` is the last three lines of the merged output, except
+    that with separate_streams a member that ran to completion gives the pair (stdout, stderr) of its
+    whole decoded streams, captured apart so that no line can be assembled across them. `cannot` is
+    None when the member ran to completion, _TIMEOUT when it was killed at its bound, or _HARNESS when
+    its script is missing from the copy or the interpreter could not be launched (`text` is then the
+    harness message). A non-None `cannot` is rc 2 and CANNOT-EVALUATE (closure was neither observed
+    nor refuted), distinct from a member that ran and failed. cwd is run_dir, which is OUTSIDE any git
+    repository and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to
+    `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
         return 2, "missing subset script in the copy: {}".format(target), _HARNESS
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(target), *args],
-            cwd=str(run_dir), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(run_dir), env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if separate_streams else subprocess.STDOUT,
             timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
         return 2, "timed out after {}s (cannot evaluate: the member never finished)".format(timeout_s), _TIMEOUT
     except OSError as exc:
         return 2, "could not launch the interpreter: {}".format(exc), _HARNESS
+    if separate_streams:
+        return proc.returncode, tuple((data or b"").decode("utf-8", "replace")
+                                      for data in (proc.stdout, proc.stderr)), None
     lines = (proc.stdout or b"").decode("utf-8", "replace").splitlines()
-    return proc.returncode, "\n".join(lines if full_output else lines[-3:]), None
+    return proc.returncode, "\n".join(lines[-3:]), None
 
 
 def _run_subset(opf_root, run_dir):
@@ -355,18 +365,31 @@ def _positive_leg_verdict(rc):
     return "fail", "positive: the real opf/ subtree did not verify in isolation (expected closure)"
 
 
+def _output_lines(stream):
+    """The complete lines of ONE decoded output stream: split on "\\n" only, each line losing at most
+    one trailing "\\r" (CRLF output). str.splitlines is not used: it also breaks at CR, VT, FF, 0x1c
+    to 0x1e, U+0085, U+2028 and U+2029, so text after any of them would read as a line of its own."""
+    return [line[:-1] if line.endswith("\r") else line for line in stream.split("\n")]
+
+
 def _negative_leg_verdict(rc, output, cannot):
     """Classify the flipped copy's run. ("caught", None) ONLY on positive evidence that it failed for
-    the intended reason (a non-zero exit carrying the _FLIP_EVIDENCE line); ("cannot", msg) when it
-    never ran to completion (a timeout or a harness error says nothing about the edge); ("fail", msg)
-    when it passed, or failed for some other reason (no evidence the edge itself was refused)."""
+    the intended reason: a non-zero exit with _FLIP_EVIDENCE as a complete line of ONE output stream
+    (see _output_lines); ("cannot", msg) when it never ran to completion (a timeout or a harness error
+    says nothing about the edge); ("fail", msg) when it passed, or failed for some other reason (no
+    evidence the edge itself was refused). `output` is the (stdout, stderr) pair _run_one gives with
+    separate_streams, or one string standing for a single stream, so evidence split across the two
+    streams is no evidence. The evidence is textual and does not authenticate its producer: any code
+    in the flipped copy that printed that exact line would read as caught. It shows that the line was
+    printed, not that opf.py's bootstrap refusal printed it."""
+    streams = (output,) if isinstance(output, str) else tuple(output)
     if cannot is not None:
         return "cannot", "negative: the flipped copy did not run to completion ({}): {}".format(
-            cannot, output.replace("\n", " | "))
+            cannot, " | ".join(streams).replace("\n", " | "))
     if rc == 0:
         return "fail", ("negative: a re-introduced upward edge (import check_versions) was NOT "
                         "caught in isolation (the gate would give no coverage)")
-    if _FLIP_EVIDENCE not in output.splitlines():
+    if not any(_FLIP_EVIDENCE in _output_lines(stream) for stream in streams):
         return "fail", ("negative: the flipped copy exited rc={} without the import refusal ({!r}); a "
                         "failure for another reason is no evidence the edge is caught".format(
                             rc, _FLIP_EVIDENCE))
@@ -404,7 +427,7 @@ def _closure_legs(root):
             rc, output, why = _run_one(
                 opf_root, "opf.py", ["--self-test"], tmp, env,
                 timeout_s=_MEMBER_TIMEOUT_S.get("opf-tooling-selftest", _SUBSET_TIMEOUT_S),
-                full_output=True)
+                separate_streams=True)
             kind, msg = _negative_leg_verdict(rc, output, why)
             if kind == "fail":
                 failures.append(msg)
@@ -456,7 +479,7 @@ def _stub_member_runner(calls, outcomes):
     """A stand-in for _run_one: records (member name, timeout_s) and returns outcomes.get(name) or a pass."""
     by_row = {(script, tuple(args)): name for name, script, args in _SUBSET}
 
-    def stub(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, full_output=False):
+    def stub(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, separate_streams=False):
         name = by_row[(script, tuple(args))]
         calls.append((name, timeout_s))
         return outcomes.get(name, (0, "ok", None))
@@ -501,13 +524,24 @@ def _check_timeout_mapping(root):
 
 def _check_harness_mapping(root):
     """A missing subset script or an interpreter that cannot be launched is cannot-evaluate (exit 2),
-    both from _run_one itself and through run()."""
+    both from _run_one itself and through run(). Real children also pin the negative leg's stream
+    handling: evidence split across stdout and stderr, or after a CR on one line, is not caught, while
+    the evidence alone on a stderr line (where opf.py prints it) is."""
+    children = (
+        ("split.py", "sys.stdout.write(E[:20])\nsys.stdout.flush()\nsys.stderr.write(E[20:] + '\\n')\n",
+         "fail"),
+        ("carriage.py", "sys.stdout.write('AssertionError: expected\\r' + E + '\\n')\n", "fail"),
+        ("evidence.py", "print('unit opf-store: FAIL')\nsys.stderr.write(E + '\\n')\n", "caught"),
+    )
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-harness-"))
             (tmp / "tools").mkdir()
             (tmp / "tools" / "sleeper.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+            for name, body, _want in children:
+                (tmp / "tools" / name).write_text(
+                    "import sys\nE = {!r}\n{}sys.exit(1)\n".format(_FLIP_EVIDENCE, body), encoding="utf-8")
         except OSError as exc:
             raise _CannotEvaluate("closure/harness-scratch: could not build the harness fixture: {}".format(exc))
         rc, _text, why = _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env())
@@ -525,6 +559,15 @@ def _check_harness_mapping(root):
             rc, text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env())
         if (rc, why) != (2, _HARNESS) or "could not launch the interpreter" not in text:
             raise AssertionError("closure/harness-launch: {!r}".format((rc, why, text)))
+        for name, _body, want in children:
+            rc, text, why = _run_one(tmp, name, [], tmp, _isolated_env(), timeout_s=120,
+                                     separate_streams=True)
+            if why is not None:
+                raise _CannotEvaluate("closure/evidence-streams: {} did not run to completion ({}): {}".format(
+                    name, why, text))
+            got = _negative_leg_verdict(rc, text, why)[0]
+            if got != want:
+                raise AssertionError("closure/evidence-streams: {} gave {}, expected {}".format(name, got, want))
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -553,10 +596,11 @@ def _check_failure_first(root):
         raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
 
 
-def _check_leg_verdicts(root):
-    """The self-test's own verdicts: a negative-leg timeout or harness error is cannot-evaluate and
-    never caught; caught requires the import-refusal evidence; run()==2 on the positive leg is
-    cannot-evaluate; and the self-test exits 2 (not 0, not 1) when only cannot-evaluate remains."""
+def _check_verdict_tables():
+    """The self-test's own leg verdicts, pure (no scratch directory and no opf/ subtree, so no fixture
+    that cannot be set up can hide them): a negative-leg timeout or harness error is cannot-evaluate
+    and never caught; caught requires the import-refusal evidence as a complete line of one output
+    stream; run()==2 on the positive leg is cannot-evaluate."""
     cases = [
         ((2, "timed out after 1800s", _TIMEOUT), "cannot"),
         ((2, _FLIP_EVIDENCE, _TIMEOUT), "cannot"),
@@ -574,6 +618,27 @@ def _check_leg_verdicts(root):
         ((2, _FLIP_EVIDENCE + " x", None), "fail"),
         ((2, repr(_FLIP_EVIDENCE), None), "fail"),
         ((2, "AssertionError: expected {!r}".format(_FLIP_EVIDENCE), None), "fail"),
+        # Whitespace around the evidence is no evidence (a strip()-based match would accept it).
+        ((2, _FLIP_EVIDENCE + " ", None), "fail"),
+        ((2, "  " + _FLIP_EVIDENCE, None), "fail"),
+        ((2, _FLIP_EVIDENCE + "\t", None), "fail"),
+        # Lines split on "\n" only, each losing at most one trailing "\r": CRLF output is evidence,
+        # but no other str.splitlines boundary makes a line of its own.
+        ((2, _FLIP_EVIDENCE + "\r\n", None), "caught"),
+        ((2, "unit opf-store: FAIL\r\n" + _FLIP_EVIDENCE + "\r\nopf: self-test FAILED\r\n", None), "caught"),
+        ((2, "AssertionError: expected\r" + _FLIP_EVIDENCE, None), "fail"),
+        ((2, _FLIP_EVIDENCE + "\r\r", None), "fail"),
+    ]
+    for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        cases.append(((2, "x" + sep + _FLIP_EVIDENCE, None), "fail"))
+        cases.append(((2, _FLIP_EVIDENCE + sep + "x", None), "fail"))
+    # The evidence must be whole within ONE stream of the (stdout, stderr) pair.
+    cases += [
+        ((1, ("", _FLIP_EVIDENCE + "\n"), None), "caught"),
+        ((1, (_FLIP_EVIDENCE + "\n", "Traceback (most recent call last):\n"), None), "caught"),
+        ((1, (_FLIP_EVIDENCE[:20], _FLIP_EVIDENCE[20:] + "\n"), None), "fail"),
+        ((1, (_FLIP_EVIDENCE[:20] + "\n", _FLIP_EVIDENCE[20:]), None), "fail"),
+        ((2, ("timed out after 1800s", ""), _TIMEOUT), "cannot"),
     ]
     for args, want in cases:
         got = _negative_leg_verdict(*args)[0]
@@ -583,7 +648,12 @@ def _check_leg_verdicts(root):
         got = _positive_leg_verdict(rc)[0]
         if got != want:
             raise AssertionError("closure/positive-verdict: rc {} gave {}, expected {}".format(rc, got, want))
-    # The wiring: both legs stubbed (run() and the flipped copy's runner) through the real _closure_legs.
+
+
+def _check_leg_wiring(root):
+    """Both legs stubbed (run() and the flipped copy's runner) through the real _closure_legs: the
+    flipped opf.py --self-test runs under its bound row, and the self-test exits 2 (not 0, not 1) when
+    only cannot-evaluate remains, 1 when a leg was refuted whatever else could not be evaluated."""
     wiring = [
         (2, (2, "timed out after 1800s", _TIMEOUT), 2),
         (0, (2, "timed out after 1800s", _TIMEOUT), 2),
@@ -596,6 +666,9 @@ def _check_leg_verdicts(root):
         (1, (2, "could not launch the interpreter: x", _HARNESS), 1),
         (2, (0, "SELF-TEST PASS", None), 1),
         (2, (1, "Traceback (most recent call last):\nSomeOtherError: unrelated", None), 1),
+        # The (stdout, stderr) pair: evidence alone on stderr is caught, split across the two is not.
+        (0, (1, ("", _FLIP_EVIDENCE + "\n"), None), 0),
+        (0, (1, (_FLIP_EVIDENCE[:20], _FLIP_EVIDENCE[20:] + "\n"), None), 1),
     ]
     for run_rc, neg, want in wiring:
         calls = []
@@ -614,10 +687,19 @@ def _check_leg_verdicts(root):
                 run_rc, neg, got, want))
 
 
+def _require_subtree(root):
+    """Raise _CannotEvaluate unless root carries the opf/ subtree run() needs: a case built on the real
+    subtree observes nothing without it, so its absence never reads as a refuted case."""
+    if not (Path(root) / "opf" / "tools" / "opf.py").is_file():
+        raise _CannotEvaluate("closure/no-subtree: opf/ subtree not found under {}".format(root))
+
+
 def _check_scratch_and_copy_errors(root):
     """A scratch directory that cannot be allocated, or a broken copy that cannot be built, is
     cannot-evaluate, never a traceback and never a refuted leg: in run() (exit 2, no member runs), in
-    the negative leg (one cannot-evaluate message, self-test exit 2) and in the harness fixture."""
+    the negative leg (one cannot-evaluate message, self-test exit 2) and in the harness fixture. When
+    the host itself cannot allocate a scratch directory, the broken-copy case is cannot-evaluate."""
+    _require_subtree(root)
     def no_mkdtemp(*_args, **_kwargs):
         raise OSError("no scratch directory (stubbed)")
     no_scratch = types.SimpleNamespace(mkdtemp=no_mkdtemp)
@@ -640,6 +722,10 @@ def _check_scratch_and_copy_errors(root):
                 failures, cannot = _closure_legs(root)
             except OSError as exc:
                 raise AssertionError("closure/negative-harness: _closure_legs raised {!r}".format(exc))
+        if (prefix == _NEG_COPY_ERROR and not failures and not calls and len(cannot) == 1
+                and cannot[0].startswith(_NEG_SCRATCH_ERROR)):
+            raise _CannotEvaluate("closure/negative-harness: no scratch directory for the broken-copy "
+                                  "case: {}".format(cannot[0]))
         if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
             raise AssertionError("closure/negative-harness: {!r}".format((failures, cannot, calls)))
         if _captured(_self_test_exit, failures, cannot)[0] != 2:
@@ -675,7 +761,7 @@ def _expect_cannot(check, root, cause, label):
 def _check_absent_subtree(root):
     """With no opf/ subtree under the root, or a copy that fails before any member runs, each stubbed
     case is cannot-evaluate naming the real cause (never a refuted leg), and the self-test's preflight
-    maps that to exit 2."""
+    maps a case that could not be set up to exit 2."""
     tmp = None
     try:
         try:
@@ -684,11 +770,13 @@ def _check_absent_subtree(root):
             raise _CannotEvaluate("closure/absent-subtree-scratch: {}".format(exc))
         absent = tmp / "no-opf-root"
         for check in (_check_timeout_mapping, _check_harness_mapping, _check_failure_first,
-                      _check_leg_verdicts):
+                      _check_leg_wiring, _check_scratch_and_copy_errors):
             _expect_cannot(check, absent, str(absent), "closure/absent-subtree")
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    _require_subtree(root)
 
     def broken_copy(_src, _dest):
         raise OSError("copy refused (stubbed)")
@@ -697,32 +785,47 @@ def _check_absent_subtree(root):
 
     def cannot_stub(_root):
         raise _CannotEvaluate("closure/stubbed-run: stubbed")
-    with _patched(_stubbed_self_test=cannot_stub):
+    with _patched(_PREFLIGHT_CASES=((None, cannot_stub),)):
         rc, _out, err = _captured(_preflight_exit, root)
     if rc != 2 or "SELF-TEST CANNOT EVALUATE" not in err or "SELF-TEST FAIL" in err:
         raise AssertionError("closure/preflight-cannot-exit: a harness error gave {}".format(rc))
 
 
-def _stubbed_self_test(root):
-    """In-process legs over stubbed runners (no subset member runs): the timeout and harness-error
-    mappings, the per-member bound lookup, failure-first precedence, the self-test's own leg verdicts,
-    and scratch, copy and absent-subtree errors as cannot-evaluate. Then RED cases: with the bound
-    table emptied, each lookup check must refuse the 600 s it now passes."""
-    _check_timeout_mapping(root)
-    print("PASS closure/timeout-cannot-evaluate")
-    _check_harness_mapping(root)
-    print("PASS closure/harness-cannot-evaluate")
-    _check_failure_first(root)
-    print("PASS closure/failure-first")
-    _check_leg_verdicts(root)
-    print("PASS closure/self-test-leg-verdicts")
-    _check_scratch_and_copy_errors(root)
-    print("PASS closure/scratch-and-copy-cannot-evaluate")
-    _check_absent_subtree(root)
-    print("PASS closure/absent-subtree-cannot-evaluate")
+def _check_preflight_failure_first(root):
+    """_preflight_exit is failure-first, the same rule as run() and _self_test_exit. With no scratch
+    directory (so every fixture case is cannot-evaluate) and the negative verdict mutated to a
+    substring match, the other preflight cases, run in REVERSE so the pure verdict case comes after
+    the fixture cases, must exit 1 with both the refutation and the cannot-evaluate cases listed;
+    without the mutant the same scratch failure exits 2."""
+    def no_mkdtemp(*_args, **_kwargs):
+        raise OSError("no scratch directory (stubbed)")
+    no_scratch = types.SimpleNamespace(mkdtemp=no_mkdtemp)
+
+    def substring_verdict(rc, output, cannot):
+        if cannot is not None:
+            return "cannot", "stubbed"
+        text = output if isinstance(output, str) else "".join(output)
+        return ("caught", None) if rc != 0 and _FLIP_EVIDENCE in text else ("fail", "stubbed")
+    cases = tuple(reversed([case for case in _PREFLIGHT_CASES
+                            if case[1] is not _check_preflight_failure_first]))
+    for patches, want in ((dict(_negative_leg_verdict=substring_verdict), 1), (dict(), 2)):
+        with _patched(tempfile=no_scratch, _PREFLIGHT_CASES=cases, **patches):
+            rc, _out, err = _captured(_preflight_exit, root)
+        lines = err.splitlines()
+        refuted = [line for line in lines if line.startswith("SELF-TEST FAIL: ")]
+        unevaluated = [line for line in lines if line.startswith("SELF-TEST CANNOT EVALUATE: ")]
+        wrong_refutation = any(not line.startswith("SELF-TEST FAIL: closure/negative-verdict")
+                               for line in refuted)
+        if rc != want or not unevaluated or bool(refuted) != (want == 1) or wrong_refutation:
+            raise AssertionError("closure/preflight-failure-first: {} gave {}, expected {}: {!r}".format(
+                "substring mutant" if patches else "scratch failure alone", rc, want, lines))
+
+
+def _red_bound_lookup(root):
+    """RED cases: with the bound table emptied, each lookup check must refuse the 600 s it now passes."""
     for check, label in ((_check_timeout_mapping, "closure/member-bound-lookup"),
-                         (_check_leg_verdicts, "closure/negative-bound-lookup")):
-        with _patched(_MEMBER_TIMEOUT_S={}):
+                         (_check_leg_wiring, "closure/negative-bound-lookup")):
+        with _patched(_MEMBER_TIMEOUT_S=dict()):
             try:
                 check(root)
             except AssertionError as exc:
@@ -733,21 +836,45 @@ def _stubbed_self_test(root):
         print("RED closure-bound-lookup -> " + label)
 
 
+# The self-test's preflight: the registration cases and the in-process stubbed cases (no subset member
+# runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first four need
+# no scratch directory and no opf/ subtree; the rest build fixtures or stub run() over the real subtree.
+_PREFLIGHT_CASES = (
+    (None, lambda _root: _pack_manifest_registration_self_test()),
+    (None, lambda _root: _adopt_observe_registration_self_test()),
+    (None, lambda _root: _member_timeout_rows_self_test()),
+    ("closure/self-test-leg-verdicts", lambda _root: _check_verdict_tables()),
+    ("closure/timeout-cannot-evaluate", _check_timeout_mapping),
+    ("closure/harness-cannot-evaluate", _check_harness_mapping),
+    ("closure/failure-first", _check_failure_first),
+    ("closure/self-test-leg-wiring", _check_leg_wiring),
+    ("closure/scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors),
+    ("closure/absent-subtree-cannot-evaluate", _check_absent_subtree),
+    ("closure/preflight-failure-first", _check_preflight_failure_first),
+    (None, _red_bound_lookup),
+)
+
+
 def _preflight_exit(root):
-    """The registration and stubbed legs: None when all held, 1 when one was refuted (SELF-TEST FAIL),
-    2 when a stubbed case could not be set up (SELF-TEST CANNOT EVALUATE, a harness error)."""
-    try:
-        _pack_manifest_registration_self_test()
-        _adopt_observe_registration_self_test()
-        _member_timeout_rows_self_test()
-        _stubbed_self_test(root)
-    except _CannotEvaluate as exc:
-        print("SELF-TEST CANNOT EVALUATE:", str(exc), file=sys.stderr)
-        return 2
-    except AssertionError as exc:
-        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
-        return 1
-    return None
+    """Run every _PREFLIGHT_CASES case on its own, collecting each outcome, so a case that could not be
+    set up never hides a later refutation. Failure-first, the same rule as run() and _self_test_exit:
+    1 when any case was refuted (SELF-TEST FAIL), else 2 when one could not be set up (SELF-TEST CANNOT
+    EVALUATE, a harness error), else None (every case held)."""
+    failures, cannot = [], []
+    for label, check in _PREFLIGHT_CASES:
+        try:
+            check(root)
+        except _CannotEvaluate as exc:
+            cannot.append(str(exc))
+            continue
+        except AssertionError as exc:
+            failures.append(str(exc))
+            continue
+        if label is not None:
+            print("PASS " + label)
+    if not failures and not cannot:
+        return None
+    return _self_test_exit(failures, cannot)
 
 
 def self_test_main():
@@ -756,8 +883,12 @@ def self_test_main():
     the pre-move upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT's `check_versions` instead
     of the extracted `_semver`); with no AIQT tree reachable that import fails, and the flipped copy counts as
     caught only when it exits non-zero WITH opf.py's import-refusal line. A gate that passed the
-    deliberately-broken copy would provide no coverage. A leg that could not be evaluated (run() exit 2, or
-    the flipped copy timed out or could not launch) makes the self-test exit 2, never PASS."""
+    deliberately-broken copy would provide no coverage. The preflight (_preflight_exit) runs first: when
+    any of its cases was refuted the self-test exits 1, otherwise when one could not be set up it exits 2,
+    and in both outcomes the legs never run. Otherwise the legs decide, failure-first: 1 when either leg
+    was refuted, whatever else could not be evaluated; 2 when neither was refuted but one could not be
+    evaluated (run() exit 2, or the flipped copy timed out, could not launch, or its scratch directory
+    or copy could not be made); 0 only when both held, never PASS on a leg that was not evaluated."""
     root = repo_root()
     rc = _preflight_exit(root)
     if rc is not None:
