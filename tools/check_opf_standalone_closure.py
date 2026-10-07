@@ -20,16 +20,20 @@ load); the commonmark selftests exercise the vendored parser and its manifest.
 
 Exit convention (matches the repo's gates):
   0  the isolated opf/ subtree verifies (closure holds)
-  1  a real finding (a subset gate failed in isolation: closure is broken)
-  2  malformed input or a harness error (fail-closed): opf/ absent/unreadable, copy failed, a
-     subset script missing from the copy, the interpreter could not be launched (reported as
-     HARNESS ERROR), or a subset member KILLED at its time bound (reported as TIMEOUT). Each is
-     cannot-evaluate: the member never ran to completion, so closure was neither observed nor
-     refuted, and it is never reported as a closure finding.
+  1  a real finding (a subset gate failed in isolation: closure is broken). Failure-first: a member
+     that ran and failed exits 1 even when other members could not be evaluated; both are listed.
+  2  malformed input or a harness error (fail-closed), with no member failing: opf/ absent/unreadable,
+     the scratch directory could not be allocated, copy failed, a subset script missing from the copy,
+     the interpreter could not be launched (reported as HARNESS ERROR), or a subset member KILLED at
+     its time bound (reported as TIMEOUT). Each is cannot-evaluate: the member never ran to
+     completion, so closure was neither observed nor refuted, and it is never reported as a closure
+     finding.
 
 --self-test exits 0 (both legs held), 1 (a leg was refuted: the real opf/ did not verify, or the
-flipped copy was not caught for the intended reason) or 2 (a leg could not be evaluated: run()
-returned 2, or the flipped copy timed out or could not be launched).
+flipped copy was not caught for the intended reason; failure-first, whatever else could not be
+evaluated) or 2 (no leg was refuted but one could not be evaluated: run() returned 2, the flipped
+copy timed out or could not be launched, its scratch directory or copy could not be made, or a
+stubbed case could not be set up, for example with no opf/ subtree).
 """
 import sys
 
@@ -275,14 +279,22 @@ def _run_subset(opf_root, run_dir):
 
 def run(root):
     """Materialize opf/ alone and run the subset in isolation. Returns 0 (closure holds), 1 (a subset gate
-    failed: closure broken), or 2 (harness error, a member timeout, opf/ unreadable), fail-closed."""
+    failed: closure broken, even when another member could not be evaluated), or 2 (no member failed,
+    but a harness error, a member timeout, an unallocatable scratch directory or an unreadable opf/
+    left closure unevaluated), fail-closed."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
         print("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root),
               file=sys.stderr)
         return 2
-    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-"))
+    tmp = None
     try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-"))
+        except OSError as exc:
+            print("error: could not allocate a scratch directory for the isolated opf/ copy: {} "
+                  "(cannot evaluate closure)".format(exc), file=sys.stderr)
+            return 2
         try:
             opf_root = _materialize(opf_src, tmp)
         except OSError as exc:
@@ -312,18 +324,26 @@ def run(root):
                   file=sys.stderr)
             for name, why, tail in cannot:
                 print("  {} [{}]: {}".format(name, why, tail.replace("\n", " | ")), file=sys.stderr)
-            return 2
+        # Failure-first: a member that ran and failed is a definite closure break whatever else could
+        # not be evaluated, so it decides the exit; cannot-evaluate (2) only when nothing failed.
         if failed:
             return 1
+        if cannot:
+            return 2
         print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
         return 0
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # The intended reason the flipped copy must fail for: opf.py's bootstrap refusing the re-introduced
 # `check_versions` import (the line opf.py prints when that import raises ImportError).
 _FLIP_EVIDENCE = "opf: cannot bootstrap: check_versions (cannot evaluate)"
+
+# The negative leg's cannot-evaluate messages for a broken copy it could not build.
+_NEG_SCRATCH_ERROR = "negative: could not allocate a scratch directory for the broken copy: "
+_NEG_COPY_ERROR = "negative: harness error building the broken copy: "
 
 
 def _positive_leg_verdict(rc):
@@ -364,8 +384,13 @@ def _closure_legs(root):
 
     # Negative (deliberate flip): a surviving upward edge must be caught.
     opf_src = Path(root) / "opf"
-    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-neg-"))
+    tmp = None
     try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-neg-"))
+        except OSError as exc:
+            cannot.append(_NEG_SCRATCH_ERROR + str(exc))
+            return failures, cannot
         opf_root = _materialize(opf_src, tmp)
         store = opf_root / "tools" / "_opf_store.py"
         text = store.read_text(encoding="utf-8")
@@ -386,9 +411,10 @@ def _closure_legs(root):
             elif kind == "cannot":
                 cannot.append(msg)
     except OSError as exc:
-        cannot.append("negative: harness error building the broken copy: {}".format(exc))
+        cannot.append(_NEG_COPY_ERROR + str(exc))
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
     return failures, cannot
 
 
@@ -437,14 +463,30 @@ def _stub_member_runner(calls, outcomes):
     return stub
 
 
+class _CannotEvaluate(Exception):
+    """A stubbed self-test case could not be set up (no opf/ subtree, a copy or scratch directory that
+    could not be made): a harness error, never a refuted leg, so the self-test exits 2."""
+
+
+def _stubbed_run(root, outcomes):
+    """run(root) with _run_one stubbed by outcomes; returns (rc, stdout, stderr, calls). Raises
+    _CannotEvaluate, naming run()'s own error, when run() exited before any subset member ran (opf/
+    absent, its copy or scratch directory not made): the case then observed nothing."""
+    calls = []
+    with _patched(_run_one=_stub_member_runner(calls, outcomes)):
+        rc, out, err = _captured(run, root)
+    if not calls:
+        raise _CannotEvaluate("closure/stubbed-run: run() exited {} before any subset member ran: {}".format(
+            rc, err.strip().replace("\n", " | ")))
+    return rc, out, err, calls
+
+
 def _check_timeout_mapping(root):
     """run() with _run_one stubbed so opf-tooling-selftest is killed at its bound: run() must exit 2
     with a TIMEOUT (cannot evaluate) line and no closure finding, and the per-member bound lookup must
     pass 1800 s to opf-tooling-selftest and 600 s to another member."""
-    calls = []
     outcomes = {"opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
-    with _patched(_run_one=_stub_member_runner(calls, outcomes)):
-        rc, out, err = _captured(run, root)
+    rc, out, err, calls = _stubbed_run(root, outcomes)
     bounds = dict(calls)
     if bounds.get("opf-tooling-selftest") != 1800 or bounds.get("opf-homes-selftest") != 600:
         raise AssertionError("closure/member-bound-lookup: {!r}".format(bounds))
@@ -460,13 +502,17 @@ def _check_timeout_mapping(root):
 def _check_harness_mapping(root):
     """A missing subset script or an interpreter that cannot be launched is cannot-evaluate (exit 2),
     both from _run_one itself and through run()."""
-    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-harness-"))
+    tmp = None
     try:
-        (tmp / "tools").mkdir()
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-harness-"))
+            (tmp / "tools").mkdir()
+            (tmp / "tools" / "sleeper.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        except OSError as exc:
+            raise _CannotEvaluate("closure/harness-scratch: could not build the harness fixture: {}".format(exc))
         rc, _text, why = _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env())
         if (rc, why) != (2, _HARNESS):
             raise AssertionError("closure/harness-missing-script: {!r}".format((rc, why)))
-        (tmp / "tools" / "sleeper.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
         rc, _text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env(), timeout_s=1)
         if (rc, why) != (2, _TIMEOUT):
             raise AssertionError("closure/run-one-timeout: {!r}".format((rc, why)))
@@ -480,15 +526,31 @@ def _check_harness_mapping(root):
         if (rc, why) != (2, _HARNESS) or "could not launch the interpreter" not in text:
             raise AssertionError("closure/harness-launch: {!r}".format((rc, why, text)))
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    calls = []
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
     outcomes = {"opf-drift-selftest": (2, "could not launch the interpreter: stubbed", _HARNESS)}
-    with _patched(_run_one=_stub_member_runner(calls, outcomes)):
-        rc, out, err = _captured(run, root)
+    rc, out, err, _calls = _stubbed_run(root, outcomes)
     if rc != 2 or "BROKEN" in err:
         raise AssertionError("closure/harness-exit: run() returned {} for a harness error".format(rc))
     if "  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)") not in out.splitlines():
         raise AssertionError("closure/harness-line: no HARNESS ERROR (cannot evaluate) line")
+
+
+def _check_failure_first(root):
+    """run() is failure-first: a member that ran and failed exits 1 even while another member timed
+    out, and both are listed (the break under BROKEN, the timeout under CANNOT EVALUATE)."""
+    outcomes = {"opf-drift-selftest": (1, "ImportError: check_versions", None),
+                "opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
+    rc, _out, err, _calls = _stubbed_run(root, outcomes)
+    if rc != 1:
+        raise AssertionError("closure/failure-first: run() returned {} for a failed member beside a "
+                             "timed-out one".format(rc))
+    lines = err.splitlines()
+    if ("  opf-drift-selftest (rc=1): ImportError: check_versions" not in lines
+            or "  opf-tooling-selftest [TIMEOUT]: timed out after 1800s" not in lines
+            or not any(line.startswith("STANDALONE CLOSURE: BROKEN") for line in lines)
+            or not any(line.startswith("STANDALONE CLOSURE: CANNOT EVALUATE") for line in lines)):
+        raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
 
 
 def _check_leg_verdicts(root):
@@ -503,6 +565,15 @@ def _check_leg_verdicts(root):
         ((1, "Traceback (most recent call last):\nSomeOtherError: unrelated", None), "fail"),
         ((2, "opf: cannot bootstrap: _opf_schema (cannot evaluate)", None), "fail"),
         ((2, _FLIP_EVIDENCE, None), "caught"),
+        ((1, _FLIP_EVIDENCE, None), "caught"),
+        ((2, "unit opf-store: FAIL\n" + _FLIP_EVIDENCE + "\nopf: self-test FAILED", None), "caught"),
+        # Caught needs a non-zero exit: rc 0 with the evidence line is not caught.
+        ((0, _FLIP_EVIDENCE, None), "fail"),
+        # The evidence must be a whole line: prefixed, suffixed or quoted evidence is no evidence.
+        ((2, "x " + _FLIP_EVIDENCE, None), "fail"),
+        ((2, _FLIP_EVIDENCE + " x", None), "fail"),
+        ((2, repr(_FLIP_EVIDENCE), None), "fail"),
+        ((2, "AssertionError: expected {!r}".format(_FLIP_EVIDENCE), None), "fail"),
     ]
     for args, want in cases:
         got = _negative_leg_verdict(*args)[0]
@@ -520,37 +591,163 @@ def _check_leg_verdicts(root):
         (0, (2, _FLIP_EVIDENCE, None), 0),
         (1, (2, _FLIP_EVIDENCE, None), 1),
         (0, (0, "SELF-TEST PASS", None), 1),
+        # Failure-first: a refuted leg exits 1 whichever leg could not be evaluated.
+        (1, (2, "timed out after 1800s", _TIMEOUT), 1),
+        (1, (2, "could not launch the interpreter: x", _HARNESS), 1),
+        (2, (0, "SELF-TEST PASS", None), 1),
+        (2, (1, "Traceback (most recent call last):\nSomeOtherError: unrelated", None), 1),
     ]
     for run_rc, neg, want in wiring:
         calls = []
         stub_run = (lambda rc: (lambda _root: rc))(run_rc)
         with _patched(run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg})):
             failures, cannot = _closure_legs(root)
+        if not calls and any(c.startswith((_NEG_SCRATCH_ERROR, _NEG_COPY_ERROR)) for c in cannot):
+            raise _CannotEvaluate("closure/self-test-exit: the flipped copy could not be built: {}".format(
+                " | ".join(cannot)))
+        # The negative leg's own bound lookup: the flipped opf.py --self-test runs under its row.
+        if calls != [("opf-tooling-selftest", 1800)]:
+            raise AssertionError("closure/negative-bound-lookup: {!r}".format(calls))
         got = _captured(_self_test_exit, failures, cannot)[0]
         if got != want:
             raise AssertionError("closure/self-test-exit: run()={} flipped={!r} gave {}, expected {}".format(
                 run_rc, neg, got, want))
 
 
+def _check_scratch_and_copy_errors(root):
+    """A scratch directory that cannot be allocated, or a broken copy that cannot be built, is
+    cannot-evaluate, never a traceback and never a refuted leg: in run() (exit 2, no member runs), in
+    the negative leg (one cannot-evaluate message, self-test exit 2) and in the harness fixture."""
+    def no_mkdtemp(*_args, **_kwargs):
+        raise OSError("no scratch directory (stubbed)")
+    no_scratch = types.SimpleNamespace(mkdtemp=no_mkdtemp)
+    calls = []
+    with _patched(tempfile=no_scratch, _run_one=_stub_member_runner(calls, {})):
+        try:
+            rc, _out, err = _captured(run, root)
+        except OSError as exc:
+            raise AssertionError("closure/scratch-run: run() raised {!r} instead of exiting 2".format(exc))
+    if rc != 2 or calls or "could not allocate a scratch directory" not in err:
+        raise AssertionError("closure/scratch-run: run() gave {} with {!r}".format(rc, calls))
+
+    def broken_copy(_src, _dest):
+        raise OSError("copy refused (stubbed)")
+    for patches, prefix in ((dict(tempfile=no_scratch), _NEG_SCRATCH_ERROR),
+                            (dict(_materialize=broken_copy), _NEG_COPY_ERROR)):
+        calls = []
+        with _patched(run=lambda _root: 0, _run_one=_stub_member_runner(calls, {}), **patches):
+            try:
+                failures, cannot = _closure_legs(root)
+            except OSError as exc:
+                raise AssertionError("closure/negative-harness: _closure_legs raised {!r}".format(exc))
+        if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
+            raise AssertionError("closure/negative-harness: {!r}".format((failures, cannot, calls)))
+        if _captured(_self_test_exit, failures, cannot)[0] != 2:
+            raise AssertionError("closure/negative-harness-exit: {!r}".format(cannot))
+
+    with _patched(tempfile=no_scratch):
+        try:
+            _check_harness_mapping(root)
+        except _CannotEvaluate as exc:
+            if not str(exc).startswith("closure/harness-scratch"):
+                raise AssertionError("closure/scratch-harness: {}".format(exc))
+        except OSError as exc:
+            raise AssertionError("closure/scratch-harness: raised {!r} instead of cannot-evaluate".format(exc))
+        else:
+            raise AssertionError("closure/scratch-harness: no cannot-evaluate without a scratch directory")
+
+
+def _expect_cannot(check, root, cause, label):
+    """check(root) must raise _CannotEvaluate naming `cause`: not pass, not refute a leg."""
+    try:
+        check(root)
+    except _CannotEvaluate as exc:
+        if cause not in str(exc):
+            raise AssertionError("{}: {} did not name the cause {!r}: {}".format(
+                label, check.__name__, cause, exc))
+    except AssertionError as exc:
+        raise AssertionError("{}: {} refuted a leg instead of cannot-evaluate: {}".format(
+            label, check.__name__, exc))
+    else:
+        raise AssertionError("{}: {} passed with nothing to evaluate".format(label, check.__name__))
+
+
+def _check_absent_subtree(root):
+    """With no opf/ subtree under the root, or a copy that fails before any member runs, each stubbed
+    case is cannot-evaluate naming the real cause (never a refuted leg), and the self-test's preflight
+    maps that to exit 2."""
+    tmp = None
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-absent-"))
+        except OSError as exc:
+            raise _CannotEvaluate("closure/absent-subtree-scratch: {}".format(exc))
+        absent = tmp / "no-opf-root"
+        for check in (_check_timeout_mapping, _check_harness_mapping, _check_failure_first,
+                      _check_leg_verdicts):
+            _expect_cannot(check, absent, str(absent), "closure/absent-subtree")
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def broken_copy(_src, _dest):
+        raise OSError("copy refused (stubbed)")
+    with _patched(_materialize=broken_copy):
+        _expect_cannot(_check_timeout_mapping, root, "could not materialize", "closure/copy-before-members")
+
+    def cannot_stub(_root):
+        raise _CannotEvaluate("closure/stubbed-run: stubbed")
+    with _patched(_stubbed_self_test=cannot_stub):
+        rc, _out, err = _captured(_preflight_exit, root)
+    if rc != 2 or "SELF-TEST CANNOT EVALUATE" not in err or "SELF-TEST FAIL" in err:
+        raise AssertionError("closure/preflight-cannot-exit: a harness error gave {}".format(rc))
+
+
 def _stubbed_self_test(root):
     """In-process legs over stubbed runners (no subset member runs): the timeout and harness-error
-    mappings, the per-member bound lookup, and the self-test's own leg verdicts. Then a RED case:
-    with the bound table emptied, the lookup check must refuse the 600 s it now passes."""
+    mappings, the per-member bound lookup, failure-first precedence, the self-test's own leg verdicts,
+    and scratch, copy and absent-subtree errors as cannot-evaluate. Then RED cases: with the bound
+    table emptied, each lookup check must refuse the 600 s it now passes."""
     _check_timeout_mapping(root)
     print("PASS closure/timeout-cannot-evaluate")
     _check_harness_mapping(root)
     print("PASS closure/harness-cannot-evaluate")
+    _check_failure_first(root)
+    print("PASS closure/failure-first")
     _check_leg_verdicts(root)
     print("PASS closure/self-test-leg-verdicts")
-    with _patched(_MEMBER_TIMEOUT_S={}):
-        try:
-            _check_timeout_mapping(root)
-        except AssertionError as exc:
-            if not str(exc).startswith("closure/member-bound-lookup"):
-                raise
-        else:
-            raise AssertionError("closure/member-bound-lookup-not-red")
-    print("RED closure-bound-lookup -> closure/member-bound-lookup")
+    _check_scratch_and_copy_errors(root)
+    print("PASS closure/scratch-and-copy-cannot-evaluate")
+    _check_absent_subtree(root)
+    print("PASS closure/absent-subtree-cannot-evaluate")
+    for check, label in ((_check_timeout_mapping, "closure/member-bound-lookup"),
+                         (_check_leg_verdicts, "closure/negative-bound-lookup")):
+        with _patched(_MEMBER_TIMEOUT_S={}):
+            try:
+                check(root)
+            except AssertionError as exc:
+                if not str(exc).startswith(label):
+                    raise
+            else:
+                raise AssertionError(label + "-not-red")
+        print("RED closure-bound-lookup -> " + label)
+
+
+def _preflight_exit(root):
+    """The registration and stubbed legs: None when all held, 1 when one was refuted (SELF-TEST FAIL),
+    2 when a stubbed case could not be set up (SELF-TEST CANNOT EVALUATE, a harness error)."""
+    try:
+        _pack_manifest_registration_self_test()
+        _adopt_observe_registration_self_test()
+        _member_timeout_rows_self_test()
+        _stubbed_self_test(root)
+    except _CannotEvaluate as exc:
+        print("SELF-TEST CANNOT EVALUATE:", str(exc), file=sys.stderr)
+        return 2
+    except AssertionError as exc:
+        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
+        return 1
+    return None
 
 
 def self_test_main():
@@ -562,14 +759,9 @@ def self_test_main():
     deliberately-broken copy would provide no coverage. A leg that could not be evaluated (run() exit 2, or
     the flipped copy timed out or could not launch) makes the self-test exit 2, never PASS."""
     root = repo_root()
-    try:
-        _pack_manifest_registration_self_test()
-        _adopt_observe_registration_self_test()
-        _member_timeout_rows_self_test()
-        _stubbed_self_test(root)
-    except AssertionError as exc:
-        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
-        return 1
+    rc = _preflight_exit(root)
+    if rc is not None:
+        return rc
     return _self_test_exit(*_closure_legs(root))
 
 
