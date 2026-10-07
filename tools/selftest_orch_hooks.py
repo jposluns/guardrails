@@ -2853,8 +2853,7 @@ def _main_isolated(report_path=None):
         # remove-the-directory note. Without the swap the same directory is named a directory and gets
         # that note. Red when the reader calls _orch_barrier_nonregular(path) without its fstat. The swap
         # stays on one filesystem, so this vector exercises only the inode half of the reader's
-        # (st_dev, st_ino) comparison; the device half is not tested here (a second filesystem is not
-        # practical in a self-test).
+        # (st_dev, st_ino) comparison; the next vector tests the device half with a faked fstat result.
         _r18_real_open = os.open
         _r18_moved = rsd / "r18-dir-moved"
 
@@ -2893,6 +2892,24 @@ def _main_isolated(report_path=None):
               (_r18_dir_row(True), _r18_dir_row(False)),
               (((True, True), ("bad", "not a regular file"), True, False),
                (None, ("bad", "not a regular file: a directory"), False, True)))
+        # ROUND 20, THE DEVICE HALF OF THAT COMPARISON: _orch_barrier_nonregular is handed a directory's
+        # own lstat result as the opened file (named a directory), then the same inode on another device
+        # and the same device with another inode (both "not a regular file"), and no opened result
+        # (named a directory). A fake stands in for the fstat of a second filesystem, which a self-test
+        # cannot mount. Red when the comparison drops st_dev or st_ino.
+        _r14_bar.mkdir()
+        try:
+            _r20_st = os.lstat(str(_r14_bar))
+            import types as _r20_types
+            _r20_fake = _r20_types.SimpleNamespace
+            _r20_names = tuple(aiqt_hooks._orch_barrier_nonregular(str(_r14_bar), o) for o in (
+                _r20_st, _r20_fake(st_dev=_r20_st.st_dev + 1, st_ino=_r20_st.st_ino),
+                _r20_fake(st_dev=_r20_st.st_dev, st_ino=_r20_st.st_ino + 1), None))
+        finally:
+            _r14_bar.rmdir()
+        check("barrier/nonregular-names-directory-only-where-device-and-inode-match", _r20_names,
+              ("not a regular file: a directory", "not a regular file", "not a regular file",
+               "not a regular file: a directory"))
         # ROUND 18, THE DESCRIPTOR IS CLOSED EXACTLY ONCE AND AN EARLIER BAD RESULT WINS: with os.close
         # wrapped so that closing the barrier's descriptor really closes it, is counted, and then raises
         # EIO, a regular barrier reads ('bad', 'OSError'), and a directory and a FIFO at the barrier path
@@ -2990,9 +3007,10 @@ def _main_isolated(report_path=None):
         # probe and renamed to escape-spoof.json.surfaced: the guard-events.jsonl the line names holds an
         # escape-spoof row for T1 and for T2, and the .surfaced file it names holds T2, never T1 (the line
         # says it holds only the latest sentinel whose rename succeeded). The line says a forced-exit
-        # finding is normally raised once, at least once if recording it fails, never "only once". Red
-        # when the line names .surfaced as keeping the escape records, or names a file the hook does not
-        # write.
+        # finding is normally raised once, at least once if recording it fails, never "only once", and
+        # that the guard-events row is the record only where it was written, a row that could not be
+        # written having been warned about. Red when the line names .surfaced as keeping the escape
+        # records, names a file the hook does not write, or drops the warned-about qualification.
         _r19_fx = Fixture(tmp, "r19-escape")
         _r19_root = str(_r19_fx.root)
         _r19_sd = Path(aiqt_hooks._orch_state_dir_for_root(_r19_root))
@@ -3002,8 +3020,12 @@ def _main_isolated(report_path=None):
         def _r19_named(pattern):
             m = _r18_re.search(pattern, _r19_line)
             return m.group(1) if m else None
-        _r19_events = _r19_named(r"its row of kind escape-spoof in (.+?), and a row that could not")
-        _r19_kept = _r19_named(r"was ignored; (.+?) holds only the latest sentinel whose rename succeeded")
+        _r19_events = _r19_named(
+            r"its row of kind escape-spoof in (.+?) where that row was written, and a row")
+        _r19_warned = ("where that row was written, and a row that could not be written was warned about "
+                       "when the sentinel was ignored, with a request to record it manually;") in _r19_line
+        _r19_kept = _r19_named(
+            r"record it manually; (.+?) holds only the latest sentinel whose rename succeeded")
         _r19_left = _r19_named(r"a failed rename leaves it at (.+?), where the next audit raises it again")
 
         def _r19_detail(path):
@@ -3025,22 +3047,73 @@ def _main_isolated(report_path=None):
                _r19_raise("r19-T2"), _r19_events == str(_r19_sd / "guard-events.jsonl"), _r19_spoofs(),
                _r19_kept == str(_r19_sd / "escape-spoof.json.surfaced"), _r19_detail(_r19_kept),
                "normally raised once (at least once if recording that it was raised fails)" in _r19_line,
-               "raised only once" in _r19_line or "is kept in" in _r19_line),
-              (True, ("", True), ("", True), True, ["r19-T1", "r19-T2"], True, "r19-T2", True, False))
+               "raised only once" in _r19_line or "is kept in" in _r19_line, _r19_warned),
+              (True, ("", True), ("", True), True, ["r19-T1", "r19-T2"], True, "r19-T2", True, False, True))
         # ROUND 19, A FAILED RENAME LEAVES THE SENTINEL WHERE THE LINE SAYS: with escape-spoof.json.surfaced
         # a directory, a third sentinel (T3) is recorded and raised but its rename fails; the .surfaced
         # path the line names is that directory (it holds no sentinel), the escape-spoof.json the line names
         # still holds T3, the next probe raises T3 again, and the guard-events.jsonl the line names holds
         # T1, T2 and T3 (red when the line names another file for the sentinel a failed rename leaves).
-        (_r19_sd / "escape-spoof.json.surfaced").unlink()
-        (_r19_sd / "escape-spoof.json.surfaced").mkdir()
+        # The probe's rename target is checked by the vector above; here it is replaced by a directory
+        # whatever that vector found, so a mutant that never renames still reaches this check by name.
+        _r19_surf = _r19_sd / "escape-spoof.json.surfaced"
+        if os.path.lexists(str(_r19_surf)) and not _r19_surf.is_dir():
+            _r19_surf.unlink()
+        if not _r19_surf.is_dir():
+            _r19_surf.mkdir()
         check("barrier/omitted-findings-line-escape-record-failed-rename",
               (_r19_raise("r19-T3"), bool(_r19_kept) and os.path.isdir(_r19_kept),
                _r19_left == str(_r19_sd / "escape-spoof.json"), _r19_detail(_r19_left),
                any("r19-T3" in f for f in aiqt_hooks._orch_pending_artefact_findings(_r19_root)),
                _r19_spoofs()),
               (("", True), True, True, "r19-T3", True, ["r19-T1", "r19-T2", "r19-T3"]))
-        (_r19_sd / "escape-spoof.json.surfaced").rmdir()
+        if _r19_surf.is_dir():
+            _r19_surf.rmdir()
+        # ROUND 20, A FAILED GUARD-EVENTS APPEND IS WARNED ABOUT AND LEAVES NO ROW: in a fresh state
+        # directory, guard-events.jsonl is a directory while sentinel T1 is recorded and raised, then the
+        # directory is removed and T2 is recorded and raised. T1's recorder returns the warning naming
+        # guard-events FAILED and escape-spoof.json ok and asking for a manual record; T2's returns "".
+        # The guard-events.jsonl the line names then holds T2 only, and the .surfaced file holds T2: no
+        # lasting record of T1 exists, which is what the line and ORCHESTRATION.md say ("where that row
+        # was written"). Red when the recorder warns only on a failed escape-spoof.json write.
+        _r20_fx = Fixture(tmp, "r20-escape")
+        _r20_root = str(_r20_fx.root)
+        _r20_sd = Path(aiqt_hooks._orch_state_dir_for_root(_r20_root))
+        _r20_ge = _r20_sd / "guard-events.jsonl"
+        if os.path.lexists(str(_r20_ge)) and not _r20_ge.is_dir():
+            _r20_ge.unlink()
+        _r20_ge.mkdir(parents=True, exist_ok=True)
+
+        def _r20_raise(detail):
+            warn = aiqt_hooks._orch_record_escape_spoof(_r20_root, detail)
+            return (warn, [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f])
+
+        def _r20_spoofs():
+            rows = aiqt_hooks._orch_read_jsonl(str(_r20_ge))[0] if _r20_ge.is_file() else None
+            return [row.get("detail") for row in rows or [] if row.get("kind") == "escape-spoof"]
+        _r20_t1 = _r20_raise("r20-T1")
+        if _r20_ge.is_dir():
+            _r20_ge.rmdir()
+        _r20_t2 = _r20_raise("r20-T2")
+        check("barrier/omitted-findings-line-escape-record-guard-events-failure",
+              (_r20_t1[0], any("r20-T1" in f for f in _r20_t1[1]), _r20_t2[0],
+               any("r20-T2" in f for f in _r20_t2[1]), _r20_spoofs(),
+               _r19_detail(str(_r20_sd / "escape-spoof.json.surfaced"))),
+              ("Additionally, an ignored escape sentinel could not be fully recorded (guard-events FAILED, "
+               "escape-spoof.json ok); record the spoof manually before resuming (nocncl).", True, "", True,
+               ["r20-T2"], "r20-T2"))
+        # ROUND 20, A LATER SENTINEL BEFORE THE AUDIT OVERWRITES escape-spoof.json: T3 and then T4 are
+        # recorded with no resume probe between them; the next probe raises T4 and never T3, a second
+        # probe raises neither, and guard-events.jsonl holds a row for each (the docs say the earlier one
+        # then keeps only its guard-events row, so it is not "surfaced once").
+        _r20_w3 = aiqt_hooks._orch_record_escape_spoof(_r20_root, "r20-T3")
+        _r20_w4 = aiqt_hooks._orch_record_escape_spoof(_r20_root, "r20-T4")
+        _r20_p1 = [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f]
+        _r20_p2 = [f for f in aiqt_hooks._orch_pending_artefact_findings(_r20_root) if "r20-" in f]
+        check("barrier/omitted-findings-line-escape-record-overwrite-before-audit",
+              (_r20_w3, _r20_w4, any("r20-T4" in f for f in _r20_p1), any("r20-T3" in f for f in _r20_p1),
+               _r20_p2, _r20_spoofs()),
+              ("", "", True, False, [], ["r20-T2", "r20-T3", "r20-T4"]))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
@@ -3421,7 +3494,7 @@ def _main_isolated(report_path=None):
         check("forced/guard-event-kind",
               '"forced_unresolved"' in (dsd / "guard-events.jsonl").read_text(encoding="utf-8"),
               True)
-        # the next resume audit surfaces the pending record ONCE and arms the warn-first barrier
+        # the next resume audit surfaces the pending record (normally once) and arms the warn-first barrier
         check("forced/resume-audit-surfaces",
               _verdict(aiqt_hooks.orch_resume_audit(d.payload("SessionStart"))), "warn")
         dbarrier = json.loads((dsd / "resume-barrier.json").read_text(encoding="utf-8"))
@@ -3465,7 +3538,8 @@ def _main_isolated(report_path=None):
         check("forced5/cap-exit-warns-2", _verdict(esched({"prompt": "waiting"})), "warn")
         e2, _b2 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
         check("forced5/two-rows-appended", len(e2), 2)
-        # the resume audit surfaces BOTH exactly once, then a second resume is clean
+        # the resume audit surfaces BOTH, then a second resume is clean (the surfaced-set write succeeds
+        # here; a failed one would raise them again, at least once)
         check("forced5/resume-surfaces-both",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "warn")
         check("forced5/second-resume-clean",
@@ -3649,7 +3723,8 @@ def _main_isolated(report_path=None):
           "barrier byte-identical while the warning still surfaces, and a barrier file that is unreadable "
           "or malformed reads as armed); the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
-          "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
+          "escape sentinel is ignored, recorded (or its failed record warned about), and normally "
+          "raised once at resume; a declared attestation "
           "register gates external/foreign-lease evidence at audit cadence, holding on an unreadable "
           "surface and surfacing unsubstantiated rows; an id that vanishes from the enumeration "
           "without a close receipt is held by the anti-shrinkage checkpoint; a bound- or cap-released "

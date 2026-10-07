@@ -9445,10 +9445,13 @@ def _orch_record_escape_spoof(root, detail):
     """C.1 recorder: an ignored (foreign, symlinked, hardlinked, actor-owned, or writable) escape
     sentinel is a recorded fact, never a verdict input: the decision already proceeded exactly as with
     no sentinel. Appends a guard-events row and writes <state_dir>/escape-spoof.json so the next resume
-    audit surfaces it once. FIX 6: the recording is FAIL-LOUD: returns '' on success, else the warning
-    text the caller MUST append to its banner, so an ignored sentinel that could not be recorded is
-    never silently dropped (which would contradict the always-recorded-and-surfaced claim, and leave
-    the resume audit nothing to surface when both writes failed)."""
+    audit raises it: normally once, again at each later audit while its rename fails, and never where a
+    later sentinel overwrote escape-spoof.json before that audit (only the later one is raised from it;
+    the earlier one keeps only its guard-events row, where that append succeeded). FIX 6: the recording
+    is FAIL-LOUD: returns '' on success, else the warning text the caller MUST append to its banner, so
+    an ignored sentinel whose guard-events row or escape-spoof.json could not be written is never
+    silently dropped: the banner names the failed write and asks for a manual record (when both writes
+    fail, the resume audit has nothing to raise)."""
     ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
     ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
                                {"ts": _orch_now().isoformat(), "detail": detail})
@@ -9476,11 +9479,11 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
     marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
     APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
-    unique key), so two forced exits before a resume are BOTH kept and each surfaced normally once (at
-    least once if recording that it was surfaced fails), never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
-    ever suppresses this record. Returns '' on success, else the failure text the caller MUST append to
-    its banner (the one record this design leans on can never fail silently). The verdict is never
-    changed here."""
+    unique key), so two forced exits before a resume are BOTH kept and each normally raised once (at
+    least once if recording that it was raised fails), never clobbered into a single fixed file. No
+    register row, attestation, or escape-adjacent artefact ever suppresses this record. Returns '' on
+    success, else the failure text the caller MUST append to its banner (the one record this design
+    leans on can never fail silently). The verdict is never changed here."""
     open_ids = _orch_open_dispositions(ctx)
     enum_ok = ctx.get("enum_status") == "ok"
     key = _orch_now().isoformat() + "-" + os.urandom(6).hex()
@@ -11057,10 +11060,14 @@ def _orch_pending_artefact_findings(root):
     """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised, then renamed to
     escape-spoof.json.surfaced, which replaces any earlier .surfaced file, so that file holds only the
     latest sentinel whose rename succeeded; a failed rename leaves it at escape-spoof.json, raised again
-    next resume, as an unreadable one is (chkfcl). The lasting record of each ignored sentinel is its
-    append-only guard-events.jsonl row of kind escape-spoof (_orch_record_escape_spoof). Forced exits are
-    an append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised normally
-    once (at least once if recording that one was raised fails) and never clobbered."""
+    next resume, as an unreadable one is (chkfcl). A second sentinel recorded before this probe runs
+    overwrites escape-spoof.json, so only the later one is raised from it. The lasting record of each
+    ignored sentinel is its append-only guard-events.jsonl row of kind escape-spoof
+    (_orch_record_escape_spoof) only where that append succeeded: a failed append was warned about in the
+    banner of the hook that ignored the sentinel, which asks for a manual record, and no row exists for
+    it. Forced exits are an append-only log surfaced via _orch_forced_exit_findings so multiple exits are
+    each normally raised once (at least once if recording that one was raised fails) and never
+    clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "escape-spoof.json")
@@ -11219,24 +11226,26 @@ def _orch_barrier_rest(count, sd):
     """The last line _orch_barrier_fit stores in place of the findings that do not fit (sd is the state
     directory holding the barrier). It points only at evidence that outlives the audit. A forced-exit
     finding is normally raised once (at least once: _orch_forced_exit_findings advances its surfaced set
-    only where that write succeeds), so a later audit, the doctor's included, does not list it again; the
-    line names forced-exit.jsonl, the append-only log that keeps every forced-exit record in full. An
-    ignored escape sentinel is raised from escape-spoof.json, which _orch_pending_artefact_findings then
-    renames to escape-spoof.json.surfaced: each later rename replaces that file, so it holds only the
+    only where that write succeeds), so a later audit, the doctor's included, does not list it again once
+    that write has succeeded (a failed write leaves it to be listed again); the line names
+    forced-exit.jsonl, the append-only log that keeps every forced-exit record in full. An ignored escape
+    sentinel is raised from escape-spoof.json, which _orch_pending_artefact_findings then renames to
+    escape-spoof.json.surfaced: each later rename replaces that file, so it holds only the
     latest sentinel whose rename succeeded, and a failed rename leaves the sentinel at escape-spoof.json,
     where the next audit raises it again. So the line names guard-events.jsonl, whose append-only rows of
-    kind escape-spoof (_orch_record_escape_spoof) are the lasting record of each sentinel (a row that
-    could not be written was warned about when the sentinel was ignored), and says what the .surfaced
-    file and escape-spoof.json hold. Every other finding is recomputed from the record by each audit, so
+    kind escape-spoof (_orch_record_escape_spoof) are the lasting record of each sentinel whose row was
+    written (a row that could not be written was warned about when the sentinel was ignored, with a
+    request to record it manually, and no row exists for it), and says what the .surfaced file and
+    escape-spoof.json hold. Every other finding is recomputed from the record by each audit, so
     'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
     return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes). A forced-exit "
             "finding is normally raised once (at least once if recording that it was raised fails): read "
             "every forced-exit record in full in {} (an ignored escape sentinel is likewise normally raised "
-            "once; its lasting record is its row of kind escape-spoof in {}, and a row that could not be "
-            "written was warned about when the sentinel was ignored; {} holds only the latest sentinel "
-            "whose rename succeeded, and a failed rename leaves it at {}, where the next audit raises it "
-            "again). Every other finding still present is printed again by 'python3 "
-            "tools/orch_doctor.py --resume-audit'".format(
+            "once; its lasting record is its row of kind escape-spoof in {} where that row was written, "
+            "and a row that could not be written was warned about when the sentinel was ignored, with a "
+            "request to record it manually; {} holds only the latest sentinel whose rename succeeded, and "
+            "a failed rename leaves it at {}, where the next audit raises it again). Every other finding "
+            "still present is printed again by 'python3 tools/orch_doctor.py --resume-audit'".format(
                 count, _ORCH_BARRIER_MAX_BYTES, os.path.join(sd, "forced-exit.jsonl"),
                 os.path.join(sd, "guard-events.jsonl"), os.path.join(sd, "escape-spoof.json.surfaced"),
                 os.path.join(sd, "escape-spoof.json")))

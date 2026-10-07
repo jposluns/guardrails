@@ -404,10 +404,13 @@ expected-check-ids = [
   "barrier/written-barrier-fits-bound-first-findings-plus-count",
   "barrier/refit-carries-stored-count-forward",
   "barrier/reader-names-directory-only-where-lstat-matches-its-fstat",
+  "barrier/nonregular-names-directory-only-where-device-and-inode-match",
   "barrier/close-once-never-retried-earlier-bad-result-wins",
   "barrier/omitted-findings-line-names-surviving-forced-exit-log",
   "barrier/omitted-findings-line-escape-record-survives-two-sentinels",
   "barrier/omitted-findings-line-escape-record-failed-rename",
+  "barrier/omitted-findings-line-escape-record-guard-events-failure",
+  "barrier/omitted-findings-line-escape-record-overwrite-before-audit",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",
