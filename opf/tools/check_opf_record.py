@@ -473,6 +473,7 @@ import errno
 import io
 import json
 import os
+import pickle
 import re
 import secrets
 import select
@@ -620,19 +621,22 @@ _flip_watch = []
 # the pipe. The parent binds a line only by a token it minted itself plus the repr it computed itself
 # (_oop_declared, _bound_injection_oop); a token shows only that the text came from the injection's
 # message (an exception raised from its args, an error formatted with its message, or a child printing
-# it carries the token too), so the repr the parent computed must be in the line as well, and that repr
-# names the private fault class the child raised the injection as (_PRIVATE_INJECTIONS), never the plain
-# base type an args copy is rebuilt as.
+# it carries the token too), so the line must also be the record backstop's own envelope around exactly
+# the repr the parent computed (equality, never a substring, so an exception wrapping the injection or
+# its repr binds nothing), and that repr names the private fault class the child raised the injection
+# as (_PRIVATE_INJECTIONS) and the serial the parent minted for that token, which only the injection
+# object itself carries (_OpfInjection).
 # The retained round-7, -8 and -9 discriminators push a dict here instead, {token: (label, exception
 # object)}, minting a fresh token per injection in-process; the round-3, -5 and -6 ones push a list and
 # record (label, exception object) with the message untouched, as their rounds did.
 _flip_injections = []
 _INJECTION_TOKEN = re.compile(r"\binjection-[0-9a-f]{16}\b")
 
-# One discriminated child run's state: _oop_tokens[0] holds the child's per-label token pools (None
-# outside a child), _oop_child[0] marks the child so cli tees capture writes onto the pipe, and
-# _case_namespace[0] prefixes the child's fixture case directories (its Fixtures.count restarts at the
-# fork's value, so without the prefix a child's copytree would collide with the parent's next case).
+# One discriminated child run's state: _oop_tokens[0] holds the child's per-label pools of (token,
+# serial) pairs (None outside a child), _oop_child[0] marks the child so cli tees capture writes onto
+# the pipe, and _case_namespace[0] prefixes the child's fixture case directories (its Fixtures.count
+# restarts at the fork's value, so without the prefix a child's copytree would collide with the
+# parent's next case).
 # _oop_serial counts forks parent-side; a child appends its serial to the namespace it inherited, so
 # nested discriminated runs stay distinct too.
 _oop_tokens = [None]
@@ -649,53 +653,105 @@ _OOP_TIMEOUT = 600.0
 # The private fault classes a discriminated child raises its injections as (_injected, _crash_point):
 # one per base type a declared injection stands in for, each subclassing that base, so every handler that
 # catches the base (the record.cli and opf._cmd_record backstops included) catches it exactly alike, and
-# each named so that its printed repr differs from the base's. The parent computes the private repr of
-# every declared injection (_oop_declared), so an exception rebuilt from an injection's args as the plain
-# base type (NameError(*injected.args)) prints the base's name and binds nothing; only a deliberate copy
-# of the private class itself (type(injected)(*injected.args)) prints the injection's line (the
-# disclosed T83 residual). _oop_private[0] is False only under the retained round-10 discriminator,
-# which raised each injection as its plain base type.
-class _OpfInjectedNameError(NameError):
+# each named so that its printed repr differs from the base's. Each instance also holds a serial in a
+# slot, shown after the base repr (_OpfInjection): every construction draws a fresh "built-N" from
+# _oop_built, and _injected then gives the injection the serial the parent minted for its token
+# (_serialed), so of all the objects a child can make only the injection itself prints the repr the
+# parent computed (_oop_declared). A slot is outside the exception's args and __dict__, so a copy.copy,
+# copy.deepcopy or pickle round trip (each rebuilt through cls(*args) and then the __dict__) and every
+# cls(*injected.args) rebuild, the private class's own included, print a fresh built serial; an instance
+# made without __init__ prints "unbuilt"; an args copy rebuilt as the plain base type, or as a local
+# class of the same name, prints no serial at all. _oop_private[0] is False only under the retained
+# round-10 discriminator, which raised each injection as its plain base type; _oop_exact[0] is False
+# under the retained round-10 and round-11 discriminators, which showed no serial and bound a line by a
+# substring.
+_oop_built = [0]
+_oop_private = [True]
+_oop_exact = [True]
+
+
+class _OpfInjection:
+    """The serial the private fault classes share: __init__ draws the next built serial into the
+    class's _opf_serial slot, and the repr is the base's followed by that serial (with no serial under
+    the retained round-10 and round-11 discriminators, _oop_exact)."""
+    __slots__ = ()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _oop_built[0] += 1
+        self._opf_serial = "built-{}".format(_oop_built[0])
+
+    def __repr__(self):
+        shown = super().__repr__()
+        if not _oop_exact[0]:
+            return shown
+        return "{} {}".format(shown, getattr(self, "_opf_serial", "unbuilt"))
+
+
+class _OpfInjectedNameError(_OpfInjection, NameError):
     """A declared NameError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
-class _OpfInjectedKeyError(KeyError):
+class _OpfInjectedKeyError(_OpfInjection, KeyError):
     """A declared KeyError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
-class _OpfInjectedOSError(OSError):
+class _OpfInjectedOSError(_OpfInjection, OSError):
     """A declared OSError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
-class _OpfInjectedBrokenPipeError(BrokenPipeError):
+class _OpfInjectedBrokenPipeError(_OpfInjection, BrokenPipeError):
     """A declared BrokenPipeError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
-class _OpfInjectedMemoryError(MemoryError):
+class _OpfInjectedMemoryError(_OpfInjection, MemoryError):
     """A declared MemoryError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
-class _OpfInjectedRuntimeError(RuntimeError):
+class _OpfInjectedRuntimeError(_OpfInjection, RuntimeError):
     """A declared RuntimeError injection of a discriminated child run."""
+    __slots__ = ("_opf_serial",)
 
 
 _PRIVATE_INJECTIONS = {NameError: _OpfInjectedNameError, KeyError: _OpfInjectedKeyError,
                        OSError: _OpfInjectedOSError, BrokenPipeError: _OpfInjectedBrokenPipeError,
                        MemoryError: _OpfInjectedMemoryError, RuntimeError: _OpfInjectedRuntimeError}
-_oop_private = [True]
+# The attributes of a base type kept outside its args, carried over to its private rebuild.
+_INJECTION_ATTRIBUTES = {NameError: ("name",),
+                         OSError: ("errno", "strerror", "filename", "filename2"),
+                         BrokenPipeError: ("errno", "strerror", "filename", "filename2")}
 
 
 def _private_injection(exc):
     """exc rebuilt from its args as the private fault class of its exact type (_PRIVATE_INJECTIONS),
-    so its errno and strerror, if any, follow as the base's constructor sets them; under the retained
-    round-10 discriminator (_oop_private[0] False) exc unchanged. A type with no private class is a
-    harness fault, never a silent plain injection."""
+    with the attributes the base keeps outside its args (_INJECTION_ATTRIBUTES: NameError.name; an
+    OSError's errno, strerror, filename and filename2) and its __dict__ (notes included) carried over;
+    under the retained round-10 discriminator (_oop_private[0] False) exc unchanged. A type with no
+    private class is a harness fault, never a silent plain injection."""
     if not _oop_private[0]:
         return exc
     private = _PRIVATE_INJECTIONS.get(type(exc))
     if private is None:
         raise Harness("no private injection class for {}".format(type(exc).__name__))
-    return private(*exc.args)
+    rebuilt = private(*exc.args)
+    for attribute in _INJECTION_ATTRIBUTES.get(type(exc), ()):
+        setattr(rebuilt, attribute, getattr(exc, attribute))
+    rebuilt.__dict__.update(exc.__dict__)
+    return rebuilt
+
+
+def _serialed(exc, serial):
+    """exc, a private injection, holding serial in place of its built one, so that its repr is the one
+    the parent computed for its token; under the retained round-10 and round-11 discriminators (no
+    private class, or no serial shown) exc unchanged."""
+    if _oop_private[0] and _oop_exact[0]:
+        exc._opf_serial = serial
+    return exc
 
 
 def _oop_write(text):
@@ -748,9 +804,10 @@ def _tokenize(exc, token):
 
 def _injected(label, exc):
     """exc, marked as injection `label` of the innermost discriminated run: in a discriminated child
-    the next parent-minted token of `label`'s pool is appended to its message (_tokenize), so any
-    backstop line printing it carries a token the parent recorded before the fork; a label the flip
-    never declared, or an event past the pool, gets no token and its line binds nothing (fail closed).
+    the next parent-minted (token, serial) pair of `label`'s pool is drawn, the token appended to its
+    message (_tokenize) and the serial held by the private rebuild (_serialed), so any backstop line
+    printing it carries a token and a serial the parent recorded before the fork; a label the flip
+    never declared, or an event past the pool, gets neither and its line binds nothing (fail closed).
     Under a retained round-7 to -9 discriminator (a dict) a fresh token is minted and recorded
     in-process, and under a retained round-3 to -6 one (a list) exc is recorded untouched, as those
     rounds did; outside any discriminated run exc is returned unchanged. In a discriminated child the
@@ -766,26 +823,33 @@ def _injected(label, exc):
         exc = _private_injection(exc)
         pool = _oop_tokens[0].get(label)
         if pool:
-            _tokenize(exc, pool.pop(0))
+            token, serial = pool.pop(0)
+            _serialed(_tokenize(exc, token), serial)
     return exc
 
 
 def _crash_point(label, owner, name, expected):
     """owner.name, recording as injection `label` an exception it raises of exactly `expected`'s type
     and args (the crash a reverted guard lets the code reach, bound to the point it must come from), and
-    in a discriminated child raising its private fault class in its place (_injected); any other
-    exception passes unrecorded."""
+    in a discriminated child raising its private fault class in its place (_injected), with the
+    traceback, cause, context and context suppression of the exception it replaces (raised after the
+    handler, so the replaced exception is not chained on as a new context, and a None cause stays a None
+    cause rather than becoming "from None"); any other exception passes unrecorded."""
     real = getattr(owner, name)
 
     def observing(*args, **kwargs):
         try:
             return real(*args, **kwargs)
         except BaseException as exc:
-            if type(exc) is type(expected) and exc.args == expected.args:
-                marked = _injected(label, exc)
-                if marked is not exc:
-                    raise marked.with_traceback(exc.__traceback__) from exc.__cause__
-            raise
+            if type(exc) is not type(expected) or exc.args != expected.args:
+                raise
+            marked = _injected(label, exc)
+            if marked is exc:
+                raise
+            marked.__cause__, marked.__context__ = exc.__cause__, exc.__context__
+            marked.__suppress_context__ = exc.__suppress_context__
+            traceback = exc.__traceback__
+        raise marked.with_traceback(traceback)
     return patch.object(owner, name, observing)
 
 
@@ -6614,11 +6678,12 @@ def _bound_injection(line, printed, injections, consumed, allowed):
 
 
 def _oop_declared(allowed):
-    """(records, pools): _OOP_POOL fresh tokens per declared label, recorded parent-side as a mapping
-    from each token to (label, the reprs of the declared injection variants of that label, each
-    rebuilt as its private fault class and tokenized with that token), and a mapping from each label to its tokens in draw order, the pools handed to
-    the child. Built BEFORE the child is launched, from _DECLARED_INJECTIONS alone: the parent computes
-    every repr it will accept itself and never reads one back from the child."""
+    """(records, pools): _OOP_POOL fresh (token, serial) pairs per declared label, recorded parent-side
+    as a mapping from each token to (label, the reprs of the declared injection variants of that label,
+    each rebuilt as its private fault class, tokenized with that token and holding that serial), and a
+    mapping from each label to its pairs in draw order, the pools handed to the child. Built BEFORE
+    the child is launched, from _DECLARED_INJECTIONS alone: the parent computes every repr it will
+    accept itself and never reads one back from the child."""
     records, pools = dict(), dict()
     for label in allowed:
         factories = _DECLARED_INJECTIONS.get(label)
@@ -6627,30 +6692,49 @@ def _oop_declared(allowed):
         pools[label] = []
         for _ in range(_OOP_POOL):
             token = "injection-" + secrets.token_hex(8)
-            records[token] = (label, tuple(repr(_tokenize(_private_injection(factory()), token))
-                                           for factory in factories))
-            pools[label].append(token)
+            serial = "serial-" + secrets.token_hex(8)
+            records[token] = (label, tuple(
+                repr(_serialed(_tokenize(_private_injection(factory()), token), serial))
+                for factory in factories))
+            pools[label].append((token, serial))
     return records, pools
+
+
+# The diagnostic envelope of the record CLI backstops (record.cli, opf._cmd_record) in a line _BACKSTOP
+# found: the printed repr of the exception is everything between the fixed head and the fixed tail.
+_RECORD_ENVELOPE = re.compile(r"cannot evaluate: unexpected error \((?P<shown>.*)\); "
+                              r"failing closed to exit 2")
 
 
 def _bound_injection_oop(line, records, consumed, allowed):
     """Consume and return the token of the recorded injection a backstop line binds to, decided from
     bytes the parent read from the pipe itself: the line carries exactly one recorded token (every
     recorded token is parent-minted and unguessable), that token unconsumed and its label one the flip
-    declares, and the line holds a repr the parent computed for the injection of that token before the
-    child was launched. A line with no recorded token (the line of another verb, a twin of the
-    injection, a copied diagnostic of an unrecorded exception, a token the child made up), one with
-    two, one without any parent-computed private repr (an unrelated error formatted with the message
-    of the injection, a new exception a child process printed from it, an args copy of the injection
-    rebuilt as its plain base type), or a second line carrying an already
-    consumed token (a cleared and reprinted capture) binds none: None. Each token accounts for one
-    line only."""
+    declares, and the line is the record backstop's envelope (_RECORD_ENVELOPE) around an exception
+    repr EQUAL to one the parent computed for the injection of that token before the child was
+    launched, private class and minted serial included. A line with no recorded token (the line of
+    another verb, a twin of the injection, a copied diagnostic of an unrecorded exception, a token the
+    child made up), one with two, one in any other envelope, one whose repr differs from every
+    parent-computed one (an exception wrapping the injection, its repr or its message; an exception
+    group holding it; an unrelated error formatted with its message; a new exception a child process
+    printed from it; an args copy of it rebuilt as its plain base type or as a same-named local class;
+    a copy, deep copy, pickle round trip or cls(*args) rebuild of it as its own private class, each
+    showing a fresh built serial), or a second line carrying an already consumed token (a cleared and
+    reprinted capture) binds none: None. Each token accounts for one line only. Under the retained
+    round-10 and round-11 discriminators (_oop_exact[0] False) a line binds when a computed repr occurs
+    anywhere in it, as in their rounds."""
     tokens = set(_INJECTION_TOKEN.findall(line)) & records.keys()
     if len(tokens) != 1:
         return None
     token, = tokens
     label, reprs = records[token]
-    if label not in allowed or token in consumed or not any(shown in line for shown in reprs):
+    if label not in allowed or token in consumed:
+        return None
+    if _oop_exact[0]:
+        envelope = _RECORD_ENVELOPE.fullmatch(line)
+        if envelope is None or envelope.group("shown") not in reprs:
+            return None
+    elif not any(shown in line for shown in reprs):
         return None
     consumed.add(token)
     return token
@@ -6710,12 +6794,16 @@ def _discriminate(name, test, flip):
     flip included, a SystemExit too; an interrupt propagates) fails it by name; and, fail closed, so
     does a child that crashes, reports no complete verdict, exits non-zero or outlives _OOP_TIMEOUT
     (every read and wait is bounded, _oop_reap). Anything the child prints that the parent did not
-    record binds nothing, and the reprs the parent accepts name the private fault class of each
-    injection (_private_injection), so an args copy rebuilt as the plain base type binds nothing;
-    what the child can still forge is the lines of its own declared injections, whose tokens and
-    private classes it holds by necessity (a deliberate type(injected)(*injected.args) copy among
-    them), nothing else. A crash production code swallows
-    prints no backstop line and is outside this check."""
+    record binds nothing, and a line binds only as the record backstop's envelope around a repr
+    EQUAL to one the parent computed, which names the private fault class of the injection
+    (_private_injection) and the serial the parent minted for its token, held only by the injection
+    object itself (_OpfInjection): an args copy, a copy, deep copy, pickle round trip or class rebuild
+    of the injection, and any exception wrapping it or its repr, bind nothing. What the child can
+    still forge is the line of one of its own declared injections by deliberately reproducing that
+    object's repr: writing the envelope around repr(injected) itself (the child holds the object by
+    necessity), or moving the injection's own _opf_serial onto another object of its private class;
+    nothing else. A crash production code swallows prints no backstop line and is outside this
+    check."""
     test()
     allowed = _INTENDED_BACKSTOPS.get(flip, ())
     records, pools = _oop_declared(allowed)
@@ -6790,11 +6878,21 @@ def _discriminate(name, test, flip):
 
 
 def _discriminate_round10(name, test, flip, current=_discriminate):
-    """The round-10 discriminator (the seventh T83 flip): today's out-of-process binding, with each
+    """The round-10 discriminator (the seventh T83 flip): the round-11 substring binding, with each
     injection raised and declared as its plain base type rather than its private fault class
     (_oop_private), so an args copy of the injection rebuilt as that type (NameError(*injected.args))
     prints the injection's line byte for byte and binds."""
-    with patch.object(sys.modules[__name__], "_oop_private", [False]):
+    me = sys.modules[__name__]
+    with patch.object(me, "_oop_private", [False]), patch.object(me, "_oop_exact", [False]):
+        current(name, test, flip)
+
+
+def _discriminate_round11(name, test, flip, current=_discriminate):
+    """The round-11 discriminator (the eighth T83 flip): today's out-of-process run with private fault
+    classes, but no serial in their reprs and a line bound when a parent-computed repr occurs anywhere
+    in it (_oop_exact), so an exception wrapping the injection or its repr, an exception group holding
+    it, and a copy, pickle round trip or class rebuild of it bind."""
+    with patch.object(sys.modules[__name__], "_oop_exact", [False]):
         current(name, test, flip)
 
 
@@ -7025,12 +7123,51 @@ def _t83_args_copy_crash(*_args):
     raise NameError(*injected.args)
 
 
-def _t83_type_copy_crash(*_args):
-    """A recorded injection, never raised: a deliberate copy of its own private class built from its
-    args (type(injected)(*injected.args)) is raised in its place, printing exactly the injection's line
-    (the disclosed residual)."""
-    injected = _injected("t82-declared", NameError("t82 broken flip fixture"))
-    raise type(injected)(*injected.args)
+def _t83_replaced(rebuild):
+    """A crash recording the declared injection, never raised: rebuild(injected) is raised in its
+    place."""
+    def crash(*_args):
+        raise rebuild(_injected("t82-declared", NameError("t82 broken flip fixture")))
+    return crash
+
+
+def _t83_subclass_rebuild(injected):
+    """The private class found among NameError's subclasses by its name, rebuilt from the args."""
+    found = next(cls for cls in NameError.__subclasses__() if cls.__name__ == "_OpfInjectedNameError")
+    return found(*injected.args)
+
+
+def _t83_caught_rebuild(injected):
+    """The injection raised and caught, then the caught exception's class rebuilt from its args."""
+    try:
+        raise injected
+    except NameError as caught:
+        return caught.__class__(*caught.args)
+
+
+def _t83_same_name_rebuild(injected):
+    """A local class of the private class's name over the plain base, rebuilt from the args."""
+    class _OpfInjectedNameError(NameError):
+        """A same-named stand-in for the private class, local to this rebuild."""
+    return _OpfInjectedNameError(*injected.args)
+
+
+# The objects raised in place of a recorded, never raised injection: each repeats or contains the
+# injection's repr, class name and token, but is not the injection object (a copy or rebuild shows a
+# fresh built serial; a wrapper's repr only contains the injection's), so none binds.
+_T83_REBUILDS = (
+    ("deliberate-type-copy", lambda injected: type(injected)(*injected.args)),
+    ("wrapped-repr", lambda injected: RuntimeError(repr(injected))),
+    ("wrapped-object", RuntimeError),
+    ("wrapped-format", lambda injected: RuntimeError("wrapped failure ({!r})".format(injected))),
+    ("exception-group", lambda injected: ExceptionGroup("grouped", [injected])),
+    ("copy", copy.copy),
+    ("deepcopy", copy.deepcopy),
+    ("pickle-round-trip", lambda injected: pickle.loads(pickle.dumps(injected))),
+    ("subclass-lookup", _t83_subclass_rebuild),
+    ("caught-class", _t83_caught_rebuild),
+    ("same-name-class", _t83_same_name_rebuild),
+)
 
 
 def _t83_formatted_crash(*_args):
@@ -7274,6 +7411,22 @@ def _t83_settrace_twin_print(*args, **kwargs):
     stream.write(second)
 
 
+def _t83_wrapped_print(*args, **kwargs):
+    """The diagnostic of the backstop, written by the backstop frame holding the injection, with the
+    exception repr in it wrapped as a RuntimeError's: the round-9 frame attribution, and every binding
+    by substring, accept the line; it is not the backstop's own diagnostic of the injection."""
+    text = kwargs.get("sep", " ").join(map(str, args))
+    found = _RECORD_ENVELOPE.search(text)
+    if found is not None:
+        text = text.replace(found.group("shown"), repr(RuntimeError(found.group("shown"))), 1)
+    print(text, **kwargs)
+
+
+def _t83_wrapped_flip():
+    """The line of the injection, rewritten by its own backstop frame to wrap the repr."""
+    return _t83_capture_flip(_t83_wrapped_print, False)
+
+
 def _t83_lying_len_flip():
     """The line of the injection written under a lying __len__ in its first run; the line of an
     unrecorded twin in the capture of a later run."""
@@ -7298,34 +7451,9 @@ def _t83_declared_as(probe, model):
         yield
 
 
-def t83_backstop_bound_to_injection(fx):
-    """A declared backstop is accepted only when, in the bytes the discriminating parent read from the
-    pipe of the flipped child run, its line carries exactly one parent-minted, unconsumed token of a
-    label the flip declares and a repr the parent computed for that injection before the child ran.
-    Rejected as a backstop: an unrelated EIO under the declarations of flip_t77, a RuntimeError
-    carrying the text of the declared NameError, a twin of the recorded NameError raised in its place,
-    and a twin raised by the print of the recorded NameError in the backstop (which the outer backstop
-    then prints), each of whose lines carries no recorded token; a crash the record CLI reports as an
-    unexpected-error refusal; an unrelated AttributeError formatted with the message of the injection
-    and a new RuntimeError a child process printed from that message, whose lines carry the token but
-    no parent-computed repr; the line of the injection forwarded only into a private capture, or
-    cleared, followed by the line of an unrecorded twin (the twin stays unbound); the line of the
-    injection printed, cleared and printed again (the second occurrence strays, its token consumed);
-    the line of the injection written under a lying __len__ ahead of a twin in a later run, and the
-    line of the injection interleaved with a twin line from a second thread, paused under sys.settrace
-    or not (the pipe carries the true bytes, so the token-bearing bytes never form a complete bound
-    line and the twin text binds nothing); and a nested run whose unrecorded twin diagnostic is copied
-    into the stderr of the run; and an args copy of the injection rebuilt as the plain base type
-    (NameError(*injected.args)) raised or printed in its place, alone, after an empty write, after a
-    token-free preamble, or with no write from the backstop of the injection, whose line carries the
-    token but not the private fault class's name the parent-computed repr carries. A SystemExit(0)
-    from the flipped run fails as a harness exception, never escaping. Accepted, each being the own
-    line of the injection, token and private repr included, however its bytes reach the pipe: the
-    line printed whole, written in two chunks, or through writelines; a cleared capture with no twin
-    (the red then being the assertion, nothing straying); and the disclosed residual, a deliberate
-    copy of the injection's own private class built from its args (type(injected)(*injected.args))
-    raised in its place (its bytes are exactly the line of the injection, which the child can always
-    print: it holds its own tokens and private classes by necessity)."""
+def _t83_legs(fx):
+    """T83's legs, each (label, test, flip, setup, needle): needle names how a required-reject leg must
+    fail, and None marks a required-accept control."""
     me = sys.modules[__name__]
 
     def create():
@@ -7370,13 +7498,49 @@ def t83_backstop_bound_to_injection(fx):
              backstop),
             ("settrace-pause", create, _t83_settrace_twin_flip, declared(_t83_settrace_twin_flip),
              backstop),
+            ("print-wrapped", create_twice, _t83_wrapped_flip, declared(_t83_wrapped_flip), backstop),
             ("own-capture", create_twice, _t83_own_flip, declared(_t83_own_flip), None),
             ("truncate-alone", create_twice, _t83_truncate_flip, declared(_t83_truncate_flip), None),
             ("split-write", create, _t83_split_flip, declared(_t83_split_flip), None),
-            ("writelines", create, _t83_writelines_flip, declared(_t83_writelines_flip), None),
-            ("deliberate-type-copy", create, _t82_declared_flip,
-             lambda: patch.object(me, "_t82_declared_crash", _t83_type_copy_crash), None))
-    for label, test, flip, setup, needle in legs:
+            ("writelines", create, _t83_writelines_flip, declared(_t83_writelines_flip), None))
+    return legs + tuple((label, create, _t82_declared_flip, lambda rebuild=rebuild: patch.object(
+        me, "_t82_declared_crash", _t83_replaced(rebuild)), backstop) for label, rebuild in _T83_REBUILDS)
+
+
+def t83_backstop_bound_to_injection(fx):
+    """A declared backstop is accepted only when, in the bytes the discriminating parent read from the
+    pipe of the flipped child run, its line carries exactly one parent-minted, unconsumed token of a
+    label the flip declares and is the record backstop's envelope around a repr EQUAL to one the parent
+    computed for that injection before the child ran (private class and minted serial included).
+    Rejected as a backstop: an unrelated EIO under the declarations of flip_t77, a RuntimeError
+    carrying the text of the declared NameError, a twin of the recorded NameError raised in its place,
+    and a twin raised by the print of the recorded NameError in the backstop (which the outer backstop
+    then prints), each of whose lines carries no recorded token; a crash the record CLI reports as an
+    unexpected-error refusal; an unrelated AttributeError formatted with the message of the injection
+    and a new RuntimeError a child process printed from that message, whose lines carry the token but
+    no parent-computed repr; the line of the injection forwarded only into a private capture, or
+    cleared, followed by the line of an unrecorded twin (the twin stays unbound); the line of the
+    injection printed, cleared and printed again (the second occurrence strays, its token consumed);
+    the line of the injection written under a lying __len__ ahead of a twin in a later run, and the
+    line of the injection interleaved with a twin line from a second thread, paused under sys.settrace
+    or not (the pipe carries the true bytes, so the token-bearing bytes never form a complete bound
+    line and the twin text binds nothing); a nested run whose unrecorded twin diagnostic is copied
+    into the stderr of the run; an args copy of the injection rebuilt as the plain base type
+    (NameError(*injected.args)) raised or printed in its place, alone, after an empty write, after a
+    token-free preamble, or with no write from the backstop of the injection; and each object of
+    _T83_REBUILDS raised in its place: a rebuild of its own private class from its args (deliberately,
+    found among NameError's subclasses, or from a caught frame), a copy, deep copy or pickle round trip
+    of it (each showing a fresh built serial, not the minted one), a same-named local class, a
+    RuntimeError wrapping it, its repr, or a message formatted with its repr, and an ExceptionGroup
+    holding it (each repr containing the injection's but not equal to it), and the injection's own
+    backstop frame printing its diagnostic with the repr wrapped as a RuntimeError's (the frame and
+    token are right, the repr is not the injection's). A SystemExit(0) from the
+    flipped run fails as a harness exception, never escaping. Accepted, each being the own line of the
+    injection object, token, private class and minted serial included, however its bytes reach the
+    pipe: the line printed whole, written in two chunks, or through writelines; and a cleared capture
+    with no twin (the red then being the assertion, nothing straying)."""
+    me = sys.modules[__name__]
+    for label, test, flip, setup, needle in _t83_legs(fx):
         outcome = None
         try:
             with setup():
@@ -7387,7 +7551,7 @@ def t83_backstop_bound_to_injection(fx):
             outcome = exc
         if needle is None:
             assert outcome is None, (
-                "T83 a backstop carrying the declared injection's token and private repr discriminates",
+                "T83 a backstop carrying the declared injection's own exact repr discriminates",
                 label, repr(outcome))
             continue
         assert isinstance(outcome, AssertionError) and needle in str(outcome), (
@@ -7511,6 +7675,11 @@ def flip_t83_round9():
 def flip_t83_round10():
     """The round-10 discriminator."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round10)
+
+
+def flip_t83_round11():
+    """The round-11 discriminator."""
+    return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round11)
 
 
 class _Round6Stderr(_EmissionStderr):
@@ -7695,12 +7864,13 @@ _DECLARED_INJECTIONS = {
 # The flips whose intended red is reached through a CLI backstop, each with the labels of the injections that
 # may cause it. A backstop line is accepted only when a recorded injection of a declared label is its cause:
 # the line, in the bytes the discriminating parent read from the pipe itself, carries exactly one
-# recorded, unconsumed token of a declared label and a repr the parent computed for that injection
-# before the child ran (_oop_declared, _bound_injection_oop; under the retained round-9 flip: the
-# in-process _injected, _EmissionStderr, _note_backstops and _bound_injection); any other backstop or
-# exception in the flipped run fails the discrimination. Each label is recorded by one test's injection site alone, so a declaration binds
-# the test, the flip and the injection together. Most label the synthetic failure their test injects, which
-# the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash the
+# recorded, unconsumed token of a declared label and is the record backstop's envelope around exactly a
+# repr the parent computed for that injection before the child ran (_oop_declared, _bound_injection_oop;
+# under the retained round-9 flip: the in-process _injected, _EmissionStderr, _note_backstops and
+# _bound_injection); any other backstop or exception in the flipped run fails the discrimination. Each
+# label is recorded by one test's injection site alone, so a declaration binds the test, the flip and the
+# injection together. Most label the synthetic failure their test injects, which the reverted handling
+# lets reach the backstop; the T18 flips drop an option guard and record the crash the
 # planner then meets reading the missing option; T64's emission leg reaches the backstop in every run, so its
 # recovery flip meets it too.
 _INTENDED_BACKSTOPS = {
@@ -7848,7 +8018,8 @@ TESTS = (
                                                                           flip_t83_round7,
                                                                           flip_t83_round8,
                                                                           flip_t83_round9,
-                                                                          flip_t83_round10)),
+                                                                          flip_t83_round10,
+                                                                          flip_t83_round11)),
 )
 
 
