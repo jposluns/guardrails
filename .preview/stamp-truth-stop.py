@@ -2042,12 +2042,14 @@ def main(argv):
 
 
 def _self_test():
+    import ast
     import importlib.util
     import inspect
     import io
     import shutil
     import subprocess
     import tempfile
+    import tokenize
     import types
     import threading
     import unittest
@@ -2080,16 +2082,16 @@ def _self_test():
             os.environ.clear()
             os.environ.update(old_env)
 
+    # A child interpreter reads the real clock: freeze_clocks freezes this process only, and no child's verdict
+    # depends on the clock (QA round 5: CHILD_FREEZE, a freeze of the children's clocks, guarded nothing). The
+    # one clock read a child reaches is prune_state's time.time_ns, in in_subprocess's guarded child and in
+    # test_r32's child: every child passes evaluate a fixed now and none runs main, and test_r5's child
+    # evaluates a Stop with no transcript_path, which reads and writes no state. A prune removes only a
+    # subdirectory unwritten for PRUNE_AGE_NS, and each child's state directory is fresh (setUp's, or one the
+    # child makes), so its prune removes nothing.
     CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
-    # A precaution that no test depends on: in_subprocess's children and test_r32's child freeze the loaded
-    # module's time.time and time_ns at one reading (as freeze_clocks does in this process), so a prune such a
-    # child runs reads one instant; their fixtures pass a fixed now. The children of growth_in_child and
-    # counted_in_child do not freeze, and some evaluate a Stop (test_r5_many_distinct_violations_linear_and_bounded's)
-    # whose prune reads the real clock; no child fixture has an aged mtime, so that read changes no verdict.
-    CHILD_FREEZE = ("_ns = time.time_ns()\nm.time = type(time)('time')\nm.time.__dict__.update(vars(time))\n"
-                    "m.time.time_ns, m.time.time = (lambda: _ns), (lambda: _ns / 10 ** 9)\n")
 
     # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
     # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
@@ -2161,7 +2163,7 @@ def _self_test():
         `guarded`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
         guard, tail = (FIFO_GUARD, "\nprint(repr(_blocking))") if guarded else ("", "")
         return subprocess.run([sys.executable, "-I", "-B", "-c",
-                               guard + CHILD_HEAD + CHILD_FREEZE + "print(%s)" % expr + tail],
+                               guard + CHILD_HEAD + "print(%s)" % expr + tail],
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
 
     class Park:
@@ -2371,9 +2373,11 @@ def _self_test():
         time.time_ns) read the same instant, and an age a fixture sets up is exact however much wall time
         passes between the two reads (QA round 3: a transcript start taken 2h05 before the fixture's reading,
         and an mtime PRUNE_AGE_NS plus an hour before it, each flipped a verdict once the code's later reading
-        moved). A file the test creates keeps its real mtime, within a clock tick of the instant (a tmpfs stamps
-        file times from the coarse kernel clock, which can read up to a tick before it), far short of
-        PRUNE_AGE_NS, so no prune removes it. A child interpreter reads its own clocks (see CHILD_FREEZE)."""
+        moved). A file the test creates keeps its real mtime, which is no earlier than about a clock tick
+        before the instant (a tmpfs stamps file times from the coarse kernel clock, which can read up to a
+        tick behind time_ns) and has no later bound (a fixture created a minute after setUp's reading has an
+        mtime a minute after the instant); its age at the instant is therefore at most about a tick, far short
+        of PRUNE_AGE_NS, so no prune removes it. A child interpreter reads the real clock (see CHILD_HEAD)."""
         real_time, real_dt = globals()["time"], globals()["datetime"]
         sec, frac = divmod(ns, 10 ** 9)
         tview = types.ModuleType("time")
@@ -3336,22 +3340,38 @@ def _self_test():
         def test_fifo_guard_disclosures(self):
             # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
             # non-blocking open are disclosed beside the ctypes residual. QA round 4 (codex MEDIUM): the text
-            # searched is the guard's comment block alone, read from this file, from its first line through the
-            # line before FIFO_GUARD; a search of _self_test's source matched this test's own expected strings
-            # and passed with the disclosures deleted
+            # searched is the guard's comment block alone; a search of _self_test's source matched this test's
+            # own expected strings and passed with the disclosures deleted. QA round 5 (codex MEDIUM): a prefix
+            # match on source lines took a triple-quoted string spelling the block and a `FIFO_GUARD = (` line
+            # (the real assignment spelled `FIFO_GUARD=(`) for the block, so the block is now the run of COMMENT
+            # tokens (tokenize), each alone on its line, directly above the one parsed FIFO_GUARD assignment
+            # (ast). QA round 5 (codex MINOR, claude MINOR): a residual reworded to contradict its limitation
+            # kept the pinned fragments, so the residuals are pinned as whole sentences: the block ends with
+            # exactly these three, and "Not covered:" opens a sentence once, the first of them
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
-                lines = [line.strip() for line in f]
-            first = [i for i, line in enumerate(lines) if line.startswith("# The FIFO guard for a child:")]
-            end = [i for i, line in enumerate(lines) if line == "FIFO_GUARD = ("]
-            self.assertEqual((len(first), len(end)), (1, 1))
-            block = lines[first[0]:end[0]]
-            # comment lines only, so no string literal (this test's included) is searched
-            self.assertTrue(block and all(line.startswith("#") for line in block), block)
-            text = " ".join(" ".join(line[1:] for line in block).split())
-            for s in ("Not covered: an open outside the audited interpreter calls",
-                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
-                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
-                self.assertIn(s, text)
+                src = f.read()
+            assigns = [node.lineno for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Assign)
+                       and [getattr(t, "id", None) for t in node.targets] == ["FIFO_GUARD"]]
+            self.assertEqual(len(assigns), 1, assigns)
+            lines = src.splitlines()
+            comments = {tok.start[0]: tok.string for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+                        if tok.type == tokenize.COMMENT and not lines[tok.start[0] - 1][:tok.start[1]].strip()}
+            row = assigns[0] - 1
+            while row in comments:
+                row -= 1
+            block = [comments[i] for i in range(row + 1, assigns[0])]
+            self.assertTrue(block and block[0].startswith("# The FIFO guard for a child:"), block)
+            text = " ".join(" ".join(c[1:] for c in block).split())
+            residuals = " ".join((
+                "Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).",
+                "Not covered either, the stat-then-open race: the guard reads a path's metadata and the open "
+                "resolves the path again afterwards, so a path retargeted between the two (a symlink switched "
+                "from a regular file to a FIFO by another thread, or by an audit hook installed after this one) "
+                "is opened unchecked.",
+                "Nor a blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer "
+                "opens): only the child's hang guard bounds that."))
+            self.assertEqual(text.count("Not covered:"), 1, text)
+            self.assertTrue(text.endswith(". " + residuals), text)
 
         def test_clocks_frozen_for_fixture_and_code(self):
             # QA round 3 (codex MED): a fixture built from the clock and the code it evaluates read the clock at
@@ -5204,7 +5224,7 @@ def _self_test():
             child = (
                 "import datetime, hashlib, importlib.util, json, os, stat, sys, time\n"
                 "spec = importlib.util.spec_from_file_location('sts32', sys.argv[1])\n"
-                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n" + CHILD_FREEZE +
+                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
                 "tmp = sys.argv[2]; sdir = os.path.join(tmp, 'state'); os.mkdir(sdir, 0o700)\n"
                 "m.PRUNE_SCAN = 8  # a prune that cannot cover every name, so it writes the cursor\n"
                 "for i in range(m.PRUNE_SCAN + 1):\n"

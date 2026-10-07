@@ -3470,12 +3470,14 @@ def main(argv):
 
 
 def _self_test():
+    import ast
     import importlib.util
     import inspect
     import io
     import shutil
     import subprocess
     import tempfile
+    import tokenize
     import types
     import unittest
 
@@ -3967,22 +3969,38 @@ def _self_test():
         def test_fifo_guard_disclosures(self):
             # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
             # non-blocking open are disclosed beside the ctypes residual. QA round 4 (codex MEDIUM): the text
-            # searched is the guard's comment block alone, read from this file, from its first line through the
-            # line before FIFO_GUARD; a search of _self_test's source matched this test's own expected strings
-            # and passed with the disclosures deleted
+            # searched is the guard's comment block alone; a search of _self_test's source matched this test's
+            # own expected strings and passed with the disclosures deleted. QA round 5 (codex MEDIUM): a prefix
+            # match on source lines took a triple-quoted string spelling the block and a `FIFO_GUARD = (` line
+            # (the real assignment spelled `FIFO_GUARD=(`) for the block, so the block is now the run of COMMENT
+            # tokens (tokenize), each alone on its line, directly above the one parsed FIFO_GUARD assignment
+            # (ast). QA round 5 (codex MINOR, claude MINOR): a residual reworded to contradict its limitation
+            # kept the pinned fragments, so the residuals are pinned as whole sentences: the block ends with
+            # exactly these three, and "Not covered:" opens a sentence once, the first of them
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
-                lines = [line.strip() for line in f]
-            first = [i for i, line in enumerate(lines) if line.startswith("# The FIFO guard for a child:")]
-            end = [i for i, line in enumerate(lines) if line == "FIFO_GUARD = ("]
-            self.assertEqual((len(first), len(end)), (1, 1))
-            block = lines[first[0]:end[0]]
-            # comment lines only, so no string literal (this test's included) is searched
-            self.assertTrue(block and all(line.startswith("#") for line in block), block)
-            text = " ".join(" ".join(line[1:] for line in block).split())
-            for s in ("Not covered: an open outside the audited interpreter calls",
-                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
-                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
-                self.assertIn(s, text)
+                src = f.read()
+            assigns = [node.lineno for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Assign)
+                       and [getattr(t, "id", None) for t in node.targets] == ["FIFO_GUARD"]]
+            self.assertEqual(len(assigns), 1, assigns)
+            lines = src.splitlines()
+            comments = {tok.start[0]: tok.string for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+                        if tok.type == tokenize.COMMENT and not lines[tok.start[0] - 1][:tok.start[1]].strip()}
+            row = assigns[0] - 1
+            while row in comments:
+                row -= 1
+            block = [comments[i] for i in range(row + 1, assigns[0])]
+            self.assertTrue(block and block[0].startswith("# The FIFO guard for a child:"), block)
+            text = " ".join(" ".join(c[1:] for c in block).split())
+            residuals = " ".join((
+                "Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).",
+                "Not covered either, the stat-then-open race: the guard reads a path's metadata and the open "
+                "resolves the path again afterwards, so a path retargeted between the two (a symlink switched "
+                "from a regular file to a FIFO by another thread, or by an audit hook installed after this one) "
+                "is opened unchecked.",
+                "Nor a blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer "
+                "opens): only the child's hang guard bounds that."))
+            self.assertEqual(text.count("Not covered:"), 1, text)
+            self.assertTrue(text.endswith(". " + residuals), text)
 
         def test_clocks_frozen_for_fixture_and_code(self):
             # QA round 3 (codex MED, in the sibling stamp-truth-stop.py): a fixture built from the clock and the
