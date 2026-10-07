@@ -49,8 +49,14 @@ variables, the allowlist unit checks covering the rest of the GIT_-prefixed fami
   selftest_git_fixture_env.py                              exit 0 on pass, 1 on assertion failure
   selftest_git_fixture_env.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
-Exit 2 is a harness/setup error, including bad arguments, no git binary, no writable temp directory,
-a failed report write, or an unreadable, malformed, or suite-missing expectation manifest.
+Exit 2 is cannot-evaluate: a harness/setup error, including bad arguments, no git binary, no writable
+temp directory, a failed report write, or an unreadable, malformed, or suite-missing expectation
+manifest; and a config-injection member that reached its time bound (see _run_config_member). A
+timed-out member is reported as SELF-TEST CANNOT EVALUATE, never as SELF-TEST FAIL: a time bound
+reached under host load is no verdict on the code, so the run exits 2 even when other findings are
+recorded alongside it (they are printed too), and never 0. tools/check_selftest_execution.py treats
+any child exit outside {0, 1} as CANNOT EVALUATE and itself exits 2 (its self-test leg
+st/child-rc2-2), so a timeout never reads as a pass or as a code failure there either.
 """
 import sys
 
@@ -66,6 +72,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -89,6 +96,7 @@ CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 CORPUS_SELFTEST = ROOT / "tools" / "selftest_aiqt_corpus.py"
 SUITE_ID = "git-fixture-env-selftest"
 FAILURES = []
+CANNOT_EVALUATE = []
 EXECUTED = []
 _EXECUTED_SET = set()
 
@@ -1353,16 +1361,176 @@ def _config_injection_lane(base):
     return system_results
 
 
-def _run_config_member(member, env):
+# Per-member time bounds (seconds) for _run_config_member. A member absent here keeps
+# CONFIG_MEMBER_BOUND_DEFAULT. Each entry states its sizing as MEASURED or ESTIMATED, never
+# blended, and must exceed the member's own end-to-end wait budget; config/member-bound-sized
+# refuses a key that is not an exact registered roster argv.
+CONFIG_MEMBER_BOUND_DEFAULT = 1200
+CONFIG_MEMBER_BOUNDS = {
+    # MEASURED (2026-10-07, nice 10, load5 about 12 to 14 on a 16-CPU host): one complete run took
+    # 582.30 s wall and 425.55 s CPU and passed; two plain runs were still running at 585 s and
+    # 590 s. The previous 1200 s default was reached twice at load5 above 20 (2026-10-07).
+    # ESTIMATED (assumes wall time grows roughly in proportion to load once load exceeds the CPU
+    # count): 3600 s, about 6.2 times the measured run, covers load5 up to about 80; it also
+    # exceeds the command's own T75 wait chain (540 s per call, 4 calls: 2160 s).
+    ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert"): 3600,
+}
+# After the process-group kill, the bounded drain of output still held by a descendant that left
+# the group (setsid or setpgid); Popen's exit then closes the pipes and reaps the direct child.
+CONFIG_MEMBER_DRAIN_SECONDS = 30
+
+
+def _config_member_bound(member):
+    return CONFIG_MEMBER_BOUNDS.get(tuple(member), CONFIG_MEMBER_BOUND_DEFAULT)
+
+
+def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
+    """Run one registered member; return its exit code, or a string for a launch error or a
+    timeout. The member leads its own session and process group (the start_new_session and
+    killpg pattern of opf/tools/_opf_pack_manifest.py), so reaching the bound kills the WHOLE
+    group: a grandchild holding the output pipe dies with it instead of surviving the timeout.
+    The numeric killpg cannot name a reused group: communicate() raised before reaping the
+    leader, so its pid, and with it the group id, stays allocated until Popen's exit waits.
+    A timeout is also recorded in cannot_evaluate (default CANNOT_EVALUATE), which makes main()
+    exit 2: a bound reached under host load is no verdict on the code. Its one-line diagnostic
+    goes to report (default sys.stdout), never to stderr: the cannot-evaluate path is a stdout
+    report plus exit 2, and the execution gate requires the suite's error stream to hold only
+    declared bytes, so the timeout control passes its own stream and asserts the line there,
+    and a real timeout is still announced at once on stdout and listed again by _verdict.
+    DISCLOSED RESIDUAL: a descendant that moved itself to another process group survives the
+    kill; its pipe is drained for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are
+    closed. In its own session the member has no controlling terminal: a read of an inherited
+    terminal fails."""
+    bound = _config_member_bound(member) if bound is None else bound
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
-                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
+        with subprocess.Popen([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
+                              cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, errors="replace", start_new_session=True) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=bound)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.communicate(timeout=CONFIG_MEMBER_DRAIN_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+                message = "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(
+                    " ".join(member), bound)
+                (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+                print("CONFIG-INJECTION " + message, file=sys.stdout if report is None else report,
+                      flush=True)
+                return message
         if proc.returncode:
-            print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
+            print("CONFIG-INJECTION {}:\n{}".format(member, stdout + stderr),
                   file=sys.stderr)
         return proc.returncode
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
+
+
+def _pid_alive(pid):
+    """True while pid exists and is not a zombie (a killed orphan awaiting its reaper is dead)."""
+    try:
+        with open("/proc/{}/stat".format(pid), encoding="utf-8") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+    except (OSError, IndexError):
+        return False
+
+
+def _member_timeout_controls(base):
+    """Controls for the config-member time bound. A fixture member spawns a sleeping grandchild
+    that inherits (holds) its stdout, then sleeps past a short bound. The timeout must come back
+    as the cannot-evaluate marker and be recorded, its diagnostic written to the control's own
+    stream and nothing to the suite's stderr (config/member-timeout-cannot-evaluate), the
+    grandchild must be dead afterwards, killed with the member's process group
+    (config/member-timeout-kills-group), and _verdict must map a recorded timeout to exit 2,
+    distinct from the FAIL exit 1 (config/timeout-verdict-exit). config/member-bound-sized pins
+    the per-member bound table against the registered roster. A grandchild that never started
+    inside the fixture's bound is itself recorded as cannot-evaluate, never a red."""
+    import contextlib
+    import io
+    import time
+
+    fixture = base / "timeout-fixture"
+    fixture.mkdir()
+    pidfile = fixture / "grandchild.pid"
+    member = fixture / "member.py"
+    member.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-I', '-B', '-c', "
+        "'import os, sys, time; open(sys.argv[1] + \".tmp\", \"w\").write(str(os.getpid())); "
+        "os.replace(sys.argv[1] + \".tmp\", sys.argv[1]); time.sleep(600)', sys.argv[1]])\n"
+        "time.sleep(600)\n", encoding="utf-8")
+    recorded = []
+    diagnostic = io.StringIO()
+    started = time.monotonic()
+    with contextlib.redirect_stderr(io.StringIO()) as leaked:
+        rc = _run_config_member((str(member), str(pidfile)), dict(os.environ), bound=20,
+                                cannot_evaluate=recorded, report=diagnostic)
+    elapsed = time.monotonic() - started
+    check("config/member-timeout-cannot-evaluate",
+          (isinstance(rc, str) and rc.startswith("TIMEOUT: "), recorded == [rc],
+           diagnostic.getvalue() == "CONFIG-INJECTION {}\n".format(rc), leaked.getvalue(),
+           elapsed < 20 + CONFIG_MEMBER_DRAIN_SECONDS + 30),
+          (True, True, True, "", True))
+    try:
+        grandchild = int(pidfile.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # The fixture itself never got going inside its bound: host load, no verdict either way.
+        CANNOT_EVALUATE.append("TIMEOUT: member-timeout control: the grandchild never started "
+                               "within the 20 s bound ({})".format(exc))
+        got = False
+    else:
+        deadline = time.monotonic() + 10
+        while _pid_alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        got = _pid_alive(grandchild)
+        if got:
+            os.kill(grandchild, signal.SIGKILL)
+    check("config/member-timeout-kills-group", got, False)
+
+    codes = []
+    for failures, timeouts in (([], []), (["a finding"], []), ([], ["TIMEOUT: x"]),
+                               (["a finding"], ["TIMEOUT: x"])):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = _verdict(failures, timeouts)
+        codes.append((code, ("CANNOT EVALUATE" in out.getvalue(),
+                             "SELF-TEST FAIL" in out.getvalue())))
+    check("config/timeout-verdict-exit", codes,
+          [(0, (False, False)), (1, (False, True)), (2, (True, False)), (2, (True, False))])
+
+    roster = set(_registered_selftests())
+    record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
+    check("config/member-bound-sized",
+          (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
+           _config_member_bound(record), CONFIG_MEMBER_BOUND_DEFAULT,
+           sorted({_config_member_bound(argv) for argv in roster if argv != record})),
+          ([], 3600, 1200, [1200]))
+
+
+def _verdict(failures, cannot_evaluate):
+    """The suite exit code: 2 (cannot evaluate) when any time bound was reached, whatever else
+    was found; 1 on findings; 0 when clean (main prints the PASS line)."""
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT EVALUATE: a time bound was reached; a timeout under host load "
+              "is no verdict on the code:")
+        for entry in cannot_evaluate:
+            print("  - " + entry)
+        if failures:
+            print("  findings recorded alongside (a finding naming a timed-out member is its "
+                  "consequence, not a code verdict):")
+            for failure in failures:
+                print("  - " + failure)
+        return 2
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    return 0
 
 
 def _manifest_setup_failures(base):
@@ -4785,6 +4953,7 @@ def main(report_path=None):
 
         _roster_checks()
         _opf_lifecycle_graph_checks()
+        _member_timeout_controls(base)
         config_results = _config_injection_lane(base)
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()
@@ -4828,11 +4997,9 @@ def main(report_path=None):
         FAILURES.append("execution-set/missing: {}".format(check_id))
     for check_id in sorted(_EXECUTED_SET - expected):
         FAILURES.append("execution-set/extra: {}".format(check_id))
-    if FAILURES:
-        print("SELF-TEST FAIL:")
-        for failure in FAILURES:
-            print("  - " + failure)
-        return 1
+    code = _verdict(FAILURES, CANNOT_EVALUATE)
+    if code:
+        return code
     print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
           "tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
