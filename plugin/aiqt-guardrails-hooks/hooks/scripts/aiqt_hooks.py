@@ -7430,21 +7430,83 @@ def _is_verification_run(tokens, depth=0):
     return _name_parts_hit(word)
 
 
-def _gate_pipe_out(segments, start):
+def _gate_case_patterns(segments):
+    """(pattern_seps, pattern_words): the indexes of the segments whose separator belongs to a case pattern
+    list (a leading '(', a '|' alternation, the closing ')') and of the segments made only of pattern words.
+    The lexer splits 'case x in (a|b) cmd;; c) cmd;; esac' at each of those characters as if they were a
+    subshell or a pipe, so the pipe walk would read a later arm's 'c)' as closing a group around an earlier
+    arm's command. One forward pass over the whole command keeps a stack of open '(' groups and case
+    compounds; a case is in its header until 'in', at a pattern until the pattern's ')', then in an arm
+    until its ';;', ';&' or ';;&' (the lexer's ';' followed by an empty ';' or '&' segment) returns it to a
+    pattern, and 'esac' at a pattern or in an arm closes it. A case nested in an arm, a loop or a $(
+    substitution is its own entry."""
+    pattern_seps, pattern_words = set(), set()
+    stack = []      # ["(", None] for a group or substitution, ["case", "hdr"/"pat"/"arm", pattern-word-seen]
+    n = len(segments)
+    for k, (argv, sep) in enumerate(segments):
+        top = stack[-1] if stack else None
+        if top is not None and top[0] == "case" and top[1] == "pat":
+            if argv and argv[0] == "esac" and not top[2]:
+                stack.pop()
+            elif argv:
+                top[2] = True
+                pattern_words.add(k)
+        elif top is not None and top[0] == "case" and top[1] == "hdr":
+            if "in" in argv:
+                top[1], top[2] = "pat", len(argv) > argv.index("in") + 1
+        elif argv:
+            if argv[0] == "esac" and top is not None and top[0] == "case":
+                stack.pop()
+            else:
+                i = 0
+                while i < len(argv) and argv[i] in _GATE_LEADING_KEYWORDS:
+                    i += 1
+                if i < len(argv) and argv[i] == "case":
+                    tail = argv[i + 2:]
+                    if "in" in tail:
+                        stack.append(["case", "pat", len(tail) > tail.index("in") + 1])
+                    else:
+                        stack.append(["case", "hdr", False])
+        top = stack[-1] if stack else None
+        if top is not None and top[0] == "case" and top[1] == "pat":
+            if sep == "(" and not top[2] and not (argv and argv[-1].endswith("$")):
+                pattern_seps.add(k)
+            elif sep in ("|", ")"):
+                pattern_seps.add(k)
+                if sep == ")":
+                    top[1], top[2] = "arm", False
+            elif sep == "(":
+                stack.append(["(", None])
+        elif sep == "(":
+            stack.append(["(", None])
+        elif sep == ")":
+            if top is not None and top[0] == "(":
+                stack.pop()
+        elif (sep == ";" and top is not None and top[0] == "case" and top[1] == "arm" and k + 1 < n
+              and not segments[k + 1][0] and segments[k + 1][1] in (";", "&")):
+            top[1], top[2] = "pat", False
+    return pattern_seps, pattern_words
+
+
+def _gate_pipe_out(segments, start, case_patterns=None):
     """The index of the segment whose separator pipes the output of segments[start] onward, or None. That
     is the segment itself when it ends with '|' or '|&'; when it sits inside a group, the group's own pipe:
     a ')' that closes a group or a $( substitution enclosing it (the lexer gives the following, usually
     empty, segment the separator after the ')'), or a '}', 'done', 'fi' or 'esac' segment that closes an
     enclosing brace group, loop, if or case compound. Groups and compounds opened AFTER start are tracked so
     a sibling's pipe is never mistaken for this segment's; a $( substitution opened inside the segment
-    continues it after its ')'."""
+    continues it after its ')'. A case pattern's '(', '|' and ')' (_gate_case_patterns) neither open, pipe
+    nor close anything, and pattern words are never read as an opener or closer."""
+    pattern_seps, pattern_words = case_patterns or _gate_case_patterns(segments)
     stack = []      # opened after start: ("(", continues-this-unit), or ("{"/"if"/"loop"/"case", False)
     carry = False   # the previous segment's ')' made this segment carry an enclosing group's separator
     for k in range(start, len(segments)):
         argv, sep = segments[k]
+        if k in pattern_seps:
+            sep = ""
         unit = k == start or carry
         carry = False
-        if k > start and argv:
+        if k > start and argv and k not in pattern_words:
             closes = _GATE_COMPOUND_CLOSERS.get(argv[0])
             if closes is not None:
                 if not stack:
@@ -7489,15 +7551,17 @@ def _verification_sink(segments):
     on), skipping empty newline segments (the gw-at lesson), and returns the first stage
     _truncating_sink_kind matches; a group closed by ')' or '}', and a compound command closed by done, fi or
     esac (a for, select, while or until loop, an if, a case) whose condition or body holds the run, counts as
-    the producer. A real-file tee stage
-    earlier in the pipeline does NOT exempt the command (the exit status is still the sink's), but it is
-    returned so the message can point at that file."""
+    the producer. A case pattern list (_gate_case_patterns) is neither a producer nor a group: its ')' does
+    not carry a later arm's pipe back to an earlier arm's run. A real-file tee stage earlier in the pipeline
+    does NOT exempt the command (the exit status is still the sink's), but it is returned so the message can
+    point at that file."""
     n = len(segments)
+    case_patterns = _gate_case_patterns(segments)
     for index, (tokens, _sep) in enumerate(segments):
         if not _is_verification_run(tokens):
             continue
         tee = None
-        out = _gate_pipe_out(segments, index)
+        out = _gate_pipe_out(segments, index, case_patterns)
         for _hop in range(n):
             if out is None:
                 break
@@ -7511,7 +7575,7 @@ def _verification_sink(segments):
                 return _gate_word(_gate_effective_argv(tokens)[0]), kind, tee
             if tee is None:
                 tee = _gate_tee_file(segments[stage][0])
-            out = _gate_pipe_out(segments, stage)
+            out = _gate_pipe_out(segments, stage, case_patterns)
     return None
 
 
@@ -10239,9 +10303,9 @@ def _orch_effective_sink_word(argv):
 # is the gate-discipline guard's own, kept apart from _ORCH_TRUNCATING_SINKS so orch_truncation_guard's
 # behaviour is unchanged. head, tail and cut always truncate (unless asked only for --help or --version);
 # grep and kin truncate only with a count/limit/quiet/list option (the rule's "textual success token" form
-# for -q and -c; rg -L is --follow, so it is not one); sed truncates with -n or a q/Q quit command; the awk family truncates when the program
-# compares NR or calls exit. A plain filter ('grep FAIL', "sed 's/q/x/'", "awk '{print NR, $0}'") is not a
-# truncating sink here (residual R4 covers '| grep PATTERN' and '| wc').
+# for -q and -c; rg -L is --follow, so it is not one); sed truncates with -n or a q/Q quit command; the awk
+# family truncates when the program compares NR or calls exit. A plain filter ('grep FAIL', "sed 's/q/x/'",
+# "awk '{print NR, $0}'") is not a truncating sink here (residual R4 covers '| grep PATTERN' and '| wc').
 _GATE_ALWAYS_TRUNCATING = frozenset(("head", "tail", "cut"))
 _GATE_GREP_SINKS = frozenset(("grep", "egrep", "fgrep", "rg"))
 _GATE_SED_SINKS = frozenset(("sed", "gsed"))
