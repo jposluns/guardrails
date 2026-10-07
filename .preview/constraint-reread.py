@@ -7,8 +7,8 @@ WHAT IT DOES
     is no longer visible (standing-constraints-persist). This hook puts the standing constraints back in view
     after a compaction, asks the assistant to re-read them from the project's durable record, and refuses the
     turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed (while it can
-    keep its state: when the state lock cannot be taken at all, a compaction is reminded once and every turn end
-    passes silently, FAILURE DIRECTION):
+    keep its state: when the state lock cannot be taken at all, a compaction reported then is reminded once
+    and no turn end is refused, FAILURE DIRECTION):
 
     1. When the platform reports a compaction, the hook reads the clock, records that time as the compaction
        time in a private per-session state file, and adds a reminder to the assistant's context that names the
@@ -69,16 +69,21 @@ STATE
     to an absolute path, else $XDG_STATE_HOME/aiqt-guardrails/constraint-reread, else
     $HOME/.local/state/aiqt-guardrails/constraint-reread (created 0700, written by an atomic replace), with its
     lock file (the same name plus .lock) beside it. Each call holds an exclusive lock (flock) on that lock file,
-    opened without following a symbolic link, over its whole load, update and save, so a Stop or a prompt cannot
-    write back a compaction time or count that another call saved meanwhile. Before each save the call checks
-    that the lock path still names the file it locked (the same device and inode, read without following a
-    link): a lock file deleted or replaced while a call holds it makes that call save nothing, as after a
-    failed save, and a call that took its lock on a file the path no longer names opens the path again within
-    the same LOCK_WAIT. A deletion that lands between that check and the write (a few system calls) can still
-    let one stale save through. Once a record is declared, every call the hook handles (each SessionStart,
-    PreCompact, prompt and Stop of every session) creates the state directory and an empty lock file for its
-    session, also when no compaction is ever reported; nothing removes the lock files or the state files, so
-    each session leaves one small lock file, and one state file after a compaction.
+    opened without following a symbolic link, over its whole load, update and save. Before each save the call
+    checks that the lock path still names the file it locked (the same device and inode, read without following
+    a link) and that the state file is still the one it loaded or last saved itself (the same device, inode,
+    size, modification time and change time; every save replaces the file). A lock file deleted or replaced
+    while a call holds it, also one moved away and put back after another call saved, and a state file that
+    another call saved (or anything else changed) meanwhile, make that call save nothing, as after a failed
+    save, so a Stop or a prompt does not write back a compaction time or count that another call saved
+    meanwhile; a call that took its lock on a file the path no longer names opens the path again within the
+    same LOCK_WAIT. A deletion, replacement or save that lands between that check and the write (a few system
+    calls) can still let one stale save through, and so can a save whose file matches the loaded one in all
+    five of those fields (an inode number reused within the filesystem's timestamp granularity). Once a record
+    is declared, every call the hook handles (each SessionStart, PreCompact, prompt and Stop of every session)
+    creates the state directory and an empty lock file for its session, also when no compaction is ever
+    reported; nothing removes the lock files or the state files, so each session leaves one small lock file,
+    and one state file after a compaction.
 
 FAILURE DIRECTION
     Each event fails toward its own safe direction. The reminder events remind when in doubt: a record that
@@ -101,10 +106,13 @@ FAILURE DIRECTION
     file, a lock file that cannot be opened, a filesystem that refuses flock, a platform without flock), saves
     nothing, as after a failed save: a compaction is still reminded once at SessionStart but not recorded, a
     prompt is still reminded but does not reset the count, and a Stop that would refuse is allowed with a
-    warning that names the lock. While the lock cannot be taken at all, the hook keeps no state: a compaction
-    is reminded once at SessionStart and then forgotten, so no later prompt is reminded and every turn end
-    passes silently (a missed reminder and a missed refusal); only a compaction saved before then (or a state
-    file that cannot be parsed) is still reminded, with each Stop allowed with a warning. An unknown count
+    warning that names the lock. A call that took the lock but whose save is refused (STATE: the lock file or
+    the state file changed meanwhile) allows a Stop it would refuse with the warning that the refusal count
+    cannot be saved, which does not name the lock. While the lock cannot be taken at all, the hook keeps no
+    state: a compaction is reminded once at SessionStart and then forgotten, so with no compaction saved before
+    then no later prompt is reminded and every turn end passes silently (a missed reminder and a missed
+    refusal); a compaction saved before then (or a state file that cannot be parsed) is still reminded, with
+    each Stop allowed with a warning. An unknown count
     persists: a Stop does not repair the state (the hook cannot tell how many refusals the lost count held), so
     every Stop is allowed with the warning until a
     UserPromptSubmit event, a Stop with stop_hook_active explicitly false, or a new compaction writes a
@@ -136,11 +144,17 @@ RESIDUAL COVERAGE
     session key in the payload, the compaction is reminded once at SessionStart and then forgotten: no later
     reminder, no Stop refusal. A state file lost (deleted) during the window after a compaction is read as no
     state, so the compaction is forgotten: the reminder and the refusals stop silently (a missed reminder and
-    a missed refusal). Concurrent hook runs in one session are serialized by the state lock; a call that
-    cannot take it within LOCK_WAIT seconds, or whose lock file is deleted or replaced while it holds it, saves
-    nothing, so its update is lost (a compaction not recorded, a count not reset) and a refusal it would give
-    is allowed with a warning (a missed refusal). While the lock cannot be taken at all (FAILURE DIRECTION),
-    the hook keeps no state, so a compaction is reminded once and every turn end passes silently. The loop cap
+    a missed refusal). A state directory moved away or deleted during a session is read as no state in the
+    same way: the call that held the lock then saves nothing, and the compaction is forgotten silently.
+    Concurrent hook runs in one session are serialized by the state lock, and a call saves only while its
+    lock file and the state file are the ones it locked and loaded (STATE, which names the few system calls
+    where a stale save can still get through); a call that cannot take the lock within LOCK_WAIT seconds,
+    whose lock file is deleted or replaced while it holds it, or whose state file another call saved
+    meanwhile, saves nothing, so its update is lost (a compaction not recorded, a count not reset) and a
+    refusal it would give is allowed with a warning (a missed refusal): one that names the lock when the lock
+    was not taken, and one that says only that the refusal count cannot be saved when the save was refused.
+    While the lock cannot be taken at all (FAILURE DIRECTION), the hook keeps no state, so a compaction is
+    reminded once, and with no compaction saved before then every turn end passes silently. The loop cap
     bounds consecutive refusals (LOOP CAP), so a model that ignores the refusal is held for at most BLOCK_CAP
     refusals and then allowed with a warning, unless the host sends stop_hook_active false on a turn end that
     continues a refusal; the next
@@ -326,7 +340,7 @@ def load_state(path):
 
 def save_state(path, compacted_at, blocks, lock=None):
     """Write the state by an atomic replace; True on success, False on any failure (never raises). With a lock
-    (a descriptor from lock_state) nothing is written unless that lock still holds (lock_held)."""
+    (a StateLock from lock_state) nothing is written unless that lock still holds (StateLock.holds)."""
     tmp = None
     try:
         d = os.path.dirname(path)
@@ -334,9 +348,14 @@ def save_state(path, compacted_at, blocks, lock=None):
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
         with os.fdopen(fd, "w", encoding="ascii") as fh:
             json.dump(dict(compacted_at=stamp(compacted_at), blocks=blocks), fh)
-        if lock is not None and not lock_held(lock, path):
-            raise OSError("the state lock file was deleted or replaced while this call held it")
-        os.replace(tmp, path)
+            fh.flush()
+            if lock is not None and not lock.holds(path):
+                raise OSError("the state lock file was deleted or replaced, or another call saved the state, "
+                              "while this call held the lock")
+            os.replace(tmp, path)
+            tmp = None  # now the state file: never unlinked below
+            if lock is not None:
+                lock.saved(fh.fileno())
         return True
     except Exception:
         if tmp is not None:
@@ -345,6 +364,41 @@ def save_state(path, compacted_at, blocks, lock=None):
             except OSError:
                 pass
         return False
+
+
+def state_identity(path):
+    """The state file's identity now: (device, inode, size, modification time, change time), None when there
+    is no file there, or False when it cannot be examined (never raises). Every save replaces the file, so a
+    save by another call changes it; a replacement that matches in all five fields (an inode number reused
+    within the filesystem's timestamp granularity) is not told apart."""
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except Exception:
+        return False
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+class StateLock:
+    """The state lock one call holds (lock_state): `fd`, the descriptor that holds the flock, and `seen`, the
+    state file's identity (state_identity) when the lock was taken or when this call last saved it."""
+
+    def __init__(self, fd, path):
+        self.fd, self.seen = fd, state_identity(path)
+
+    def holds(self, path):
+        """True while the lock path names the locked file (lock_held) and the state file is the one this call
+        loaded or last saved; False once another call may have saved it (STATE in the docstring)."""
+        return self.seen is not False and lock_held(self.fd, path) and state_identity(path) == self.seen
+
+    def saved(self, fd):
+        """Record the file this call just saved (fd, the descriptor it wrote) as the state file it knows."""
+        try:
+            st = os.fstat(fd)
+            self.seen = st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+        except Exception:
+            self.seen = False  # unknown: no later save of this call goes through
 
 
 def lock_held(fd, path):
@@ -359,12 +413,13 @@ def lock_held(fd, path):
 
 
 def lock_state(path):
-    """An open descriptor that holds an exclusive flock on the lock file beside the state file (its name plus
-    .lock), so one run's whole load, update and save cannot interleave with another's; None when the lock is
-    not taken within LOCK_WAIT seconds or cannot be taken at all (never raises). Closing it releases the lock.
-    A lock taken on a file the lock path no longer names (deleted or replaced while this call waited) is
+    """A StateLock whose descriptor holds an exclusive flock on the lock file beside the state file (its name
+    plus .lock), so one call's whole load, update and save cannot interleave with another's; None when the
+    lock is not taken within LOCK_WAIT seconds or cannot be taken at all (never raises). unlock_state releases
+    it. A lock taken on a file the lock path no longer names (deleted or replaced while this call waited) is
     dropped and the path opened again within the same LOCK_WAIT, and save_state with the lock writes nothing
-    once the lock path stops naming the locked file (STATE in the docstring)."""
+    once the lock path stops naming the locked file or the state file is no longer the one this call loaded
+    or last saved (STATE in the docstring)."""
     if path is None or fcntl is None:
         return None
     fd = None
@@ -385,7 +440,7 @@ def lock_state(path):
                         raise
                     time.sleep(0.02)
             if lock_held(fd, path):
-                return fd
+                return StateLock(fd, path)
             stale, fd = fd, None
             os.close(stale)
             if time.monotonic() >= deadline:
@@ -399,10 +454,10 @@ def lock_state(path):
         return None
 
 
-def unlock_state(fd):
-    if fd is not None:
+def unlock_state(lock):
+    if lock is not None:
         try:
-            os.close(fd)
+            os.close(lock.fd)
         except OSError:
             pass
 
@@ -558,6 +613,7 @@ def main(argv):
 def _self_test():
     import shutil
     import subprocess
+    import threading
     import unittest
 
     here = os.path.abspath(__file__)
@@ -582,12 +638,37 @@ def _self_test():
                 self.met.set()
                 raise
 
-    def contended(met, thread):
-        """True once `met` is set or `thread` has finished; False when neither happens within about 10 seconds."""
-        for _ in range(1000):
-            if met.wait(0.01) or not thread.is_alive():
-                return True
+    class Pause:
+        """A pause seam for the call that holds the state lock: wait() stays paused until the test calls
+        release(), which every test that makes one also calls in its cleanup. A wait that ends any other way
+        (after HOLD seconds) sets timed_out, and the test fails on it."""
+        HOLD = 60.0
+
+        def __init__(self):
+            self.loaded, self.go, self.resumed = threading.Event(), threading.Event(), threading.Event()
+            self.timed_out = False
+
+        def wait(self):
+            self.loaded.set()
+            if not self.go.wait(self.HOLD):
+                self.timed_out = True
+            self.resumed.set()
+
+        def release(self):
+            self.go.set()
+
+    def contended(met, thread, pause=None):
+        """True once `met` is set, or once `thread` has finished while the paused holder `pause` has not
+        resumed; False when the holder resumed first, or neither happens within about 30 seconds. Without a
+        pause only `met` counts."""
+        for _ in range(3000):
+            if pause is not None and pause.resumed.is_set():
+                return False
+            if met.wait(0.01) or (pause is not None and not thread.is_alive()):
+                return pause is None or not pause.resumed.is_set()
         return False
+
+    real_fcntl, real_status = globals().get("fcntl"), status  # fcntl is None (or absent) without flock
 
     class T(unittest.TestCase):
         def setUp(self):
@@ -598,6 +679,10 @@ def _self_test():
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
+            # Round 25 fix for QA round 24 (claude MINOR): a test that patches a module global restores the real one.
+            g = globals()
+            self.assertIs(g.get("fcntl"), real_fcntl)
+            self.assertIs(g["status"], real_status)
 
         def write(self, text, mode="w"):
             with open(self.rec, mode, encoding="utf-8") as fh:
@@ -885,16 +970,18 @@ def _self_test():
             # Round 24 (codex MEDIUM): the Stop is released only once the compaction has met the held lock (seen
             # through the flock seam) or has finished, never after a fixed wait, so a slow scheduler cannot let
             # the compaction run after the Stop's save; one that does neither within the bound fails the test.
-            import threading
+            # Round 25 fix for QA round 24 (codex MEDIUM): the Stop ignored a timed-out wait and resumed on its own,
+            # so a compaction delayed past it finished after the Stop's save and the test passed. The Stop now
+            # stays paused until released (also in cleanup), a timed-out pause fails the test, and a compaction
+            # that finished only after the Stop resumed is not counted as contended.
             self.compact()
             g = globals()
-            real, real_fcntl = g["status"], g.get("fcntl")
-            loaded, release, met = threading.Event(), threading.Event(), threading.Event()
+            real = g["status"]
+            pause, met = Pause(), threading.Event()
 
             def slow(*args):
                 st = real(*args)
-                loaded.set()
-                release.wait(10)
+                pause.wait()
                 return st
 
             outs = []
@@ -902,21 +989,24 @@ def _self_test():
             try:
                 stop = threading.Thread(target=lambda: outs.append(self.call("Stop", 5)))
                 stop.start()
-                self.assertTrue(loaded.wait(10))
+                self.assertTrue(pause.loaded.wait(10))
                 g["status"] = real
                 if real_fcntl is not None:
                     g["fcntl"] = MetFlock(real_fcntl, met)
                 start = threading.Thread(target=lambda: outs.append(self.compact(100)))
                 start.start()
-                self.assertTrue(contended(met, start), "the compaction neither met the held lock nor finished")
-                release.set()
+                self.assertTrue(contended(met, start, pause), "the compaction neither met the held lock nor "
+                                "finished while the Stop was paused")
+                pause.release()
                 stop.join(15)
-                start.join(15)
+                start.join(40)
                 self.assertFalse(stop.is_alive() or start.is_alive())
             finally:
+                pause.release()
                 g["status"] = real
                 if real_fcntl is not None:
                     g["fcntl"] = real_fcntl
+            self.assertFalse(pause.timed_out, "the Stop's pause timed out")
             self.assertEqual(len(outs), 2)
             self.assertEqual(load_state(self.spath()), ("ok", at(100), 0))
             self.write("Constraints-reread: " + stamp(at(50)) + "\n", "a")  # before the new compaction
@@ -963,18 +1053,18 @@ def _self_test():
             # Round 24 (claude MEDIUM): the lock file deleted while a Stop held it let a compaction lock a new file
             # and the Stop then save the older compaction time back. Now a call saves only while the lock path
             # still names the file it locked.
-            import threading
+            # Round 25 fix for QA round 24: the pause no longer ends on its own (a timed-out pause fails the test),
+            # and the flock seam is undone with the real module kept before patching, not the patched global.
             if fcntl is None:
                 self.skipTest("SKIPPED, no flock on this platform")
             self.compact()
             g = globals()
             real = g["status"]
-            loaded, release = threading.Event(), threading.Event()
+            pause = Pause()
 
             def slow(*args):
                 st = real(*args)
-                loaded.set()
-                release.wait(10)
+                pause.wait()
                 return st
 
             outs = []
@@ -982,25 +1072,27 @@ def _self_test():
             try:
                 stop = threading.Thread(target=lambda: outs.append(self.call("Stop", 5)))
                 stop.start()
-                self.assertTrue(loaded.wait(10))
+                self.assertTrue(pause.loaded.wait(10))
                 g["status"] = real
                 os.unlink(self.spath() + ".lock")
                 self.assertIn(stamp(at(100)), self.compact(100)["hookSpecificOutput"]["additionalContext"])
-                release.set()
+                pause.release()
                 stop.join(15)
                 self.assertFalse(stop.is_alive())
             finally:
+                pause.release()
                 g["status"] = real
+            self.assertFalse(pause.timed_out, "the Stop's pause timed out")
             self.assertEqual(outs, [dict(systemMessage="constraint-reread: turn end allowed without a post-compaction "
                                          "re-read entry in " + self.rec + " (refusal count cannot be saved)")])
             self.assertEqual(load_state(self.spath()), ("ok", at(100), 0))
             # A call that waited on the old file and took it after the deletion opens the path again: its refusal
             # is saved on the new file, not dropped as unsaveable.
             met = threading.Event()
-            g["fcntl"] = MetFlock(fcntl, met)
+            g["fcntl"] = MetFlock(real_fcntl, met)
             fd = os.open(self.spath() + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                real_fcntl.flock(fd, real_fcntl.LOCK_EX)
                 stop = threading.Thread(target=lambda: outs.append(self.call("Stop", 105)))
                 stop.start()
                 self.assertTrue(contended(met, stop))
@@ -1008,7 +1100,7 @@ def _self_test():
                 os.unlink(self.spath() + ".lock")
             finally:
                 os.close(fd)
-                g["fcntl"] = fcntl
+                g["fcntl"] = real_fcntl
             stop.join(15)
             self.assertFalse(stop.is_alive())
             self.assertIn("(refusal 1 of", outs[-1]["reason"])
@@ -1029,6 +1121,71 @@ def _self_test():
             self.assertEqual(load_state(self.spath()), before)
             os.unlink(self.spath() + ".lock")
             self.assertIn("(refusal 1 of", self.call("Stop", 2)["reason"])
+
+        def paused_stop(self, between):
+            """Run a Stop paused between its load and its save, call between() meanwhile, and return its output."""
+            g = globals()
+            real = g["status"]
+            pause = Pause()
+
+            def slow(*args):
+                st = real(*args)
+                pause.wait()
+                return st
+
+            outs = []
+            g["status"] = slow
+            try:
+                stop = threading.Thread(target=lambda: outs.append(self.call("Stop", 5)))
+                stop.start()
+                self.assertTrue(pause.loaded.wait(10))
+                g["status"] = real
+                between()
+                pause.release()
+                stop.join(15)
+                self.assertFalse(stop.is_alive())
+            finally:
+                pause.release()
+                g["status"] = real
+            self.assertFalse(pause.timed_out, "the Stop's pause timed out")
+            self.assertEqual(len(outs), 1)
+            return outs[0]
+
+        def test_30_a_lock_file_moved_away_and_back_does_not_let_a_stale_save_through(self):
+            # Round 25 fix for QA round 24 (codex MEDIUM): with the lock file moved away, a compaction locked a new
+            # file and saved, the original lock file was put back, and the paused Stop then passed its lock check
+            # and wrote the older compaction time over the new one. A call now saves only while the state file is
+            # the one it loaded or last saved itself.
+            if fcntl is None:
+                self.skipTest("SKIPPED, no flock on this platform")
+            self.compact()
+            lock = self.spath() + ".lock"
+
+            def between():
+                os.rename(lock, lock + ".away")
+                self.assertIn(stamp(at(100)), self.compact(100)["hookSpecificOutput"]["additionalContext"])
+                os.rename(lock + ".away", lock)  # the original lock file is back: the Stop's lock check passes
+
+            self.assertEqual(self.paused_stop(between), dict(systemMessage="constraint-reread: turn end allowed "
+                                                             "without a post-compaction re-read entry in " + self.rec
+                                                             + " (refusal count cannot be saved)"))
+            self.assertEqual(load_state(self.spath()), ("ok", at(100), 0))
+            self.assertIn("(refusal 1 of", self.call("Stop", 110)["reason"])
+            self.assertEqual(load_state(self.spath()), ("ok", at(100), 1))
+
+        def test_31_a_state_directory_moved_away_mid_call_forgets_the_compaction(self):
+            # Round 25 fix for QA round 24 (codex MINOR): documented in RESIDUAL COVERAGE; pinned here as it behaves.
+            self.compact()
+            d = os.path.dirname(self.spath())
+            out = self.paused_stop(lambda: os.rename(d, d + ".away"))
+            self.assertIn("(refusal count cannot be saved)", out["systemMessage"])
+            self.assertIsNone(self.call("UserPromptSubmit", 6))
+            self.assertIsNone(self.call("Stop", 7))
+            doc = " ".join(__doc__.split())
+            for phrase in ("A state directory moved away or deleted during a session is read as no state",
+                           "which does not name the lock", "with no compaction saved before then every turn end "
+                           "passes silently", "also one moved away and put back after another call saved"):
+                self.assertTrue(phrase in doc, phrase)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

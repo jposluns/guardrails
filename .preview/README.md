@@ -69,8 +69,8 @@ the authority, and the summary further down this page only points to it.
   Event: `PreToolUse`, matcher `Bash`.
 - **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
   refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
-  (while it can keep its state: if its state lock cannot be taken at all, it reminds once and every turn end
-  passes silently, as its limits below say); it cannot make the assistant honour them. When Claude Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
+  (while it can keep its state: if its state lock cannot be taken at all, it reminds of a compaction once
+  and refuses no turn end, as its limits below say); it cannot make the assistant honour them. When Claude Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
   record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
   compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
   with a warning, so a turn end is not held past the cap, unless the host sends `stop_hook_active` false
@@ -143,10 +143,10 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `0d387c275d78db1fa7fff2e3636c3eb4b330d92c8a3cf3b588a331d3a479590b` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `59a17c25b70b363433f6e4ea2c573c555aa1b8a0593e10614a93bbdaefe8a1b7` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `e105067b4f67fb4bc59b41c748ec8a6d47e56eba5526d5381371e13162d691b0` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
@@ -415,15 +415,20 @@ section of its opening docstring. Read that section before relying on a hook; in
   three in a row, after which the stop is allowed with a warning, unless the host sends `stop_hook_active`
   false on a turn end that continues a refusal (each such turn end is refused again). A refusal whose count
   cannot be saved is allowed with a warning, also on an explicit false. Its state updates are serialized by
-  a lock file beside the state file; a call that cannot take the lock within two seconds, or whose lock
-  file is deleted or replaced while it holds it, saves nothing, and a turn end it would refuse is allowed
-  with a warning that names the lock (a deletion that lands in the few system calls between its last check
+  a lock file beside the state file, and a call saves only while that lock file and the state file are the
+  ones it locked and loaded. A call that cannot take the lock within two seconds saves nothing, and a turn
+  end it would refuse is allowed with a warning that names the lock. A call whose lock file is deleted or
+  replaced while it holds it (also one moved away and put back), or whose state file another call saved
+  meanwhile, saves nothing, and a turn end it would refuse is allowed with a warning that the refusal count
+  cannot be saved (a deletion, replacement or save that lands in the few system calls between its last check
   and its write can still let one stale save through). While the lock cannot be taken at all (a lock path
   that is a symbolic link or not a regular file, a lock file it cannot open, a filesystem that refuses
   `flock`, a platform without it), it keeps no state: a compaction is reminded once and then forgotten, and
-  every turn end passes silently (a missed reminder and a missed refusal). Once a record is declared, every
-  call it handles creates its state folder and an empty lock file for the session, and nothing removes
-  them. Without `UserPromptSubmit`
+  with no compaction saved before then every turn end passes silently (a missed reminder and a missed
+  refusal); a compaction saved before then is still reminded, and each turn end is allowed with a warning. A
+  state folder moved away or deleted during a session forgets the compaction silently, like a deleted state
+  file. Once a record is declared, every call it handles creates its state folder and an empty lock file for
+  the session, and nothing removes them. Without `UserPromptSubmit`
   registered
   and without a `stop_hook_active` field in the input, the count stays at the cap, so every later turn end
   until the next compaction is allowed with the warning (a missed refusal); a state file that cannot be
@@ -446,8 +451,7 @@ section of its opening docstring. Read that section before relying on a hook; in
   passes is not refused (a missed refusal). A blank command gets no note. Inside its grammar, a rerun
   whose words come into existence only when the command runs (an expansion with a value, a tilde expansion
   such as `~`, `~+` or `~-`, an alias) or that runs `gh` under a hashed name (`hash -p`) is missed. The
-  exit status it reads, only from an integer exit-code field where one is present, is the whole call's,
-  so a
+  exit status it reads, only from an integer exit-code field where one is present, is the whole call's, so a
   refused `gh` call that a pipe (under default bash options, not under `pipefail`), `|| true`, a later
   command, a background `&`, a `!` or an `if` or `while` condition (each also under `pipefail`) can hide
   is kept as a CI rerun call that was not reported as failed (a false refusal). Its turn-end check reads
@@ -459,20 +463,25 @@ section of its opening docstring. Read that section before relying on a hook; in
   turn end that reads it is allowed with a warning that the state could not be read when the final message
   calls a pass conclusive or is missing), but the current call's own CI rerun or possible CI rerun note is
   still given. A refusal whose count cannot be saved is allowed with a warning, also on an explicit
-  `stop_hook_active` false. Its state updates are serialized by a lock file beside the state file; a run
-  that cannot take the lock within two seconds, or whose lock file is deleted or replaced while it holds
-  it, saves nothing, and a turn end it would refuse is allowed with a warning that names the lock (a
-  deletion that lands in the few system calls between its last check and its write can still let one stale
-  save through). While the lock cannot be taken at all (a lock path that is a symbolic link or not a
-  regular file, a lock file it cannot open, a filesystem that refuses `flock`, a platform without it), it
-  keeps no state: it only notes after each tool call, and every turn end passes silently (a missed
-  refusal). Nothing removes its state and lock files, one of each per session. A state file written by an
+  `stop_hook_active` false. Its state updates are serialized by a lock file beside the state file, and a run
+  saves only while that lock file and the state file are the ones it locked and loaded. A run that cannot
+  take the lock within two seconds saves nothing, and a turn end it would refuse is allowed with a warning
+  that names the lock. A run whose lock file is deleted or replaced while it holds it (also one moved away
+  and put back), or whose state file another run saved meanwhile, saves nothing, and a turn end it would
+  refuse is allowed with a warning that the refusal count cannot be saved (a deletion, replacement or save
+  that lands in the few system calls between its last check and its write can still let one stale save
+  through). While the lock cannot be taken at all (a lock path that is a symbolic link or not a regular
+  file, a lock file it cannot open, a filesystem that refuses `flock`, a platform without it), it keeps no
+  state: it only notes after each tool call, and with no state saved before then every turn end passes
+  silently (a missed refusal); the outstanding reruns of a state saved before then still bring a warning. A
+  state folder moved away or deleted during a session is read as no state, so the next turn end passes
+  silently (a missed refusal). Nothing removes its state and lock files, one of each per session. A state
+  file written by an
   earlier revision of the hook is read as
   no earlier runs too, so
   none of its flags arms a refusal. The state file is trusted: a hand-edited state of the current revision
   whose flags are of the kinds it keeps still arms a refusal. A state file that is missing (first use
-  cannot be told from a lost file), unreadable or malformed gives an unknown count. While it cannot be
-  read
+  cannot be told from a lost file), unreadable or malformed gives an unknown count. While it cannot be read
   or is malformed, a conclusive turn end, or one with no final message, is allowed with a warning that the
   state could not be read. Once it is missing, or a tool call has written back a lost or unreadable one,
   until a prompt you submit, a disclosure word or an explicit `stop_hook_active` false, a conclusive turn
