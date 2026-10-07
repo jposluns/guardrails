@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ed17280844bb4da48b2aa5789dcb40ac40b05bd1347ca9642fcc6c16318a6c1d"
+tree-sha256 = "37c55d1346963ebbdff5e55fc37b6b77e1552e0d9f6d2b4a2a1e1cf07a9aa788"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257712
-sha256 = "f3969fecad16b8fb4c9f52c2e457d0a9cfcb2f2a92eb2426e3a21b1f8e8a4402"
+bytes = 257739
+sha256 = "6499a4a708c90e43cdc7b2b9535d8b4faa4b40b915f3700bee99c9dac5c41ab1"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7102
-sha256 = "3f67cf89e250046c94b6fd38efcd2cca5bd0c13ef02c22e334856d04ae131beb"
+bytes = 7375
+sha256 = "940d93bb56a6c0e86a5f6d2bb63d403b63624122fce7b7683a17cde400c0477b"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2246,8 +2246,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41622
-sha256 = "00c84741022ca046fd68f9154fa35953fe64b98142692118dee94ed7379f7fc0"
+bytes = 41676
+sha256 = "3a693c3eacdc307b30015a693b047082a08bc6a8aa3c2060a4c1eabdfd8eb5fb"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2433,6 +2433,11 @@ sha256 = "f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5"
 path = "opf/enforcement/ci/opf-ci.sh"
 bytes = 2178
 sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+
+[[sources]]
+path = "opf/enforcement/claude/pretooluse_deny.py"
+bytes = 177979
+sha256 = "46c4b26a69defd748961e5b5057d380e06335f25077dd131412ceda9074694f0"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -2891,8 +2896,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 156149
-sha256 = "ed44f2b013a04a05738691583ec33302b40485fc01f4aaee1cfa8150455b0aed"
+bytes = 317393
+sha256 = "8ed3850bf46568ffba50ed35e75a9a23546a82080392d885735798b742e4dd74"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -3341,8 +3346,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 130152
-sha256 = "bff17ed0699844d3f46b19b198db7aaaf68636ccc94722723793b72014ebfb32"
+bytes = 130179
+sha256 = "0e5a9e08bfe99a259f003f8f52eed169fb1aac1232f23064d9ef924e570644aa"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

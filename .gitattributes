@@ -489,6 +489,7 @@ docs/standard.md text eol=lf
 docs/teams.md text eol=lf
 opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
+opf/enforcement/claude/pretooluse_deny.py text eol=lf
 opf/enforcement/precommit/install.sh text eol=lf
 opf/enforcement/precommit/pre-commit text eol=lf
 opf/prompt-pack/flow/SKILL.md text eol=lf
