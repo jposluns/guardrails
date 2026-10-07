@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cfa35b9548d7b3e71f041a215ad7366a7507b94882bff60e67c1f9a3ddda5e64"
+tree-sha256 = "0a8217549bfc012853c414beb3fa266efbdc5752bde4bb4f0daf46a539415099"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -116,8 +116,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7335
-sha256 = "6b29dcd329f90ea34ca26121d38f23516687ef561d6bc8f9190d25eabdcfa9c0"
+bytes = 7481
+sha256 = "870cb5c7de21987dea056b945a277488592910744949b1e343c35ea76963c7fa"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2261,13 +2261,13 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 36933
-sha256 = "5a7de7c37377e2c64e7d7629078f89b67be6358815b3f62ab2210997f13d0f2c"
+bytes = 37197
+sha256 = "d0c53ab91fd9427c0da9ee21fef3ef6c0656fdd82b566ce8afa2baaef8035aa8"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 809
-sha256 = "b2abdc43c8af834e8566e7439602890869d9324e1f5631b0e7a7df2680559adb"
+sha256 = "ceaf7b7d56fad8d81a0c002190423a9271b4170d46f5f61b5f4d4bc96fbcb17b"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2276,8 +2276,8 @@ sha256 = "ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930"
 
 [[sources]]
 path = ".preview/constraint-reread.py"
-bytes = 33328
-sha256 = "7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e"
+bytes = 34968
+sha256 = "2684d58043c71b4288c072465ba127e131e78073a5f05f7231399ac74aadbc62"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
@@ -2291,8 +2291,8 @@ sha256 = "c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d"
 
 [[sources]]
 path = ".preview/rerun-pass-check.py"
-bytes = 122934
-sha256 = "6e0857c1e3eb3b765cbcc06425ebe743d0b0c77030b6163b3167caaae31d44d0"
+bytes = 124466
+sha256 = "cc8ac07234b091c4851191248090cd4e84bd35be203da65f45a3020589bb2981"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
