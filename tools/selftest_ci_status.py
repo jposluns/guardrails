@@ -10,11 +10,17 @@ and complete captured output, never a success token.
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
-Exit 2 is a harness/setup error, including bad arguments, a failed report write, an unreadable,
-malformed, or suite-missing expectation manifest, a ci-status.sh whose jq program cannot be extracted,
-or a duplicate check id. Exit 1 takes precedence over exit 2: a run with a harness error in which any
-assertion failed exits 1, after printing every collected failure. Bad arguments are refused before any
-check runs, so they always exit 2.
+Once the checks start, main() ends every run through one rule, whatever ends it: a normal finish, a
+recorded harness error, an uncaught exception, or SystemExit raised anywhere, including inside check().
+It first prints every collected assertion failure, then exits 1 if any assertion failed, else 2 if any
+harness error was recorded (an uncaught exception or SystemExit is recorded as one), else 0. Harness
+errors also include a failed report write, an unreadable or malformed expectation manifest (a suite
+container that is not an array of tables included), a ci-status.sh whose jq program cannot be
+extracted, and a duplicate check id. The execution set is reconciled against the manifest only when no
+check recorded a harness error, because an unevaluated check would also be reported missing. Bad
+arguments, a Python older than 3.14, and a missing tomllib are refused before any check runs, so they
+always exit 2. The one path outside the rule is a failure to print the result itself (for example a
+closed stdout): the interpreter then ends the run with its own exit 1.
 """
 import sys
 
@@ -33,6 +39,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 try:
@@ -176,15 +183,18 @@ def check(name, got, want):
 
 
 def _duplicate_check_id(name):
-    # Recorded, not raised: the run still reaches main()'s finalisation, which prints every collected
-    # failure. check() still evaluates the duplicate's own assertion.
-    message = "{}: duplicate check id".format(name)
-    HARNESS_ERRORS.append(message)
-    print("SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
+    # Recorded, not raised, and check() still evaluates the duplicate's own assertion; the "duplicate"
+    # finalisation case pins both through two real check() calls.
+    _record_harness_error("{}: duplicate check id".format(name))
 
 
 def harness_error(check_id, detail):
-    message = "{}: not evaluated: {}".format(check_id, detail)
+    _record_harness_error("{}: not evaluated: {}".format(check_id, detail))
+
+
+def _record_harness_error(message):
+    # Every harness error is recorded here, before it is printed, so _conclude() sees it even if the
+    # print fails.
     HARNESS_ERRORS.append(message)
     print("SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
 
@@ -320,35 +330,32 @@ def _expected_check_ids():
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
-        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
-              file=sys.stderr)
+        _record_harness_error("cannot read {}: {}".format(CHECKS_MANIFEST, exc))
         return None
-    for row in data.get("suite", []):
+    # The suite container is validated before it is iterated: `suite = 1` is a malformed manifest.
+    suites = data.get("suite")
+    for row in suites if isinstance(suites, list) else ():
         if isinstance(row, dict) and row.get("id") == SUITE_ID:
             ids = row.get("expected-check-ids")
             if isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids):
                 return set(ids)
             break
-    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(
-        SUITE_ID, CHECKS_MANIFEST), file=sys.stderr)
+    _record_harness_error("missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST))
     return None
 
 
 def _write_report(report_path):
     if report_path is None:
-        return True
+        return
     try:
         with open(report_path, "w", encoding="utf-8") as handle:
             json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
             handle.write("\n")
     except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
+        _record_harness_error("cannot write execution report {}: {}".format(report_path, exc))
 
 
-def main(report_path=None):
+def _run_checks():
     with tempfile.TemporaryDirectory(prefix="ci-status-selftest-") as raw:
         fixture = Fixture(Path(raw))
         head_sha = fixture.head_sha
@@ -792,88 +799,178 @@ def main(report_path=None):
             check("ci/jq-step-direct-cases", step_result,
                   ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
 
-    # Round 6: every harness-error exit of the finalisation must print the failures collected before it
-    # and exit 1 when there are any. Each case seeds state, runs _finalise() in-process, and restores.
-    check("ci/finalise-harness-error-keeps-failures", _finalisation_cases(),
-          [(1, True), (2, False), (1, True), (1, True), (1, True), (2, False)])
-    return _finalise(report_path)
+    # Round 7: main() must print every collected failure and map the exit code by the module docstring's
+    # rule on every path. Each case runs a nested main() on seeded state and restores the real state.
+    _finalise_check(*_finalisation_cases())
 
 
-def _print_failures():
+def _finalise_check(got, want):
+    # The one check() call site the finalisation cases also drive, inside their nested main(), so a
+    # seeded duplicate goes through the real check() without a second source id for the static layer.
+    check("ci/finalise-harness-error-keeps-failures", got, want)
+
+
+def main(report_path=None, run_checks=_run_checks):
+    """Run the checks and the reconciliation, then return the exit code by the module docstring's rule.
+
+    Whatever ends the try block (a normal finish, an exception, or SystemExit raised anywhere, including
+    inside check()), the finally clause runs _conclude(), which prints every collected failure and maps
+    the exit code: any assertion failure -> 1; else any harness error, an uncaught exception or
+    SystemExit included -> 2; else 0. run_checks is replaced only by _finalisation_cases().
+    """
+    code = 2
+    try:
+        run_checks()
+        _reconcile(report_path)
+    except BaseException as exc:  # SystemExit and KeyboardInterrupt too: none may skip _conclude()
+        _record_uncaught(exc)
+    finally:
+        code = _conclude()
+    return code
+
+
+def _record_uncaught(exc):
+    _record_harness_error("uncaught {}: {}".format(type(exc).__name__, exc))
+    traceback.print_exception(exc, file=sys.stderr)
+
+
+def _reconcile(report_path):
+    # Only a run in which every check was evaluated is reconciled: a check that recorded a harness error
+    # never executed, and would also be reported missing. A failed report write does not stop it.
+    reconcile = not HARNESS_ERRORS
+    _write_report(report_path)
+    if not reconcile:
+        return
+    expected = _expected_check_ids()
+    if expected is None:
+        return
+    for check_id in sorted(expected - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(check_id))
+    for check_id in sorted(_EXECUTED_SET - expected):
+        FAILURES.append("execution-set/extra: {}".format(check_id))
+
+
+def _conclude():
+    # The single exit-code rule. Every collected failure is printed first, on every path.
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
-
-
-def _harness_error_exit():
-    # Every harness-error exit after the checks have run returns through here, so a harness error
-    # never hides a behaviour failure: the collected failures are printed, and any one of them makes
-    # the run a FAIL (exit 1) rather than a cannot-evaluate (exit 2).
-    _print_failures()
-    if FAILURES:
-        print("SELF-TEST HARNESS ERROR: see the labelled errors above; the assertion failures make this "
-              "run a FAIL", file=sys.stderr)
+        if HARNESS_ERRORS:
+            print("SELF-TEST HARNESS ERROR: see the labelled errors above; the assertion failures make "
+                  "this run a FAIL", file=sys.stderr)
         return 1
-    print("SELF-TEST HARNESS ERROR: see the labelled errors above (cannot evaluate)", file=sys.stderr)
-    return 2
-
-
-def _finalise(report_path):
-    report_written = _write_report(report_path)
     if HARNESS_ERRORS:
-        return _harness_error_exit()
-    expected = _expected_check_ids()
-    if expected is not None:
-        for check_id in sorted(expected - _EXECUTED_SET):
-            FAILURES.append("execution-set/missing: {}".format(check_id))
-        for check_id in sorted(_EXECUTED_SET - expected):
-            FAILURES.append("execution-set/extra: {}".format(check_id))
-    if not report_written or expected is None:
-        return _harness_error_exit()
-    if FAILURES:
-        _print_failures()
-        return 1
+        print("SELF-TEST HARNESS ERROR: see the labelled errors above (cannot evaluate)", file=sys.stderr)
+        return 2
     print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
           "tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 
+class _ExitOnCompare:
+    """A got value whose comparison raises SystemExit(0): a SystemExit raised from inside check()."""
+
+    def __ne__(self, other):
+        raise SystemExit(0)
+
+
+class _FaultingPath:
+    """A manifest path whose os.fspath() raises: an uncaught exception during the reconciliation."""
+
+    def __fspath__(self):
+        raise RuntimeError("seeded reconciliation fault")
+
+
 def _finalisation_cases():
-    """Run _finalise() on seeded state per case; return (exit code, seeded failure printed) for each."""
+    """Run a nested main() on seeded state per case.
+
+    Return (results, wants): per case, the exit code and the expected stdout and stderr texts that are
+    absent, against the case's code with nothing absent.
+    """
     global CHECKS_MANIFEST
     saved = (list(FAILURES), list(HARNESS_ERRORS), list(EXECUTED), set(_EXECUTED_SET), CHECKS_MANIFEST)
+    own = "ci/finalise-harness-error-keeps-failures"
     seeded = "seeded/assertion: got 1, want 2"
-    results = []
+    duplicate = "{}: got 'duplicate', want 'wanted'".format(own)
+
+    def passes():
+        _finalise_check(0, 0)
+
+    def duplicated():
+        _finalise_check(0, 0)
+        _finalise_check("duplicate", "wanted")
+
+    def recorded():
+        _finalise_check(0, 0)
+        harness_error("seeded/not-evaluated", "seeded harness error")
+
+    def exits():
+        _finalise_check(_ExitOnCompare(), 0)
+
+    def raises():
+        _finalise_check(0, 0)
+        raise subprocess.TimeoutExpired("fixture", 30)
+
+    results, wants = [], []
     try:
         with tempfile.TemporaryDirectory(prefix="ci-status-finalise-") as raw:
-            missing = Path(raw) / "absent"
-            # (seed a failure?, harness error to inject); otherwise the report path is None and the
-            # manifest is the real one, so only the injected error can make the exit a harness error.
-            for fail, inject in ((True, "recorded"), (False, "recorded"), (True, "duplicate"),
-                                 (True, "report"), (True, "manifest"), (False, "manifest")):
+            base = Path(raw)
+
+            def manifest(name, ids=None, text=None):
+                path = base / name
+                if text is None:
+                    text = "[[suite]]\nid = {}\nexpected-check-ids = {}\n".format(
+                        json.dumps(SUITE_ID), json.dumps(ids))
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            own_only = manifest("own.toml", [own])
+            never_run = manifest("never-run.toml", [own, "seeded/never-run"])
+            not_evaluated = manifest("not-evaluated.toml", [own, "seeded/not-evaluated"])
+            scalar_suite = manifest("scalar-suite.toml", text="suite = 1\n")
+            absent = base / "absent" / "selftest_checks.toml"
+            bad_report = str(base / "absent" / "report.json")
+            # (seed a failure first?, checks run, report path, manifest, code, stdout texts, stderr texts)
+            for fail, run, report, path, code, out_texts, err_texts in (
+                    (False, passes, None, own_only, 0, ["SELF-TEST PASS"], []),
+                    (True, passes, None, own_only, 1, [seeded], []),
+                    (True, recorded, None, own_only, 1, [seeded], ["seeded/not-evaluated"]),
+                    (False, recorded, None, not_evaluated, 2, [], ["seeded/not-evaluated"]),
+                    (True, duplicated, None, own_only, 1, [seeded, duplicate],
+                     [own + ": duplicate check id"]),
+                    (False, passes, bad_report, never_run, 1, ["execution-set/missing: seeded/never-run"],
+                     ["cannot write execution report"]),
+                    (False, passes, bad_report, own_only, 2, [], ["cannot write execution report"]),
+                    (True, passes, None, absent, 1, [seeded], ["cannot read"]),
+                    (False, passes, None, absent, 2, [], ["cannot read"]),
+                    (True, passes, None, scalar_suite, 1, [seeded], ["missing or malformed suite"]),
+                    (False, passes, None, scalar_suite, 2, [], ["missing or malformed suite"]),
+                    (True, exits, None, own_only, 1, [seeded], ["uncaught SystemExit: 0"]),
+                    (False, exits, None, own_only, 2, [], ["uncaught SystemExit: 0"]),
+                    (True, raises, None, own_only, 1, [seeded], ["uncaught TimeoutExpired"]),
+                    (True, passes, None, _FaultingPath(), 1, [seeded], ["uncaught RuntimeError"]),
+                    (False, passes, None, _FaultingPath(), 2, [], ["uncaught RuntimeError"])):
                 FAILURES[:] = [seeded] if fail else []
                 HARNESS_ERRORS[:] = []
                 EXECUTED[:] = []
                 _EXECUTED_SET.clear()
-                CHECKS_MANIFEST = missing / "selftest_checks.toml" if inject == "manifest" else saved[4]
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                CHECKS_MANIFEST = path
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     try:
-                        if inject == "recorded":
-                            harness_error("seeded/not-evaluated", "seeded harness error")
-                        elif inject == "duplicate":
-                            _duplicate_check_id("seeded/duplicate")
-                        code = _finalise(str(missing / "report.json") if inject == "report" else None)
-                    except SystemExit as exc:  # an exit that bypasses finalisation is a failure here
-                        code = ("SystemExit", exc.code)
-                results.append((code, seeded in out.getvalue()))
+                        got = main(report, run)
+                    except BaseException as exc:  # anything escaping main() is a failure here
+                        got = ("escaped", type(exc).__name__)
+                results.append((got, [text for text in out_texts if text not in out.getvalue()],
+                                [text for text in err_texts if text not in err.getvalue()]))
+                wants.append((code, [], []))
     finally:
         FAILURES[:], HARNESS_ERRORS[:], EXECUTED[:] = saved[0], saved[1], saved[2]
         _EXECUTED_SET.clear()
         _EXECUTED_SET.update(saved[3])
         CHECKS_MANIFEST = saved[4]
-    return results
+    return results, wants
 
 
 def _parse_argv(argv):
