@@ -136,6 +136,7 @@ guarded-surfaces = [
     "tools/gen_disclosure.py",
     "tools/gen_enforceability.py",
     "tools/gen_enforcement_register.py",
+    "tools/gen_first_pin_demo.py",
     "tools/gen_gensrc.py",
     "tools/gen_hooks.py",
     "tools/gen_install.py",
