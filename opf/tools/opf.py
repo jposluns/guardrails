@@ -2081,12 +2081,9 @@ def _watchdog_completion_case(mode):
         # cancelled construction aborts the launch and re-raises the cancellation.
         real_start = threading.Thread.start
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                if _st_census_open(int(name)):   # EBADF only (the listing's own); any other error raises
-                    live.add(int(name))
-            return live
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
 
         def no_children():
             try:
@@ -2128,6 +2125,12 @@ def _watchdog_completion_case(mode):
                 "the descriptor census read an EIO descriptor as closed"
         finally:
             os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -3116,12 +3119,9 @@ def _watchdog_completion_case(mode):
         real_abandon = emit._FixtureProcess._abandon_unfinished_launch
         real_finish = emit._FixtureProcess._finish_close
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                if _st_census_open(int(name)):   # EBADF only (the listing's own); any other error raises
-                    live.add(int(name))
-            return live
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
 
         def no_children():
             try:
@@ -3220,6 +3220,12 @@ def _watchdog_completion_case(mode):
                 "the descriptor census read an EIO descriptor as closed"
         finally:
             os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -14822,19 +14828,52 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
-def _st_census_open(fd, fstat=None):
-    """Whether descriptor `fd` is open, for a self-test descriptor census or survivor scan. Only EBADF reads
-    as closed; any other read error (EIO, EACCES, ENOMEM) is cannot-evaluate, raised naming `fd`, never read
-    as a closed descriptor: a leak check fails closed on input it cannot read. `fstat` defaults to os.fstat
-    as bound when called, so a case can inject the census read failure."""
+def _st_census_stat(fd, fstat=None):
+    """The stat result of descriptor `fd`, or None once it is closed, for a self-test descriptor census or
+    survivor scan. Only EBADF reads as closed; any other read error (EIO, EACCES, ENOMEM) is cannot-evaluate,
+    raised naming `fd`, never read as a closed descriptor: a leak check fails closed on input it cannot read.
+    `fstat` defaults to os.fstat as bound when called, so a case can inject the census read failure."""
     import errno
     try:
-        (os.fstat if fstat is None else fstat)(fd)
+        return (os.fstat if fstat is None else fstat)(fd)
     except OSError as exc:
         if exc.errno == errno.EBADF:
-            return False
+            return None
         raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
-    return True
+
+
+def _st_census_open(fd, fstat=None):
+    """Whether descriptor `fd` is open (see _st_census_stat: only EBADF reads as closed)."""
+    return _st_census_stat(fd, fstat) is not None
+
+
+def _st_census_fds():
+    """This process's open descriptors as identities (number, st_dev, st_ino, file type), so a descriptor
+    closed and reopened at the same number to a different file reads as a change, never as unchanged. Only
+    EBADF reads as closed (the listing's own descriptor); any other read error raises naming the descriptor."""
+    live = set()
+    for name in os.listdir("/proc/self/fd"):
+        info = _st_census_stat(int(name))
+        if info is not None:
+            live.add((int(name), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)))
+    return live
+
+
+def _st_census_reuse_detected(scan):
+    """Whether `scan()` reports a same-number replacement as a change: a held /dev/null descriptor is in the
+    baseline, then its number is reopened to /dev/zero (dup2), so the set of open numbers is unchanged but
+    the file behind one is not. A number-only census reads that as unchanged and would pass a leak."""
+    held = os.open(os.devnull, os.O_RDONLY)
+    try:
+        baseline = scan()
+        other = os.open("/dev/zero", os.O_RDONLY)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        return scan() != baseline
+    finally:
+        os.close(held)
 
 
 def _st_census_eio_raises(scan, fd):
