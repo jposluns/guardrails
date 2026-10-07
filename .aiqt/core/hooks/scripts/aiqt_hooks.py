@@ -11084,24 +11084,29 @@ def _orch_barrier_write(path, obj):
     """Replace the resume barrier file atomically; the one writer of resume-barrier.json (orch_resume_audit,
     orch_resume_barrier's warned flag, and tools/orch_doctor.py --resume-audit). It creates the state
     directory, creates a temporary file beside the barrier with O_CREAT|O_EXCL (open mode "x": mode 0o666
-    less the umask, as open(path, "w") creates the barrier), writes the JSON, flushes and fsyncs it, then
-    os.replace()s it onto the barrier path. On any failure it unlinks the temporary file (an unlink that
-    itself fails leaves it beside the barrier, never in its place) and re-raises, so the previous barrier
-    file, armed or clear, or its absence, is left byte-identical; the caller decides what the error means."""
+    less the umask, as open(path, "w") creates the barrier), writes the JSON, flushes and fsyncs it, closes
+    it, then os.replace()s it onto the barrier path. It records whether this call created the temporary
+    file: on any failure after that (the write, flush, fsync, the close at the end of the with block, or
+    the replace) it unlinks the temporary file (an unlink that itself fails leaves it beside the barrier,
+    never in its place), and it never unlinks a temporary name it did not create (an "x" open of a name
+    that already exists raises FileExistsError first); then it re-raises, so the previous barrier file,
+    armed or clear, or its absence, is left byte-identical; the caller decides what the error means. A
+    process killed between the create and the replace (a hook timeout, for example) leaves its temporary
+    file beside the barrier, and nothing removes it. A directory at the barrier path cannot be replaced:
+    the replace raises IsADirectoryError and the directory stays until someone removes it."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
-    with open(tmp, "x", encoding="utf-8") as fh:
-        try:
+    created = False
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            created = True
             json.dump(obj, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        except BaseException:
-            _orch_unlink_quiet(tmp)
-            raise
-    try:
         os.replace(tmp, path)
     except BaseException:
-        _orch_unlink_quiet(tmp)
+        if created:
+            _orch_unlink_quiet(tmp)
         raise
 
 
@@ -11176,20 +11181,43 @@ def orch_resume_audit(data):
     return _allow()
 
 
+_ORCH_BARRIER_KEYS = frozenset(("active", "findings", "warned", "ts"))
+
+
+def _orch_barrier_well_formed(barrier):
+    """True only for the documented barrier shape: a JSON object with a boolean "active" and a list of
+    string "findings" (both required; a missing "findings" is malformed, never an empty list), an optional
+    boolean "warned" and an optional string "ts", and no other key."""
+    if not isinstance(barrier, dict) or not set(barrier) <= _ORCH_BARRIER_KEYS:
+        return False
+    if not isinstance(barrier.get("active"), bool) or "findings" not in barrier:
+        return False
+    found = barrier["findings"]
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        return False
+    if "warned" in barrier and not isinstance(barrier["warned"], bool):
+        return False
+    return "ts" not in barrier or isinstance(barrier["ts"], str)
+
+
 def orch_resume_barrier(data):
     """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
     never obstructed. A barrier file that is absent (its open raises FileNotFoundError or
-    NotADirectoryError) reads as clear. One that exists but cannot be read or parsed, or is not an object
-    with a boolean "active" and a list of string "findings" (a truncated or partial write by an earlier
-    writer, for example), reads as ARMED: every mutation outside the allowlist surfaces a note naming the
-    file as unreadable (there is no readable "warned" flag to record, so it is not once per arming), and
-    in BAKE that note blocks nothing, so no call is wedged. It clears where 'python3
+    NotADirectoryError) reads as clear. A barrier is well-formed only when it is a JSON object whose keys
+    are "active" (required, a boolean), "findings" (required, never defaulted, a list of strings), and
+    optionally "warned" (a boolean) and "ts" (a string), and no other key. One that exists but cannot be
+    read or parsed for any reason (an OSError, a decode or JSON error, a RecursionError from deep nesting,
+    or any other exception the parse raises), or is not well-formed (a truncated or partial write by an
+    earlier writer, for example), reads as ARMED: every mutation outside the allowlist surfaces a note
+    naming the file as unreadable (there is no readable "warned" flag to record, so it is not once per
+    arming), and in BAKE that note blocks nothing, so no call is wedged. It clears where 'python3
     tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
     (_orch_barrier_write), or where the user corrects or removes it (the state directory is on the
     allowlist); where the state directory cannot be searched, that replace fails as well, and the note
-    persists until its permissions are restored."""
+    persists until its permissions are restored. A directory at the barrier path (its open raises
+    IsADirectoryError) cannot be replaced by either audit, so its note says to remove the directory."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -11204,13 +11232,11 @@ def orch_resume_barrier(data):
             barrier = json.load(fh)
     except (FileNotFoundError, NotADirectoryError):
         return _allow()
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # any read or parse failure (RecursionError from deep nesting too) is armed
         barrier, unreadable = {}, type(exc).__name__
     if unreadable is None:
-        found = barrier.get("findings", []) if isinstance(barrier, dict) else None
-        if not (isinstance(barrier, dict) and isinstance(barrier.get("active"), bool)
-                and isinstance(found, list) and all(isinstance(f, str) for f in found)):
-            barrier, unreadable = {}, "not a barrier object"
+        if not _orch_barrier_well_formed(barrier):
+            barrier, unreadable = {}, "not a well-formed barrier object"
         elif not barrier["active"]:
             return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -11229,6 +11255,14 @@ def orch_resume_barrier(data):
             rp = os.path.realpath(p)
             if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
                 return _allow()  # the exit path (fixing the record) is always writable
+    if unreadable == "IsADirectoryError":
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed (IsADirectoryError: it is a directory), so it is "
+            "read as armed and this mutation is outside the record surfaces. Neither 'python3 "
+            "tools/orch_doctor.py --resume-audit' nor the SessionStart audit can replace a directory: "
+            "remove the directory, then re-run 'python3 tools/orch_doctor.py --resume-audit'."
+            .format(barrier_path))
     if unreadable is not None:
         return _allow_note(
             "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "

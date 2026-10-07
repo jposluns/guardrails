@@ -820,6 +820,13 @@ def _test_note_literal_sites(failures, tmp):
          "out-of-record Write with a note naming the file as unreadable or malformed",
          aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
              file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.unlink()
+    barrier_file.mkdir()
+    note("(nl-barrier-directory) a directory at the resume barrier path reads as armed and allows an "
+         "out-of-record Write with a note saying to remove the directory, which no audit can replace",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), "remove the directory")
+    barrier_file.rmdir()
     note("(nl-ledger-unbound) a TaskOutput with no task_id is surfaced with a note",
          aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "TaskOutput", dict())), "UNBOUND")
     saved_append = aiqt_hooks._orch_append_jsonl

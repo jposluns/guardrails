@@ -2493,12 +2493,27 @@ def _main_isolated(report_path=None):
         # not an object, carries a non-boolean active or a non-string finding, or is a directory (its open
         # raises IsADirectoryError) surfaces a mutation outside the allowlist on every call, naming the file
         # as unreadable, and leaves the file as it is, while a record write stays silent (red when it reads
-        # as absent or clear, or surfaces only once). An absent barrier stays silent, and a clean audit
-        # replaces a malformed barrier, after which the mutation is silent again (the recovery path).
+        # as absent or clear, or surfaces only once). ROUND 15 adds a missing findings key for both active
+        # values with and without warned (red when a missing findings reads as an empty list), a non-boolean
+        # warned (red when any truthy warned reads as already warned), a non-list findings string (red when
+        # the list check is dropped, as "abc" iterates as strings), an extra key and a non-string ts (red
+        # when the key set is not exact), and JSON nested past the recursion limit (red when its
+        # RecursionError escapes the handler, which fails the call closed); the directory note must say to
+        # remove the directory (red when it advises the audit, which cannot replace a directory). An absent
+        # barrier and a well-formed clear one, with or without its optional keys, stay silent (red when
+        # the shape check is stricter than documented), and a clean audit replaces a malformed barrier,
+        # after which the mutation is silent again (the recovery path).
         _r14_src = dict(file_path=str(r.root / "src.py"), content="x")
         _r14_mal = []
-        for _r14_body in (_r14_trunc, "", "[]", json.dumps(dict(active="yes", findings=[])),
-                          json.dumps(dict(active=True, findings=[1])), None):
+        _r14_bodies = (_r14_trunc, "", "[]", json.dumps(dict(active="yes", findings=[])),
+                       json.dumps(dict(active=True, findings=[1])), json.dumps(dict(active=False)),
+                       json.dumps(dict(active=True)), json.dumps(dict(active=False, warned=True)),
+                       json.dumps(dict(active=True, warned=True)),
+                       json.dumps(dict(active=True, findings=[], warned="no")),
+                       json.dumps(dict(active=False, findings="abc")),
+                       json.dumps(dict(active=False, findings=[], extra=1)),
+                       json.dumps(dict(active=False, findings=[], ts=5)), "[" * 200000, None)
+        for _r14_body in _r14_bodies:
             if _r14_body is None:
                 _r14_bar.unlink()
                 _r14_bar.mkdir()
@@ -2510,18 +2525,122 @@ def _main_isolated(report_path=None):
                 "PreToolUse", "Write", dict(file_path=str(r.findings), content="x")))
             _r14_m = _r14_msg(_r14_first)
             _r14_mal.append((_verdict(_r14_first), _verdict(_r14_again), _verdict(_r14_rec),
-                             str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m,
+                             str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m
+                             and (_r14_body is not None or "remove the directory" in _r14_m),
                              _r14_bar.is_dir() if _r14_body is None
                              else _r14_bar.read_text(encoding="utf-8") == _r14_body))
             if _r14_body is None:
                 _r14_bar.rmdir()
-        _r14_absent = _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))
+        _r14_absent = [_verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))]
+        for _r14_body in (dict(active=False, findings=[]), dict(active=False, findings=[], ts="t", warned=False)):
+            _r14_bar.write_text(json.dumps(_r14_body), encoding="utf-8")
+            _r14_res = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r14_absent.append((_verdict(_r14_res), _r14_msg(_r14_res)))
         _r14_bar.write_text(_r14_trunc, encoding="utf-8")
         _r14_recover = (_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
                         _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))))
         check("barrier/malformed-reads-armed-every-call-clean-audit-clears",
-              (tuple(_r14_mal), _r14_absent, _r14_recover),
-              ((("warn", "warn", "allow", True, True),) * 6, "allow", ("allow", "allow")))
+              (tuple(_r14_mal), tuple(_r14_absent), _r14_recover),
+              ((("warn", "warn", "allow", True, True),) * len(_r14_bodies),
+               ("allow", ("allow", ""), ("allow", "")), ("allow", "allow")))
+        # ROUND 15, A DIRECTORY AT THE BARRIER PATH: a clean audit cannot replace it (the rename raises
+        # IsADirectoryError and the audit swallows it), so it returns allow, the directory stays, and no
+        # temporary file is left beside it; the helper the doctor uses raises IsADirectoryError and leaves
+        # no temporary file (red when the unlink after a failed replace is dropped). Once the directory is
+        # removed, a clean audit writes a clear barrier and the mutation is silent.
+        _r15_dir = []
+
+        def _r15_tmps():
+            return sorted(n for n in os.listdir(str(rsd))
+                          if n.startswith("resume-barrier.json.") and n.endswith(".tmp"))
+        _r14_bar.unlink()
+        _r14_bar.mkdir()
+        try:
+            _r15_dir.append((_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                             _r14_bar.is_dir(), _r15_tmps()))
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = type(exc).__name__
+            _r15_dir.append((_r15_raised, _r14_bar.is_dir(), _r15_tmps()))
+        finally:
+            if _r14_bar.is_dir():
+                _r14_bar.rmdir()
+        _r15_dir.append((_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                         json.loads(_r14_bar.read_text(encoding="utf-8")).get("active"),
+                         _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))))
+        check("barrier/directory-not-replaced-no-temp-left-removal-clears", tuple(_r15_dir),
+              (("allow", True, []), ("IsADirectoryError", True, []), ("allow", False, "allow")))
+        # ROUND 15, THE WRITER REMOVES ONLY ITS OWN TEMPORARY FILE: (a) an open seam whose context exit
+        # closes the real file and then raises EIO (a close error) must leave the seeded barrier
+        # byte-identical and no temporary file (red when the cleanup does not cover the with block's exit);
+        # (b) with os.urandom pinned so the temporary name is known, a file already at that name (not
+        # created by this call) makes the "x" open raise FileExistsError, and that file must keep its
+        # bytes (red when the helper unlinks a temporary name it did not create).
+        _r15_tmp = []
+        _r15_real_open = open
+
+        class _R15CloseFails:
+            def __init__(self, fh):
+                self.fh = fh
+
+            def __enter__(self):
+                return self.fh.__enter__()
+
+            def __exit__(self, *exc):
+                self.fh.__exit__(*exc)
+                raise OSError(5, "injected close EIO")
+
+        def _r15_open(path, *a, **k):
+            return _R15CloseFails(_r15_real_open(path, *a, **k))
+        _r14_bar.write_text(_r14_seed, encoding="utf-8")
+        aiqt_hooks.open = _r15_open
+        try:
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = "raised errno " + str(exc.errno)
+        finally:
+            del aiqt_hooks.open
+        _r15_tmp.append((_r15_raised,) + _r14_left())
+        _r15_urandom = os.urandom
+        _r15_foreign = Path("{}.{}.{}.tmp".format(_r14_bar, os.getpid(), "00" * 8))
+        _r15_foreign.write_text("foreign", encoding="utf-8")
+        os.urandom = lambda n: bytes(n)
+        try:
+            try:
+                aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                   warned=False))
+                _r15_raised = "returned"
+            except OSError as exc:
+                _r15_raised = type(exc).__name__
+        finally:
+            os.urandom = _r15_urandom
+        _r15_tmp.append((_r15_raised, _r14_bar.read_text(encoding="utf-8") == _r14_seed,
+                         _r15_foreign.is_file() and _r15_foreign.read_text(encoding="utf-8") == "foreign"))
+        if _r15_foreign.is_file():
+            _r15_foreign.unlink()
+        _r15_tmp.append(_r14_left()[1])
+        check("barrier/close-error-removes-own-temp-never-foreign-temp", tuple(_r15_tmp),
+              (("raised errno 5", True, []), ("FileExistsError", True, True), []))
+        # ROUND 15, A STATE DIRECTORY PATH THROUGH A REGULAR FILE: with the state directory resolved under
+        # a regular file, the barrier's open raises NotADirectoryError, which reads as an absent barrier:
+        # the mutation is silent with no note (red when NotADirectoryError reads as armed).
+        _r15_file = rsd / "r15-not-a-directory"
+        _r15_file.write_text("x", encoding="utf-8")
+        _r15_sd = aiqt_hooks._orch_state_dir_for_root
+        aiqt_hooks._orch_state_dir_for_root = lambda root: os.path.join(str(_r15_file), "state")
+        try:
+            _r15_res = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+        finally:
+            aiqt_hooks._orch_state_dir_for_root = _r15_sd
+            _r15_file.unlink()
+        check("barrier/state-dir-not-a-directory-reads-absent", (_verdict(_r15_res), _r14_msg(_r15_res)),
+              ("allow", ""))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",

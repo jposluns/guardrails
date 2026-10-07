@@ -394,6 +394,9 @@ expected-check-ids = [
   "barrier/record-write-stays-silent",
   "barrier/partial-write-leaves-previous-barrier-byte-identical",
   "barrier/malformed-reads-armed-every-call-clean-audit-clears",
+  "barrier/directory-not-replaced-no-temp-left-removal-clears",
+  "barrier/close-error-removes-own-temp-never-foreign-temp",
+  "barrier/state-dir-not-a-directory-reads-absent",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",

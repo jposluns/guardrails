@@ -108,13 +108,21 @@ the doctor and the resume audit report and arm from it):
   directory, as with that regular file, the warning also names the forced-exit log as unreadable). The
   PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
   for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
-  reads an absent barrier file as clear, and one that exists but cannot be read or parsed, or is not a
-  well-formed barrier (a boolean `active` and a list of string `findings`), as armed: each mutation
+  reads an absent barrier file as clear. A barrier is well-formed only when it is a JSON object whose
+  keys are exactly a boolean `active` and a list of string `findings` (both required; a missing
+  `findings` is malformed, never read as an empty list), plus an optional boolean `warned` and an
+  optional string `ts`. One that exists but cannot be read or parsed for any reason (including a
+  `RecursionError` from deeply nested JSON), or is not well-formed, reads as armed: each mutation
   outside the allowlist then surfaces a note naming the file as unreadable (not once per arming, since
   there is no readable `warned` flag to record), and during the bake that note blocks nothing. It clears
   when `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file, or when
   the user corrects or removes it (the state directory is on the allowlist); where the state directory
   cannot be searched the replace fails too, and the note persists until its permissions are restored.
+  Neither audit can replace a directory at the barrier path (the rename fails with
+  `IsADirectoryError`), so for a directory the note says to remove the directory, after which a clean
+  audit clears the barrier. A writer removes the temporary file it created when any later step fails
+  (writing, closing or renaming it) and never removes a temporary name it did not create; a process
+  killed between creating and renaming it leaves that temporary file beside the barrier file.
   `tools/orch_doctor.py --resume-audit` does not ignore a write error: its run ends with the error, and
   the previous barrier file is left unchanged. The barrier does not record the
   mode, so the two writers agree only when they run with the same value: a doctor run without the
