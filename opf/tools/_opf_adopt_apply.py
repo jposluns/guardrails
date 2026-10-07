@@ -6709,15 +6709,32 @@ def _self_test_checks():
             skipped.append((name, no_census))
     else:
         import dis
+        import errno
+        import fcntl
+
+        def _fd_ident(fd):
+            """What `fd` names now (st_dev, st_ino, file type, st_rdev, access mode and status flags), or
+            None when it is OBSERVED closed (EBADF); any other read failure is cannot-evaluate, raised
+            naming `fd`, never read as a closed descriptor (round 6)."""
+            try:
+                st = _real_fstat(fd)
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            except OSError as exc:
+                if exc.errno == errno.EBADF:
+                    return None
+                raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+            return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
 
         def _fds_open():
+            """Every descriptor open now, as (number, identity) pairs (round 6, the class sweep's census
+            form): a number closed and reopened on another file, or with other flags, is a new pair, so a
+            leak at a reused number is seen. Limit (disclosed): one reopened on the same file with the same
+            flags is the same pair."""
             out = set()
             for fd_name in os.listdir("/proc/self/fd"):
-                try:
-                    _real_fstat(int(fd_name))
-                except OSError:
-                    continue
-                out.add(int(fd_name))
+                identity = _fd_ident(int(fd_name))
+                if identity is not None:
+                    out.add((int(fd_name), identity))
             return out
 
         def _unbound_returns(code):
@@ -6740,6 +6757,7 @@ def _self_test_checks():
             guard_r, guard_w = os.pipe()
             guard_st = _real_fstat(guard_r)
             guard_id = (guard_st.st_dev, guard_st.st_ino)
+            guard_ident = _fd_ident(guard_r)
             guarded, doubles = set(), []
 
             def ledger_close(fd):
@@ -6788,7 +6806,8 @@ def _self_test_checks():
                         outcome = "refused"
                     finally:
                         sys.settrace(prior_trace)
-                leaked = _fds_open() - baseline - guarded
+                # a guarded number (dup2'd onto the guard pipe) is excluded only while it names that pipe
+                leaked = _fds_open() - baseline - set((fd, guard_ident) for fd in guarded)
             finally:
                 _close_held([guard_w, guard_r] + sorted(guarded, reverse=True))
             return fired, outcome, sorted(doubles), sorted(leaked)
@@ -6931,7 +6950,7 @@ def _self_test_checks():
                 leaked = _fds_open() - baseline
             finally:
                 _close_held(list(popped))   # a copy: the caller reads popped
-            return raised, popped, after, sorted(leaked)
+            return raised, popped, after, sorted(fd for fd, _identity in leaked)
         for name, targets, kind in final_close_legs:
             control = got = None
             committed = None
@@ -8303,7 +8322,7 @@ def _self_test_checks():
                     _close_held(list(popped))   # a copy: the caller reads popped
             finally:
                 os.close(root_fd)
-            return raised, popped, after, sorted(leaked)
+            return raised, popped, after, sorted(fd for fd, _identity in leaked)
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             saved_umask = os.umask(0o022)
             control = got = None
@@ -12034,6 +12053,82 @@ def _st_rendering(exc):
     return " ".join(parts)
 
 
+# The builtin classes a close-site name may resolve to (the class sweep's close_site_classes): an explicit
+# roster keyed by each class's own name, never a dynamic builtins lookup (round 6). The plain types are
+# here because an isinstance site names them; they resolve and are dropped (not exceptions). A name that
+# resolves neither in its module nor here, and is bound nowhere in that module, fails the sweep closed.
+_SITE_BUILTIN_CLASSES = dict((cls.__name__, cls) for cls in (
+    ArithmeticError, AssertionError, AttributeError, BaseException, BlockingIOError, BrokenPipeError,
+    BufferError, ChildProcessError, ConnectionAbortedError, ConnectionError, ConnectionRefusedError,
+    ConnectionResetError, EOFError, Exception, FileExistsError, FileNotFoundError, FloatingPointError,
+    GeneratorExit, ImportError, IndentationError, IndexError, InterruptedError, IsADirectoryError, KeyError,
+    KeyboardInterrupt, LookupError, MemoryError, ModuleNotFoundError, NameError, NotADirectoryError,
+    NotImplementedError, OSError, OverflowError, PermissionError, ProcessLookupError, RecursionError,
+    ReferenceError, RuntimeError, StopAsyncIteration, StopIteration, SyntaxError, SystemError, SystemExit,
+    TabError, TimeoutError, TypeError, UnboundLocalError, UnicodeDecodeError, UnicodeEncodeError,
+    UnicodeError, UnicodeTranslateError, ValueError, ZeroDivisionError, Warning, UserWarning,
+    DeprecationWarning, RuntimeWarning, ResourceWarning,
+    bool, bytearray, bytes, complex, dict, float, frozenset, int, list, memoryview, object, range, set,
+    str, tuple, type))
+
+
+def _site_classes_in(tree, namespace, where, unknown):
+    """The exception classes named at each raise, except, isinstance or issubclass site of the parsed
+    module `tree` (its self-test functions excluded), each name resolved in `namespace` (the module's),
+    then in _SITE_BUILTIN_CLASSES. A name that resolves in neither and is bound nowhere in `tree` (a local
+    value such as the `exc` of `raise exc` is bound) is appended to `unknown` as (where, name, line)."""
+    import ast
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+    found = set()
+    todo = [tree]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name:
+            continue
+        named = []
+        if isinstance(node, ast.ExceptHandler) and node.type is not None:
+            named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+        elif isinstance(node, ast.Raise) and node.exc is not None:
+            named = [node.exc.func if isinstance(node.exc, ast.Call) else node.exc]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 2 \
+                and node.func.id in ("isinstance", "issubclass"):
+            named = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
+        for expr in named:
+            chain = []
+            while isinstance(expr, ast.Attribute):
+                chain.append(expr.attr)
+                expr = expr.value
+            if not isinstance(expr, ast.Name):
+                continue
+            if expr.id in namespace:
+                obj = namespace[expr.id]
+            elif expr.id in _SITE_BUILTIN_CLASSES:
+                obj = _SITE_BUILTIN_CLASSES[expr.id]
+            else:
+                if expr.id not in bound:
+                    unknown.append((where, expr.id, expr.lineno))
+                continue
+            for attr in reversed(chain):
+                obj = getattr(obj, attr, None)
+            if isinstance(obj, type) and issubclass(obj, BaseException):
+                found.add(obj)
+        todo.extend(ast.iter_child_nodes(node))
+    return found
+
+
 # The checks the close-fault class sweep child reports, in the order it runs them.
 _CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
                        "close-class-every-close-event-named-or-raised",
@@ -12044,7 +12139,10 @@ _CLASS_SWEEP_CHECKS = ("class-run-leaves-a-foreign-thread-descriptor-open",
                        "class-run-reclaims-only-at-disclosed-windows",
                        "class-run-census-number-reuse-after-foreign-close-judged",
                        "class-run-census-baseline-close-reopen-judged",
-                       "class-run-reclaims-caller-leak-at-window-refused")
+                       "class-run-reclaims-caller-leak-at-window-refused",
+                       "class-run-reclaims-stale-held-after-close-refused",
+                       "class-run-census-read-failure-cannot-evaluate",
+                       "close-class-resolver-explicit-and-fails-closed")
 _CLASS_SWEEP_FORMAT = "opf.adopt-apply.class-sweep/v1"
 
 
@@ -12107,6 +12205,7 @@ def _close_class_sweep_checks():
     _CLASS_SWEEP_CHECKS order."""
     import errno
     import fcntl
+    import itertools
     import tempfile
     from unittest import mock
     rows = []
@@ -12129,19 +12228,27 @@ def _close_class_sweep_checks():
         finally:
             _journal._close_fd_quietly(jr_fd)
 
+    class _CensusUnreadable(RuntimeError):
+        """A descriptor census that cannot be evaluated: a descriptor's identity could not be read."""
+
     def _fd_identity(fd):
         """The identity of what `fd` names now, read with no side effect (fstat and F_GETFL): (st_dev,
-        st_ino, file type, st_rdev, access mode and status flags), or None when `fd` is not open."""
+        st_ino, file type, st_rdev, access mode and status flags), or None when `fd` is OBSERVED closed
+        (EBADF). Any other read failure is cannot-evaluate (_CensusUnreadable naming `fd`), never read as
+        a closed descriptor (round 6)."""
         try:
             st = _real_fstat(fd)
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        except OSError:
-            return None
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return None
+            raise _CensusUnreadable("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
         return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
 
     def _fd_census():
         """Every descriptor open now, as (number, identity) pairs: a number closed and reopened on another
-        file, or with other flags, is a new pair, never the one open before."""
+        file, or with other flags, is a new pair, never the one open before. A descriptor whose identity
+        cannot be read raises _CensusUnreadable; only one observed closed (the listing's own) is left out."""
         out = set()
         for fd_name in os.listdir("/proc/self/fd"):
             identity = _fd_identity(int(fd_name))
@@ -12170,7 +12277,6 @@ def _close_class_sweep_checks():
     # unreadable, cannot-evaluate, not reached). The probe runs make fsync a no-op (no close event
     # depends on it, re-proved below by equal event counts) so the full set fits a self-test run.
     import ast
-    import builtins
     import inspect
     import warnings
     real_acquire_c, real_apply_c = _journal.acquire_lock, _journal.apply_ops
@@ -12226,20 +12332,29 @@ def _close_class_sweep_checks():
         name, compose_c, patches = scenario
         under = plan.get("under")
         # Attribution only, never ownership: the code that opened each descriptor os.open, os.dup or
-        # os.pipe returns while the run's patches stand, with its identity (_fd_identity) then, dropped
-        # when os.close is called on it. What the run leaves open is read from the census (below), so a
-        # descriptor opened around these patches is still counted, as unattributed.
+        # os.pipe returns while the run's patches stand, with its identity (_fd_identity) then and a
+        # serial distinct for every open (its lifetime), dropped when os.close is called on it. What the
+        # run leaves open is read from the census (below), so a descriptor opened around these patches is
+        # still counted, as unattributed.
         opened = {}
-        # (number, identity) of the descriptor a disclosed window's own frame held (window_held_locals)
-        # when an injected exception fired at a close beneath that frame: the one descriptor that
-        # window's parent close abandons, so the one a window leak may be.
+        # (number, open serial) of the descriptor a disclosed window's own frame held
+        # (window_held_locals) when an injected exception fired at a close beneath that frame: the one
+        # descriptor that window's parent close abandons, so the one a window leak may be. The admission
+        # is that descriptor's lifetime alone (round 6): it expires when os.close is called on the number,
+        # and a later open of the number, even on the same file with the same flags, has another serial.
         held = set()
+        serials, census_faults = itertools.count(1), []
         real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
 
         def note(*fds):
             opener = sys._getframe(2).f_code
             for fd in fds:
-                opened[fd] = (_fd_identity(fd), opener)
+                try:
+                    identity = _fd_identity(fd)
+                except _CensusUnreadable as exc:    # judged after the run, never raised into its code
+                    census_faults.append(exc)
+                    identity = None
+                opened[fd] = (identity, opener, next(serials))
             return fds
 
         def noted_open(*args, **kwargs):
@@ -12257,6 +12372,7 @@ def _close_class_sweep_checks():
 
             def close_then_raise(fd):
                 opened.pop(fd, None)
+                held.difference_update(set(pair for pair in held if pair[0] == fd))
                 real_close_c(fd)
                 if under is not None:
                     frame = sys._getframe(1)
@@ -12278,7 +12394,7 @@ def _close_class_sweep_checks():
                         value = frame.f_locals.get(window_held_locals[frame.f_code]) \
                             if frame.f_code in window_held_locals else None
                         if type(value) is int and value in opened and opened[value][1] is frame.f_code:
-                            held.add((value, opened[value][0]))
+                            held.add((value, opened[value][2]))
                         frame = frame.f_back
                     raise exc
             raised = None
@@ -12303,13 +12419,19 @@ def _close_class_sweep_checks():
         # at an injected fault), the opener None (unattributed) when the number no longer names what that
         # opener opened, so a leak is judged, never hidden: a number closed and reused (a baseline's, or
         # one the fixture has closed) is a new pair. The check after the sweeps admits only the disclosed
-        # windows. Census limit (disclosed): a baseline descriptor closed and its number reopened on the
-        # same file with the same flags is the same pair, so not seen. None is closed here; the child's
-        # exit releases them all.
+        # windows, and a window's admission only for the descriptor lifetime (open serial) its frame held.
+        # Census limit (disclosed): a baseline descriptor closed and its number reopened on the same file
+        # with the same flags is the same pair, so not seen. None is closed here; the child's exit
+        # releases them all. An identity read failure (here, or at an open the run made) is
+        # cannot-evaluate: _CensusUnreadable is raised, failing the sweep, never an absent descriptor.
+        census_after = _fd_census()
+        if census_faults:
+            raise census_faults[0]
         left = []
-        for fd, identity in sorted(_fd_census() - census_before - foreign_live):
-            was, opener = opened.get(fd, (None, None))
-            left.append((fd, opener if identity == was else None, (fd, identity) in held))
+        for fd, identity in sorted(census_after - census_before - foreign_live):
+            was, opener, serial = opened.get(fd, (None, None, None))
+            same = was is not None and identity == was
+            left.append((fd, opener if same else None, same and (fd, serial) in held))
         if left:
             (class_reclaims if into is None else into).append(
                 (name, tuple(type(exc) for exc, _quiet in fired), tuple(left)))
@@ -12318,41 +12440,19 @@ def _close_class_sweep_checks():
     def class_named(exc, raised):
         return raised is exc or (raised is not None and str(exc.args[-1]) in rendering(raised))
 
-    def close_site_classes(module_names):
+    def close_site_classes(module_names, unknown):
         """Every exception class named at a raise, an except or an isinstance site of each module in
         `module_names` that lives beside this one (its self-test functions excluded), resolved in that
-        module's namespace: the classes a close-site path can raise or a handler on it can read."""
+        module's namespace, then through _SITE_BUILTIN_CLASSES (never a dynamic builtins lookup): the
+        classes a close-site path can raise or a handler on it can read. A name neither resolves nor is
+        bound in its module is appended to `unknown` as (module, name, line), and fails the sweep."""
         found = set()
         here = os.path.dirname(os.path.abspath(__file__))
         for module_name in sorted(n for n in module_names if n in sys.modules):
             module = sys.modules[module_name]
             if os.path.dirname(os.path.abspath(getattr(module, "__file__", None) or "/")) != here:
                 continue
-            todo = [ast.parse(inspect.getsource(module))]
-            while todo:
-                node = todo.pop()
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name:
-                    continue
-                named = []
-                if isinstance(node, ast.ExceptHandler) and node.type is not None:
-                    named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
-                elif isinstance(node, ast.Raise) and node.exc is not None:
-                    named = [node.exc.func if isinstance(node.exc, ast.Call) else node.exc]
-                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 2 \
-                        and node.func.id in ("isinstance", "issubclass"):
-                    named = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
-                for expr in named:
-                    chain = []
-                    while isinstance(expr, ast.Attribute):
-                        chain.append(expr.attr)
-                        expr = expr.value
-                    if isinstance(expr, ast.Name):
-                        obj = vars(module).get(expr.id, getattr(builtins, expr.id, None))
-                        for attr in reversed(chain):
-                            obj = getattr(obj, attr, None)
-                        if isinstance(obj, type) and issubclass(obj, BaseException):
-                            found.add(obj)
-                todo.extend(ast.iter_child_nodes(node))
+            found |= _site_classes_in(ast.parse(inspect.getsource(module)), vars(module), module_name, unknown)
         return found
 
     def class_maker(cls, said):
@@ -12370,7 +12470,7 @@ def _close_class_sweep_checks():
             if made.args and said in str(made.args[-1]):
                 return made
         return None
-    class_sites, class_counts = set(), []
+    class_sites, class_counts, class_unknown = set(), [], []
     for scenario in class_scenarios:
         class_counts.append((class_run(scenario, dict(), class_sites)[0],
                              class_run(scenario, dict(fast=True))[0]))
@@ -12404,7 +12504,8 @@ def _close_class_sweep_checks():
     check("class-run-leaves-a-foreign-thread-descriptor-open",
           foreign_raised is None and len(foreign) == 1 and foreign_kept == [(foreign[0][0], True)],
           observed=(foreign_raised, foreign_kept))
-    class_set = sorted(close_site_classes(class_sites) | {_InjectedCloseFault, _InjectedCloseInterrupt},
+    class_set = sorted(close_site_classes(class_sites, class_unknown)
+                       | {_InjectedCloseFault, _InjectedCloseInterrupt},
                        key=lambda cls: (cls.__module__, cls.__qualname__))
     class_unmade = [cls.__qualname__ for cls in class_set if class_maker(cls, "probe") is None]
     class_bad, class_runs = [], 0
@@ -12424,10 +12525,11 @@ def _close_class_sweep_checks():
     check("close-class-every-close-event-named-or-raised",
           all(total == fast_total for total, fast_total in class_counts) and not class_unmade
           and {"StoreError", "FileNotFoundError", "JournalError", "OSError", "KeyError"} <= class_names
-          and class_runs == sum(total for total, _fast in class_counts) * len(class_set) and not class_bad,
-          observed="counts={} classes={} unmade={} runs={} unnamed (scenario, class): events={!r}; first "
-          "(scenario, event, injected, raised)={!r}".format(
-              class_counts, sorted(class_names), class_unmade, class_runs,
+          and class_runs == sum(total for total, _fast in class_counts) * len(class_set) and not class_bad
+          and not class_unknown,
+          observed="counts={} classes={} unmade={} unknown names={!r} runs={} unnamed (scenario, class): "
+          "events={!r}; first (scenario, event, injected, raised)={!r}".format(
+              class_counts, sorted(class_names), class_unmade, class_unknown, class_runs,
               sorted({(sc, inj.split("(")[0]): [ev for sc2, ev, inj2, _r in class_bad
                                                 if sc2 == sc and inj2.split("(")[0] == inj.split("(")[0]]
                       for sc, _ev, inj, _r in class_bad}.items()), class_bad[:8]))
@@ -12617,6 +12719,82 @@ def _close_class_sweep_checks():
           and [where for _sc, _cls, where in leak_bad] == ["_journal.py:_open_dir_contained"],
           observed=(leak_total, leak_seen, [repr(exc) for exc, _quiet in leak_fired], leak_left,
                     sorted(leak_bad.items())))
+    # Round 6, a window's admission is one descriptor lifetime (the STALE_HELD reproduction): an injected
+    # fault at the first _open_dir_contained parent close is caught by its caller, which closes the
+    # abandoned descriptor, calls the window again on the same directory (succeeding, at the same number
+    # on the same file with the same flags) and drops what it returns. Required to FAIL the judge for
+    # that dropped descriptor: red against a held admission kept past the close of its descriptor, or
+    # keyed by (number, identity) alone.
+    stale_seen = []
+
+    def open_dir_then_stale(root_fd, relpath):
+        if not stale_seen:
+            before = _fd_census()
+            try:
+                real_open_dir_c(root_fd, relpath)
+            except _InjectedCloseFault:
+                abandoned = sorted(_fd_census() - before)
+                for fd, _identity in abandoned:
+                    os.close(fd)
+                again = real_open_dir_c(root_fd, relpath)     # returned whole, dropped here
+                stale_seen.append((abandoned, (again, _fd_identity(again))))
+        return real_open_dir_c(root_fd, relpath)
+    stale_rows = []
+    _n, stale_fired, stale_raised = class_run(
+        ("stale-held", None, (("_open_dir_contained", open_dir_then_stale),)),
+        dict(((1, lambda: _InjectedCloseFault("STALE-HELD")), ("under", leak_under))), into=stale_rows)
+    _tally, stale_bad = reclaim_judge(stale_rows)
+    stale_left = sorted((fd, opener is leak_under, at_window)
+                        for _sc, _inj, left in stale_rows for fd, opener, at_window in left)
+    check("class-run-reclaims-stale-held-after-close-refused",
+          stale_raised is None and len(stale_fired) == 1 and len(stale_seen) == 1
+          and stale_seen[0][0] == [stale_seen[0][1]] and stale_left == [(stale_seen[0][1][0], True, False)]
+          and list(stale_bad.values()) == [1]
+          and [where for _sc, _cls, where in stale_bad] == ["_journal.py:_open_dir_contained"],
+          observed=(stale_raised, [repr(exc) for exc, _quiet in stale_fired], stale_seen, stale_left,
+                    sorted(stale_bad.items())))
+    # Round 6, an identity the census cannot read is cannot-evaluate, never an absent descriptor: with
+    # F_GETFL failing (EIO) on one open descriptor, _fd_census raises _CensusUnreadable naming it, and so
+    # does class_run (its census), while a descriptor observed closed (EBADF) reads as absent. Red against
+    # a census that reads any OSError as a closed descriptor.
+    census_fd = os.open(os.devnull, os.O_RDONLY)
+    real_fcntl = fcntl.fcntl
+
+    def fcntl_eio(fd, *args):
+        if fd == census_fd:
+            raise OSError(errno.EIO, "census read failure")
+        return real_fcntl(fd, *args)
+    census_got = []
+    try:
+        with mock.patch.object(fcntl, "fcntl", fcntl_eio):
+            for probe in (_fd_census, lambda: class_run(class_scenarios[0], dict(), into=[])):
+                try:
+                    census_got.append(("returned", probe()))
+                except _CensusUnreadable as exc:
+                    census_got.append(("cannot-evaluate", str(exc)))
+    finally:
+        os.close(census_fd)
+    census_closed = _fd_identity(census_fd)
+    named = "descriptor {}:".format(census_fd)
+    check("class-run-census-read-failure-cannot-evaluate",
+          len(census_got) == 2 and census_closed is None
+          and all(kind == "cannot-evaluate" and named in said and "census read failure" in said
+                  for kind, said in census_got),
+          observed=(census_fd, census_got, census_closed))
+    # Round 6, close_site_classes resolves names through the explicit _SITE_BUILTIN_CLASSES roster: each
+    # entry is the builtin of its own name (equivalent to the builtins lookup it replaced), a name bound in
+    # the module (a local value) is skipped, and a name that resolves nowhere and is bound nowhere is
+    # reported unknown, failing the sweep (red against an unknown name read as no class).
+    roster_bad = sorted(name for name, cls in _SITE_BUILTIN_CLASSES.items()
+                        if not (isinstance(cls, type) and cls.__name__ == name and cls.__module__ == "builtins"))
+    probe_unknown = []
+    probe_found = _site_classes_in(ast.parse(
+        "def f(x):\n    try:\n        g(x)\n    except (OSError, KeyError) as exc:\n        raise exc\n"
+        "    if isinstance(x, int):\n        raise NoSuchProbeError('probe')\n"), {}, "probe", probe_unknown)
+    check("close-class-resolver-explicit-and-fails-closed",
+          not roster_bad and probe_found == {OSError, KeyError}
+          and probe_unknown == [("probe", "NoSuchProbeError", 7)] and not class_unknown,
+          observed=(roster_bad, sorted(cls.__name__ for cls in probe_found), probe_unknown, class_unknown))
     return rows
 
 

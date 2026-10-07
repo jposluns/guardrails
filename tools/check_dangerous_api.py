@@ -104,8 +104,8 @@ a context, is a call of a verifying constructor); a name that may also
 hold an assignment, a parameter or any other value the scan cannot name, an unbound name, and
 an expression prove nothing, so they are findings. A reviewed site is admitted only by an
 ALLOWLIST entry (path, enclosing qualname, kind, exact count, reason); an entry whose count no
-longer matches is itself a finding. A site is counted by its line and column, so two sites on
-one line count twice.
+longer matches is itself a finding. A site is counted by its start and end position (line and
+column each), so two sites on one line count twice, chained calls (x.f(a).f(b)) among them.
 
 Fail closed: each file is decoded as Python decodes it (tokenize.detect_encoding, so a BOM and
 a PEP 263 coding cookie are honoured) and a cookie other than utf-8 is cannot-evaluate, since
@@ -295,7 +295,8 @@ CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", 
           "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
           "shell-subprocess", "shell-always", "code-ref", "code-loader",
           "fail-encoding", "fail-read", "fail-parse", "fail-nonregular", "fail-symlink",
-          "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape", "site-column")
+          "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape", "site-column",
+          "site-end")
 
 # The reviewed allowlist: (path, enclosing qualname, kind, exact count, reason). Every entry
 # names a current legitimate site and why it is safe; a count that no longer matches the
@@ -371,11 +372,6 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_watchdog_completion_case.resolve_exception_classes", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in the"
      " repository's own _opf_emit source and asserts it is an exception class; never called"),
-    ("opf/tools/_opf_adopt_apply.py", "_close_class_sweep_checks.close_site_classes", "code", 1,
-     "static analysis: getattr(builtins, name), the same reviewed form as"
-     " _watchdog_completion_case.resolve_exception_classes, resolves an exception name read from"
-     " the repository's own module source and keeps it only when it is an exception class; never"
-     " called"),
     ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
      "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
      " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"
@@ -756,9 +752,12 @@ class _Scanner(ast.NodeVisitor):
 
     def add(self, node, kind, check, detail):
         qual = ".".join(self.qual) if self.qual else "<module>"
-        # The column keeps two sites on one line apart, so each call site counts once.
+        # The column keeps two sites on one line apart, and the end position two chained calls
+        # that start at one place (x.f(a).f(b)), so each call site counts once.
         column = getattr(node, "col_offset", 0) if self.on("site-column") else 0
-        self.findings.append((getattr(node, "lineno", 0), column, qual, kind, check, detail))
+        end = (getattr(node, "end_lineno", 0), getattr(node, "end_col_offset", 0)) \
+            if self.on("site-end") and self.on("site-column") else (0, 0)
+        self.findings.append((getattr(node, "lineno", 0), column, qual, kind, check, detail) + end)
 
     def candidates(self, name, fallback=True):
         """Every binding the bare name may hold at this point (a dotted import target, or None
@@ -1335,12 +1334,12 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
             raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
         hits.extend((rel,) + item for item in found)
     counts = {}
-    for rel, _line, _column, qual, kind, _check, _detail in hits:
+    for rel, _line, _column, qual, kind, _check, _detail, _end_line, _end_column in hits:
         counts[(rel, qual, kind)] = counts.get((rel, qual, kind), 0) + 1
     allowed = {entry[:3]: entry[3] for entry in allowlist}
     stale_off = "allowlist-stale" in disabled
     findings = []
-    for rel, line, _column, qual, kind, check, detail in hits:
+    for rel, line, _column, qual, kind, check, detail, _end_line, _end_column in hits:
         key = (rel, qual, kind)
         if key in allowed and (stale_off or counts[key] == allowed[key]):
             continue
@@ -1997,6 +1996,7 @@ _GBK = (b"# -*- coding: gbk -*-\ns = \x22\xe3\x81\x82\x5c\x22; exec(\x27print(1+
 CE = "cannot-evaluate"
 _TWO_ON_ONE_LINE = (b"def f(spec, a, b):\n"
                     b"    spec.loader.exec_module(a); spec.loader.exec_module(b)\n")
+_TWO_CHAINED = b"def f(x, a, b):\n    x.exec_module(a).exec_module(b)\n"
 # Tree vectors: (name, files, allowlist, setup, expected, check, outcome without the check).
 TREE_VECTORS = (
     # Parses, but nests deeper than the visitor can recurse: RecursionError is cannot-evaluate.
@@ -2047,6 +2047,9 @@ TREE_VECTORS = (
     # allowance leaves both reported plus the count drift.
     ("two sites on one line", {"tools/a.py": _TWO_ON_ONE_LINE},
      (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-column", 0),
+    # Round 6: two chained calls start at one position, so the end position keeps them apart.
+    ("two chained sites on one line", {"tools/a.py": _TWO_CHAINED},
+     (("tools/a.py", "f", "code", 1, _REASON),), None, 3, "site-end", 0),
     ("allowlist entry without reason", {"tools/a.py": _SITE}, (_ENTRY[:4] + (" ",),),
      None, CE, "allowlist-shape", 0),
     ("allowlist boolean count", {"tools/a.py": _SITE}, (_ENTRY[:3] + (True, _REASON),),
