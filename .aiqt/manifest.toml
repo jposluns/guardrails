@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "da9a87899d0197be937a1d3e4911d3c3eacda4d8f69235f2d5b302f14b0d0ffe"
+tree-sha256 = "aef5aa78e64b56945ec0304bd54c00b14787a2a8efdec9909f44ead1ba7fc1d9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 258804
-sha256 = "c361fbb4f892ce25c7904c9c71ae5befd62773c2ffe6bc66fdf93cf331923fb5"
+bytes = 259582
+sha256 = "fdd1ebfd9d8569c89a47bef1ad8badacd1d780af168768cd7999e4d14b42eff1"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -796,8 +796,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 352981
-sha256 = "e1af1edef3e212ac4186dc2f4fbd4d378cff886506fc1b8af69b8d86dc9b21fb"
+bytes = 354537
+sha256 = "9659061c324ed9ba961c7d0799875eea419930a17909e13ba640f6b1b85e42e8"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2311,8 +2311,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 206636
-sha256 = "11f2e53bc4d89f3ae6fc0b4a11e1eafb6280c26468cbcf7c901c1f739df93466"
+bytes = 207414
+sha256 = "42d231c9537bf11aab94bc5dc03977a95dbcca9345a73646347bb9207edba950"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 256140
-sha256 = "86a13dfd70482b093cfeead4d981ef3b75f378ed61869db228f86e6a6bcfd484"
+bytes = 256918
+sha256 = "17212fe0f32afc83ed67553512f6c34cfc4f8f0b7635f41df5cdf9ad5e4a9849"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3226,8 +3226,8 @@ sha256 = "8200fb8c8dbf53ee0a74f0a3c5ac1c0ea00ec84bf147cfa836b8f3f32fefe2d8"
 
 [[sources]]
 path = "tools/check_brief_claims.py"
-bytes = 59671
-sha256 = "3a46817f4d646763dea9814d1dd10b383c62a629cb5e482521795bcab6e9140f"
+bytes = 86098
+sha256 = "0425ad41246b291cb46a5df2d9df203c6182444a3b09450d62ab24bcc14f1c48"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
