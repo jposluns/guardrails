@@ -11080,16 +11080,53 @@ def _orch_pending_artefact_findings(root):
     return findings
 
 
+def _orch_barrier_write(path, obj):
+    """Replace the resume barrier file atomically; the one writer of resume-barrier.json (orch_resume_audit,
+    orch_resume_barrier's warned flag, and tools/orch_doctor.py --resume-audit). It creates the state
+    directory, creates a temporary file beside the barrier with O_CREAT|O_EXCL (open mode "x": mode 0o666
+    less the umask, as open(path, "w") creates the barrier), writes the JSON, flushes and fsyncs it, then
+    os.replace()s it onto the barrier path. On any failure it unlinks the temporary file (an unlink that
+    itself fails leaves it beside the barrier, never in its place) and re-raises, so the previous barrier
+    file, armed or clear, or its absence, is left byte-identical; the caller decides what the error means."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
+    with open(tmp, "x", encoding="utf-8") as fh:
+        try:
+            json.dump(obj, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        except BaseException:
+            _orch_unlink_quiet(tmp)
+            raise
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        _orch_unlink_quiet(tmp)
+        raise
+
+
+def _orch_unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def orch_resume_audit(data):
     """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
-    clears it. Arming and clearing are best-effort: where the barrier file cannot be written (its state
-    directory cannot be created, or the file cannot be opened or written, for example XDG_STATE_HOME naming
-    a regular file), the OSError is swallowed so SessionStart never wedges, the barrier file is neither
-    written nor cleared (one an earlier run wrote keeps its state, armed or clear), and an audit with
-    findings still returns its warning naming them (where the state directory cannot be read either, as
-    with that regular file, the forced-exit probe adds its cannot-evaluate finding). Registry-scoped: silent where _orch_registry reads the
-    root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
+    clears it. Arming and clearing are best-effort and atomic (_orch_barrier_write: a temporary file
+    beside the barrier, flushed and fsynced, then os.replace): where the barrier cannot be written (its
+    state directory cannot be created, the temporary file cannot be created or written, or the replace
+    fails, for example XDG_STATE_HOME naming a regular file, or a full disk), the error is swallowed so
+    SessionStart never wedges, the temporary file is removed, the previous barrier file (armed or clear)
+    or its absence is left byte-identical, and an audit with findings still returns its warning naming
+    them (where opening the forced-exit log fails other than as not-found, because the state directory
+    cannot be searched or is not a directory, as with that regular file, the forced-exit probe adds its
+    cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
+    _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
+    does not swallow the error (its run ends with it, the previous barrier unchanged). Registry-scoped:
+    silent where _orch_registry reads the root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
     present it also arms on the truncation guard's deny at its scope check for a Bash call from the root
     (_orch_resume_audit_findings), so it is mode-sensitive: a root git resolves but the walk cannot carry
     out (one this process can enter but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
@@ -11124,12 +11161,10 @@ def orch_resume_audit(data):
     # holds; the barrier does not record the mode, so a run in the other mode can (_orch_resume_audit_findings).
     findings = _orch_resume_audit_findings(status, reg, root)
     try:
-        os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump({"active": bool(findings), "findings": findings,
-                       "ts": _orch_now().isoformat(), "warned": False}, fh)
-    except OSError:
-        pass  # a barrier that cannot arm still surfaces below; never wedge SessionStart
+        _orch_barrier_write(barrier_path, {"active": bool(findings), "findings": findings,
+                                           "ts": _orch_now().isoformat(), "warned": False})
+    except (OSError, ValueError):
+        pass  # the previous barrier is left unchanged and the warning still surfaces; never wedge SessionStart
     if findings:
         _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
@@ -11145,7 +11180,16 @@ def orch_resume_barrier(data):
     """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
-    never obstructed."""
+    never obstructed. A barrier file that is absent (its open raises FileNotFoundError or
+    NotADirectoryError) reads as clear. One that exists but cannot be read or parsed, or is not an object
+    with a boolean "active" and a list of string "findings" (a truncated or partial write by an earlier
+    writer, for example), reads as ARMED: every mutation outside the allowlist surfaces a note naming the
+    file as unreadable (there is no readable "warned" flag to record, so it is not once per arming), and
+    in BAKE that note blocks nothing, so no call is wedged. It clears where 'python3
+    tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
+    (_orch_barrier_write), or where the user corrects or removes it (the state directory is on the
+    allowlist); where the state directory cannot be searched, that replace fails as well, and the note
+    persists until its permissions are restored."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -11154,13 +11198,21 @@ def orch_resume_barrier(data):
         return _allow()
     sd = _orch_state_dir_for_root(root)
     barrier_path = os.path.join(sd, "resume-barrier.json")
+    unreadable = None
     try:
         with open(barrier_path, "r", encoding="utf-8") as fh:
             barrier = json.load(fh)
-    except (OSError, ValueError):
+    except (FileNotFoundError, NotADirectoryError):
         return _allow()
-    if not isinstance(barrier, dict) or not barrier.get("active"):
-        return _allow()
+    except (OSError, ValueError) as exc:
+        barrier, unreadable = {}, type(exc).__name__
+    if unreadable is None:
+        found = barrier.get("findings", []) if isinstance(barrier, dict) else None
+        if not (isinstance(barrier, dict) and isinstance(barrier.get("active"), bool)
+                and isinstance(found, list) and all(isinstance(f, str) for f in found)):
+            barrier, unreadable = {}, "not a barrier object"
+        elif not barrier["active"]:
+            return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     file_path = tool_input.get("file_path")
     if isinstance(file_path, str) and file_path:
@@ -11177,14 +11229,20 @@ def orch_resume_barrier(data):
             rp = os.path.realpath(p)
             if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
                 return _allow()  # the exit path (fixing the record) is always writable
+    if unreadable is not None:
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed ({}), so it is read as armed and this mutation "
+            "is outside the record surfaces. Re-run 'python3 tools/orch_doctor.py --resume-audit' to "
+            "replace it (a clean audit clears it), or correct or remove the file."
+            .format(barrier_path, unreadable))
     if barrier.get("warned"):
         return _allow()  # surface once per arming, never a nag wall
     barrier["warned"] = True
     try:
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump(barrier, fh)
-    except OSError:
-        pass
+        _orch_barrier_write(barrier_path, barrier)
+    except (OSError, ValueError):
+        pass  # the previous barrier is left unchanged; it surfaces again on the next mutation
     return _allow_note(
         "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "

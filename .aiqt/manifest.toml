@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2cfe4729960a60e42f81cd43667d9d2ce17c3316d3b5c90df264ab6cd480c2c8"
+tree-sha256 = "fd9cfb49d63b0560f2937fc851a527bfb97fca99f390420a4d7f83c203c56420"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,18 +66,18 @@ sha256 = "17979e5cdb527085cb44cdb60c968ee623e6b18245d21b1573c5444bcd585f82"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
-bytes = 27667
-sha256 = "8da2185f65d52fea22ec1445f56b698253b597a121513c98fd9b4713294d7ce6"
+bytes = 28755
+sha256 = "4071ea1c5ed848875ecdcebefc9ea3cebcd837ebf0e75260524b40e55bd22a21"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 144594
-sha256 = "20f2bf069302e5b1c70db794aeaf32937524c96976c36d6f0bdfd9f54da05591"
+bytes = 145951
+sha256 = "118d5f78c75edf79cc234f42ce203e6027b3b77471cfffd76ce6574edfb5d87f"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 789687
-sha256 = "0fcb2d08091a8734e178056e4c065a7b3aa6096bcd6958dd0cc35112d0094110"
+bytes = 793407
+sha256 = "1fa812908949542a9d083c1e5bb16649cd3b0d28207ad342542e919528b86f12"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -796,8 +796,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 358255
-sha256 = "85436b409920128fdc99ba1a823dc244087c415c97477bb7d20fe294632cea1b"
+bytes = 361408
+sha256 = "dab0ad2e62b59b1f8954818b993d198ad8a870d348e6dd932bd03946694fadf0"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2306,8 +2306,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 198287
-sha256 = "8f5fa914580ab76746b6ea4d9419bfa7e2e1a9044e7a8f1fc1093a8ea10f4eb0"
+bytes = 199644
+sha256 = "eca7af6681b8281eb00406e09b39e455e9bb3005adeb31bfcb6261492c422614"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2971,8 +2971,8 @@ sha256 = "cd7f86d1569c8138f95392a7912dab35b9817ece40d0302f47d8ff4ae25d3121"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 789687
-sha256 = "0fcb2d08091a8734e178056e4c065a7b3aa6096bcd6958dd0cc35112d0094110"
+bytes = 793407
+sha256 = "1fa812908949542a9d083c1e5bb16649cd3b0d28207ad342542e919528b86f12"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3061,8 +3061,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 246159
-sha256 = "bfbcd0f72be16c5a3fcf5ed46fe173a78afae50e41a8c7cef3e83ff8be380d27"
+bytes = 247516
+sha256 = "0bfa86c41141989b61bc2672f8384b4dd818f52b0b1a53c0e81b0c88d4de1c70"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3581,8 +3581,8 @@ sha256 = "f9db0d0389214445e76ba144772f49f206de891507e4c392e9a52ce57893a898"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 5757
-sha256 = "bd3504995a7017cb7c556be81aa2dc3dce7032a2502c8027d928f7132e81cd2b"
+bytes = 5911
+sha256 = "a81fb6f33f888c8d2582b8f7c5a294fd099470bb8222d9e7fc22dd3d83f66a1a"
 
 [[sources]]
 path = "tools/orch_preflight.py"
@@ -3611,13 +3611,13 @@ sha256 = "2721586ca547f7f8940ee4beb3409d28143649a9525972bbaf685b506cf2d070"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 618598
-sha256 = "361b78ed866f39444a6af506fcbea9a0ab723cd6bc6066b45a1774618b8cf02c"
+bytes = 619685
+sha256 = "f8a42e0d9fae7eb5efae4d749a3735e3eb7fac650ac3fc48f797d8c5cf509af4"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 43978
-sha256 = "098922f012c439e0ba93f8ae24133f4a5bf30c2fd2102ea4f524c761b53010a8"
+bytes = 44115
+sha256 = "0d4ac21fcb42152f81ec249666f209a0f0f38277b5a6840ff17972946cc06220"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3636,8 +3636,8 @@ sha256 = "7bf6d2e2970edca4f80923d9e5f57684dd2e28dc85787c46f9215f79ee217510"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 197978
-sha256 = "95c91b344d449df114de085ced0d8b080e8f46aaba99404cd031d812af194db7"
+bytes = 205395
+sha256 = "e206ecc9459fc74db8ba26277d01f780c89920adbf29ce725367706e2511e9e1"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

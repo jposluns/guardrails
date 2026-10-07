@@ -1862,8 +1862,12 @@ def _main_isolated(report_path=None):
         # barrier is removed before each call, so one an earlier call wrote cannot satisfy the row.
         # (c) Arming is best-effort: with XDG_STATE_HOME naming a regular file the barrier cannot be written,
         # yet the audit for the regular-file toplevel still warns, naming every finding the writable run
-        # named, plus the forced-exit cannot-evaluate finding for the state directory it cannot read, and no
-        # barrier file exists (red when the write error propagates or the warning drops a finding).
+        # named, plus the forced-exit cannot-evaluate finding (opening the log under a state directory that
+        # is not a directory fails other than as not found), and no barrier file exists at that path (red
+        # when the write error propagates or the warning drops a finding). It also lists every path named
+        # resume-barrier* under this self-test's temporary tree (the fixtures and the hermetic default
+        # state root) before and after that run and requires none new (red when a failed write falls back
+        # to another location under that tree; a write outside it is not watched).
         _r12_nr = tmp / "r12-noroot"
         (_r12_nr / ".aiqt").mkdir(parents=True)
         (_r12_nr / ".aiqt" / "orchestration.json").write_text("not json", encoding="utf-8")
@@ -1921,6 +1925,11 @@ def _main_isolated(report_path=None):
                 rec.get("active") if isinstance(rec, dict) else "not an object",
                 isinstance(found, list) and bool(found) and all(isinstance(f, str) and f in msg for f in found))
 
+        def _r12_barrier_names():
+            # every path named resume-barrier* under this self-test's temporary tree
+            return set(os.path.join(d, n) for d, dirs, files in os.walk(str(tmp))
+                       for n in dirs + files if n.startswith("resume-barrier"))
+
         def _r12_findings(msg):
             # the findings text of a resume-audit warning, or a marker no warning carries
             head, sep, rest = msg.partition("observed reality: ")
@@ -1969,11 +1978,13 @@ def _main_isolated(report_path=None):
                 os.environ["XDG_STATE_HOME"] = str(_r12_xdg_file)
                 try:
                     _r12_cwd, _r12_top = _r12_wt["file"]
+                    _r12_seen = _r12_barrier_names()
                     _r12_root, _r12_v, _r12_msg, _r12_bar = _r12_audit(_r12_cwd)
                     _r12_unwritable.append((
                         _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
                         _r12_v, _r12_findings(_r12_msgs["file"]) in _r12_msg,
-                        "pending forced-exit.jsonl present but unreadable" in _r12_msg, _r12_bar))
+                        "pending forced-exit.jsonl present but unreadable" in _r12_msg, _r12_bar,
+                        sorted(_r12_barrier_names() - _r12_seen)))
                 finally:
                     if _r12_xdg_old is None:
                         os.environ.pop("XDG_STATE_HOME", None)
@@ -1991,8 +2002,8 @@ def _main_isolated(report_path=None):
               ((None, "allow", ("found", None), "allow", ((None, "allow"),) * 5, 0),) * 2)
         check("resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent", tuple(_r12_wt_rows),
               (((True, "warn", (True, True)), (True, "warn", (True, True)), (True, "allow", None)),) * 2)
-        check("resume-audit/barrier-unwritable-still-warns-writes-nothing", tuple(_r12_unwritable),
-              ((True, "warn", True, True, None),) * 2)
+        check("resume-audit/barrier-unwritable-still-warns-no-barrier-under-tmp", tuple(_r12_unwritable),
+              ((True, "warn", True, True, None, []),) * 2)
         # ROUND 8, SEARCH PERMISSION DECIDES A .aiqt DIRECTORY'S PROBE (the documented attribute): mode
         # 0o100 (search only, no read) confirms the registry inside it; 0o600 (read and write, no search)
         # and 0o000 cannot be evaluated. A root run is not bound by these modes, so there the seam supplies
@@ -2412,6 +2423,105 @@ def _main_isolated(report_path=None):
               _verdict(aiqt_hooks.orch_resume_barrier(r.payload(
                   "PreToolUse", "Write", {"file_path": str(r.findings),
                                           "content": "x"}))), "allow")
+
+        # ROUND 14, ATOMIC BARRIER WRITE: an armed barrier is seeded and a json.dump seam writes the first
+        # ten characters of the barrier object, flushes, then raises ENOSPC. For an arming audit (a branch
+        # finding), a clearing audit (clean), the PreToolUse warned-flag write and a direct call of the
+        # helper the doctor uses, the seeded bytes must stay byte-identical and no temporary file may stay
+        # beside it, while the arming audit still warns and the PreToolUse call still surfaces (red when
+        # the barrier is opened for writing in place, as the truncated object then replaces the seed, or
+        # when the temporary file is left behind). A last run without the seam must replace the seeded
+        # barrier with a cleared one (red when the helper stops writing).
+        _r14_bar = rsd / "resume-barrier.json"
+        _r14_seed = json.dumps(dict(active=True, findings=["an earlier finding"], ts="seed", warned=False))
+        _r14_trunc = json.dumps(dict(active=True))[:10]
+        _r14_dump = json.dump
+
+        def _r14_partial_dump(obj, fh, *a, **k):
+            if isinstance(obj, dict) and "active" in obj and "warned" in obj:
+                fh.write(_r14_trunc)
+                fh.flush()
+                raise OSError(28, "No space left on device")
+            return _r14_dump(obj, fh, *a, **k)
+
+        def _r14_left():
+            # (seed unchanged, temporary files left beside the barrier)
+            return (_r14_bar.read_text(encoding="utf-8") == _r14_seed,
+                    sorted(n for n in os.listdir(str(rsd))
+                           if n.startswith("resume-barrier.json.") and n.endswith(".tmp")))
+
+        def _r14_msg(res):
+            if isinstance(res, tuple) and len(res) > 1 and isinstance(res[1], dict):
+                return res[1].get("systemMessage", "")
+            return ""
+        _r14_part = []
+        try:
+            for _r14_branch in ("feature/other", "main"):
+                r.handoff.write_text("Branch: " + _r14_branch + chr(10), encoding="utf-8")
+                _r14_bar.write_text(_r14_seed, encoding="utf-8")
+                json.dump = _r14_partial_dump
+                try:
+                    _r14_res = aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))
+                finally:
+                    json.dump = _r14_dump
+                _r14_part.append((_verdict(_r14_res), "feature/other" in _r14_msg(_r14_res)) + _r14_left())
+            _r14_bar.write_text(_r14_seed, encoding="utf-8")
+            json.dump = _r14_partial_dump
+            try:
+                _r14_res = aiqt_hooks.orch_resume_barrier(r.payload(
+                    "PreToolUse", "Write", dict(file_path=str(r.root / "src.py"), content="x")))
+                try:
+                    aiqt_hooks._orch_barrier_write(str(_r14_bar), dict(active=False, findings=[], ts="x",
+                                                                       warned=False))
+                    _r14_raised = "returned"
+                except OSError as exc:
+                    _r14_raised = "raised errno " + str(exc.errno)
+            finally:
+                json.dump = _r14_dump
+            _r14_part.append((_verdict(_r14_res), "an earlier finding" in _r14_msg(_r14_res)) + _r14_left())
+            _r14_part.append((_r14_raised,) + _r14_left())
+            _r14_res = aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))
+            _r14_part.append((_verdict(_r14_res), json.loads(_r14_bar.read_text(encoding="utf-8")).get("active"),
+                              _r14_left()[1]))
+        finally:
+            json.dump = _r14_dump
+            r.handoff.write_text("Branch: main" + chr(10), encoding="utf-8")
+        check("barrier/partial-write-leaves-previous-barrier-byte-identical", tuple(_r14_part),
+              (("warn", True, True, []), ("allow", False, True, []), ("warn", True, True, []),
+               ("raised errno 28", True, []), ("allow", False, [])))
+        # ROUND 14, A MALFORMED BARRIER READS ARMED: a barrier file that exists but is truncated, empty,
+        # not an object, carries a non-boolean active or a non-string finding, or is a directory (its open
+        # raises IsADirectoryError) surfaces a mutation outside the allowlist on every call, naming the file
+        # as unreadable, and leaves the file as it is, while a record write stays silent (red when it reads
+        # as absent or clear, or surfaces only once). An absent barrier stays silent, and a clean audit
+        # replaces a malformed barrier, after which the mutation is silent again (the recovery path).
+        _r14_src = dict(file_path=str(r.root / "src.py"), content="x")
+        _r14_mal = []
+        for _r14_body in (_r14_trunc, "", "[]", json.dumps(dict(active="yes", findings=[])),
+                          json.dumps(dict(active=True, findings=[1])), None):
+            if _r14_body is None:
+                _r14_bar.unlink()
+                _r14_bar.mkdir()
+            else:
+                _r14_bar.write_text(_r14_body, encoding="utf-8")
+            _r14_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r14_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+            _r14_rec = aiqt_hooks.orch_resume_barrier(r.payload(
+                "PreToolUse", "Write", dict(file_path=str(r.findings), content="x")))
+            _r14_m = _r14_msg(_r14_first)
+            _r14_mal.append((_verdict(_r14_first), _verdict(_r14_again), _verdict(_r14_rec),
+                             str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m,
+                             _r14_bar.is_dir() if _r14_body is None
+                             else _r14_bar.read_text(encoding="utf-8") == _r14_body))
+            if _r14_body is None:
+                _r14_bar.rmdir()
+        _r14_absent = _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))
+        _r14_bar.write_text(_r14_trunc, encoding="utf-8")
+        _r14_recover = (_verdict(aiqt_hooks.orch_resume_audit(r.payload("SessionStart"))),
+                        _verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))))
+        check("barrier/malformed-reads-armed-every-call-clean-audit-clears",
+              (tuple(_r14_mal), _r14_absent, _r14_recover),
+              ((("warn", "warn", "allow", True, True),) * 6, "allow", ("allow", "allow")))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
@@ -3015,8 +3125,10 @@ def _main_isolated(report_path=None):
           "run_in_background, or command, and on any stdin the dispatcher cannot parse; the ledger "
           "records launches "
           "and completions; the resume "
-          "audit arms and clears the mutation barrier on real record state (best-effort: a barrier it "
-          "cannot write is left unchanged while the warning still surfaces); the prompt stamp "
+          "audit arms and clears the mutation barrier on real record state (best-effort and atomic: a "
+          "barrier write that fails, before or after the temporary file is opened, leaves the previous "
+          "barrier byte-identical while the warning still surfaces, and a barrier file that is unreadable "
+          "or malformed reads as armed); the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
           "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
           "register gates external/foreign-lease evidence at audit cadence, holding on an unreadable "

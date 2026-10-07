@@ -14,7 +14,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import json
 import os
 from pathlib import Path
 
@@ -68,11 +67,12 @@ def main():
         # The same finding list the SessionStart resume audit writes (an unreadable registry, the truncation
         # guard's deny, the resume probes): the audit is clean only when none of them found anything.
         audit = aiqt_hooks._orch_resume_audit_findings(status, raw_reg, root)
+        # Atomic, as the SessionStart audit writes it: a failed write raises and ends this run, leaving the
+        # previous barrier byte-identical (aiqt_hooks._orch_barrier_write).
         sd = aiqt_hooks._orch_state_dir_for_root(root)
-        os.makedirs(sd, exist_ok=True)
-        with open(os.path.join(sd, "resume-barrier.json"), "w", encoding="utf-8") as fh:
-            json.dump({"active": bool(audit), "findings": audit,
-                       "ts": aiqt_hooks._orch_now().isoformat(), "warned": False}, fh)
+        aiqt_hooks._orch_barrier_write(os.path.join(sd, "resume-barrier.json"),
+                                       {"active": bool(audit), "findings": audit,
+                                        "ts": aiqt_hooks._orch_now().isoformat(), "warned": False})
         if audit:
             print("resume audit: {} finding(s); the barrier stays armed:".format(len(audit)))
             for f in audit:

@@ -287,7 +287,7 @@ expected-check-ids = [
   "trunc/union-missing-toplevel-reads-absent-strict-denies",
   "resume-audit/no-root-silent-every-mode-with-registry-on-walk",
   "resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent",
-  "resume-audit/barrier-unwritable-still-warns-writes-nothing",
+  "resume-audit/barrier-unwritable-still-warns-no-barrier-under-tmp",
   "trunc/aiqt-search-permission-decides-probe",
   "trunc/walk-recheck-realpath-fault-denies",
   "trunc/walk-recheck-open-fault-denies",
@@ -392,6 +392,8 @@ expected-check-ids = [
   "resume/future-lease-no-maxage-warns",
   "barrier/mutation-surfaces",
   "barrier/record-write-stays-silent",
+  "barrier/partial-write-leaves-previous-barrier-byte-identical",
+  "barrier/malformed-reads-armed-every-call-clean-audit-clears",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",

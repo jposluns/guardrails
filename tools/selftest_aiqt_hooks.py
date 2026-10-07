@@ -763,7 +763,8 @@ def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's;
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's two
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed);
     the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
     fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
     are selftest_orch_hooks.Fixture repos under tmp."""
@@ -807,6 +808,18 @@ def _test_note_literal_sites(failures, tmp):
     note("(nl-barrier) an armed resume barrier allows an out-of-record Write with a note",
          aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
              file_path=str(r.root / "src.py"), content="x"))), "resume barrier")
+    barrier_file = state / "resume-barrier.json"
+    malformed = "barrier file " + str(barrier_file) + " is unreadable or malformed"
+    barrier_file.write_text(json.dumps(dict(active=True, findings=["nl-finding"]))[:20], encoding="utf-8")
+    note("(nl-barrier-truncated) a truncated resume barrier reads as armed and allows an out-of-record "
+         "Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.write_text(json.dumps(["nl-not-an-object"]), encoding="utf-8")
+    note("(nl-barrier-shape) a resume barrier that is not a barrier object reads as armed and allows an "
+         "out-of-record Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
     note("(nl-ledger-unbound) a TaskOutput with no task_id is surfaced with a note",
          aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "TaskOutput", dict())), "UNBOUND")
     saved_append = aiqt_hooks._orch_append_jsonl

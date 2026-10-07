@@ -96,16 +96,27 @@ the doctor and the resume audit report and arm from it):
   it is not a directory, the registry loader's `lstat` faults, the loader reports the registry bad, and
   the audit warns and arms the barrier in both modes (as it does for a regular file named `.aiqt` at
   any root); where that root does not exist, the loader reports the registry absent and the audit stays
-  silent in both modes. Arming is best-effort, as is clearing: where the SessionStart audit cannot write
-  the barrier file (its state directory cannot be created, or the file cannot be opened or written, for
-  example `XDG_STATE_HOME` naming a regular file), it ignores the error so that SessionStart is never
-  wedged. The barrier file is then neither written nor cleared (one an earlier run wrote keeps its
-  state, armed or clear), so the PreToolUse barrier does not surface this run's findings; the session
-  still sees the SessionStart warning naming them (where the state directory cannot be read either, as
-  with that regular file, the warning also names the forced-exit log as unreadable). The PreToolUse barrier reads the barrier file only
-  where the registry loader reads the registry ok, so for a registry it reads bad an armed barrier
-  surfaces nothing there until the registry reads ok. `tools/orch_doctor.py --resume-audit` does not
-  ignore that error: its run ends with the error. The barrier does not record the
+  silent in both modes. Arming is best-effort, as is clearing, and both are atomic: each writer creates
+  a temporary file beside the barrier file, flushes and fsyncs it, then renames it onto the barrier
+  file with `os.replace`. Where the SessionStart audit cannot write the barrier (its state directory
+  cannot be created, the temporary file cannot be created or written, or the rename fails, for example
+  `XDG_STATE_HOME` naming a regular file, or a full disk), it removes the temporary file it created and
+  ignores the error so that SessionStart is never wedged. The previous barrier file, armed or clear, or
+  its absence, is then left byte-identical, so the PreToolUse barrier does not surface this run's
+  findings; the session still sees the SessionStart warning naming them (where opening the forced-exit
+  log fails other than as not found, because the state directory cannot be searched or is not a
+  directory, as with that regular file, the warning also names the forced-exit log as unreadable). The
+  PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
+  for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
+  reads an absent barrier file as clear, and one that exists but cannot be read or parsed, or is not a
+  well-formed barrier (a boolean `active` and a list of string `findings`), as armed: each mutation
+  outside the allowlist then surfaces a note naming the file as unreadable (not once per arming, since
+  there is no readable `warned` flag to record), and during the bake that note blocks nothing. It clears
+  when `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file, or when
+  the user corrects or removes it (the state directory is on the allowlist); where the state directory
+  cannot be searched the replace fails too, and the note persists until its permissions are restored.
+  `tools/orch_doctor.py --resume-audit` does not ignore a write error: its run ends with the error, and
+  the previous barrier file is left unchanged. The barrier does not record the
   mode, so the two writers agree only when they run with the same value: a doctor run without the
   variable can clear a barrier a registry-required SessionStart armed for a scope deny. Clearing it does
   not allow any Bash call: the barrier only warns, and the guard still denies on its own scope check.
