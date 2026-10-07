@@ -2270,8 +2270,16 @@ class _StCensusError(RuntimeError):
 
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file. Only EBADF reads as closed; any other read error raises _StCensusError naming
-    the descriptor, never omitting it as closed (a leak check fails closed on input it cannot read)."""
+    is reused by a different file. Each is keyed on (st_dev, st_ino, anonymous-inode kind): anonymous-inode
+    descriptors of every kind share one (st_dev, st_ino), so the kind, read from the descriptor's /proc/self/fd
+    link ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"; None for any other file), is what tells an epoll
+    descriptor from an eventfd put at its number. Residual: two anonymous-inode descriptors of the same kind
+    share every field, so one replaced at its number by another of its own kind still reads as unchanged; and
+    where /proc/self/fd does not exist (not Linux) every link read is ENOENT, so the kind is None throughout
+    and the table is keyed on (st_dev, st_ino) alone. Only EBADF on the fstat reads as closed, and only ENOENT
+    on the link read (the number has no entry: closed since its fstat) reads as no kind; any other read error
+    raises _StCensusError naming the descriptor, never omitting it as closed (a leak check fails closed on
+    input it cannot read)."""
     import errno
     table = {}
     for fd in range(1024):
@@ -2281,8 +2289,43 @@ def _st_fd_table():
             if exc.errno == errno.EBADF:
                 continue
             raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
-        table[fd] = (st.st_dev, st.st_ino)
+        try:
+            link = os.readlink("/proc/self/fd/{}".format(fd))
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+            link = ""
+        table[fd] = (st.st_dev, st.st_ino, link if link.startswith("anon_inode:") else None)
     return table
+
+
+def _st_anon_reuse(table):
+    """(detected, shared) for an anonymous-inode replacement, or None where there is no epoll or eventfd (not
+    Linux): a held epoll descriptor is in the baseline, then an eventfd is put at its number (dup2).
+    `detected` is whether `table()` reads that as a change; `shared` is whether the two have one (st_dev,
+    st_ino), where a table of those alone reads the replacement as unchanged and only the anonymous-inode
+    kind tells them apart."""
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    poll = select.epoll()
+    try:
+        held = os.dup(poll.fileno())
+    finally:
+        poll.close()
+    try:
+        before = os.fstat(held)
+        baseline = table()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+        return table() != baseline, shared
+    finally:
+        os.close(held)
 
 
 def _st_close_run(call, masking, expect, watch=True):
@@ -2716,29 +2759,34 @@ def _st_n2d():
     return returned, closes == [-1]
 
 
-def _st_fd_table_eio():
-    """F1: the descriptor census fails closed. A held /dev/null descriptor is listed by _st_fd_table; with
-    its fstat failing EIO the table must raise _StCensusError naming it, never omit it as closed. An
-    independent fstat must still see it open afterwards, else the check proves nothing."""
+def _st_fd_table_eio(seam="fstat"):
+    """F1 and F3: the descriptor census fails closed. A held /dev/null descriptor is listed by _st_fd_table;
+    with its census read failing EIO (os.<seam>: its fstat, F1, or the readlink of its /proc/self/fd link,
+    F3) the table must raise _StCensusError naming it, never omit it as closed. An independent fstat must
+    still see it open afterwards, else the check proves nothing."""
     import errno
     fd = os.open(os.devnull, os.O_RDONLY)
-    saved_fstat = os.fstat
+    saved_fstat, saved_readlink = os.fstat, os.readlink
+    saved_seam = saved_readlink if seam == "readlink" else saved_fstat
 
-    def failing_fstat(number, *args, **kwargs):
-        if number == fd:
+    def failing_seam(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
             raise OSError(errno.EIO, "injected census read failure")
-        return saved_fstat(number, *args, **kwargs)
+        return saved_seam(number, *args, **kwargs)
 
     try:
         listed = fd in _st_fd_table()
-        os.fstat = failing_fstat
+        if seam == "readlink":
+            os.readlink = failing_seam
+        else:
+            os.fstat = failing_seam
         try:
             _st_fd_table()
             got = "omitted"
         except _StCensusError as exc:
             got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
         finally:
-            os.fstat = saved_fstat
+            os.fstat, os.readlink = saved_fstat, saved_readlink
         try:
             saved_fstat(fd)
             still_open = True
@@ -2758,6 +2806,11 @@ def _st_descriptor_helper_checks():
       N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
       F1         _st_fd_table fails closed: an EIO census read of a held descriptor raises naming it.
+      F2         _st_fd_table reads an eventfd put at an epoll descriptor's number (dup2) as a change, by
+                 its anonymous-inode kind; the flip, a table of (st_dev, st_ino) alone, must read it as
+                 unchanged wherever the two share an inode. Run where epoll and eventfd exist (Linux).
+      F3         _st_fd_table fails closed: an EIO read of a held descriptor's /proc/self/fd link raises
+                 naming it.
     No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
     leg's descriptors are its own, closed once. Returns (failures, checks)."""
     n2d_returned, n2d_single = _st_n2d()
@@ -2766,7 +2819,14 @@ def _st_descriptor_helper_checks():
                ("N2a-close-quietly-swallows-oserror", _st_n2a()),
                ("N2d-close-quietly-nonthrow", n2d_returned),
                ("N2d-close-quietly-single-close", n2d_single),
-               ("F1-fd-table-eio-fails-closed", _st_fd_table_eio()))
+               ("F1-fd-table-eio-fails-closed", _st_fd_table_eio()),
+               ("F3-fd-table-readlink-eio-fails-closed", _st_fd_table_eio("readlink")))
+    anon = _st_anon_reuse(_st_fd_table)
+    if anon is not None:
+        detected, shared = anon
+        stat_only = _st_anon_reuse(lambda: dict((fd, ident[:2]) for fd, ident in _st_fd_table().items()))
+        results += (("F2-fd-table-anon-reuse-detected", detected),
+                    ("F2-fd-table-anon-reuse-flip-red", not shared or not stat_only[0]))
     return [name for name, ok in results if ok is not True], len(results)
 
 

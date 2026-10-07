@@ -205,8 +205,16 @@ class _StCensusError(RuntimeError):
 
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file. Only EBADF reads as closed; any other read error raises _StCensusError naming
-    the descriptor, never omitting it as closed (a leak check fails closed on input it cannot read)."""
+    is reused by a different file. Each is keyed on (st_dev, st_ino, anonymous-inode kind): anonymous-inode
+    descriptors of every kind share one (st_dev, st_ino), so the kind, read from the descriptor's /proc/self/fd
+    link ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"; None for any other file), is what tells an epoll
+    descriptor from an eventfd put at its number. Residual: two anonymous-inode descriptors of the same kind
+    share every field, so one replaced at its number by another of its own kind still reads as unchanged; and
+    where /proc/self/fd does not exist (not Linux) every link read is ENOENT, so the kind is None throughout
+    and the table is keyed on (st_dev, st_ino) alone. Only EBADF on the fstat reads as closed, and only ENOENT
+    on the link read (the number has no entry: closed since its fstat) reads as no kind; any other read error
+    raises _StCensusError naming the descriptor, never omitting it as closed (a leak check fails closed on
+    input it cannot read)."""
     import errno
     table = {}
     for fd in range(1024):
@@ -216,8 +224,43 @@ def _st_fd_table():
             if exc.errno == errno.EBADF:
                 continue
             raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
-        table[fd] = (st.st_dev, st.st_ino)
+        try:
+            link = os.readlink("/proc/self/fd/{}".format(fd))
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise _StCensusError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+            link = ""
+        table[fd] = (st.st_dev, st.st_ino, link if link.startswith("anon_inode:") else None)
     return table
+
+
+def _st_anon_reuse(table):
+    """(detected, shared) for an anonymous-inode replacement, or None where there is no epoll or eventfd (not
+    Linux): a held epoll descriptor is in the baseline, then an eventfd is put at its number (dup2).
+    `detected` is whether `table()` reads that as a change; `shared` is whether the two have one (st_dev,
+    st_ino), where a table of those alone reads the replacement as unchanged and only the anonymous-inode
+    kind tells them apart."""
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    poll = select.epoll()
+    try:
+        held = os.dup(poll.fileno())
+    finally:
+        poll.close()
+    try:
+        before = os.fstat(held)
+        baseline = table()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+        return table() != baseline, shared
+    finally:
+        os.close(held)
 
 
 def _st_close_run(call, masking, expect, watch=True):

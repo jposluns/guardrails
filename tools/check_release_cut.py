@@ -1169,29 +1169,33 @@ import sys
 '''
 
 
-def _close_census_eio(harness):
+def _close_census_eio(harness, seam="fstat"):
     """The copy's descriptor census fails closed: a held /dev/null descriptor is listed by
-    harness._st_fd_table; with its fstat failing EIO the table must raise harness._StCensusError naming it,
-    never omit it as closed. An independent fstat must still see it open afterwards, else the check proves
-    nothing."""
+    harness._st_fd_table; with its census read failing EIO (os.<seam>: its fstat, or the readlink of its
+    /proc/self/fd link) the table must raise harness._StCensusError naming it, never omit it as closed. An
+    independent fstat must still see it open afterwards, else the check proves nothing."""
     import errno
     fd = os.open(os.devnull, os.O_RDONLY)
-    real_fstat = os.fstat
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
 
     def failing(number, *args, **kwargs):
-        if number == fd:
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
             raise OSError(errno.EIO, "injected census read failure")
-        return real_fstat(number, *args, **kwargs)
+        return real_seam(number, *args, **kwargs)
     try:
         listed = fd in harness._st_fd_table()
-        os.fstat = failing
+        if seam == "readlink":
+            os.readlink = failing
+        else:
+            os.fstat = failing
         try:
             harness._st_fd_table()
             got = "omitted"
         except harness._StCensusError as exc:
             got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
         finally:
-            os.fstat = real_fstat
+            os.fstat, os.readlink = real_fstat, real_readlink
         try:
             real_fstat(fd)
             still_open = True
@@ -2307,6 +2311,15 @@ def _close_harness_checks(parent, script):
     copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
     check("close-harness-in-step", _close_harness_in_step(journal, copy))
     check("close-harness-census-eio", _close_census_eio(_close_selftest))
+    check("close-harness-census-readlink-eio", _close_census_eio(_close_selftest, "readlink"))
+    # An eventfd put at an epoll descriptor's number reads as a change by its anonymous-inode kind; the flip, a
+    # table of (st_dev, st_ino) alone, reads it as unchanged wherever the two share an inode.
+    anon = _close_selftest._st_anon_reuse(_close_selftest._st_fd_table)
+    if anon is not None:
+        check("close-harness-anon-reuse", anon[0])
+        stat_only = _close_selftest._st_anon_reuse(
+            lambda: dict((fd, ident[:2]) for fd, ident in _close_selftest._st_fd_table().items()))
+        check("close-harness-anon-reuse-flip-red", not anon[1] or not stat_only[0])
     require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
     check("close-harness-drift-red",
           not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
