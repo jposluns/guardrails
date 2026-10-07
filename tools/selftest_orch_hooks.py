@@ -1844,6 +1844,81 @@ def _main_isolated(report_path=None):
               (_mt_probe, _mt_scope, _mt_plain, _verdict(_mt_res),
                "no .aiqt/orchestration.local.json or" in _mt_why, "could not be opened" in _mt_why),
               (False, ("none", None), "allow", "deny", True, False))
+        # ROUND 12, WHERE THE RESUME AUDIT STAYS SILENT AND WHERE IT ARMS FOR A ROOT IT CANNOT ENTER: (a) where
+        # _orch_root returns None the audit returns before it reads the registry, silent in both modes,
+        # though the cwd's walk holds a registry (an unparsable one, so a read would warn), while the
+        # guard's scope check from that cwd finds it and allows a plain command; a cwd that is not a string
+        # is just as silent (red when the None branch reads a registry). (b) git resolves a core.worktree
+        # toplevel from the repository's git directory: one that exists without search permission (mode
+        # 0o000; a root run is not bound by it, so there the seam supplies the kernel's EACCES for an lstat
+        # under it) and a regular file each fault the loader's lstat, so the audit arms the barrier in both
+        # modes (red when that fault reads as absent); one that does not exist reads as absent and the
+        # audit stays silent in both modes (red when the audit's absent return is dropped).
+        _r12_nr = tmp / "r12-noroot"
+        (_r12_nr / ".aiqt").mkdir(parents=True)
+        (_r12_nr / ".aiqt" / "orchestration.json").write_text("not json", encoding="utf-8")
+        _r12_wt = dict()
+        for _r12_kind in ("noenter", "file", "missing"):
+            _r12_repo = tmp / "r12-wt" / _r12_kind / "repo"
+            _r12_top = tmp / "r12-wt" / _r12_kind / "top"
+            subprocess.run(["git", "init", "-q", str(_r12_repo)], check=True, capture_output=True, timeout=30)
+            if _r12_kind == "noenter":
+                _r12_top.mkdir()
+            elif _r12_kind == "file":
+                _r12_top.write_text("x", encoding="utf-8")
+            subprocess.run(["git", "-C", str(_r12_repo), "config", "core.worktree", str(_r12_top)],
+                           check=True, capture_output=True, timeout=30)
+            _r12_wt[_r12_kind] = (str(_r12_repo / ".git"), str(_r12_top))
+        _r12_noenter = _r12_wt["noenter"][1]
+        _r12_lstat = aiqt_hooks.os.lstat
+
+        def _r12_lstat_seam(path, *a, **k):
+            if isinstance(path, str) and path.startswith(_r12_noenter + os.sep):
+                raise PermissionError(13, "Permission denied", path)
+            return _r12_lstat(path, *a, **k)
+        _r12_toplevel = aiqt_hooks._recovery_toplevel
+        _r12_old = os.environ.get(_doc_env)
+        _r12_none, _r12_wt_rows = [], []
+        try:
+            os.chmod(_r12_noenter, 0o000)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.lstat = _r12_lstat_seam
+            for _r12_val in (None, "1"):
+                if _r12_val is None:
+                    os.environ.pop(_doc_env, None)
+                else:
+                    os.environ[_doc_env] = _r12_val
+                aiqt_hooks._recovery_toplevel = lambda _cwd: None
+                _r12_none.append((
+                    aiqt_hooks._orch_root(dict(cwd=str(_r12_nr))),
+                    _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart",
+                                                               cwd=str(_r12_nr)))),
+                    aiqt_hooks._orch_truncation_scope(str(_r12_nr)),
+                    _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                        nocwd, cwd=str(_r12_nr), tool_input=dict(command="printf ok")))),
+                    _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart")))))
+                aiqt_hooks._recovery_toplevel = _r12_toplevel
+                _r12_row = []
+                for _r12_kind in ("noenter", "file", "missing"):
+                    _r12_cwd, _r12_top = _r12_wt[_r12_kind]
+                    _r12_root = aiqt_hooks._orch_root(dict(cwd=_r12_cwd))
+                    _r12_row.append((
+                        _r12_root is not None and os.path.realpath(_r12_root) == os.path.realpath(_r12_top),
+                        _verdict(aiqt_hooks.orch_resume_audit(dict(hook_event_name="SessionStart",
+                                                                   cwd=_r12_cwd)))))
+                _r12_wt_rows.append(tuple(_r12_row))
+        finally:
+            aiqt_hooks._recovery_toplevel = _r12_toplevel
+            aiqt_hooks.os.lstat = _r12_lstat
+            os.chmod(_r12_noenter, 0o700)
+            if _r12_old is None:
+                os.environ.pop(_doc_env, None)
+            else:
+                os.environ[_doc_env] = _r12_old
+        check("resume-audit/no-root-silent-every-mode-with-registry-on-walk", tuple(_r12_none),
+              ((None, "allow", ("found", None), "allow", "allow"),) * 2)
+        check("resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent", tuple(_r12_wt_rows),
+              (((True, "warn"), (True, "warn"), (True, "allow")),) * 2)
         # ROUND 8, SEARCH PERMISSION DECIDES A .aiqt DIRECTORY'S PROBE (the documented attribute): mode
         # 0o100 (search only, no read) confirms the registry inside it; 0o600 (read and write, no search)
         # and 0o000 cannot be evaluated. A root run is not bound by these modes, so there the seam supplies

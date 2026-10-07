@@ -285,6 +285,8 @@ expected-check-ids = [
   "doctor/default-cannot-evaluate-above-root-reports-fault-not-registry",
   "doctor/resume-audit-walk-fail-arms-barrier-every-mode",
   "trunc/union-missing-toplevel-reads-absent-strict-denies",
+  "resume-audit/no-root-silent-every-mode-with-registry-on-walk",
+  "resume-audit/core-worktree-toplevel-unenterable-arms-missing-silent",
   "trunc/aiqt-search-permission-decides-probe",
   "trunc/walk-recheck-realpath-fault-denies",
   "trunc/walk-recheck-open-fault-denies",

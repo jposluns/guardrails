@@ -11087,13 +11087,22 @@ def orch_resume_audit(data):
     truncation guard's deny at its scope check for a Bash call from the root (_orch_resume_audit_findings),
     so it is mode-sensitive: a root git resolves but the walk cannot carry out (one this process can enter
     but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
-    symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None (git
-    resolves no toplevel for the session cwd, for any reason: an unreadable or broken config, a dangling
-    gitfile, a dubious-ownership refusal, no git binary, or a cwd this process cannot enter), this audit
-    returns before it reads the registry, so it stays silent in both modes; whether the truncation guard
-    denies there depends only on its own ancestor walk and the mode (its git leg resolves nothing either).
+    symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None
+    (`if root is None: return _allow()`), this audit returns before it reads the registry, so it stays
+    silent in both modes. _orch_root returns None for a session cwd that is missing, empty or not a string,
+    without calling git, and wherever _recovery_toplevel returns None: git cannot run or exits non-zero (an
+    unreadable or broken config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout,
+    or a cwd this process cannot enter), or its output cannot be decoded, is empty, or is not an absolute
+    path. The truncation guard denies a Bash call whose cwd is missing, empty or not a string in every
+    mode, before its scope check. For a Bash call from a string cwd where git still resolves nothing,
+    whether its scope check denies depends only on its own ancestor walk of that cwd and the mode (its git
+    leg resolves nothing either); its other checks still read the call's tool_name, tool_input and command.
     Git can still resolve a toplevel this process cannot enter (core.worktree read from a session cwd
-    inside the repository's git directory), and there this audit arms the barrier."""
+    inside the repository's git directory). Where that toplevel exists without search permission for this
+    process, or is not a directory, _orch_registry's lstat of a registry path under it raises an OSError
+    other than FileNotFoundError and returns bad, so this audit arms the barrier in both modes; where that
+    toplevel does not exist, the lstat raises FileNotFoundError for each registry name, _orch_registry
+    returns absent (`if status == "absent": return _allow()`), and this audit stays silent in both modes."""
     root = _orch_root(data)
     if root is None:
         return _allow()
