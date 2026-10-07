@@ -10,12 +10,17 @@ WHAT IT DOES
     1. A CI RERUN. A shell command that reruns a CI run (`gh run rerun`, `glab ci retry`, named or given by
        path, as the command of a simple command) is a rerun by definition. The command is the first word of a
        simple command after optional shell keywords (if, then, else, elif, fi, do, done, while, until, time
-       and its -p, coproc and the NAME before its { group, !, {, }), NAME=VALUE assignments, a command or exec
-       builtin prefix with its options (command -v or -V runs nothing), and an env prefix. The words come from
+       and its -p and --, coproc and the NAME before its { group, function and its NAME, !, {, }), NAME=VALUE
+       assignments, a command, exec or builtin prefix with its options read by bash's option rules (exec -a
+       takes the rest of its word or the next word; command -v or -V, an invalid option, or builtin before
+       anything but command, exec or builtin runs nothing), and an env prefix. The words come from
        the standard library's POSIX shlex lexer, which reads quotes, escapes, comments and operators as the
-       shell does for the syntax this reading models (a # starts a comment only at the start of a word; an
-       unquoted descriptor number or {name} directly before < or >, as in 2>/dev/null, is part of the
-       redirection, never a word), and the body of each $(...) or backtick command substitution
+       shell does for the syntax this reading models (a # starts a comment only at the start of a word), with
+       line continuations removed first. A redirection is one construct wherever it stands in a simple command
+       (before, between or after the words): an optional unquoted descriptor (a number up to 2147483647, or
+       {name}) directly before the operator, one of < > >> <> >| <& >& &> &>> <<<, and its operand word, all
+       removed from the words; a shape the shell rejects or reads otherwise is unmodelled syntax (below). The body
+       of each $(...) or backtick command substitution
        that is unquoted or in double quotes is read as a command line of its own, recursively; quoted text
        around a substitution stays quoted. After it runs, the hook adds a note to the assistant's context: the
        rerun's result does not erase the earlier failure, which is to be recorded and investigated.
@@ -41,9 +46,11 @@ WHAT IT DOES
     substitution, a backslash inside backticks, ANSI-C or locale quoting such as $'...' or $"...", which
     shlex would read as a literal $ and a plain quote, a ${...} expansion that is unclosed or holds a quote,
     a backslash, a backtick or a $ (unquoted, also a blank or an operator character), a [[ test split at an
-    operator inside it) is read conservatively: it is a change,
-    and when its text, with line continuations, a $ directly before a quote, quotes and backslashes
-    removed, names a CI rerun command anywhere, it is also a possible CI rerun, noted and flagged like one.
+    operator inside it, an unquoted brace expansion such as {gh,}, a redirection operator with no operand or
+    with a descriptor-shaped operand the shell rejects, >&-N, a {...} descriptor other than {name}, or an
+    operator run such as >>| or ;; outside case) is read conservatively: it is a change, and when its text,
+    with line continuations, a $ directly before a quote, quotes, backslashes, braces and commas removed, names a
+    CI rerun command anywhere, it is also a possible CI rerun, noted and flagged like one.
     A check command line that also runs a simple command that is neither a check, nor read-only, nor cd,
     pushd, popd, set or tee (`pip install -e . && pytest -q`) counts as one
     change for later runs; it is counted after that line's own comparison, so the identical line run twice
@@ -74,9 +81,13 @@ RESIDUAL COVERAGE
     through a web page, a pushed empty commit, a retry option of the runner itself (pytest --reruns, a CI
     retry setting), a script that wraps the check, a rerun command whose name comes from an expansion ($VAR,
     a substitution's output) or that follows a wrapper such as sudo, sh -c, or env -S, or a changed command
-    line (an added flag, another order) is not seen. Shell syntax that this reading neither models nor
-    detects as unmodelled (bash extensions beyond those listed in 1 and above) can be misread, hiding or
-    inventing a rerun. A command the lexer cannot read counts as a change, so a
+    line (an added flag, another order) is not seen. This reading does not model, and can misread (hiding or
+    inventing a rerun): an alias or a shell function named like a command; a ( directly after a word (an
+    extglob pattern, a NAME() definition), read as a command separator; a function body, read as run where it
+    is defined; options of time other than -p and --; an option of command, exec or builtin given through an
+    expansion; a dup operand that expands to a number (>&$fd counts as a file write); and any other bash
+    syntax not named in 1 and above that the lexer tokenizes without error. A command the lexer cannot read counts
+    as a change, so a
     rerun across it (a here-document, notably) is not flagged (a missed note), and when it names a CI rerun
     command anywhere, even in a here-document body, it is flagged as a possible CI rerun (a false note). A
     failed call is never a change, so a fix made by a command that then failed reads as no change (a false
@@ -131,6 +142,13 @@ _OP_RE = re.compile(r"[<>]\(|&>>?|>>?\||>>?&?|<<<|<<-?|<&|<>|<|;;&?|;&|&&|\|\||\
 _HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)")
 _UNQUOTED = (" ", "a", "c")  # the shlex states in which a character is read outside quotes and escapes
 _FD_RE = re.compile(r"[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}")  # a redirection's descriptor: 2 in 2>f, {fd} in {fd}>f
+_DUP_RE = re.compile(r"[0-9]+-?|-")  # a >& operand that names a descriptor (2), moves one (2-) or closes it (-)
+# The redirection operators (each takes one operand word; a here-document is not modelled) and the
+# operators that end a simple command; any other operator run is not modelled.
+REDIRECT_OPS = frozenset(("<", ">", ">>", "<>", ">|", "<&", ">&", "&>", "&>>", "<<<"))
+CONTROL_OPS = frozenset((";", "&", "|", "&&", "||", "|&", "(", ")", "\n"))
+# The options of the builtins read through (bash's option strings: a : marks an option with an operand).
+BUILTIN_OPTS = dict(command="pvV", exec="cla:", builtin="")
 _ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # A negation directly before a conclusive phrase ("not verified", "hasn't been verified", "never green").
 _NEGATED_RE = re.compile(r"(?:\bnot|\bcannot|n't|\bnever|\bno longer)"
@@ -265,10 +283,12 @@ class _Source:
     def __init__(self, text):
         self.text, self.pos, self.lexer, self.last, self.char, self.quoted = text, 0, None, None, "", False
         self.ctx = [None] * len(text)  # the state each character was read in; None: never read (a comment)
+        self.joined = []  # the positions of the line continuations dropped
 
     def read(self, n=1):
         state, text = self.lexer.state, self.text
         while state not in ("\\", "'") and text.startswith("\\\n", self.pos):
+            self.joined.append(self.pos)
             self.pos += 2
         self.last, self.char = state, text[self.pos:self.pos + 1]
         self.quoted = self.quoted or state in ("\\", "'", '"')  # since _lex last cleared it
@@ -323,12 +343,27 @@ def _unmodelled_quoting(text, ctx):
                 raise _Unsupported()
 
 
+def _brace_expansion(text, ctx):
+    """Raise _Unsupported at an unquoted brace expansion ({a,b} or {1..3}), which the shell expands into several
+    words ({gh,} run is gh run); a { directly after a $ starts a parameter expansion instead."""
+    for i, ch in enumerate(text):
+        if ch != "{" or ctx[i] not in _UNQUOTED or text[i - 1:i] == "$":
+            continue
+        j = i + 1
+        while j < len(text) and not (ctx[j] in _UNQUOTED and text[j] in " \t\r}" + _PUNCT):
+            j += 1
+        if text[j:j + 1] == "}" and ("," in text[i + 1:j] or ".." in text[i + 1:j]):
+            raise _Unsupported()
+
+
 def _lex(text):
-    """(tokens, ctx) for one command line, from the standard library's POSIX shlex lexer: tokens are (word,
-    is_operator) pairs and ctx[i] is the lexer state character i was read in. A descriptor word directly
-    before a redirection operator (the 2 of 2>f, the {fd} of {fd}>f) is dropped, as the shell reads it as part
-    of the redirection. Raises _Unsupported for text shlex cannot tokenize (an unbalanced quote, a trailing
-    backslash), a here-document, or quoting shlex reads otherwise than the shell (see _unmodelled_quoting)."""
+    """(tokens, ctx, joined) for one command line, from the standard library's POSIX shlex lexer: tokens are
+    (text, kind) pairs, kind "op" for an operator run, "fd" for a descriptor word, "word" otherwise; ctx[i] is
+    the lexer state character i was read in, and joined is `text` with its line continuations removed. A
+    descriptor word is an unquoted descriptor number the shell accepts (at most 2147483647) or {name},
+    directly before < or >, as the 2 of 2>f or the {fd} of {fd}>f. Raises _Unsupported for text shlex cannot
+    tokenize (an unbalanced quote, a trailing backslash), a here-document, any other {...} word directly
+    before < or > (as {a[0]}>f), or quoting shlex reads otherwise than the shell (see _unmodelled_quoting)."""
     src = _Source(text)
     lexer = shlex.shlex(src, posix=True, punctuation_chars=_PUNCT)
     src.lexer = lexer
@@ -346,20 +381,29 @@ def _lex(text):
             if op and _HEREDOC_RE.search(tok):
                 raise _Unsupported()  # a here-document body is not shell words
             # An unquoted word ended directly by < or > (read in the word state) that is a descriptor number
-            # the shell accepts, or a {name}, is the descriptor of the redirection that follows, never a word.
-            if not op and not src.quoted and src.last == "a" and src.char in ("<", ">") and _FD_RE.fullmatch(tok) \
-                    and (not tok.isdigit() or int(tok) <= 0x7FFFFFFF):
-                continue
-            tokens.append((tok, op))
+            # the shell accepts, or a {name}, may be the descriptor of the redirection that follows (_split).
+            kind = "op" if op else "word"
+            if not op and not src.quoted and src.last == "a" and src.char in ("<", ">"):
+                if _FD_RE.fullmatch(tok) and (not tok.isdigit() or int(tok) <= 0x7FFFFFFF):
+                    kind = "fd"
+                elif tok.startswith("{") and tok.endswith("}"):
+                    raise _Unsupported()  # {a[0]}>f: a descriptor shape this reading does not model
+            tokens.append((tok, kind))
     except ValueError:
         raise _Unsupported()
     _unmodelled_quoting(text, src.ctx)
-    return tokens, src.ctx
+    _brace_expansion(text, src.ctx)
+    joined, at = [], 0
+    for i in src.joined:
+        joined.append(text[at:i])
+        at = i + 2
+    return tokens, src.ctx, "".join(joined) + text[at:]
 
 
 def _substitutions(text, ctx):
     """The (start, end, body) spans of the command substitutions that run: each $(...) and backtick outside
-    single quotes, comments, and escapes (so unquoted or in double quotes)."""
+    single quotes, comments, and escapes (so unquoted or in double quotes). `text` has no line continuations
+    (see _commands), so a $ and its ( are adjacent here exactly when the shell reads them as adjacent."""
     spans, i, n = [], 0, len(text)
     while i < n:
         q = ctx[i]
@@ -402,13 +446,14 @@ def _substitutions(text, ctx):
 
 
 def _command_words(words):
-    """`words` after leading shell keywords (with time's -p, and coproc's NAME before a { group) and
-    NAME=VALUE assignments: the command and its arguments."""
+    """`words` after leading shell keywords (with time's -p and --, coproc's NAME before a { group, and
+    function's NAME) and NAME=VALUE assignments: the command and its arguments."""
     i = 0
     while i < len(words):
-        if words[i] in KEYWORDS or (i and words[i] == "-p" and words[i - 1] == "time"):
+        if words[i] in KEYWORDS or (i and words[i] == "-p" and words[i - 1] == "time") \
+                or (i and words[i] == "--" and (words[i - 1] == "time" or words[i - 2:i] == ["time", "-p"])):
             i += 1
-        elif i and words[i - 1] == "coproc" and words[i + 1:i + 2] == ["{"]:
+        elif (i and words[i - 1] == "coproc" and words[i + 1:i + 2] == ["{"]) or words[i] == "function":
             i += 2
         else:
             break
@@ -418,37 +463,48 @@ def _command_words(words):
 
 
 def _split(tokens):
-    """The word lists of the simple commands in `tokens`, redirections removed; a redirection that writes a
-    file (any target but /dev/null, or a descriptor after >&) leaves the word >W in its command."""
-    cmds, words, target = [], [], None
-    for tok, op in tokens:
-        if not op:
-            if target is None:
-                words.append(tok)
-            elif tok != "/dev/null" and (target == "w" or (target == "dup" and not (tok.isdigit() or tok == "-"))):
-                words.append(">W")
-            target = None
+    """The word lists of the simple commands in `tokens`, redirections removed. A redirection is one construct
+    wherever it stands in a simple command: an optional descriptor word, a redirection operator (REDIRECT_OPS)
+    and its operand word; one that writes a file (any operand but /dev/null, and after >& any but a descriptor
+    number, N- or -) leaves the word >W at the end of its command. A shape the shell rejects or reads
+    otherwise raises _Unsupported: an operator with no operand, a descriptor word as the operand of any
+    operator but <& and >&, >&-1 (the shell reads >&- and the word 1), or an operator outside REDIRECT_OPS
+    and CONTROL_OPS."""
+    cmds, words, writes, redir, fd = [], [], False, None, False
+    for tok, kind in tokens:
+        if redir is not None:  # the operand of the redirection operator redir
+            if kind == "op" or (kind == "fd" and not (redir in ("<&", ">&") and tok.isdigit())):
+                raise _Unsupported()
+            if redir in ("<&", ">&") and tok.startswith("-") and tok != "-":
+                raise _Unsupported()
+            if ">" in redir and tok != "/dev/null" and not (redir == ">&" and _DUP_RE.fullmatch(tok)):
+                writes = True
+            redir = None
+            continue
+        if kind == "fd":
+            fd = True  # the next token is an operator run that starts with < or >
+            continue
+        if kind == "word":
+            words.append(tok)
             continue
         pieces = _OP_RE.findall(tok)
         if "".join(pieces) != tok:
             raise _Unsupported()
         for p in pieces:
-            if target in ("w", "dup"):
-                words.append(">W")  # a redirection with no target
-            target = None
-            if p in ("<(", ">("):
-                raise _Unsupported()  # process substitution
-            if ">" in p:
-                target = "dup" if p.endswith("&") else "w"
-            elif "<" in p:
-                target = "r"
-            elif words:
-                cmds.append(words)
-                words = []
-    if target in ("w", "dup"):
-        words.append(">W")
-    if words:
-        cmds.append(words)
+            if redir is not None or (fd and p not in REDIRECT_OPS):
+                raise _Unsupported()  # a redirection with no operand; a descriptor before no redirection
+            fd = False
+            if p in REDIRECT_OPS:
+                redir = p
+            elif p not in CONTROL_OPS:
+                raise _Unsupported()  # process substitution, ;; outside case, >>| and >>& (two operators)
+            elif words or writes:
+                cmds.append(words + [">W"] * writes)
+                words, writes = [], False
+    if redir is not None or fd:
+        raise _Unsupported()
+    if words or writes:
+        cmds.append(words + [">W"] * writes)
     if any(_command_words(w)[:1] == ["case"] for w in cmds):
         raise _Unsupported()  # case patterns end in a bare )
     if any(_command_words(w)[:1] == ["[["] and "]]" not in w for w in cmds):
@@ -459,7 +515,10 @@ def _split(tokens):
 def _commands(text, depth):
     if depth > MAX_DEPTH:
         raise _Unsupported()
-    tokens, ctx = _lex(text)
+    tokens, ctx, joined = _lex(text)
+    if joined != text:  # read the text the shell reads, line continuations removed
+        text = joined
+        tokens, ctx = _lex(text)[:2]
     spans = _substitutions(text, ctx)
     out = []
     if spans:
@@ -488,18 +547,34 @@ def parse(cmd):
 
 
 def builtin_command(words):
-    """The words of the command a `command` or `exec` builtin (words[0]) runs, options removed; [] when none
-    runs (none follows, or command -v or -V only describes it)."""
-    while words and words[0] in ("command", "exec"):
-        name, i = words[0], 1
+    """The words of the command a `command`, `exec` or `builtin` builtin (words[0]) runs, options removed by
+    bash's option rules (an option's operand is the rest of its word, else the next word; -- ends the options,
+    and so does a word that is - or does not start with -); [] when none runs: none follows, command -v or -V
+    only describes it, an option is invalid (as --help) or lacks its operand, or builtin names another builtin
+    (none of which is a CI rerun) or a name that is not a builtin."""
+    while words and words[0] in BUILTIN_OPTS:
+        name, spec, i, opts = words[0], BUILTIN_OPTS[words[0]], 1, ""
         while i < len(words) and words[i].startswith("-") and words[i] != "-":
-            if words[i] == "--":
-                i += 1
+            w = words[i]
+            i += 1
+            if w == "--":
                 break
-            if name == "command" and ("v" in words[i] or "V" in words[i]):
-                return []
-            i += 2 if name == "exec" and words[i].endswith("a") else 1  # exec -a NAME
+            for k in range(1, len(w)):
+                at = spec.find(w[k])
+                if w[k] == ":" or at < 0:
+                    return []  # an invalid option: a usage error, nothing runs
+                opts += w[k]
+                if spec[at + 1:at + 2] == ":":  # the operand: the rest of this word, else the next word
+                    if k == len(w) - 1:
+                        if i >= len(words):
+                            return []
+                        i += 1
+                    break
+        if "v" in opts or "V" in opts:
+            return []
         words = words[i:]
+        if name == "builtin" and words[:1] not in (["command"], ["exec"], ["builtin"]):
+            return []
     return words
 
 
@@ -516,7 +591,7 @@ def ci_rerun(cmd):
     cmds = parse(cmd)
     if cmds is None:
         plain = re.sub(r"\$(?=['\"])", "", cmd.replace("\\\n", ""))  # $'x' and $"x" read as x
-        return _NAMED_RERUN_RE.search(re.sub(r"[\\'\"]", "", plain)) is not None
+        return _NAMED_RERUN_RE.search(re.sub(r"[\\'\"{},]", "", plain)) is not None  # {gh,} read as gh
     return any(_is_ci_rerun(w) for w in cmds)
 
 
@@ -1033,8 +1108,8 @@ def _self_test():
                       "2<f gh run rerun 7", "&>/dev/null gh run rerun 7", "2>&1 gh run rerun 7", "3>&- gh run rerun 7",
                       "2147483647>/dev/null gh run rerun 7"):
                 self.assertEqual(parse(c), (("gh", "run", "rerun", "7"),), c)
-            for c, words in (("echo 2&>f", ("echo", "2", ">W")), ('"2">f ls', ("2", ">W", "ls")),
-                             ("x\x5c\n2>f ls", ("x2", ">W", "ls")),
+            for c, words in (("echo 2&>f", ("echo", "2", ">W")), ('"2">f ls', ("2", "ls", ">W")),
+                             ("x\x5c\n2>f ls", ("x2", "ls", ">W")),
                              ("echo 2147483648>f", ("echo", "2147483648", ">W"))):
                 self.assertEqual(parse(c), (words,), c)
             self.assertTrue(read_only("2>/dev/null echo ok") and read_only("echo hi 2>&-"))
@@ -1083,6 +1158,43 @@ def _self_test():
             for c in ("[[ $x =~ (a|b) ]]", "[[ -n $x && -f y ]]"):
                 self.assertIsNone(parse(c), c)
             self.assertEqual(parse("[[ -f x ]] && ls"), (("[[", "-f", "x", "]]"), ("ls",)))
+
+        def test_31_a_redirection_is_one_construct(self):
+            for c in ("gh 2>&1>/dev/null run rerun 7", "2>err.log gh run rerun 7", "{fd}>fdlog gh run rerun 7",
+                      "gh 2>err.log run rerun 7", ">out.txt gh run rerun 7", "&>log gh run rerun 7",
+                      ">&2>/dev/null gh run rerun 7", "( gh 2>e run rerun 7 ) 2>e", "{ gh >x run rerun 7; }"):
+                self.assertTrue(ci_rerun(c) and parse(c) is not None, c)
+            self.assertEqual(parse("gh 2>&1>/dev/null run rerun 7"), (("gh", "run", "rerun", "7"),))
+            self.assertEqual(parse("2>e gh 3<>f run <<<x rerun 7"), (("gh", "run", "rerun", "7", ">W"),))
+            for c in ("ls 2>&1>/dev/null", "echo hi >&2>/dev/null", "ls >&1-"):
+                self.assertTrue(read_only(c), c)
+            for c in ("echo hi >2>/dev/null", "gh run rerun 1 2>&-1", "ls >>|cat", "ls >", "ls >;rm f",
+                      "ls >&{fd}>/dev/null",
+                      "{a[0]}>/dev/null gh run rerun 7", "echo ${x"):
+                self.assertIsNone(parse(c), c)
+                self.assertFalse(read_only(c), c)
+            self.assertTrue(ci_rerun("{a[0]}>/dev/null gh run rerun 7"))
+            for c, words in (("\x5c2>/dev/null gh run rerun 1", ("2", "gh", "run", "rerun", "1")),
+                             ("'2'>/dev/null ls", ("2", "ls"))):
+                self.assertEqual(parse(c), (words,), c)
+            out = self.bash("gh 2>&1>/dev/null run rerun 7")
+            self.assertIn("a CI rerun was started", out["hookSpecificOutput"]["additionalContext"])
+            self.assertIsNone(self.bash("pytest -q", ok=False))
+            self.assertIsNone(self.bash("ls 2>&1>/dev/null"))  # read-only: not a change
+            self.assertIsNotNone(self.bash("pytest -q"))
+            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
+
+        def test_32_builtin_options_braces_and_continued_substitutions(self):
+            for c in ("exec -aextra gh run rerun 1", "exec -la x gh run rerun 1", "exec -a -l gh run rerun 1",
+                      "builtin exec gh run rerun 1", "time -p -- gh run rerun 1", "function f { gh run rerun 1; }; f",
+                      "echo \"$\x5c\n(gh run rerun 1)\"", "{gh,} run rerun 1"):
+                self.assertTrue(ci_rerun(c), c)
+            for c in ("command -V gh run rerun 1", "command -pv gh run rerun 1", "exec -q gh run rerun 1", "exec -a",
+                      "exec --help gh run rerun 1", "builtin gh run rerun 1"):
+                self.assertFalse(ci_rerun(c), c)
+            self.assertIsNone(parse("{gh,} run rerun 1"))
+            self.assertFalse(read_only("echo \"$\x5c\n(rm -rf build)\""))
+            self.assertEqual(parse("echo \"$\x5c\n(ls)\""), (("echo", "S"), ("ls",)))
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
