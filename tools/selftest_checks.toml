@@ -397,6 +397,8 @@ expected-check-ids = [
   "barrier/directory-not-replaced-no-temp-left-removal-clears",
   "barrier/close-error-removes-own-temp-never-foreign-temp",
   "barrier/state-dir-not-a-directory-reads-absent",
+  "barrier/non-regular-or-oversized-reads-armed-promptly-repair-allowed",
+  "barrier/symlink-to-regular-reads-as-target-warned-write-replaces-link",
   # ---------- substrate: the prompt stamp ----------
   "stamp/exit0",
   "stamp/human-input-stamped",

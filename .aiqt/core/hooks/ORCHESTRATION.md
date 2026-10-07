@@ -108,19 +108,28 @@ the doctor and the resume audit report and arm from it):
   directory, as with that regular file, the warning also names the forced-exit log as unreadable). The
   PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
   for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
-  reads an absent barrier file as clear. A barrier is well-formed only when it is a JSON object whose
-  keys are exactly a boolean `active` and a list of string `findings` (both required; a missing
-  `findings` is malformed, never read as an empty list), plus an optional boolean `warned` and an
-  optional string `ts`. One that exists but cannot be read or parsed for any reason (including a
-  `RecursionError` from deeply nested JSON), or is not well-formed, reads as armed: each mutation
-  outside the allowlist then surfaces a note naming the file as unreadable (not once per arming, since
-  there is no readable `warned` flag to record), and during the bake that note blocks nothing. It clears
-  when `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file, or when
-  the user corrects or removes it (the state directory is on the allowlist); where the state directory
-  cannot be searched the replace fails too, and the note persists until its permissions are restored.
-  Neither audit can replace a directory at the barrier path (the rename fails with
+  reads an absent barrier file (a dangling symlink included) as clear, and a symlink to a regular file
+  as that file. It reads the barrier with a non-blocking open (a FIFO with no writer does not wait for
+  one), an `fstat` that refuses anything not a regular file before any read (so a FIFO or a device such
+  as `/dev/zero` is never read), and a read bounded at 64 KiB. A barrier is well-formed only when it is
+  a JSON object whose keys are exactly a boolean `active` and a list of string `findings` (both
+  required; a missing `findings` is malformed, never read as an empty list), plus an optional boolean
+  `warned` and an optional string `ts`. One that exists but is not a regular file (a FIFO, a socket, a
+  device, a directory, or a symlink to any of these), is larger than the bound, cannot be read or
+  parsed for any reason (including a `RecursionError` from deeply nested JSON), or is not well-formed,
+  reads as armed: each mutation outside the allowlist then surfaces a note naming the file as
+  unreadable or malformed with the reason (not once per arming, since there is no readable `warned`
+  flag to record), during the bake that note blocks nothing, and a mutation on the allowlist is allowed
+  after the same read. A regular file on a filesystem that stalls (a hung network mount) can still
+  stall the read until the hook timeout, as any file read can. It clears when
+  `tools/orch_doctor.py --resume-audit` or the next SessionStart audit replaces the file (the rename
+  replaces a FIFO, a device node or a symlink at the path and leaves a symlink's target intact), or
+  when the user corrects or removes it (the state directory is on the allowlist); where the state
+  directory cannot be searched the replace fails too, and the note persists until its permissions are
+  restored. Neither audit can replace a directory at the barrier path itself (the rename fails with
   `IsADirectoryError`), so for a directory the note says to remove the directory, after which a clean
-  audit clears the barrier. A writer removes the temporary file it created when any later step fails
+  audit clears the barrier; a symlink to a directory gets the generic note, since the rename replaces
+  the link. A writer removes the temporary file it created when any later step fails
   (writing, closing or renaming it) and never removes a temporary name it did not create; a process
   killed between creating and renaming it leaves that temporary file beside the barrier file.
   `tools/orch_doctor.py --resume-audit` does not ignore a write error: its run ends with the error, and

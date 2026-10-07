@@ -11200,24 +11200,89 @@ def _orch_barrier_well_formed(barrier):
     return "ts" not in barrier or isinstance(barrier["ts"], str)
 
 
+_ORCH_BARRIER_MAX_BYTES = 64 * 1024  # the audit's barrier is a few hundred bytes; a larger one reads as armed
+_ORCH_BARRIER_DIRECTORY = "not a regular file: a directory"
+
+
+def _orch_barrier_nonregular(path):
+    """The detail for a barrier path that opened as something other than a regular file:
+    _ORCH_BARRIER_DIRECTORY only where os.lstat shows the entry itself is a directory (no audit can
+    replace that), otherwise "not a regular file" (a FIFO, a socket, a device, or a symlink to any of
+    these or to a directory, which the writer's os.replace does replace, leaving the target intact)."""
+    try:
+        return _ORCH_BARRIER_DIRECTORY if stat.S_ISDIR(os.lstat(path).st_mode) else "not a regular file"
+    except OSError:
+        return "not a regular file"
+
+
+def _orch_barrier_read(path):
+    """Read the resume barrier without blocking: ('absent', None), ('ok', the parsed JSON value) or
+    ('bad', detail). The open is os.open(O_RDONLY | O_NONBLOCK | O_CLOEXEC), so a FIFO with no writer
+    opens at once instead of waiting for one. It follows a symlink: a symlink to a regular file reads as
+    that file (the writer's os.replace later replaces the link, not its target). A FileNotFoundError or
+    NotADirectoryError from the open (a missing file, a dangling symlink, a state directory path through
+    a regular file) is absent. The opened descriptor is fstat'ed and anything not a regular file is bad
+    without a read (_orch_barrier_nonregular names it). The read stops after _ORCH_BARRIER_MAX_BYTES + 1
+    bytes and a longer file is bad. The descriptor is closed on every path. Any other exception (an
+    OSError, a decode or JSON error, a RecursionError from deep nesting) is bad, named by its type."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (FileNotFoundError, NotADirectoryError):
+        return ("absent", None)
+    except IsADirectoryError:
+        return ("bad", _orch_barrier_nonregular(path))  # a platform whose open refuses a directory
+    except Exception as exc:
+        return ("bad", type(exc).__name__)
+    chunks, total = [], 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("bad", _orch_barrier_nonregular(path))
+        while total <= _ORCH_BARRIER_MAX_BYTES:
+            chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except Exception as exc:
+        return ("bad", type(exc).__name__)
+    finally:
+        os.close(fd)
+    if total > _ORCH_BARRIER_MAX_BYTES:
+        return ("bad", "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    try:
+        return ("ok", json.loads(b"".join(chunks).decode("utf-8")))
+    except Exception as exc:  # any decode or parse failure (RecursionError from deep nesting too) is bad
+        return ("bad", type(exc).__name__)
+
+
 def orch_resume_barrier(data):
     """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
-    never obstructed. A barrier file that is absent (its open raises FileNotFoundError or
-    NotADirectoryError) reads as clear. A barrier is well-formed only when it is a JSON object whose keys
-    are "active" (required, a boolean), "findings" (required, never defaulted, a list of strings), and
-    optionally "warned" (a boolean) and "ts" (a string), and no other key. One that exists but cannot be
-    read or parsed for any reason (an OSError, a decode or JSON error, a RecursionError from deep nesting,
-    or any other exception the parse raises), or is not well-formed (a truncated or partial write by an
-    earlier writer, for example), reads as ARMED: every mutation outside the allowlist surfaces a note
-    naming the file as unreadable (there is no readable "warned" flag to record, so it is not once per
-    arming), and in BAKE that note blocks nothing, so no call is wedged. It clears where 'python3
+    never obstructed. The barrier is read by _orch_barrier_read: a non-blocking open (a FIFO with no
+    writer does not wait for one), an fstat that refuses anything not a regular file before any read (so
+    a FIFO or a device such as /dev/zero is never read), and a read bounded at _ORCH_BARRIER_MAX_BYTES.
+    A barrier file that is absent (its open raises FileNotFoundError
+    or NotADirectoryError, a dangling symlink included) reads as clear; a symlink to a regular file reads
+    as that file. A barrier is well-formed only when it is a JSON object whose keys are "active"
+    (required, a boolean), "findings" (required, never defaulted, a list of strings), and optionally
+    "warned" (a boolean) and "ts" (a string), and no other key. One that exists but is not a regular file
+    (a FIFO, a socket, a device such as /dev/zero, a directory, or a symlink to any of these), is larger
+    than the bound, cannot be read or parsed for any reason (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting, or any other exception the parse raises), or is not well-formed (a
+    truncated or partial write by an earlier writer, for example), reads as ARMED: every mutation outside
+    the allowlist surfaces a note naming the file as unreadable or malformed with the reason (there is no
+    readable "warned" flag to record, so it is not once per arming), and in BAKE that note blocks
+    nothing, and a mutation on the allowlist is allowed after the same read. A regular file on a
+    filesystem that stalls (a hung network mount) can still stall the read, as any file read can, until
+    the hook timeout. It clears where 'python3
     tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
-    (_orch_barrier_write), or where the user corrects or removes it (the state directory is on the
-    allowlist); where the state directory cannot be searched, that replace fails as well, and the note
-    persists until its permissions are restored. A directory at the barrier path (its open raises
-    IsADirectoryError) cannot be replaced by either audit, so its note says to remove the directory."""
+    (_orch_barrier_write, whose os.replace replaces a FIFO, a socket, a device node or a symlink at the
+    path and leaves a symlink's target intact), or where the user corrects or removes it (the state
+    directory is on the allowlist); where the state directory cannot be searched, that replace fails as
+    well, and the note persists until its permissions are restored. A directory at the barrier path
+    itself (os.lstat shows a directory) cannot be replaced by either audit, so its note says to remove
+    the directory; a symlink to a directory gets the generic note, since the audit replaces the link."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -11226,19 +11291,16 @@ def orch_resume_barrier(data):
         return _allow()
     sd = _orch_state_dir_for_root(root)
     barrier_path = os.path.join(sd, "resume-barrier.json")
-    unreadable = None
-    try:
-        with open(barrier_path, "r", encoding="utf-8") as fh:
-            barrier = json.load(fh)
-    except (FileNotFoundError, NotADirectoryError):
+    status, barrier = _orch_barrier_read(barrier_path)
+    if status == "absent":
         return _allow()
-    except Exception as exc:  # any read or parse failure (RecursionError from deep nesting too) is armed
-        barrier, unreadable = {}, type(exc).__name__
-    if unreadable is None:
-        if not _orch_barrier_well_formed(barrier):
-            barrier, unreadable = {}, "not a well-formed barrier object"
-        elif not barrier["active"]:
-            return _allow()
+    unreadable = None
+    if status == "bad":  # not a regular file, oversized, unreadable or unparseable: armed
+        barrier, unreadable = {}, barrier
+    elif not _orch_barrier_well_formed(barrier):
+        barrier, unreadable = {}, "not a well-formed barrier object"
+    elif not barrier["active"]:
+        return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     file_path = tool_input.get("file_path")
     if isinstance(file_path, str) and file_path:
@@ -11255,10 +11317,10 @@ def orch_resume_barrier(data):
             rp = os.path.realpath(p)
             if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
                 return _allow()  # the exit path (fixing the record) is always writable
-    if unreadable == "IsADirectoryError":
+    if unreadable == _ORCH_BARRIER_DIRECTORY:
         return _allow_note(
             "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
-            "barrier file {} is unreadable or malformed (IsADirectoryError: it is a directory), so it is "
+            "barrier file {} is unreadable or malformed (not a regular file: it is a directory), so it is "
             "read as armed and this mutation is outside the record surfaces. Neither 'python3 "
             "tools/orch_doctor.py --resume-audit' nor the SessionStart audit can replace a directory: "
             "remove the directory, then re-run 'python3 tools/orch_doctor.py --resume-audit'."

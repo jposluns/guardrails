@@ -2513,22 +2513,29 @@ def _main_isolated(report_path=None):
                        json.dumps(dict(active=False, findings="abc")),
                        json.dumps(dict(active=False, findings=[], extra=1)),
                        json.dumps(dict(active=False, findings=[], ts=5)), "[" * 200000, None)
+        # ROUND 16: an exception escaping the handler (a RecursionError when the except is narrowed, for
+        # example) is recorded as that body's row by its type name, so one row fails instead of the
+        # exception aborting the suite and hiding the later rows.
         for _r14_body in _r14_bodies:
             if _r14_body is None:
                 _r14_bar.unlink()
                 _r14_bar.mkdir()
             else:
                 _r14_bar.write_text(_r14_body, encoding="utf-8")
-            _r14_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
-            _r14_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
-            _r14_rec = aiqt_hooks.orch_resume_barrier(r.payload(
-                "PreToolUse", "Write", dict(file_path=str(r.findings), content="x")))
-            _r14_m = _r14_msg(_r14_first)
-            _r14_mal.append((_verdict(_r14_first), _verdict(_r14_again), _verdict(_r14_rec),
-                             str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m
-                             and (_r14_body is not None or "remove the directory" in _r14_m),
-                             _r14_bar.is_dir() if _r14_body is None
-                             else _r14_bar.read_text(encoding="utf-8") == _r14_body))
+            try:
+                _r14_first = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+                _r14_again = aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src))
+                _r14_rec = aiqt_hooks.orch_resume_barrier(r.payload(
+                    "PreToolUse", "Write", dict(file_path=str(r.findings), content="x")))
+            except Exception as exc:
+                _r14_mal.append(("raised " + type(exc).__name__,))
+            else:
+                _r14_m = _r14_msg(_r14_first)
+                _r14_mal.append((_verdict(_r14_first), _verdict(_r14_again), _verdict(_r14_rec),
+                                 str(_r14_bar) in _r14_m and "unreadable or malformed" in _r14_m
+                                 and (_r14_body is not None or "remove the directory" in _r14_m),
+                                 _r14_bar.is_dir() if _r14_body is None
+                                 else _r14_bar.read_text(encoding="utf-8") == _r14_body))
             if _r14_body is None:
                 _r14_bar.rmdir()
         _r14_absent = [_verdict(aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", _r14_src)))]
@@ -2641,6 +2648,108 @@ def _main_isolated(report_path=None):
             _r15_file.unlink()
         check("barrier/state-dir-not-a-directory-reads-absent", (_verdict(_r15_res), _r14_msg(_r15_res)),
               ("allow", ""))
+        # ROUND 16, THE BARRIER READ NEVER WAITS ON A FIFO OR READS PAST ITS BOUND: a FIFO with no writer
+        # at the barrier path, a symlink to such a FIFO, a symlink to /dev/zero, a regular file one byte
+        # over the bound (a clear barrier padded with spaces) and a symlink to a directory each read as
+        # armed: a mutation outside the allowlist surfaces the note naming the file and the reason, never
+        # the remove-the-directory note, and a repair write in the state directory is allowed with no
+        # note. Each call runs under a 5-second interval timer whose handler raises a BaseException the
+        # handler's own except clauses cannot swallow, so a regression fails its row ("timed out")
+        # instead of hanging the suite. The /dev/zero rows first run the reader alone in a child capped at
+        # its own size plus 64 MiB (an in-process cap did not stop the host's OOM killer), and call the
+        # handler in this process only when that child shows the reader refuses /dev/zero without reading
+        # it; otherwise the row records the child's result and fails, so a regression that reads without
+        # a bound never reads /dev/zero in this process (red on the round-15
+        # reader, which blocks on the FIFO open, reads /dev/zero until MemoryError, reads the padded file
+        # as clear and gives a symlink to a directory the remove-the-directory note). A symlink to a
+        # regular armed barrier reads as that barrier (the symlink policy): the first mutation surfaces
+        # its findings, and the warned-flag write replaces the link with a regular file and leaves the
+        # target's bytes unchanged.
+        import signal as _r16_signal
+
+        class _R16Timeout(BaseException):
+            pass
+
+        def _r16_alarm(signum, frame):
+            raise _R16Timeout()
+
+        def _r16_probe():
+            # The reader alone, in a child capped at its own size plus 64 MiB with a 30-second timeout.
+            try:
+                p = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c",
+                     "import os, resource, sys; sys.path.insert(0, sys.argv[1]); import aiqt_hooks; "
+                     "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE'); "
+                     "resource.setrlimit(resource.RLIMIT_AS, (vm + (64 << 20), resource.RLIM_INFINITY)); "
+                     "print(aiqt_hooks._orch_barrier_read(sys.argv[2]))",
+                     os.path.dirname(os.path.abspath(aiqt_hooks.__file__)), str(_r14_bar)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                return "probe timed out"
+            return p.stdout.strip() or "probe exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
+
+        def _r16_call(file_path, probe):
+            seen = _r16_probe() if probe else None
+            if probe and seen != repr(("bad", "not a regular file")):
+                return ("probe: " + seen, "")  # never read it in this process
+            prev = _r16_signal.signal(_r16_signal.SIGALRM, _r16_alarm)
+            try:
+                _r16_signal.setitimer(_r16_signal.ITIMER_REAL, 5)
+                try:
+                    res = aiqt_hooks.orch_resume_barrier(r.payload(
+                        "PreToolUse", "Write", dict(file_path=file_path, content="x")))
+                finally:
+                    _r16_signal.setitimer(_r16_signal.ITIMER_REAL, 0)
+            except _R16Timeout:
+                return ("timed out", "")
+            except Exception as exc:
+                return ("raised " + type(exc).__name__, "")
+            finally:
+                _r16_signal.signal(_r16_signal.SIGALRM, prev)
+            return (_verdict(res), _r14_msg(res))
+        _r16_target = rsd / "r16-target"
+        _r16_pad = json.dumps(dict(active=False, findings=[])) + " " * aiqt_hooks._ORCH_BARRIER_MAX_BYTES
+        _r16_cases = (
+            ("fifo", lambda: os.mkfifo(str(_r14_bar)), "(not a regular file)", False),
+            ("symlink-to-fifo", lambda: (os.mkfifo(str(_r16_target)), _r14_bar.symlink_to(_r16_target)),
+             "(not a regular file)", False),
+            ("symlink-to-dev-zero", lambda: _r14_bar.symlink_to("/dev/zero"), "(not a regular file)", True),
+            ("oversized", lambda: _r14_bar.write_text(_r16_pad, encoding="utf-8"),
+             "(larger than the {}-byte bound)".format(aiqt_hooks._ORCH_BARRIER_MAX_BYTES), False),
+            ("symlink-to-directory", lambda: (_r16_target.mkdir(), _r14_bar.symlink_to(_r16_target)),
+             "(not a regular file)", False))
+        _r16_rows = []
+        for _r16_name, _r16_make, _r16_reason, _r16_cap in _r16_cases:
+            if os.path.lexists(str(_r14_bar)):
+                os.unlink(str(_r14_bar))
+            _r16_make()
+            try:
+                _r16_out = _r16_call(str(r.root / "src.py"), _r16_cap)
+                _r16_fix = _r16_call(str(rsd / "r16-repair.json"), _r16_cap)
+            finally:
+                os.unlink(str(_r14_bar))
+                if _r16_target.is_dir() and not _r16_target.is_symlink():
+                    _r16_target.rmdir()
+                elif os.path.lexists(str(_r16_target)):
+                    os.unlink(str(_r16_target))
+            _r16_rows.append((_r16_name, _r16_out[0], str(_r14_bar) in _r16_out[1]
+                              and _r16_reason in _r16_out[1] and "remove the directory" not in _r16_out[1],
+                              _r16_fix))
+        check("barrier/non-regular-or-oversized-reads-armed-promptly-repair-allowed", tuple(_r16_rows),
+              tuple((n, "warn", True, ("allow", "")) for n, _m, _s, _c in _r16_cases))
+        _r16_armed = json.dumps(dict(active=True, findings=["r16 finding"], warned=False))
+        _r16_target.write_text(_r16_armed, encoding="utf-8")
+        _r14_bar.symlink_to(_r16_target)
+        try:
+            _r16_out = _r16_call(str(r.root / "src.py"), False)
+            _r16_link = (_r16_out[0], "r16 finding" in _r16_out[1], _r14_bar.is_symlink(),
+                         _r14_bar.is_file() and json.loads(_r14_bar.read_text(encoding="utf-8")).get("warned"),
+                         _r16_target.read_text(encoding="utf-8") == _r16_armed)
+        finally:
+            os.unlink(str(_r14_bar))
+            os.unlink(str(_r16_target))
+        check("barrier/symlink-to-regular-reads-as-target-warned-write-replaces-link", _r16_link,
+              ("warn", True, False, True, True))
 
         # ---------- substrate: the prompt stamp ----------
         p = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit",
