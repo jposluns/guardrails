@@ -89,11 +89,14 @@ the authority, and the summary further down this page only points to it.
   `~`, `~+` or `~-`, which bash expands though the hook reads `~` as a plain character, a pathname
   expansion, an alias, a shell function, a hashed command name from `hash -p`, or a command string handed
   to another program), and a simple command that names `gh`, `run` and `rerun` in order without running
-  them is noted anyway (a false note, and a false refusal when its call succeeds). The exit status it
-  reads is the whole call's, so a `gh` call the server refused behind a pipe, `|| true` or a later command
-  (`gh run rerun 7 2>&1 | tail -5`) exits 0 and is kept as certain (a false refusal). The note for a CI
-  rerun call that succeeds says only that a command naming a CI rerun succeeded and asserts neither a
-  rerun nor an earlier failure; the refusal asks the assistant to state any earlier failure. An uncertain
+  them is noted anyway (a false note, and a false refusal when its call succeeds). It reads an exit
+  status only from an integer exit-code field of the tool response, where one is present, and that status
+  is the whole call's: under default bash options a pipe, `|| true` or a later command can hide a `gh` call
+  the server refused, so `gh run rerun 7 2>&1 | tail -5` exits 0 and is kept as certain (a false
+  refusal); with `pipefail` set, that pipe exits nonzero and gets only the uncertain note. The note for a
+  CI rerun call that succeeds says only that the call was not reported as failed and asserts neither a
+  rerun nor an earlier failure; the refusal asks the assistant to state any earlier failure, and neither
+  it nor the warning given when a refusal is capped asserts a rerun. An uncertain
   rerun gets a note and is never kept, so it never brings a refusal: every command outside the grammar
   (including `echo "$(date)"`, a here-document, and any longer command), a possible CI rerun by
   construction because the hook could not parse it, even when it fails; and a CI rerun call that fails,
@@ -102,7 +105,8 @@ the authority, and the summary further down this page only points to it.
   an off-grammar command that reruns nothing, such as a here-document commit, gets a false note, and a
   real CI rerun written outside the grammar, a failed CI rerun call that did start a rerun, or an
   off-grammar check that fails and then passes gets only its note, with no refusal. A state file written
-  by an earlier revision of the hook is discarded, so none of its flags arms a refusal. Read-only is
+  by an earlier revision of the hook is discarded, so none of its flags arms a refusal, and one of the
+  current revision holding a flag of a kind it never keeps is malformed. Read-only is
   decided only inside the grammar: `env` with any argument, an assignment prefix, a command word holding
   an expansion, and any output redirection whose target is not the unquoted word `/dev/null` count as a
   change; an input redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
@@ -120,7 +124,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `1a49e9bcffb61e1ad2dc6642069c4aad1f92b46191bc68bc26f4ce76da60ff80` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `5eaacb7936e46e81834cd1d96e4c391b1bfa5bfe439aa17025885f9b4c67e524` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
@@ -367,7 +371,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   ignores it is allowed to stop after three refusals with a warning.
 - **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
   through the shell tool, with the same words, each as written with its quoting (a word quoted another way
-  is a different check). A rerun through a web page, a runner's own retry option, or a change made outside
+  is a different check, and so is an operator spelled another way, such as a newline in place of `;`
+  between two commands; blanks, comments, leading and trailing newlines and a final `;` do not count). A
+  command is shown in a note as written, or, when it holds a tab, a newline or another control character,
+  as one `$'...'` string with those characters escaped, and is cut after 160 characters. A rerun through a web page, a runner's own retry option, or a change made outside
   the tool calls it sees is missed or misread. A command its shell reader cannot parse (a here-document,
   ANSI-C quoting such as `$'...'`, a command substitution, a line continuation, or a command over 8192
   characters, notably) is always noted as a possible CI rerun, even when it fails, and counted as a change
@@ -377,8 +384,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   passes is not refused (a missed refusal). A blank command gets no note. Inside its grammar, a rerun
   whose words come into existence only when the command runs (an expansion with a value, a tilde expansion
   such as `~`, `~+` or `~-`, an alias) or that runs `gh` under a hashed name (`hash -p`) is missed. The
-  exit status it reads is the whole call's, so a refused `gh` call hidden by a pipe, `|| true` or a later command
-  is kept as a CI rerun call that succeeded (a false refusal). Its turn-end check reads only the final
+  exit status it reads, only from an integer exit-code field where one is present, is the whole call's, so a
+  refused `gh` call that a pipe (under default bash options, not under `pipefail`), `|| true` or a later
+  command can hide is kept as a CI rerun call that succeeded (a false refusal). Its turn-end check reads only the final
   message against fixed phrase lists: any disclosure word such as `flaky` or `rerun` clears it wherever
   the word stands, even inside a denial such as `I did not rerun CI`, whether or not the failure is
   recorded; it does not record or investigate the failure itself. It fails open on its own failure, by
@@ -386,6 +394,8 @@ section of its opening docstring. Read that section before relying on a hook; in
   unreadable state file is read as no earlier runs, so a local rerun across it is missed and the stop is
   allowed, but the current call's own CI rerun or possible CI rerun note is still given. A state file
   written by an earlier revision of the hook is read the same way, so none of its flags arms a refusal.
+  The state file is trusted: a hand-edited state of the current revision whose flags are of the kinds it
+  keeps still arms a refusal.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git
