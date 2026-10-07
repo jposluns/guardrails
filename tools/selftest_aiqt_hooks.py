@@ -168,6 +168,67 @@ def _reduce_result(code, stdout_obj):
     return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
 
 
+def _strict_constant(name):
+    raise ValueError("non-standard JSON constant " + name)
+
+
+def _strict_pairs(pairs):
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate JSON object key")
+    return dict(pairs)
+
+
+def _strict_hook_json(text):
+    """text (a hook's stdout) parsed as strict JSON: NaN, Infinity, -Infinity and a duplicate object key at
+    any depth raise ValueError, as malformed JSON does. This mirrors tools/check_python_floor.py's strict_json
+    (mirrored, not imported, so this suite stays stdlib-only and self-contained). The default json.loads
+    accepts all four, yet each can change what the platform does: a parser that refuses a NaN member sees no
+    decision at all, and one that keeps the FIRST of two duplicate keys reads a different value from the
+    last-one-wins value a lenient check would judge."""
+    return json.loads(text, parse_constant=_strict_constant, object_pairs_hook=_strict_pairs)
+
+
+def _note_failure(label, result, needle):
+    """None when result (code, stdout_obj, stderr) is an allow-note (_reduce_result) whose systemMessage
+    names needle, else the failure line labelled label. The (nl-*) and (ns-*) note checks and the (hs-*)
+    mutant fixtures share it, so a mutant refused here is refused by those checks."""
+    code, obj, _err = result
+    got = _reduce_result(code, obj)
+    if got != "allow-note":
+        return "{}: expected allow-note, got {}".format(label, got)
+    if needle not in obj["systemMessage"]:
+        return "{}: the note does not name {!r}: {!r}".format(label, needle, obj["systemMessage"])
+    return None
+
+
+_GENERATED_DENY_KEYS = {"hookSpecificOutput", "systemMessage"}
+_GENERATED_DENY_SPECIFIC_KEYS = {"hookEventName", "permissionDecision", "permissionDecisionReason"}
+
+
+def _generated_deny_ok(stdout, rule, detail):
+    """True when stdout (the generated entry point's output for one PreToolUse call) is ONE strict JSON object
+    (_strict_hook_json) of EXACTLY the _deny shape: top-level keys {"hookSpecificOutput", "systemMessage"}
+    with a non-blank string banner, and hookSpecificOutput keys {"hookEventName", "permissionDecision",
+    "permissionDecisionReason"} holding "PreToolUse", "deny" and a string reason that names rule and detail.
+    Any other key (a top-level "decision" of "block" or "approve", a "continue": false) or a non-standard
+    member is refused: the platform may act on such a key or refuse the whole output, so a check that
+    ignored it would accept a deny the platform need not apply as written."""
+    try:
+        output = _strict_hook_json(stdout)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(output, dict) or set(output) != _GENERATED_DENY_KEYS:
+        return False
+    specific, banner = output["hookSpecificOutput"], output["systemMessage"]
+    if not (isinstance(specific, dict) and set(specific) == _GENERATED_DENY_SPECIFIC_KEYS
+            and isinstance(banner, str) and banner.strip()):
+        return False
+    reason = specific["permissionDecisionReason"]
+    return (specific["hookEventName"] == "PreToolUse" and specific["permissionDecision"] == "deny"
+            and isinstance(reason, str) and rule in reason and detail in reason)
+
+
 def _decision(handler, command, tool="Bash", cwd=None):
     """Run a PreToolUse handler over a synthetic Bash payload and reduce its result with _reduce_result to
     'allow' (silent), 'allow-note', 'explicit-allow', 'ask', 'deny', or an "unexpected" string. This helper
@@ -770,12 +831,9 @@ def _test_note_literal_sites(failures, tmp):
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
-        code, obj, _err = result
-        got = _reduce_result(code, obj)
-        if got != "allow-note":
-            failures.append("{}: expected allow-note, got {}".format(label, got))
-        elif needle not in obj["systemMessage"]:
-            failures.append("{}: the note does not name {!r}: {!r}".format(label, needle, obj["systemMessage"]))
+        problem = _note_failure(label, result, needle)
+        if problem is not None:
+            failures.append(problem)
 
     base = tmp / "note-literals"
     base.mkdir()
@@ -834,7 +892,8 @@ def _terminal_dispatch(argv, stdin_text=None):
     again, outside it, and that status is what the probe reports. The REAL os._exit behavior
     (status preserved against broken descriptors, pre-existing buffers and diagnostic faults) is
     pinned by tools/check_python_floor.py (launcher/dispatcher-refusal-fd-states and the
-    fault-injection checks). Returns (exit status, parsed stdout JSON or a note, None)."""
+    fault-injection checks). Returns (exit status, stdout parsed by _strict_hook_json or a note, None):
+    a NaN, an infinity or a duplicate key in the note reads as unparseable, never as a note."""
     buf, saved_stdin, saved_exit = io.StringIO(), sys.stdin, os._exit
 
     def _exit(status):
@@ -853,9 +912,118 @@ def _terminal_dispatch(argv, stdin_text=None):
         os._exit = saved_exit
         sys.stdin = saved_stdin
     try:
-        return code, json.loads(buf.getvalue()), None
-    except ValueError:
+        return code, _strict_hook_json(buf.getvalue()), None
+    except (ValueError, RecursionError):
         return code, "unparseable stdout " + repr(buf.getvalue()), None
+
+
+class _JsonDumpsShim:
+    """Stands in for aiqt_hooks' json module with a dumps that returns one fixed text, so the dispatcher's own
+    fail-open print emits a recorded mutant; every other attribute is the real json module's."""
+
+    def __init__(self, text):
+        self._text = text
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+    def dumps(self, *_args, **_kwargs):
+        return self._text
+
+
+def _test_hook_stdout_strict(failures):
+    """(hs-*) The two parses of hook stdout in this suite that judge a fail-open warning or a decision use
+    _strict_hook_json: _terminal_dispatch (the dispatcher's fail-open note, judged by _note_failure as the
+    (nl-dispatch-warn) and (ns-dispatch-*) checks judge it) and _generated_deny_ok (the generated entry
+    point's deny, (pl239-generated-*)). Each recorded mutant must fail its check. A mutant marked lenient is
+    one the former plain json.loads judgement accepted, so it must also pass a lenient replay of that
+    judgement, which proves the fixture discriminates; a mutant marked shape was already refused by the
+    exact-key rule and is held refused. The deny mutants exercise the judge on recorded stdout texts, not
+    the generated entry point itself."""
+    for text, refused in (("NaN", True), ("Infinity", True), ("-Infinity", True), ("[1, NaN]", True),
+                          ('{"a": {"b": 1, "b": 2}}', True), ('{"a": 1, "a": 1}', True),
+                          ('{"systemMessage": "x"}', False), ('{"a": [1.5, -2e300, null]}', False)):
+        try:
+            _strict_hook_json(text)
+            got = False
+        except ValueError:
+            got = True
+        if got is not refused:
+            failures.append("(hs-parse) strict parse of {!r}: expected refused={}, got {}"
+                            .format(text, refused, got))
+
+    note_text = ("AIQT guardrail: the orch_stop_guard check could not run (hs-mutant); surfacing a warning "
+                 "rather than blocking (non-blocking by design on this event).")
+    needle = "could not run"
+    dispatch_cases = (
+        ("control", json.dumps({"systemMessage": note_text}), None),
+        ("dup-key", '{"systemMessage": "hs-other", "systemMessage": ' + json.dumps(note_text) + "}",
+         "lenient"),
+        ("dup-nan", '{"systemMessage": NaN, "systemMessage": ' + json.dumps(note_text) + "}", "lenient"),
+        ("decision-block", json.dumps({"decision": "block", "reason": "hs", "systemMessage": note_text}),
+         "shape"),
+        ("extra-nan", json.dumps({"extra": float("nan"), "systemMessage": note_text}), "shape"),
+    )
+    saved_json = aiqt_hooks.json
+    for name, text, kind in dispatch_cases:
+        label = "(hs-dispatch-{})".format(name)
+        aiqt_hooks.json = _JsonDumpsShim(text)
+        try:
+            result = _terminal_dispatch(["orch_stop_guard", "extra"])
+        finally:
+            aiqt_hooks.json = saved_json
+        problem = _note_failure(label, result, needle)
+        if kind is None:
+            if problem is not None:
+                failures.append(problem)
+        elif problem is None:
+            failures.append("{} the dispatcher fail-open note check accepted the mutant {!r}"
+                            .format(label, text))
+        if kind == "lenient":
+            lenient = json.loads(text)
+            if _note_failure(label, (0, lenient, None), needle) is not None:
+                failures.append("{} the mutant does not discriminate: a plain json.loads replay already "
+                                "refuses it".format(label))
+
+    detail = "hs-detail"
+    deny = aiqt_hooks._deny("AIQT rule artbr1 (protected-line): {}.".format(detail),
+                            "AIQT guardrail: denied (rule artbr1).")[1]
+    reason = deny["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def lenient_deny(stdout):
+        try:
+            output = json.loads(stdout)
+            specific = output["hookSpecificOutput"]
+            return (specific["hookEventName"] == "PreToolUse" and specific["permissionDecision"] == "deny"
+                    and "rule artbr1" in specific["permissionDecisionReason"]
+                    and detail in specific["permissionDecisionReason"] and bool(output["systemMessage"]))
+        except (ValueError, KeyError, TypeError):
+            return False
+
+    deny_cases = (
+        ("control", json.dumps(deny), None),
+        ("decision-block", json.dumps(dict(deny, decision="block")), "lenient"),
+        ("decision-approve", json.dumps(dict(deny, decision="approve")), "lenient"),
+        ("continue-false", json.dumps(dict(deny, **{"continue": False})), "lenient"),
+        ("nan-banner", json.dumps(dict(deny, systemMessage=float("nan"))), "lenient"),
+        ("nan-extra", json.dumps(dict(deny, extra=float("nan"))), "lenient"),
+        ("dup-decision", '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+         '"permissionDecision": "allow", "permissionDecision": "deny", '
+         '"permissionDecisionReason": ' + json.dumps(reason) + '}, '
+         '"systemMessage": "AIQT guardrail: denied (rule artbr1)."}', "lenient"),
+        ("specific-extra", json.dumps(dict(deny, hookSpecificOutput=dict(
+            deny["hookSpecificOutput"], updatedInput={"command": "true"}))), "lenient"),
+        ("permission-allow", json.dumps(dict(deny, hookSpecificOutput=dict(
+            deny["hookSpecificOutput"], permissionDecision="allow"))), "shape"),
+    )
+    for name, text, kind in deny_cases:
+        label = "(hs-deny-{})".format(name)
+        ok = _generated_deny_ok(text, "rule artbr1", detail)
+        if ok is not (kind is None):
+            failures.append("{} the generated-deny check returned {} for {!r}".format(label, ok, text))
+        if kind == "lenient" and not lenient_deny(text):
+            failures.append("{} the mutant does not discriminate: the former plain json.loads judgement "
+                            "already refuses it".format(label))
 
 
 def _shape_mutant(source, func_name, lines):
@@ -1247,12 +1415,9 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
-        code, obj, _err = result
-        got = _reduce_result(code, obj)
-        if got != "allow-note":
-            failures.append("{}: expected allow-note, got {}".format(label, got))
-        elif needle not in obj["systemMessage"]:
-            failures.append("{}: the note does not name {!r}: {!r}".format(label, needle, obj["systemMessage"]))
+        problem = _note_failure(label, result, needle)
+        if problem is not None:
+            failures.append(problem)
 
     note("(ns-wall-event) the diff-wall Stop check wired to a non-Stop event warns",
          aiqt_hooks.diff_wall_stop({"hook_event_name": "PreToolUse"}), "unexpected event")
@@ -4380,19 +4545,7 @@ def _main_isolated(monitor):
                         failures.append("(pl239-generated-{}) expected silent ALLOW, got {!r}"
                                         .format(_case, _result.stdout))
                     continue
-                try:
-                    _output = json.loads(_result.stdout)
-                    _specific = _output["hookSpecificOutput"]
-                    _valid = (
-                        _specific["hookEventName"] == "PreToolUse"
-                        and _specific["permissionDecision"] == "deny"
-                        and "rule artbr1" in _specific["permissionDecisionReason"]
-                        and _detail in _specific["permissionDecisionReason"]
-                        and bool(_output["systemMessage"])
-                    )
-                except (ValueError, KeyError, TypeError):
-                    _valid = False
-                if not _valid:
+                if not _generated_deny_ok(_result.stdout, "rule artbr1", _detail):
                     failures.append("(pl239-generated-{}) expected structured artbr1 DENY, got {!r}"
                                     .format(_case, _result.stdout))
 
@@ -7511,6 +7664,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
+        _test_hook_stdout_strict(failures)
         _test_note_shape_pins(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========

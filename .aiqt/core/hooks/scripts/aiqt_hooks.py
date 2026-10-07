@@ -176,7 +176,11 @@ import sys
 # aiqt_hooks_launch.py, which carries this guard and literal in syntax every Python 3 that accepts -I
 # compiles, and refuses there first. RESIDUAL the launcher cannot close: an interpreter that predates -I
 # (Python 2, or Python 3 before 3.4) rejects that option before it reads any file and exits 2 on every
-# event, so it blocks each UserPromptSubmit and Stop as well as each PreToolUse call.
+# event, so it blocks each UserPromptSubmit and Stop as well as each PreToolUse call. This guard's fail-open
+# refusal delivers its stderr diagnostic FIRST and imports json only after it, inside the protected block: if
+# that `import json` fails (a MemoryError, for example), the stderr diagnostic has already been delivered and
+# the exit status still holds, but the JSON systemMessage warning is not written to stdout, so the platform
+# shows no warning for that refusal.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
