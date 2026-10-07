@@ -53,6 +53,10 @@ does not support dir_fd for os.open the hook is opened by its full name, still w
 the final component; and a writer whose in-place rewrite of the SAME inode is still in progress
 when the launcher reads it (never a rename, removal or replacement, which the descriptor
 acquisition covers) can expose a partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs.
+The steps before the acquisition refusal decides its status run outside any protected block: the
+module imports (sys before the floor guard; ast, io, itertools, os, stat, tokenize, types and
+warnings after it), the HERE path computation and the _hook path computation (hook_path), so a
+fault in one of them (a MemoryError, for example) exits 1, which does not block a PreToolUse call.
 """
 import sys
 
@@ -89,7 +93,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import io
 import itertools
-import json
 import os
 import stat
 import tokenize
@@ -494,7 +497,7 @@ _hook = hook_path(sys.argv[1])
 # acquisition itself runs inside a try/except BaseException (an exception it does not map is
 # refused by the mode rule too, as "the acquisition raised"); every diagnostic step (formatting the
 # acquisition error, whose __str__ can raise anything, a SystemExit included, the message,
-# serialization, delivery) runs inside one try/except BaseException, with the bare reason as the
+# the import of json, serialization, delivery) runs inside one try/except BaseException, with the bare reason as the
 # fallback when the error's text cannot be formatted; the refusal ends with os._exit, which no
 # shutdown flush, stream-buffer state or atexit handler can change.
 _refusal_status = 2
@@ -517,6 +520,7 @@ if isinstance(_got, tuple):
                     "Nothing was run (cannot evaluate).\n" % (_hook, _reason))
         _deliver(2, _missing)
         if _refusal_status == 0:
+            import json
             _deliver(1, json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _missing.strip())))) + "\n")

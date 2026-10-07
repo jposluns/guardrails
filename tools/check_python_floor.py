@@ -2441,6 +2441,18 @@ def _self_test_cases(base):
                    "    int(not os.path.lexists(sibling))))\n")
     hook_ran = "import sys\nsys.stdout.write(\"HOOK_RAN\\n\")\n"
 
+    def _warning(out, needle):
+        """True only when out is ONE JSON object whose systemMessage is a string containing needle.
+        Only that parsed field is searched, never the raw stream: a fail-open warning that does not
+        parse (a json.dumps replaced by str prints a Python dict repr) is not a warning the platform
+        can surface, so a substring test on the stream would accept a broken refusal."""
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            return False
+        note = parsed.get("systemMessage") if isinstance(parsed, dict) else None
+        return isinstance(note, str) and needle in note
+
     def _acquire_case(scenario, mode_kind):
         got = []
         for rel in sorted(LAUNCHERS):
@@ -2487,7 +2499,7 @@ def _self_test_cases(base):
             elif scenario == "ok":
                 got.append((rc, "HOOK_RAN" in out))
             elif mode_kind == "fail_open":
-                got.append((rc, "systemMessage" in out, marker in err))
+                got.append((rc, _warning(out, marker), marker in err))
             else:
                 got.append((rc, out, marker in err))
         return got
@@ -2573,9 +2585,10 @@ def _self_test_cases(base):
     def _fd_seen(fd_case, rc_want, kept):
         """What the surviving stream must show: with stderr closed, stdout carries the warning for
         a fail-open refusal and stays empty for a blocking one; with stdout closed or broken,
-        stderr carries the refusal either way."""
+        stderr carries the refusal either way. The warning is judged strictly (_warning: one JSON
+        object whose string systemMessage carries the launcher's refusal wording)."""
         if fd_case in ("stderr-closed", "stderr-broken") and rc_want == 0:
-            return "systemMessage" in kept
+            return _warning(kept, "check could not run")
         if fd_case in ("stderr-closed", "stderr-broken"):
             return kept
         return "Nothing was run" in kept
@@ -2642,7 +2655,14 @@ def _self_test_cases(base):
     # SyntaxError subclass raised at its compile, each with a __str__ that raises MemoryError, then
     # SystemExit(0); the status is decided before the acquisition and the error is formatted only
     # inside the protected refusal, with the bare reason as the fallback, so the refusal still names
-    # that reason and exits by the mode rule. What is NOT probed, disclosed in the launcher
+    # that reason and exits by the mode rule. Then, per real launcher, mode kind and acquisition
+    # branch, an exception OUTSIDE every tuple _acquire_hook maps (RuntimeError, then SystemExit(0))
+    # raised at the hook's os.open or compile: only the dispatch's catch-all around the acquisition
+    # holds the mode rule there, so the refusal must name the fallback reason "the acquisition
+    # raised" and the hook must not run. The acquisition refusal is also probed with MemoryError at
+    # its `import json`, which therefore runs inside the protected block. Every fail-open warning
+    # is judged strictly (_warning: one JSON object whose string systemMessage carries the reason),
+    # never by a substring of the raw stream. What is NOT probed, disclosed in the launcher
     # docstrings: a full blocking pipe can block the diagnostic write until its reader drains it,
     # and an external signal terminates outside any guarantee.
     inject_runner = (
@@ -2709,6 +2729,34 @@ def _self_test_cases(base):
         "if branch == 'compile':\n"
         "    builtins.compile = _compile\n"
         "runpy.run_path(path, run_name='__main__')\n")
+    # The unmapped-exception child: os.open (branch open) or compile (branch compile) raises an
+    # exception OUTSIDE every tuple _acquire_hook maps (a RuntimeError, or SystemExit(0)) for the
+    # hook file alone, so it escapes _acquire_hook and only the dispatch's own catch-all around the
+    # acquisition stands between it and an exit 1 (RuntimeError) or a silent exit 0 (SystemExit).
+    unmapped_runner = (
+        "import builtins, os, runpy, sys\n"
+        "branch, fault, path, sibling = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]\n"
+        "sys.argv = [path] + sys.argv[5:]\n"
+        "def _raise():\n"
+        "    if fault == 'runtimeerror':\n"
+        "        raise RuntimeError('injected at the acquisition')\n"
+        "    raise SystemExit(0)\n"
+        "real_open, real_compile = os.open, builtins.compile\n"
+        "def _open(target, flags, *args, **kwargs):\n"
+        "    if os.path.basename(str(target)) == os.path.basename(sibling):\n"
+        "        _raise()\n"
+        "    return real_open(target, flags, *args, **kwargs)\n"
+        "def _compile(source, filename, *args, **kwargs):\n"
+        "    if os.path.basename(str(filename)) == os.path.basename(sibling):\n"
+        "        _raise()\n"
+        "    return real_compile(source, filename, *args, **kwargs)\n"
+        "if branch == 'open':\n"
+        "    os.open = _open\n"
+        "    if real_open in os.supports_dir_fd:\n"
+        "        os.supports_dir_fd = frozenset(set(os.supports_dir_fd) | {_open})\n"
+        "if branch == 'compile':\n"
+        "    builtins.compile = _compile\n"
+        "runpy.run_path(path, run_name='__main__')\n")
     # The handler-crash child: the dispatcher is imported (never run as __main__), the PreToolUse
     # handler is replaced by one that raises, stdin carries a readable payload, and main's status is
     # handed to sys.exit exactly as the dispatcher's own __main__ block does.
@@ -2732,7 +2780,7 @@ def _self_test_cases(base):
         skip = "skipped (closing a child's standard descriptor needs posix)"
         inject_got = inject_want = acq_inject_got = acq_inject_want = skip
         buffer_got = buffer_want = dispatcher_got = dispatcher_want = skip
-        text_got = text_want = skip
+        text_got = text_want = unmapped_got = unmapped_want = skip
     else:
         inject_got, inject_want = [], []
         for rel in HOOK_SURFACES:
@@ -2747,11 +2795,12 @@ def _self_test_cases(base):
         for rel in sorted(LAUNCHERS):
             for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
                 mode = _hook_kind_mode(rel, kind)
-                args = _acquire_fd_args(rel, mode)
-                rc, out, err = _child(inject_runner, ["serialize", args[0], "real", mode], (), base)
-                acq_inject_got.append((rel, kind, rc, "cannot acquire" in err,
-                                       "Traceback" not in err))
-                acq_inject_want.append((rel, kind, rc_want, True, True))
+                for fault in ("serialize", "import-json"):
+                    args = _acquire_fd_args(rel, mode)
+                    rc, out, err = _child(inject_runner, [fault, args[0], "real", mode], (), base)
+                    acq_inject_got.append((rel, kind, fault, rc, "cannot acquire" in err,
+                                           "Traceback" not in err))
+                    acq_inject_want.append((rel, kind, fault, rc_want, True, True))
         buffer_got, buffer_want = [], []
         for rel in sorted(LAUNCHERS):
             for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
@@ -2796,16 +2845,38 @@ def _self_test_cases(base):
                         rc, out, err = _child(error_text_runner,
                                               [branch, fault, str(spot / Path(rel).name),
                                                str(spot / sibling), mode], (), spot)
-                        seen = ("systemMessage" in out) if kind == "fail_open" else out
+                        seen = _warning(out, reason) if kind == "fail_open" else out
                         text_got.append((rel, kind, branch, fault, rc, reason in err,
                                          "Traceback" not in err, "HOOK_RAN" not in out, seen))
                         text_want.append((rel, kind, branch, fault, rc_want, True, True, True,
                                           True if kind == "fail_open" else ""))
+        unmapped_got, unmapped_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            for kind, rc_want in (("blocking", REFUSAL_EXIT), ("fail_open", 0)):
+                mode = _hook_kind_mode(rel, kind)
+                sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+                for branch in ("open", "compile"):
+                    for fault in ("runtimeerror", "systemexit"):
+                        spot = Path(tempfile.mkdtemp(prefix="unmapped-", dir=base))
+                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                        (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                        rc, out, err = _child(unmapped_runner,
+                                              [branch, fault, str(spot / Path(rel).name),
+                                               str(spot / sibling), mode], (), spot)
+                        seen = _warning(out, "(the acquisition raised)") if kind == "fail_open" \
+                            else out
+                        unmapped_got.append((rel, kind, branch, fault, rc,
+                                             "(the acquisition raised)" in err,
+                                             "Traceback" not in err, "HOOK_RAN" not in out, seen))
+                        unmapped_want.append((rel, kind, branch, fault, rc_want, True, True, True,
+                                              True if kind == "fail_open" else ""))
     check("launcher/floor-refusal-fault-injection", inject_got, inject_want)
     check("launcher/acquire-refusal-fault-injection", acq_inject_got, acq_inject_want)
     check("launcher/refusal-stdout-buffer-fd-closed", buffer_got, buffer_want)
     check("launcher/dispatcher-refusal-fd-states", dispatcher_got, dispatcher_want)
     check("launcher/acquire-error-text-fault-injection", text_got, text_want)
+    check("launcher/acquire-unmapped-exception-mode-rule", unmapped_got, unmapped_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,

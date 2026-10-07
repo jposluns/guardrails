@@ -1450,8 +1450,23 @@ def _main_isolated(report_path=None):
               (2, True))
         ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
                             capture_output=True, text=True, timeout=120)
-        check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, "RecursionError" in ds.stdout),
-              (0, True))
+
+        def _stop_warning(stdout):
+            """(shape, note) for a fail-open Stop warning, judged strictly: stdout must be ONE JSON object
+            whose systemMessage is a string, and only that field is searched; a parse failure, a non-object
+            or a missing or non-string systemMessage fails the check (plain text naming the exception on
+            stdout is not a warning the platform would surface)."""
+            try:
+                obj = json.loads(stdout)
+            except ValueError:
+                obj = None
+            note = obj.get("systemMessage") if isinstance(obj, dict) else None
+            if isinstance(note, str):
+                return "json object with a string systemMessage", note
+            return "parse or schema failure: stdout " + repr(stdout), ""
+        ds_shape, ds_note = _stop_warning(ds.stdout)
+        check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, ds_shape, "RecursionError" in ds_note),
+              (0, "json object with a string systemMessage", True))
 
         # A read that raises MemoryError cannot be fed through a real stdin, so a scratch launcher installs a
         # raising stdin and calls the dispatcher's main in a CHILD process: every dispatcher refusal is
@@ -1476,18 +1491,8 @@ def _main_isolated(report_path=None):
         mp = _memerr_dispatch("orch_truncation_guard")
         check("trunc/dispatch-memoryerror-fails-closed", (mp.returncode, "MemoryError" in mp.stderr), (2, True))
         ms = _memerr_dispatch("orch_stop_guard")
-        # Strict: stdout must be ONE JSON object whose systemMessage is a string, and only that field is
-        # searched; a parse failure, a non-object or a missing or non-string systemMessage fails the check
-        # (plain "MemoryError" text on stdout is not a warning the platform would surface).
-        try:
-            ms_obj = json.loads(ms.stdout)
-        except ValueError:
-            ms_obj = None
-        ms_note = ms_obj.get("systemMessage") if isinstance(ms_obj, dict) else None
-        ms_shape = "json object with a string systemMessage" if isinstance(ms_note, str) \
-            else "parse or schema failure: stdout " + repr(ms.stdout)
-        check("trunc/dispatch-memoryerror-stop-warns",
-              (ms.returncode, ms_shape, isinstance(ms_note, str) and "MemoryError" in ms_note),
+        ms_shape, ms_note = _stop_warning(ms.stdout)
+        check("trunc/dispatch-memoryerror-stop-warns", (ms.returncode, ms_shape, "MemoryError" in ms_note),
               (0, "json object with a string systemMessage", True))
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
