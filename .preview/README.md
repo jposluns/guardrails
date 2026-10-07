@@ -82,7 +82,15 @@ the authority, and the summary further down this page only points to it.
   command text and no recorded change between, it adds a note to the assistant's context; at turn end it
   refuses, at most twice in a row, a final message that calls a pass conclusive without naming the earlier
   failure. Events: `PostToolUse` and `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`),
-  and `Stop`.
+  and `Stop`. Its shell reading is exact only for a small closed grammar (listed in its docstring). Inside it,
+  a CI rerun is missed only when its words come into existence when the command runs (an expansion that has
+  a value, a pathname expansion, an alias or a shell function, or a command string handed to another
+  program), and a simple command that names `gh`, `run` and `rerun` in order without running them is noted
+  anyway (a false note). A command outside the grammar counts as a change, so a rerun across it is not
+  flagged (a missed note; this includes `echo "$(date)"` and a here-document), and it is a possible CI rerun
+  when its normalized text names one anywhere (a false note). Read-only is decided only inside the grammar:
+  `env` with any argument, an assignment prefix, a command word holding an expansion, and any redirection
+  target other than `/dev/null` count as a change.
 
 ## Integrity
 
@@ -97,7 +105,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `5da805b4cd81fd4aeef114e763390813bdfdc03c4f82e416156e8c393274bb46` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `515c5d2c1f22f92c7d5ba6c3e328cf864f4f1f193f61fb3a94a2da2b0cac56cc` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
