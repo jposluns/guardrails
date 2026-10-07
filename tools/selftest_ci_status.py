@@ -24,14 +24,22 @@ missing tomllib are refused before any check runs, so they always exit 2.
 Reporting can never escape or change the rule. An uncaught exception is recorded before its text is
 rendered, and exception or path text in a diagnostic goes through _safe_text(), which contains whatever
 str() or repr() raises (SystemExit included) and falls back to the type name. Each print and each flush
-of the report is contained on its own and a failure is recorded as a harness error, so a failing stderr
-does not stop the assertion failures being written to stdout, nor a failing stdout the diagnostics on
-stderr. The verdict is read only after both streams are flushed of earlier output; a PASS line is then
-the last output, and if printing or flushing it fails, the run exits 2 and a following line, best
-effort, says that any PASS line above is void. The exit code is computed once, after all reporting, and
-the script ends with os._exit() on that code, so the interpreter's own exit-time flush cannot replace
-it. A stdout already closed when the run starts (None in Python) discards the result lines; the exit
-code still follows the rule.
+of a result line (the FAIL header, each failure line, the stderr summary line, the PASS line and each
+void line) is contained on its own and a failure is recorded as a harness error, so a fault on one line
+or stream does not stop the later lines, on the same stream or the other. The verdict is read only after
+both streams are flushed of earlier output; a PASS line is then the last output. The exit code is
+computed once, after all reporting, and the script ends with os._exit() on that code, so the
+interpreter's own exit-time flush cannot replace it.
+
+What a reader of stdout can rely on: only the exit code is authoritative. If printing or flushing the
+PASS line fails, the run exits 2 and then writes the void line (any PASS line above is void) to stdout
+and to stderr. On stdout the void line is written together with a line break before it, so it always
+starts a line of its own even when the PASS write stopped mid-line; when the PASS line was complete, a
+blank line comes before it. Those void lines are best effort: a stream that rejects them, or that cannot
+be written at all, shows no void line. So a stdout may end with a PASS text, whole or cut off, and no
+void line after it while the run exits 2, and a stdout that cannot be written at all, or that was
+already closed when the run started (None in Python), shows nothing; the exit code still follows the
+rule. A PASS text on stdout that a later line voids is not a pass.
 """
 import sys
 
@@ -854,6 +862,9 @@ def _run_checks():
     # Round 9: a fault on one stream does not stop the other stream's output, no unsuccessful case
     # leaves an unflagged PASS line, and the os._exit() ending runs in a child whose stdout cannot
     # flush.
+    # Round 10: each result line's print and flush is contained on its own, and each containment has a
+    # case that fails without it; a PASS write cut off mid-line is followed by the void line on a line of
+    # its own, read line by line.
     _finalise_check(*_finalisation_cases())
 
 
@@ -867,8 +878,9 @@ def main(report_path=None, run_checks=_run_checks):
     """Run the checks and the reconciliation, then return the exit code by the module docstring's rule.
 
     An exception or SystemExit that ends the try block, raised anywhere including inside check(), is
-    recorded as a harness error; a normal finish records nothing. _report() then prints the result with
-    each print and flush contained on its own, every failure recorded and none raised. The last
+    recorded as a harness error; when the try block finishes normally, ending it records nothing beyond
+    what the checks and the reconciliation recorded. _report() then prints the result with each print
+    and flush of a result line contained on its own, every failure recorded and none raised. The last
     statement computes the code from the records alone: any assertion failure -> 1; else any harness
     error, an uncaught exception or SystemExit included -> 2; else 0. run_checks is replaced only by
     _finalisation_cases().
@@ -916,6 +928,9 @@ def _reconcile(report_path):
 
 _PASS_VOID = ("SELF-TEST HARNESS ERROR: the run failed while or after reporting PASS; any PASS line "
               "above is void (cannot evaluate)")
+# A line break in the same write as the stdout void text, so that text starts a line of its own even
+# when the PASS write stopped mid-line.
+_PASS_VOID_STDOUT = "\n" + _PASS_VOID
 
 
 def _report():
@@ -929,7 +944,9 @@ def _report():
         _report_pass()
         return
     if FAILURES:
-        _contained(_print_failures)
+        _contained(print, "SELF-TEST FAIL:")
+        for failure in FAILURES:  # each line on its own: a refused line does not stop the next one
+            _contained(print, "  - " + failure)
         _contained(_flush, sys.stdout)
         if HARNESS_ERRORS:
             _contained(print, "SELF-TEST HARNESS ERROR: see the labelled errors above; the assertion "
@@ -940,21 +957,16 @@ def _report():
     _contained(_flush, sys.stderr)
 
 
-def _print_failures():
-    print("SELF-TEST FAIL:")
-    for failure in FAILURES:
-        print("  - " + failure)
-
-
 def _report_pass():
     # Nothing is recorded yet, and the PASS line's own print and flush are the last steps that can still
-    # turn the verdict. If either fails, the run exits 2 and the PASS text may already be out, so a
-    # following line voids it, best effort, on both streams.
+    # turn the verdict. If either fails, the run exits 2 and the PASS text may already be out, whole or
+    # cut off mid-line, so a void line follows it, best effort, on both streams; on stdout it starts
+    # with a line break.
     _contained(print, "SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
                "tools/selftest_checks.toml".format(len(EXECUTED)))
     _contained(_flush, sys.stdout)
     if HARNESS_ERRORS:
-        _contained(print, _PASS_VOID)
+        _contained(print, _PASS_VOID_STDOUT)
         _contained(_flush, sys.stdout)
         _contained(print, _PASS_VOID, file=sys.stderr)
         _contained(_flush, sys.stderr)
@@ -1028,6 +1040,35 @@ class _FlushFault(io.StringIO):
             raise SystemExit(0)
 
 
+class _SeededStream(io.StringIO):
+    """An output stream with seeded faults, each raising SystemExit(0). A write whose text contains
+    refuse raises and keeps nothing; with times set, only the first times such writes do. A buffered
+    stream holds written text until flush() delivers it, and getvalue() returns the delivered text only:
+    the first flush_faults flushes with text held raise and deliver nothing, keeping it held."""
+
+    def __init__(self, refuse=None, times=None, buffered=False, flush_faults=0):
+        super().__init__()
+        self.refuse, self.times, self.buffered, self.flush_faults = refuse, times, buffered, flush_faults
+        self.held = []
+
+    def write(self, text):
+        if self.refuse is not None and self.refuse in text and self.times != 0:
+            if self.times is not None:
+                self.times -= 1
+            raise SystemExit(0)
+        if self.buffered:
+            self.held.append(text)
+            return len(text)
+        return super().write(text)
+
+    def flush(self):
+        if self.held and self.flush_faults:
+            self.flush_faults -= 1
+            raise SystemExit(0)
+        super().write("".join(self.held))
+        self.held.clear()
+
+
 class _FaultingPath:
     """A manifest path whose os.fspath() raises: an uncaught exception during the reconciliation."""
 
@@ -1060,8 +1101,9 @@ class _NamelessError(Exception, metaclass=_NamelessType):
     """An exception whose type name cannot be read."""
 
 
-# Run by _finalisation_cases() in a child: the real main() and _end(), with a stdout whose writes reach
-# the pipe at once and whose flush raises while anything written is pending, as a full disk does.
+# Run by _finalisation_cases() in a child: the real main() and _end(), with a stdout whose writes go
+# straight to the pipe and whose every flush raises once anything has been written, as the flush of a
+# buffered stream whose delivery fails does.
 _END_DRIVER = """import os
 import sys
 
@@ -1089,11 +1131,13 @@ selftest._end(selftest.main(None, lambda: selftest._finalise_check(0, 0)))
 
 
 def _pass_state(text):
-    # "none": no PASS text; "void": the last PASS text is followed by the void line; "pass": it is not.
-    at = text.rfind("SELF-TEST PASS")
-    if at < 0:
+    # Read line by line, as a reader of stdout would: "none": no line holds PASS text; "void": a later
+    # line than the last one that does is exactly the void line; "pass": no such line follows it.
+    lines = text.split("\n")
+    marks = [at for at, line in enumerate(lines) if "SELF-TEST PASS" in line]
+    if not marks:
         return "none"
-    return "void" if _PASS_VOID in text[at:] else "pass"
+    return "void" if _PASS_VOID in lines[marks[-1] + 1:] else "pass"
 
 
 def _finalisation_cases():
@@ -1101,9 +1145,10 @@ def _finalisation_cases():
 
     Return (results, wants): per case, the exit code, the expected stdout and stderr texts that are
     absent, the stdout PASS state (see _pass_state) and whether stderr holds a PASS text, against the
-    case's code, nothing absent, its PASS state and False. Every unsuccessful case expects no PASS text,
-    or one followed by the void line where the PASS line's own delivery fails. The last case runs the
-    real main() and _end() in a child whose stdout cannot flush.
+    case's code, nothing absent, its PASS state and False. A buffered stream's text is what its flushes
+    delivered. Every unsuccessful case expects no PASS text, or one followed by the void line where the
+    PASS line's own delivery fails. The last case runs the real main() and _end() in a child whose
+    stdout cannot flush.
     """
     global CHECKS_MANIFEST
     saved = (list(FAILURES), list(HARNESS_ERRORS), list(EXECUTED), set(_EXECUTED_SET), CHECKS_MANIFEST)
@@ -1157,7 +1202,15 @@ def _finalisation_cases():
         print("seeded check output", file=sys.stderr)
 
     faults = {"write": _ExitOnWrite, "flush": _FlushFault, "flush-always": lambda: _FlushFault(True),
-              "closed": lambda: None}
+              "closed": lambda: None,
+              "newline-once": lambda: _SeededStream(refuse="\n", times=1),
+              "refuse-header": lambda: _SeededStream(refuse="SELF-TEST FAIL"),
+              "refuse-seeded": lambda: _SeededStream(refuse="  - " + seeded),
+              "refuse-summary-buffered": lambda: _SeededStream(refuse="see the labelled errors",
+                                                               buffered=True),
+              "refuse-void-buffered": lambda: _SeededStream(refuse=_PASS_VOID, buffered=True),
+              "buffered": lambda: _SeededStream(buffered=True),
+              "buffered-flush-once": lambda: _SeededStream(buffered=True, flush_faults=1)}
     void = [_PASS_VOID]
     failed = "diagnostic output failed: SystemExit"
     both_fail = "the assertion failures make this run a FAIL"
@@ -1185,8 +1238,8 @@ def _finalisation_cases():
             value_text = "uncaught _UnprintableError: _UnprintableError()"
             unprintable_path = _UnprintablePath(str(absent))
             # (seed a failure first?, checks run, report path, manifest, code, stdout texts, stderr texts,
-            # and optionally "stream:fault" from faults, then the stdout PASS state when not the default:
-            # "pass" for code 0, else "none")
+            # and optionally "stream:fault" from faults, several joined by "+", then the stdout PASS state
+            # when not the default: "pass" for code 0, else "none")
             for fail, run, report, path, code, out_texts, err_texts, *faulting in (
                     (False, passes, None, own_only, 0, ["SELF-TEST PASS"], []),
                     (True, passes, None, own_only, 1, [seeded], []),
@@ -1213,7 +1266,8 @@ def _finalisation_cases():
                     (False, exits_on_text, None, own_only, 2, [], [exit_text]),
                     (True, unprintable, None, own_only, 1, [seeded], [value_text]),
                     (False, unprintable, None, own_only, 2, [], [value_text]),
-                    (False, passes, None, own_only, 2, [], [failed], "stdout:write"),
+                    # The PASS print fails: the void line still reaches stderr.
+                    (False, passes, None, own_only, 2, [], [failed] + void, "stdout:write"),
                     (True, passes, None, own_only, 1, [], [failed], "stdout:write"),
                     (True, recorded, None, own_only, 1, [], ["seeded/not-evaluated", both_fail],
                      "stdout:write"),
@@ -1230,13 +1284,44 @@ def _finalisation_cases():
                     # The last stderr flush is attempted too: its failure follows the summary line.
                     (False, noisy_err, None, own_only, 2, [],
                      ["(cannot evaluate)\nSELF-TEST HARNESS ERROR: " + failed], "stderr:flush"),
-                    (True, passes, None, own_only, 1, [seeded], [failed], "stdout:flush"),
+                    # The failure list cannot flush: the stderr summary line still follows.
+                    (True, passes, None, own_only, 1, [seeded], [failed, both_fail], "stdout:flush"),
                     # A failing stderr flush, pending or not, does not stop the failure list on stdout.
                     (True, duplicated, None, own_only, 1, [seeded, duplicate],
                      [own + ": duplicate check id", both_fail], "stderr:flush"),
                     (True, passes, None, own_only, 1, [seeded], [failed], "stderr:flush-always"),
                     # A stdout closed before the run discards the PASS line; the code is still 0.
-                    (False, passes, None, own_only, 0, [], [], "stdout:closed", "none")):
+                    (False, passes, None, own_only, 0, [], [], "stdout:closed", "none"),
+                    # The PASS line's line break is refused after its text was written: the void line
+                    # still starts a line of its own.
+                    (False, passes, None, own_only, 2, [], [failed] + void, "stdout:newline-once", "void"),
+                    # A refused FAIL header or failure line does not stop the failure lines after it.
+                    (True, passes, None, own_only, 1, ["  - " + seeded], [failed, both_fail],
+                     "stdout:refuse-header"),
+                    (True, duplicated, None, own_only, 1, ["SELF-TEST FAIL:\n", duplicate],
+                     [failed, both_fail], "stdout:refuse-seeded"),
+                    # A refused stderr summary line does not stop the last stderr flush delivering the
+                    # diagnostic that records it, in either branch.
+                    (True, recorded, None, own_only, 1, [seeded], ["seeded/not-evaluated", failed],
+                     "stderr:refuse-summary-buffered"),
+                    (False, recorded, None, not_evaluated, 2, [], ["seeded/not-evaluated", failed],
+                     "stderr:refuse-summary-buffered"),
+                    # Buffered streams: each result line reaches the reader only through its flush.
+                    (False, passes, None, own_only, 0, ["SELF-TEST PASS"], [], "stdout:buffered"),
+                    (True, passes, None, own_only, 1, ["SELF-TEST FAIL:\n  - " + seeded], [],
+                     "stdout:buffered"),
+                    (False, recorded, None, not_evaluated, 2, [], ["(cannot evaluate)"],
+                     "stderr:buffered"),
+                    (True, recorded, None, own_only, 1, [seeded], [both_fail], "stderr:buffered"),
+                    # The PASS flush fails once: the void line's own flush delivers both lines.
+                    (False, passes, None, own_only, 2, void, [failed] + void, "stdout:buffered-flush-once",
+                     "void"),
+                    # The stderr void line reaches the reader only through the last stderr flush.
+                    (False, passes, None, own_only, 2, [], [failed] + void,
+                     "stdout:write+stderr:buffered"),
+                    # A refused stderr void line does not stop the last stderr flush.
+                    (False, passes, None, own_only, 2, void, [failed],
+                     "stdout:flush+stderr:refuse-void-buffered", "void")):
                 FAILURES[:] = [seeded] if fail else []
                 HARNESS_ERRORS[:] = []
                 EXECUTED[:] = []
@@ -1244,8 +1329,9 @@ def _finalisation_cases():
                 CHECKS_MANIFEST = path
                 streams = {"stdout": io.StringIO(), "stderr": io.StringIO()}
                 if faulting:
-                    stream, _, fault = faulting[0].partition(":")
-                    streams[stream] = faults[fault]()
+                    for spec in faulting[0].split("+"):
+                        stream, _, fault = spec.partition(":")
+                        streams[stream] = faults[fault]()
                 out, err = streams["stdout"], streams["stderr"]
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     try:
