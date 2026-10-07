@@ -1782,10 +1782,12 @@ def _main_isolated(report_path=None):
                "hit a fault it reads as present" in _r8_cev_out, "a registry entry was found" in _r8_cev_out,
                "cannot be confirmed as a registry" in _r8_cev_out),
               (2, True, True, False, True))
-        # ROUND 9, A WALK FAILURE ARMS THE BARRIER IN EVERY MODE: a repository root the truncation guard's
-        # walk cannot carry out is denied in every mode, so _orch_guard_scope_report flags it as a deny and
-        # the SessionStart resume audit arms the barrier and warns with that finding, unset and set alike
-        # (red when the 'fail' branch reports denies=False). The warning names the condition as a repair,
+        # ROUND 9, A WALK FAILURE ARMS THE BARRIER IN EVERY MODE WHERE GIT RESOLVES THE ROOT: a repository
+        # root the truncation guard's walk cannot carry out is denied in every mode, so
+        # _orch_guard_scope_report flags it as a deny and, where git resolves that root (here the fixture
+        # is a real repository and only _orch_registry_walk is mocked), the SessionStart resume audit arms
+        # the barrier and warns with that finding, unset and set alike (red when the 'fail' branch reports
+        # denies=False). Where git resolves no root the audit returns silently before this check. The warning names the condition as a repair,
         # not only the record.
         _r9_fx = Fixture(tmp, "doc-walk-fail")
         _r9_bar = Path(aiqt_hooks._orch_state_dir_for_root(str(_r9_fx.root))) / "resume-barrier.json"

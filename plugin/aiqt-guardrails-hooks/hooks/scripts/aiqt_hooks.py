@@ -9971,8 +9971,11 @@ def _orch_registry_required():
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
     there a git failure alone denies; a registry entry the discovery probe cannot confirm
     (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
-    lacks search (execute) permission on, such as mode 0o600 or 0o000 for a process those modes bind (mode
-    0o100 evaluates normally for its owner where O_PATH exists; the O_RDONLY fallback also needs read permission there), or a
+    lacks search (execute) permission on, such as mode 0o600 or 0o000 for a process those modes bind (where
+    O_PATH exists, mode 0o100 evaluates normally for its owner and for a process the mode bits do not bind,
+    such as root, and cannot be evaluated by any other process; where O_PATH is unavailable, the O_RDONLY
+    fallback open also needs read permission, so mode 0o100 cannot be evaluated by any process the mode bits
+    bind, its owner included), or a
     first present registry name that is not a regular file or cannot be stat'ed) is not a registry
     either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
     surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
@@ -11084,9 +11087,13 @@ def orch_resume_audit(data):
     truncation guard's deny at its scope check for a Bash call from the root (_orch_resume_audit_findings),
     so it is mode-sensitive: a root git resolves but the walk cannot carry out (one this process can enter
     but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
-    symlinked registry, for example) arms it in registry-required mode. A root git cannot resolve (one this
-    process cannot enter, for example) returns before any finding is built, so this audit stays silent
-    there and only the guard's own scope deny remains."""
+    symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None (git
+    resolves no toplevel for the session cwd, for any reason: an unreadable or broken config, a dangling
+    gitfile, a dubious-ownership refusal, no git binary, or a cwd this process cannot enter), this audit
+    returns before it reads the registry, so it stays silent in both modes; whether the truncation guard
+    denies there depends only on its own ancestor walk and the mode (its git leg resolves nothing either).
+    Git can still resolve a toplevel this process cannot enter (core.worktree read from a session cwd
+    inside the repository's git directory), and there this audit arms the barrier."""
     root = _orch_root(data)
     if root is None:
         return _allow()

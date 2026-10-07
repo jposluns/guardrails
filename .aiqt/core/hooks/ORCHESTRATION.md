@@ -75,9 +75,16 @@ the doctor and the resume audit report and arm from it):
   stays inert on an absent registry in both modes. With a registry present, the audit also arms the
   barrier (and SessionStart warns) when the truncation guard would deny a Bash call from the
   repository root: in BOTH modes when git resolves the root but the walk cannot be carried out there
-  (for example a root directory this process can enter but not read; a root it cannot enter is not
-  resolved by git, so the audit returns silently there and only the guard's own deny remains), and in this mode also when that root's registry scope is absent or
-  cannot be confirmed (for example a symlinked `orchestration.json`). The barrier does not record the
+  (for example a root directory this process can enter but not read), and in this mode also when that
+  root's registry scope is absent or cannot be confirmed (for example a symlinked `orchestration.json`).
+  The audit finds its root only through git: where git resolves no root for the session cwd, for any
+  reason (an unreadable or broken git config, a dangling gitfile, a dubious-ownership refusal, no git
+  binary, or a session cwd this process cannot enter), the audit returns silently in both modes before
+  it reads the registry. Whether the truncation guard denies a Bash call there depends only on its own
+  ancestor walk and the mode, because its git leg resolves nothing either: with a regular registry on
+  the walk it does not deny a plain command in either mode, while a walk it cannot carry out denies in
+  both. Git can still resolve a root this process cannot enter (through `core.worktree`, from a session
+  cwd inside the repository's git directory), and there the audit arms the barrier. The barrier does not record the
   mode, so the two writers agree only when they run with the same value: a doctor run without the
   variable can clear a barrier a registry-required SessionStart armed for a scope deny. Clearing it does
   not allow any Bash call: the barrier only warns, and the guard still denies on its own scope check.
