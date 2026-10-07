@@ -77,28 +77,26 @@ the authority, and the summary further down this page only points to it.
   `source` with the value `compact`, and the `PreCompact` event, both described in the
   [Claude Code hooks reference](https://code.claude.com/docs/en/hooks). Events: `SessionStart`,
   `PreCompact` (optional), `UserPromptSubmit`, and `Stop`.
-- **`rerun-pass-check.py`** keeps an earlier failure in view after a rerun passes. After a CI rerun
-  (`gh run rerun`, `glab ci retry`), or a test or check command that failed and then passed with the same
-  command text and no recorded change between, it adds a note to the assistant's context; at turn end it
-  refuses, at most twice in a row, a final message that calls a pass conclusive without naming the earlier
-  failure. Events: `PostToolUse` and `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`),
-  and `Stop`. Its shell reading is exact only for a small closed grammar (listed in its docstring) and for
-  commands of at most 8192 characters. Inside it, a CI rerun is missed only when its words come into
-  existence when the command runs, or bash runs `gh` under another name (an expansion that has a value, a
-  tilde expansion such as `~` or `~-`, which bash expands though the hook reads `~` as a plain character, a
-  pathname expansion, an alias, a shell function, a hashed command name from `hash -p`, or a command string
-  handed to another program), and a simple command that names `gh`, `run` and `rerun` in order without
-  running them is noted anyway (a false note). A CI rerun call that fails is still noted, since the rerun
-  may have started. Every command outside the grammar (including `echo "$(date)"`, a here-document, and any
-  longer command) is a possible CI rerun by construction, because the hook could not parse it: each nonblank
-  one gets a note, even when it fails, and leaves an outstanding possible rerun wherever it falls in the
-  session, with no failure or pass needed (a blank command gets no note). While it is outstanding, the hook
-  refuses (its Stop default is block) every final message that calls a pass conclusive without a disclosure
-  word or a denial: up to twice in a row, then the stop is allowed with a warning, and again in each later
-  turn, until a final message names a disclosure word or plainly denies a CI rerun (such as `I did not
-  rerun CI`). That refusal says only that a command could not be parsed, so a CI rerun cannot be ruled out,
-  and asks whether CI was rerun; it states no failure. This is a deliberate cost: an off-grammar command
-  that reruns nothing, such as a here-document commit, gets a false note and false refusals. Read-only is decided only
+- **`rerun-pass-check.py`** keeps an earlier failure in view after a rerun passes. After a CI rerun call
+  that succeeds (`gh run rerun`, `glab ci retry`), or a test or check command that failed and then passed
+  with the same command text and no recorded change between (a certain rerun), it adds a note to the
+  assistant's context; at turn end it refuses, at most twice in a row, a final message that calls a pass
+  conclusive without naming the earlier failure. Events: `PostToolUse` and `PostToolUseFailure` (matcher
+  `Bash|Write|Edit|MultiEdit|NotebookEdit`), and `Stop`. Its shell reading is exact only for a small closed
+  grammar (listed in its docstring) and for commands of at most 8192 characters. Inside it, a CI rerun is
+  missed only when its words come into existence when the command runs, or bash runs `gh` under another
+  name (an expansion that has a value, a tilde expansion such as `~`, `~+` or `~-`, which bash expands
+  though the hook reads `~` as a plain character, a pathname expansion, an alias, a shell function, a
+  hashed command name from `hash -p`, or a command string handed to another program), and a simple command
+  that names `gh`, `run` and `rerun` in order without running them is noted anyway (a false note, and a
+  false refusal when its call succeeds). An uncertain rerun gets a note and is never kept, so it never
+  brings a refusal: every command outside the grammar (including `echo "$(date)"`, a here-document, and any
+  longer command), a possible CI rerun by construction because the hook could not parse it, even when it
+  fails; and a CI rerun call that fails, since the rerun may or may not have started. That note says that a
+  CI rerun cannot be ruled out and asserts no rerun and no failure. A blank command gets no note. This is a
+  deliberate cost: an off-grammar command that reruns nothing, such as a here-document commit, gets a false
+  note, and a real CI rerun written outside the grammar, a failed CI rerun call that did start a rerun, or
+  an off-grammar check that fails and then passes gets only its note, with no refusal. Read-only is decided only
   inside the grammar: `env` with any argument, an assignment prefix, a command word holding an expansion,
   and any output redirection whose target is not the unquoted word `/dev/null` count as a change; an input
   redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
@@ -116,7 +114,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `7e55ab0404cc0199fcb76df496b801356b677f7ed14cfdbc9c9d85ffb571551e` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `b450180d9e4cee677f27b019828a620638d35eeb37e43ef66fe6d3aee9b2be88` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `06df601f921ca90fe3fd8757318733e4673684839e5d50427a233762044e11bc` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
@@ -366,15 +364,16 @@ section of its opening docstring. Read that section before relying on a hook; in
   option, or a change made outside the tool calls it sees is missed or misread. A command its shell reader
   cannot parse (a here-document, ANSI-C quoting such as `$'...'`, a command substitution, a line
   continuation, or a command over 8192 characters, notably) is always noted as a possible CI rerun, even
-  when it fails, and counted as a change unless it fails, even when it reruns nothing (a false note); until
-  a final message names a disclosure word or denies a CI rerun, each final message that calls a pass
-  conclusive is refused, up to twice in a row and again in each later turn (a false refusal). A blank
-  command gets no note. Inside its grammar, a rerun whose words come into existence only when the command
-  runs (an expansion with a value, a tilde expansion such as `~`, an alias) or that runs `gh` under a
+  when it fails, and counted as a change unless it fails, even when it reruns nothing (a false note). Such a
+  command, and a CI rerun call that fails, is an uncertain rerun: it gets that note only and never a
+  turn-end refusal, so a real CI rerun written that way, a failed call that did start a rerun, or an
+  off-grammar check that fails and then passes is not refused (a missed refusal). A blank command gets no
+  note. Inside its grammar, a rerun whose words come into existence only when the command runs (an
+  expansion with a value, a tilde expansion such as `~`, `~+` or `~-`, an alias) or that runs `gh` under a
   hashed name (`hash -p`) is missed. Its turn-end check reads only the final message against fixed phrase
-  lists: any disclosure word such as `flaky` or `rerun` clears it, and a plain denial such as `I did not
-  rerun CI` clears a possible CI rerun, whether or not either is true; it does not record or investigate
-  the failure itself. It fails open on its
+  lists: any disclosure word such as `flaky` or `rerun` clears it wherever the word stands, even inside a
+  denial such as `I did not rerun CI`, whether or not the failure is recorded; it does not record or
+  investigate the failure itself. It fails open on its
   own failure, by design for an advisory hook: an internal error or an unwritable stdout gives no note and
   no refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed and
   the stop is allowed, but the current call's own CI rerun or possible CI rerun note is still given.

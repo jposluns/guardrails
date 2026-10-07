@@ -11,31 +11,34 @@ WHAT IT DOES
        definition. The hook reads the command in a small closed grammar (SHELL GRAMMAR, below) and does not
        decide which word is the command: a simple command whose word values, each expansion read as empty,
        hold a word whose last path part is gh, then run, then rerun (or glab, ci, retry), in that order at any
-       positions, is a CI rerun. A command outside the grammar (off-grammar) is always a possible CI rerun:
-       the hook could not parse it, so a CI rerun cannot be ruled out, and no search of its text decides
-       otherwise. After it runs, even when the call then fails (the rerun may have started: gh run rerun N &&
-       gh run watch N timing out), the hook adds a note to the assistant's context: for a CI rerun, the rerun's
-       result does not erase the earlier failure, which is to be recorded and investigated; for a possible CI
-       rerun, the note says it does not mean that anything failed or was rerun, and asks the assistant to say
-       so if it did not rerun CI. A blank command (only whitespace) runs nothing and gets no note.
+       positions, is a CI rerun. When its call succeeds, the rerun is CERTAIN: the hook adds a note to the
+       assistant's context that the rerun's result does not erase the earlier failure, which is to be recorded
+       and investigated, and keeps the rerun outstanding for the Stop check (4).
     2. A LOCAL RERUN. A recognized check command (CHECK_RE: a test runner, `make test` or `make check`, a
        `--self-test` or `--check` run) that failed and then, run again with the identical command text, passed,
-       with no change recorded between the two runs. After the passing run, the hook adds the same note.
-    3. AT TURN END (Stop), while such a rerun is outstanding, a final message that presents a pass as
+       with no change recorded between the two runs, is a CERTAIN rerun. After the passing run, the hook adds
+       the same note and keeps the rerun outstanding.
+    3. An UNCERTAIN rerun gets a note after the tool call and nothing more: it is never kept, so it never arms
+       the Stop refusal. It is either a command outside the grammar (off-grammar), always a possible CI rerun
+       because the hook could not parse it, so a CI rerun cannot be ruled out, and no search of its text
+       decides otherwise (noted even when the call fails); or a CI rerun call (1) that fails, which may or may
+       not have started the rerun (gh run rerun N && gh run watch N timing out started one; false && gh run
+       rerun N started none). Its note says that a CI rerun cannot be ruled out, that this does not show that
+       CI was rerun or that a check failed before, and that if CI or a check that had failed was rerun, the
+       rerun's pass does not erase that failure. A blank command (only whitespace) runs nothing and gets no
+       note.
+    4. AT TURN END (Stop), while a certain rerun is outstanding, a final message that presents a pass as
        conclusive (CONCLUSIVE_RE: "all tests pass", "CI is green", "verified", and similar, each not directly
-       after a negation such as "not", "cannot", "n't", or "never") without naming the earlier failure (DISCLOSED_RE:
-       "flaky", "intermittent", "rerun", "earlier failure", and similar) is refused, with the reason. When every
-       outstanding rerun is a possible CI rerun, the reason says only that a command could not be parsed, so a
-       CI rerun cannot be ruled out, that this does not mean anything failed or was rerun, and asks the
-       assistant to say whether it reran CI; otherwise it asks the assistant to state the earlier failure. A
-       final message that names a disclosure word clears the outstanding reruns; one that plainly denies a
-       CI rerun (DENIED_RE: "I did not rerun CI", "no CI rerun", "CI was not retriggered", and similar) clears
-       the possible CI reruns only, and the denial's own words ("rerun") are not read as a disclosure. A loop
-       cap bounds the refusals: inside one continuous stop_hook_active run at most BLOCK_CAP, then the stop is
+       after a negation such as "not", "cannot", "n't", or "never") without naming the earlier failure
+       (DISCLOSED_RE: "flaky", "intermittent", "rerun", "earlier failure", and similar) is refused, with a
+       reason that names the reruns and asks the assistant to state the earlier failure and that it is
+       unresolved. A final message that names any disclosure word, wherever it stands (also inside a denial,
+       a quotation or a negation, as in "I did not rerun CI"), clears the outstanding reruns. A loop cap
+       bounds the refusals: inside one continuous stop_hook_active run at most BLOCK_CAP, then the stop is
        allowed with a one-line warning. The reruns stay outstanding, so a later turn is refused again.
 
     A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, any shell
-    command outside the grammar that did not fail (also a possible CI rerun, see 1), and any other shell command
+    command outside the grammar that did not fail (also a possible CI rerun, see 3), and any other shell command
     that did not fail, is not a CI rerun, and is not read-only. A command is read-only only
     inside the grammar: no simple command writes a file, and in each simple command, after leading ! { } if
     then elif else fi do done while until, either nothing remains or the command word holds no expansion and
@@ -44,13 +47,13 @@ WHAT IT DOES
     (status, diff, log, ...), gh with READ_ONLY_GH (run view, pr checks, ...), env with no argument, or a
     for NAME [in ...] header. So an install, a checkout, a sed, an echo into a file, an assignment prefix, or
     any command outside the grammar between the runs counts as a deliberate change and no local rerun is
-    flagged (a command outside the grammar is itself noted as a possible CI rerun, see 1).
+    flagged (a command outside the grammar is itself noted as a possible CI rerun, see 3).
 
     SHELL GRAMMAR. The hook reads the characters of this grammar exactly; anything outside it is off-grammar.
     Inside it, bash still expands some words when the command runs (an expansion, a pathname pattern, a
     leading ~), which the hook does not do (RESIDUAL COVERAGE).
     - The whole text is off-grammar if it holds a NUL or is longer than MAX_PARSE (8192) characters, so the
-      reading work is bounded (a longer command is a possible CI rerun, see 1). Blanks are space and tab. An
+      reading work is bounded (a longer command is a possible CI rerun, see 3). Blanks are space and tab. An
       unquoted # where a token starts is a comment up to the next newline (a backslash before that newline
       does not extend it).
     - Operators, longest first: <<< &>> &> >> >| >& <& && || |& > < ; & | ( ) and newline. Off-grammar:
@@ -105,25 +108,23 @@ RESIDUAL COVERAGE
     changed command line is not seen. The shell reading is exact only for the closed grammar described above. Inside
     the grammar, a CI rerun is missed only when its words come into existence when the command runs, or bash runs
     gh under another name: an expansion that has a value ($c run rerun, with c=gh), a tilde expansion (~ run rerun
-    with HOME=/path/to/gh, or ~- with OLDPWD set so; bash tilde-expands a word the hook reads as a plain ~), a
-    pathname expansion (/usr/bin/g? run rerun), an alias, a shell function, a hashed command name (hash -p
-    /path/to/gh x; x run rerun), or a command string handed to another program (sh -c '...', eval '...', ssh,
-    xargs input, a script).
-    The name rule ignores command position, so a simple command that names gh, run and rerun in order without
-    running them is noted anyway: echo gh run rerun, unquoted or with each word quoted alone (echo "gh" "run"
-    "rerun"), command -v gh run rerun, a function body that is defined but never called (a false note). Every
-    command outside the grammar is a possible CI rerun, by construction: this includes `echo "$(date)"`, a
-    here-document, a line continuation, ${x:-y}, $'...', a redirection spelling not listed, and any command longer
-    than MAX_PARSE characters. Each nonblank one gets a note, even when it fails, and leaves an outstanding possible
-    rerun wherever it falls in the session: no failure and no pass is needed (a blank command, only whitespace,
-    gets no note). While it is outstanding, every final message that presents a pass as conclusive without a
-    disclosure word or a denial is refused (the Stop default is block): up to BLOCK_CAP times in a continuous
-    stop_hook_active run, then allowed with a warning, and again in each later turn, until a final message holds
-    a disclosure word or a denial. This is a deliberate cost: an off-grammar command that reruns nothing (a
-    here-document commit, notably) is noted anyway (a false note) and brings these refusals (false refusals),
-    whose reason asks whether CI was rerun and states no failure. It also counts as a change unless it fails, so a
-    local rerun across it gets no local-rerun note of its own, and a check command outside the grammar is never
-    compared as a check (its pass gets the possible-CI-rerun note instead).
+    with HOME=/path/to/gh, ~+ run rerun with PWD=/path/to/gh, or ~- with OLDPWD set so; bash tilde-expands a word
+    the hook reads as a plain ~), a pathname expansion (/usr/bin/g? run rerun), an alias, a shell function, a hashed
+    command name (hash -p /path/to/gh x; x run rerun), or a command string handed to another program (sh -c '...',
+    eval '...', ssh, xargs input, a script).
+    The name rule ignores command position and whether the named words ran, so a simple command that names gh, run
+    and rerun in order without running them is noted anyway, and when its call succeeds it is kept as a certain
+    rerun: echo gh run rerun, unquoted or with each word quoted alone (echo "gh" "run" "rerun"), command -v gh run
+    rerun, a function body that is defined but never called, false && gh run rerun 7; true (a false note, and
+    false refusals at Stop). Every command outside the grammar is a possible CI rerun, by construction: this
+    includes `echo "$(date)"`, a here-document, a line continuation, ${x:-y}, $'...', a redirection spelling not
+    listed, and any command longer than MAX_PARSE characters. Each nonblank one gets a note, even when it fails (a
+    blank command, only whitespace, gets no note), so an off-grammar command that reruns nothing (a here-document
+    commit, notably) gets a false note. An uncertain rerun (3) is never kept and never brings a refusal: a real CI
+    rerun written outside the grammar, a CI rerun call that failed after the rerun started, and an off-grammar
+    check command that fails and then passes each get their note and no refusal at Stop (a missed refusal). An
+    off-grammar command also counts as a change unless it fails, so a local rerun across it gets no local-rerun
+    note of its own, and a check command outside the grammar is never compared as a check.
     Read-only is decided only inside the grammar: env with any argument, an assignment prefix (X=1 ls), a command
     word holding an expansion, and any output redirection (> >> >| &> &>>) whose target is not the unquoted word
     /dev/null count as a change; an input redirection (< <<<) and a descriptor duplication or close (>&2, <&0, >&-)
@@ -135,9 +136,9 @@ RESIDUAL COVERAGE
     change, so a later rerun of that check alone is not flagged (a missed note). The pass and fail reading rests on
     the event name and a few tool_response fields, not on the command's output. The Stop check reads only the final
     message, by fixed phrase lists: a conclusive claim worded otherwise passes, a claim after an unlisted negation
-    ("could not get it verified") is refused, and a message naming any disclosure word passes and clears the reruns,
-    whether or not it records the failure; a denial clears the possible CI reruns whether or not it is true, and a
-    denial worded otherwise does not clear them. It does not record or investigate the failure itself. Concurrent hook
+    ("could not get it verified") is refused, and a message naming any disclosure word passes and clears the
+    reruns, whether or not it records the failure and wherever the word stands, also inside a denial, a quotation
+    or a negation ("I did not rerun CI"). It does not record or investigate the failure itself. Concurrent hook
     runs in one session can lose a state update. State keeps at most MAX_CHECKS commands (one longer than MAX_KEY
     JSON characters is keyed by its SHA-256, so the state stays under STATE_MAX_BYTES) and MAX_FLAGS outstanding
     reruns. The hook fails open on its own failure (warn-only by design: an advisory hook must not block on its own
@@ -200,17 +201,9 @@ DISCLOSED_RE = re.compile(
     r"\bflak(?:y|e|es|iness)\b|\bintermittent(?:ly)?\b|\bre-?run\b|\bre-?ran\b|\bretr(?:y|ied)\b"
     r"|\bearlier fail(?:ure|ed)?\b|\bfirst (?:run|attempt) fail(?:ed|s)?\b|\bfailed (?:once|first|initially)\b",
     re.I)
-# A plain statement that no CI rerun happened ("I did not rerun CI", "no CI rerun"). It clears only the possible CI
-# reruns (commands the hook could not parse), and its own words are not read as a disclosure.
-_DENY_VERB = r"(?:re-?run|retr(?:y|ied)|re-?trigger(?:ed)?)"
-DENIED_RE = re.compile(
-    r"\b(?:did not|didn't|have not|haven't|has not|hasn't|never)\s+" + _DENY_VERB
-    + r"\s+(?:(?:the|any|a)\s+)?(?:ci|pipeline|workflow|job|anything)\b"
-    r"|\bno (?:ci|pipeline|workflow) (?:re-?runs?|retr(?:y|ies))\b"
-    r"|\b(?:ci|pipeline|workflow) (?:was|has) not been " + _DENY_VERB + r"\b"
-    r"|\b(?:ci|pipeline|workflow) was not " + _DENY_VERB + r"\b",
-    re.I)
-POSSIBLE = "possible CI rerun: "  # the flag prefix of a command the hook could not parse
+# The flag prefixes of a certain rerun, the only reruns kept for the Stop check. An uncertain rerun (a command outside
+# the grammar, or a CI rerun call that failed) gets a note only and is never kept.
+CERTAIN = ("CI rerun: ", "local rerun: ")
 READ_ONLY = frozenset(("cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ls", "pwd",
                        "echo", "printf", "wc", "date", "sleep", "true", "file", "stat", "which", "type", "diff",
                        "cmp", "sha256sum", "md5sum", "du", "df", "id", "whoami", "uname", "jq", "tree"))
@@ -555,16 +548,15 @@ def shown(cmd):
 TAIL = (" A pass on a rerun with no deliberate change in between does not erase the earlier failure: record the "
         "failure, investigate it as an intermittent result, and do not present the later pass as conclusive "
         "verification.")
-# The tail for a possible CI rerun: the command may rerun nothing, so it asks for no failure that may not exist.
-POSSIBLE_TAIL = (" This does not mean that anything failed or was rerun. If the command did rerun CI and a check "
-                 "had failed before, the rerun's pass does not erase that failure; if it did not rerun CI, say so "
-                 "when you next report a pass.")
+# The tail of an uncertain rerun's note: it asserts no rerun and no failure, since neither may have happened.
+UNCERTAIN_TAIL = (" This does not show that CI was rerun or that a check failed before. If CI, or a check that had "
+                  "failed, was rerun, the rerun's pass does not erase that failure: record the failure, and do not "
+                  "present the later pass as conclusive verification.")
 
 
 def note(event, what):
-    tail = POSSIBLE_TAIL if what.startswith("the hook could not parse") else TAIL
     return dict(hookSpecificOutput=dict(hookEventName=event, additionalContext=(
-        "RERUN NOTE (rerun-pass-check hook): " + what + tail)))
+        "RERUN NOTE (rerun-pass-check hook): " + what)))
 
 
 def after_tool(payload, state, event):
@@ -582,17 +574,16 @@ def after_tool(payload, state, event):
     if not isinstance(cmd, str) or not cmd.strip():
         return None
     if ci_rerun(cmd):  # changes nothing locally, so it never separates two local runs
-        # Noted even when the call fails: the rerun may have started (gh run rerun N && gh run watch N timing out).
-        if parse(cmd) is None:  # read conservatively: a possible CI rerun, and a change unless it failed
+        if parse(cmd) is None:  # uncertain: a possible CI rerun, noted only, and a change unless it failed
             if not bad:
                 state["change"] += 1
-            state["flags"] = (state["flags"] + [POSSIBLE + shown(cmd)])[-MAX_FLAGS:]
-            return ("the hook could not parse a command (" + shown(cmd) + "), so a CI rerun cannot be ruled "
-                    "out; it is read as a possible CI rerun" + (" (the call failed)" if bad else "") + ".")
+            return ("the hook could not parse a command (" + shown(cmd) + "), so it is a possible CI rerun: a CI "
+                    "rerun cannot be ruled out" + (" (the call failed)" if bad else "") + "." + UNCERTAIN_TAIL)
+        if bad:  # uncertain: the rerun may or may not have started (false && gh run rerun 7 starts none)
+            return ("a command naming a CI rerun (" + shown(cmd) + ") failed, so it is a possible CI rerun: a CI "
+                    "rerun cannot be ruled out, since the call may or may not have started one." + UNCERTAIN_TAIL)
         state["flags"] = (state["flags"] + ["CI rerun: " + shown(cmd)])[-MAX_FLAGS:]
-        if bad:
-            return "a CI rerun command ran (" + shown(cmd) + ") and the call failed, but the rerun may have started."
-        return "a CI rerun was started (" + shown(cmd) + ")."
+        return "a CI rerun was started (" + shown(cmd) + ")." + TAIL
     if not CHECK_RE.search(cmd):
         if not bad and not read_only(cmd):
             state["change"] += 1
@@ -614,52 +605,39 @@ def after_tool(payload, state, event):
         state["change"] += 1  # counted after this line's own comparison: the same line run twice is a rerun
     if rerun:
         state["flags"] = (state["flags"] + ["local rerun: " + shown(cmd)])[-MAX_FLAGS:]
-        return "the check `" + shown(cmd) + "` failed earlier and passed on a rerun with no change recorded between."
+        return ("the check `" + shown(cmd) + "` failed earlier and passed on a rerun with no change recorded "
+                "between." + TAIL)
     return None
 
 
 def at_stop(payload, state, readable, path):
+    # Only a certain rerun arms the refusal (a flag of another prefix, kept by an earlier version, is dropped).
+    state["flags"] = [f for f in state["flags"] if f.startswith(CERTAIN)]
     if not readable or not state["flags"]:
         return None
     msg = payload.get("last_assistant_message")
     if not isinstance(msg, str) or not msg.strip():
         return None
-    if DISCLOSED_RE.search(DENIED_RE.sub(" ", msg)):  # a denial's own words ("did not rerun") disclose nothing
+    if DISCLOSED_RE.search(msg):
         state["flags"] = []
         state["blocks"] = 0
         save_state(path, state)
         return None
-    if DENIED_RE.search(msg):  # clears the possible CI reruns only
-        state["flags"] = [f for f in state["flags"] if not f.startswith(POSSIBLE)]
-        if not state["flags"]:
-            state["blocks"] = 0
-            save_state(path, state)
-            return None
     if not conclusive(msg):
         return None
-    possible = all(f.startswith(POSSIBLE) for f in state["flags"])
     active = payload.get("stop_hook_active") is True
     blocks = state["blocks"] if active else 0
-    allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive after "
-               + ("a command the hook could not parse (a possible CI rerun)" if possible else "a rerun"))
+    allowed = "rerun-pass-check: turn end allowed; the final message presents a pass as conclusive after a rerun"
     if blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + " (loop cap)")
     state["blocks"] = blocks + 1
     if not save_state(path, state) and active:
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
-    count = " (refusal " + str(blocks + 1) + " of at most " + str(BLOCK_CAP) + ")."
-    shown_flags = "; ".join(state["flags"][-3:])
-    if possible:  # asserts no rerun and no failure: neither may exist
-        return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
-                    "and this session ran a command the hook could not parse (" + shown_flags + "), so a CI "
-                    "rerun cannot be ruled out. This does not mean that anything failed or was rerun. Say whether "
-                    "you reran CI: if you did not, say so (for example \"I did not rerun CI\"); if you did, say "
-                    "so and name any earlier failure" + count)
     return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
                 "but this session started a CI rerun or saw a check pass on a rerun after it failed ("
-                + shown_flags + "). "
+                + "; ".join(state["flags"][-3:]) + "). "
                 "State the earlier failure and that it is unresolved (intermittent), and do not call the "
-                "later pass conclusive" + count)
+                "later pass conclusive (refusal " + str(blocks + 1) + " of at most " + str(BLOCK_CAP) + ").")
 
 
 def decide(payload, env):
@@ -808,8 +786,8 @@ def _self_test():
         def test_03_ci_rerun_is_noted(self):
             out = self.bash("gh run rerun 12345 --failed")
             self.assertIn("CI rerun", out["hookSpecificOutput"]["additionalContext"])
-            out = self.bash("gh run rerun 1", ok=False)  # noted anyway: the rerun may have started
-            self.assertIn("the rerun may have started", out["hookSpecificOutput"]["additionalContext"])
+            out = self.bash("gh run rerun 1", ok=False)  # noted anyway: the rerun may or may not have started
+            self.assertIn("may or may not have started one", out["hookSpecificOutput"]["additionalContext"])
 
         def test_04_stop_refuses_a_conclusive_claim_with_a_cap(self):
             self.bash("gh run rerun 7")
@@ -985,8 +963,8 @@ def _self_test():
             self.assertIsNone(self.bash("pytest -q", ok=False))
             out = self.bash('echo "$(date) done"')  # off-grammar: always a possible CI rerun, and a change
             self.assertIn("could not parse a command", out["hookSpecificOutput"]["additionalContext"])
-            self.assertIsNone(self.bash("pytest -q"))  # no local-rerun note; the possible rerun stays outstanding
-            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
+            self.assertIsNone(self.bash("pytest -q"))  # no local-rerun note, and the possible rerun is not kept
+            self.assertIsNone(self.stop("All tests pass."))  # an uncertain rerun is note-only
 
         def test_22_an_escaped_space_or_quote_is_part_of_a_word(self):
             self.assertIsNotNone(self.bash("echo x\x5c # ; gh run rerun 7"))  # the # is inside the word
@@ -1028,7 +1006,7 @@ def _self_test():
             out = self.bash("cat > n.md <<'EOF'\nwe'll use gh run rerun 4\nEOF")
             self.assertIn("possible CI rerun", out["hookSpecificOutput"]["additionalContext"])
             self.assertIsNone(self.bash("pytest -q"))  # the unreadable command also counts as a change
-            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
+            self.assertIsNone(self.stop("All tests pass."))  # an uncertain rerun is note-only
 
         def test_26_long_commands_keep_the_state_readable(self):
             self.bash("gh run rerun 9")
@@ -1256,16 +1234,16 @@ def _self_test():
             for cmd, what in (("pytest -q", "the check `pytest -q` failed earlier and passed on a rerun with no "
                                             "change recorded between."),
                               ("gh run rerun 7", "a CI rerun was started (gh run rerun 7)."),
-                              ("gh {run,rerun} 7", "the hook could not parse a command (gh {run,rerun} 7), so a CI "
-                                                   "rerun cannot be ruled out; it is read as a possible CI rerun.")):
+                              ("gh {run,rerun} 7", "the hook could not parse a command (gh {run,rerun} 7), so it is "
+                                                   "a possible CI rerun: a CI rerun cannot be ruled out.")):
                 out = self.bash(cmd)["hookSpecificOutput"]["additionalContext"]
-                if cmd.startswith("gh {"):  # a possible CI rerun: the tail asks for no failure that may not exist
-                    tail = (" This does not mean that anything failed or was rerun. If the command did rerun CI and "
-                            "a check had failed before, the rerun's pass does not erase that failure; if it did not "
-                            "rerun CI, say so when you next report a pass.")
+                if cmd.startswith("gh {"):  # uncertain: the tail asserts no rerun and no failure
+                    tail = (" This does not show that CI was rerun or that a check failed before. If CI, or a check "
+                            "that had failed, was rerun, the rerun's pass does not erase that failure: record the "
+                            "failure, and do not present the later pass as conclusive verification.")
                 self.assertEqual(out, "RERUN NOTE (rerun-pass-check hook): " + what + tail)
-            self.assertIn("failed (local rerun: pytest -q; CI rerun: gh run rerun 7; possible CI rerun: gh {run,rerun} "
-                          "7). State", self.stop("All tests pass.")["reason"])
+            self.assertIn("failed (local rerun: pytest -q; CI rerun: gh run rerun 7). State",
+                          self.stop("All tests pass.")["reason"])
             state = new_state()
             for cmd in ("pytest " + "a" * 503, "pytest " + "a" * 504):  # JSON lengths 512 and 513
                 after_tool(dict(tool_name="Bash", tool_input=dict(command=cmd)), state, "PostToolUse")
@@ -1305,69 +1283,78 @@ def _self_test():
                 self.assertTrue(ci_rerun(c), c[:40])
                 state = new_state()
                 what = after_tool(dict(tool_name="Bash", tool_input=dict(command=c)), state, "PostToolUse")
-                self.assertIn("so a CI rerun cannot be ruled out", what)
-                self.assertEqual(state["flags"], ["possible CI rerun: " + shown(c)])
+                self.assertIn("so it is a possible CI rerun: a CI rerun cannot be ruled out.", what)
+                self.assertEqual((state["flags"], state["change"]), ([], 1))  # noted only, never kept; a change
                 state = new_state()  # a failed call is still noted (a rerun may have started), not a change
                 what = after_tool(dict(tool_name="Bash", tool_input=dict(command=c)), state, "PostToolUseFailure")
-                self.assertTrue(what.endswith("a possible CI rerun (the call failed)."), what)
-                self.assertEqual((state["flags"], state["change"]), (["possible CI rerun: " + shown(c)], 0))
+                self.assertIn("a CI rerun cannot be ruled out (the call failed). This does not show", what)
+                self.assertEqual((state["flags"], state["change"]), ([], 0))
 
         def test_40_bounds_and_pins(self):
             self.assertEqual(MAX_PARSE, 8192)  # the cap the docstring, README and residue state
-            for cmd in ("echo $; ", "gh run rerun "):  # off-grammar and in-grammar flags are both capped
+            for cmd, kept in (("echo $; ", 0), ("gh run rerun ", MAX_FLAGS)):  # an uncertain rerun is never kept
                 state = new_state()
                 for i in range(MAX_FLAGS + 5):
                     after_tool(dict(tool_name="Bash", tool_input=dict(command=cmd + str(i))), state, "PostToolUse")
-                self.assertEqual(len(state["flags"]), MAX_FLAGS, cmd)
-                self.assertTrue(state["flags"][-1].endswith(cmd + str(MAX_FLAGS + 4)), cmd)
+                self.assertEqual(len(state["flags"]), kept, cmd)
+            self.assertEqual(state["flags"][-1], "CI rerun: gh run rerun " + str(MAX_FLAGS + 4))
             state = new_state()
             state["checks"]["pytest -q"] = ["skip", 0]  # only a recorded failure makes a rerun
             self.assertIsNone(after_tool(dict(tool_name="Bash", tool_input=dict(command="pytest -q")), state,
                                          "PostToolUse"))
 
-        def test_41_possible_rerun_refusal_asserts_no_failure(self):
-            # Round 10 reproduction: the standard heredoc commit is off-grammar, and no rerun or failure happened.
+        def test_41_an_uncertain_rerun_is_note_only(self):
+            path = state_path(dict(session_id="s"), self.env)
+            # Round 10: the standard heredoc commit is off-grammar, and no rerun or failure happened.
             out = self.bash("git commit -m \"$(cat <<'EOF'\nFix parser\nEOF\n)\"")["hookSpecificOutput"]
-            self.assertIn("could not parse", out["additionalContext"])
-            self.assertNotIn("record the failure", out["additionalContext"])
-            reasons = [self.stop("Committed; all tests pass.")]
-            reasons.append(self.stop("Committed; all tests pass.", active=True))
-            for out in reasons:
-                self.assertEqual(out["decision"], "block")
-                for s in ("could not parse", "a CI rerun cannot be ruled out", "This does not mean that anything "
-                          "failed or was rerun", "Say whether you reran CI", "I did not rerun CI"):
-                    self.assertIn(s, out["reason"])
-                for s in ("State the earlier failure", "after it failed", "started a CI rerun", "intermittent"):
-                    self.assertNotIn(s, out["reason"])
-            self.assertIn("refusal 2 of at most 2", reasons[1]["reason"])
-            cap = self.stop("Committed; all tests pass.", active=True)["systemMessage"]
-            self.assertIn("could not parse (a possible CI rerun) (loop cap)", cap)
-            self.assertNotIn("after a rerun", cap)
-            self.assertEqual(self.stop("Done; the build is green.")["decision"], "block")  # still outstanding
-            for denial in ("I did not rerun CI; the build is green.", "No CI rerun was needed; all tests pass.",
-                           "CI was not retriggered, and all tests pass.", "I haven't retried the pipeline; verified."):
-                self.bash("echo $; true")
-                self.assertIsNone(self.stop(denial), denial)  # a plain denial clears the possible CI reruns
-                self.assertIsNone(self.stop("Done; the build is green."), denial)
-            for m in ("I did not rerun CI.", "No CI retry happened.", "The workflow has not been rerun."):
-                self.assertTrue(DENIED_RE.search(m), m)
-                self.assertFalse(DISCLOSED_RE.search(DENIED_RE.sub(" ", m)), m)
+            for s in ("could not parse", "a CI rerun cannot be ruled out", "does not show that CI was rerun"):
+                self.assertIn(s, out["additionalContext"])
+            self.assertNotIn("investigate it as an intermittent", out["additionalContext"])
+            self.assertIsNone(self.stop("Committed; all tests pass."))
+            self.assertIsNone(self.stop("Committed; all tests pass.", active=True))
+            # Round 11 (codex 1): false && gh run rerun 7 exits 1 with no gh call; (claude MEDIUM-1): gh run rerun 7
+            # refused with an HTTP 403. Neither started a rerun, and the note asserts none.
+            for c in ("false && gh run rerun 7", "gh run rerun 7"):
+                out = self.bash(c, ok=False)["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("(" + c + ") failed, so it is a possible CI rerun: a CI rerun cannot be ruled out", out)
+                for s in ("a CI rerun command ran", "was started", "investigate it as an intermittent"):
+                    self.assertNotIn(s, out)
+                self.assertIsNone(self.stop("All tests pass."), c)
+                self.assertIsNone(self.stop("CI is green."), c)
+            # Round 11 (codex 2, claude MINOR-1): real reruns outside the grammar are note-only, so no wording of a
+            # final message clears or arms anything.
+            for c in ("gh {run,rerun} 7", "gh run rerun \"$(gh run list -L1 --json databaseId -q .[0].databaseId)\""):
+                self.assertIn("possible CI rerun", self.bash(c)["hookSpecificOutput"]["additionalContext"])
+                for m in ("No CI reruns failed; all tests pass.", "The documentation says \"CI was not retriggered\". "
+                          "All tests pass.", "It is not true that CI was not retriggered. All tests pass.",
+                          "The scheduler has not retriggered the workflow, so I started it again by hand; CI is green.",
+                          "I did not rerun CI until the fix landed; CI is green.", "The hook says to write \"I did "
+                          "not rerun CI\" if that is so; CI is green.", "It is not true that I did not rerun CI. CI "
+                          "is green.", "CI is green."):
+                    self.assertIsNone(self.stop(m), m)
+            self.assertEqual(load_state(path)[0]["flags"], [])
 
-        def test_42_a_denial_does_not_clear_a_real_rerun(self):
-            for real in (lambda: self.bash("gh run rerun 7"),
-                         lambda: (self.bash("pytest -q", ok=False), self.bash("pytest -q"))):
-                self.bash("echo $; true")
+        def test_42_a_certain_rerun_keeps_the_refusal(self):
+            path = state_path(dict(session_id="s"), self.env)
+            for real, flag in ((lambda: self.bash("gh run rerun 7"), "CI rerun: gh run rerun 7"),
+                               (lambda: (self.bash("pytest -q", ok=False), self.bash("pytest -q")),
+                                "local rerun: pytest -q")):
+                self.bash("echo $; true")  # uncertain: never kept beside the certain rerun (codex 3)
                 real()
-                out = self.stop("I did not rerun CI; all tests pass.")  # the real rerun keeps the current reason
-                self.assertEqual(out["decision"], "block")
-                self.assertIn("State the earlier failure and that it is unresolved", out["reason"])
-                self.assertNotIn("possible CI rerun", out["reason"])  # the denial cleared the possible one
-                self.assertIsNone(self.stop("The CI rerun passed; the earlier failure is intermittent."))
-            self.bash("echo $; true")
-            self.bash("gh run rerun 8")  # mixed outstanding flags keep the current reason
-            self.assertIn("State the earlier failure", self.stop("All tests pass.")["reason"])
+                self.assertEqual(load_state(path)[0]["flags"], [flag])
+                for m in ("No CI reruns failed; all tests pass.", "The documentation says \"CI was not retriggered\". "
+                          "All tests pass.", "It is not true that CI was not retriggered. All tests pass."):
+                    self.assertEqual(self.stop(m)["reason"], "rerun-pass-check: your final message presents a pass "
+                                     "as conclusive, but this session started a CI rerun or saw a check pass on a "
+                                     "rerun after it failed (" + flag + "). State the earlier failure and that it is "
+                                     "unresolved (intermittent), and do not call the later pass conclusive (refusal "
+                                     "1 of at most 2).", m)
+                # Any disclosure word clears, wherever it stands, also inside a denial (claude MINOR-2).
+                self.assertIsNone(self.stop("I did not rerun CI; all tests pass."))
+                self.assertEqual(load_state(path)[0]["flags"], [])
+                self.assertIsNone(self.stop("All tests pass."))
 
-        def test_43_a_failed_ci_rerun_call_is_noted(self):
+        def test_43_a_failed_ci_rerun_call_is_note_only(self):
             # gh run rerun N && gh run watch N --exit-status timing out: the call fails, the rerun may have started.
             for c, kw in (("gh run rerun 7 && gh run watch 7 --exit-status", dict(ok=False)),
                           ("gh run rerun 7; exit 3", dict(exit_code=3)), ("gh run rerun 7", dict(interrupted=True)),
@@ -1375,27 +1362,55 @@ def _self_test():
                 self.tearDown()
                 self.setUp()
                 out = self.bash(c, **kw)["hookSpecificOutput"]["additionalContext"]
-                self.assertTrue("the rerun may have started" in out or "(the call failed)" in out, c)
+                self.assertIn("a CI rerun cannot be ruled out", out, c)
+                self.assertNotIn("was started", out, c)
                 self.assertIsNone(self.bash("gh run view 7"))  # read-only: green on a later look
-                self.assertEqual(self.stop("CI is green.")["decision"], "block", c)
+                self.assertIsNone(self.stop("CI is green."), c)  # uncertain: a note, no refusal
+            # Round 11 (claude MEDIUM-2): an off-grammar check that fails and then passes is uncertain: note-only,
+            # and its note does not say both that the call failed and that nothing failed.
             self.tearDown()
             self.setUp()
+            for ok in (False, True):
+                out = self.bash("pytest -q -k \"$(cat sel.txt)\"", ok=ok)["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("a CI rerun cannot be ruled out" + ("." if ok else " (the call failed)."), out)
+                self.assertIn("If CI, or a check that had failed, was rerun", out)
+                self.assertNotIn("does not mean that anything failed", out)
+            self.assertIsNone(self.stop("All tests pass."))
             self.assertIsNone(self.bash("pytest -q", ok=False))
             self.assertIsNotNone(self.bash("echo \"$(date)\"", ok=False))  # noted, but a failed call is no change
             out = self.bash("pytest -q")["hookSpecificOutput"]["additionalContext"]
             self.assertIn("failed earlier and passed", out)
 
         def test_44_documented_misses(self):
-            # Pinned residuals: a blank command gets no note; ~ and ~- are tilde-expanded by bash and a hashed name
-            # (hash -p) is looked up by bash, so these in-grammar reruns are missed.
+            # Pinned residuals: a blank command gets no note; ~, ~+ and ~- are tilde-expanded by bash and a hashed
+            # name (hash -p) is looked up by bash, so these in-grammar reruns are missed.
             state = new_state()
             for c in ("\n" * 8193, " \t\n"):
                 payload = dict(tool_name="Bash", tool_input=dict(command=c))
                 self.assertIsNone(after_tool(payload, state, "PostToolUse"))
             self.assertEqual(state["flags"], [])
-            for c in ("HOME=/s/gh; ~ run rerun 7", "OLDPWD=/s/gh; ~- run rerun 7", "hash -p /s/gh x; x run rerun 7"):
+            for c in ("HOME=/s/gh; ~ run rerun 7", "PWD=/s/gh; ~+ run rerun 7", "OLDPWD=/s/gh; ~- run rerun 7",
+                      "hash -p /s/gh x; x run rerun 7"):
                 self.assertIsNotNone(parse(c), c)
                 self.assertFalse(ci_rerun(c), c)
+            # The name rule ignores whether the words ran: this call succeeds, starts no rerun, and is kept.
+            self.assertIn("was started", self.bash("false && gh run rerun 7; true")["hookSpecificOutput"]
+                          ["additionalContext"])
+            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
+
+        def test_45_only_a_certain_flag_arms_the_refusal(self):
+            # A flag of another prefix (an earlier version kept "possible CI rerun: ...") never arms a refusal.
+            path = state_path(dict(session_id="s"), self.env)
+            self.assertTrue(save_state(path, dict(change=0, checks=dict(), flags=["possible CI rerun: echo $"],
+                                                  blocks=0)))
+            self.assertIsNone(self.stop("All tests pass."))
+            self.assertTrue(save_state(path, dict(change=0, checks=dict(), blocks=0, flags=[
+                "possible CI rerun: echo $", "CI rerun: gh run rerun 7"])))
+            self.assertIn("after it failed (CI rerun: gh run rerun 7). State", self.stop("All tests pass.")["reason"])
+            self.assertIn("(refusal 2 of at most 2)", self.stop("All tests pass.", active=True)["reason"])
+            self.assertIsNone(self.stop("It was flaky; all tests pass."))  # a disclosure resets the count too
+            self.bash("gh run rerun 8")
+            self.assertIn("(refusal 1 of at most 2)", self.stop("All tests pass.", active=True)["reason"])
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))
