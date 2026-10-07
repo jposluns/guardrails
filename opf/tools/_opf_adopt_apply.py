@@ -5547,6 +5547,8 @@ def self_test():
 
 
 def _self_test_checks():
+    import errno
+    import fcntl
     import signal
     import tempfile
     from unittest import mock
@@ -5560,17 +5562,41 @@ def _self_test_checks():
     census = Path("/proc/self/fd").is_dir()
     no_census = "no /proc/self/fd descriptor census on this platform"
 
-    def descriptors():
-        """The descriptors open now, by the census: compared at the end so this run leaves none behind for
-        the modules a self-test run loads after it."""
-        found = set()
+    # The REAL stat family, taken before any vector patches it; every descriptor census below reads
+    # through it, never through a patched os.fstat.
+    _real_stat, _real_lstat, _real_fstat = os.stat, os.lstat, os.fstat
+
+    def _fd_ident(fd):
+        """What `fd` names now (st_dev, st_ino, file type, st_rdev, access mode and status flags), or
+        None when it is OBSERVED closed (EBADF); any other read failure is cannot-evaluate, raised
+        naming `fd`, never read as a closed descriptor (round 6)."""
+        try:
+            st = _real_fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return None
+            raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+        return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
+
+    def _fds_open():
+        """Every descriptor open now, as (number, identity) pairs (round 6, the class sweep's census
+        form): a number closed and reopened on another file, or with other flags, is a new pair, so a
+        leak at a reused number is seen. Limit (disclosed): one reopened on the same file with the same
+        flags is the same pair."""
+        out = set()
         for fd_name in os.listdir("/proc/self/fd"):
-            try:
-                os.fstat(int(fd_name))
-            except OSError:
-                continue
-            found.add(int(fd_name))
-        return found
+            identity = _fd_ident(int(fd_name))
+            if identity is not None:
+                out.add((int(fd_name), identity))
+        return out
+
+    def descriptors():
+        """The descriptors open now, as (number, identity) pairs by the census (round 7): compared at the
+        end so this run leaves none behind for the modules a self-test run loads after it, and a number
+        closed and reopened on another file in between is a new pair, never read as no leak. A descriptor
+        whose identity cannot be read raises naming it (_fd_ident), never left out."""
+        return _fds_open()
     entry_descriptors = descriptors() if census else None
 
     def check(name, cond, observed=None):
@@ -5579,6 +5605,27 @@ def _self_test_checks():
             failures.append(name)
             if observed is not None:
                 failure_details[name] = observed
+
+    # Round 7: the whole-run entry/exit census is by (number, identity) pair. A number open at "entry"
+    # (os.devnull), closed and reopened on another file (the /dev directory) before "exit", is reported by
+    # the difference the final leak check takes (red against a number-only census: the number is in both
+    # censuses, so the reopened descriptor reads as no leak).
+    if not census:
+        skipped.append(("self-test-census-reports-reused-number", no_census))
+    else:
+        entry_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            reuse_entry = descriptors()
+        finally:
+            os.close(entry_fd)
+        reopened_fd = os.open(os.path.dirname(os.devnull), os.O_RDONLY)
+        try:
+            reuse_left = sorted(descriptors() - reuse_entry)
+        finally:
+            os.close(reopened_fd)
+        check("self-test-census-reports-reused-number",
+              reopened_fd == entry_fd and [fd for fd, _identity in reuse_left] == [entry_fd],
+              observed="opened at {}, reopened at {}, reported {!r}".format(entry_fd, reopened_fd, reuse_left))
 
     def refusal(fn, *args, **kwargs):
         """The refusal text when fn refuses with AdoptApplyError, else None."""
@@ -6500,17 +6547,57 @@ def _self_test_checks():
     # _reuse_remapped wraps a stat-family call so a result whose identity a vector recorded as reused
     # reports the predecessor's (st_dev, st_ino) instead: production then sees exactly the identities a
     # reusing filesystem would show it, on any filesystem the self-test actually runs on.
-    _real_stat, _real_lstat, _real_fstat = os.stat, os.lstat, os.fstat
+    # (_real_stat, _real_lstat and _real_fstat are taken at the top of this function.)
 
     def _inode_free(identity):
+        """False when a descriptor of this process holds `identity` ((st_dev, st_ino)), else True. Only a
+        descriptor OBSERVED closed (EBADF, the listing's own) reads as not holding; any other fstat
+        failure is cannot-evaluate, raised naming the descriptor, never read as a free inode (round 7)."""
         for fd_name in os.listdir("/proc/self/fd"):
             try:
                 fd_st = _real_fstat(int(fd_name))
-            except OSError:
-                continue
+            except OSError as exc:
+                if exc.errno == errno.EBADF:
+                    continue
+                raise RuntimeError("inode-reuse census cannot evaluate descriptor {}: {!r}".format(
+                    fd_name, exc))
             if (fd_st.st_dev, fd_st.st_ino) == identity:
                 return False
         return True
+
+    # Round 7: _inode_free fails closed. With os.devnull held open and the census's fstat failing EIO for
+    # that one descriptor, asking for an inode no descriptor holds (so the scan reads every descriptor,
+    # never returning early at another holder of os.devnull) raises naming it (red against reading any
+    # fstat OSError as not holding: it returns True, a free inode, over a descriptor it never read).
+    # Unfaulted, it still reads the held inode as held and an unheld one as free.
+    if not census:
+        skipped.append(("inode-free-census-read-failure-cannot-evaluate", no_census))
+    else:
+        eio_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            eio_st = _real_fstat(eio_fd)
+            eio_identity = (eio_st.st_dev, eio_st.st_ino)
+            held_seen = _inode_free(eio_identity)
+            unheld_seen = _inode_free((-1, -1))
+            unfaulted_fstat = _real_fstat
+
+            def _eio_fstat(fd):
+                if fd == eio_fd:
+                    raise OSError(errno.EIO, "injected EIO")
+                return unfaulted_fstat(fd)
+            _real_fstat = _eio_fstat
+            try:
+                eio_seen = ("returned", _inode_free((-1, -1)))
+            except RuntimeError as exc:
+                eio_seen = ("raised", str(exc))
+            finally:
+                _real_fstat = unfaulted_fstat
+        finally:
+            os.close(eio_fd)
+        check("inode-free-census-read-failure-cannot-evaluate",
+              held_seen is False and unheld_seen is True and eio_seen[0] == "raised"
+              and "descriptor {}:".format(eio_fd) in eio_seen[1],
+              observed="held={!r} unheld={!r} under EIO={!r}".format(held_seen, unheld_seen, eio_seen))
 
     def _reuse_remapped(real, reuse):
         def wrapper(*args, **kwargs):
@@ -6709,34 +6796,8 @@ def _self_test_checks():
             skipped.append((name, no_census))
     else:
         import dis
-        import errno
-        import fcntl
 
-        def _fd_ident(fd):
-            """What `fd` names now (st_dev, st_ino, file type, st_rdev, access mode and status flags), or
-            None when it is OBSERVED closed (EBADF); any other read failure is cannot-evaluate, raised
-            naming `fd`, never read as a closed descriptor (round 6)."""
-            try:
-                st = _real_fstat(fd)
-                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-            except OSError as exc:
-                if exc.errno == errno.EBADF:
-                    return None
-                raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
-            return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
-
-        def _fds_open():
-            """Every descriptor open now, as (number, identity) pairs (round 6, the class sweep's census
-            form): a number closed and reopened on another file, or with other flags, is a new pair, so a
-            leak at a reused number is seen. Limit (disclosed): one reopened on the same file with the same
-            flags is the same pair."""
-            out = set()
-            for fd_name in os.listdir("/proc/self/fd"):
-                identity = _fd_ident(int(fd_name))
-                if identity is not None:
-                    out.add((int(fd_name), identity))
-            return out
-
+        # _fd_ident and _fds_open, the (number, identity) census, are defined at the top of this function.
         def _unbound_returns(code):
             """The offsets of each store binding a call's result: the one boundary no Python code covers."""
             got, prior = set(), None
@@ -11974,7 +12035,8 @@ def _self_test_checks():
         left_open = sorted(descriptors() - entry_descriptors)
         check("self-test-leaves-no-descriptor-open", not left_open,
               observed="{} descriptor(s) left open, first {}".format(
-                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd))) for fd in left_open[:4]]))
+                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd)))
+                                   for fd, _identity in left_open[:4]]))
     else:
         skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:

@@ -1469,6 +1469,27 @@ def _watchdog_launcher_case(label, disposition):
     return EXIT_OK if ok else EXIT_FINDING
 
 
+def _fixture_fd_census():
+    """Every descriptor this process holds open, as (number, identity) pairs, identity being (st_dev,
+    st_ino, file type, st_rdev, access mode and status flags): a number closed and reopened on another
+    file between two censuses is a new pair, never read as the one open before. Only a descriptor
+    OBSERVED closed (EBADF, the listing's own) is left out; any other read failure raises naming it,
+    never read as closed. Limit: one reopened on the same file with the same flags is the same pair."""
+    import errno
+    import fcntl
+    live = set()
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            st = os.fstat(int(name))
+            flags = fcntl.fcntl(int(name), fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(name, exc))
+        live.add((int(name), (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)))
+    return live
+
+
 def _watchdog_completion_case(mode):
     """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
     import json
@@ -2086,15 +2107,7 @@ def _watchdog_completion_case(mode):
         # cancelled construction aborts the launch and re-raises the cancellation.
         real_start = threading.Thread.start
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
-            return live
+        open_fds = _fixture_fd_census
 
         def no_children():
             try:
@@ -3118,15 +3131,7 @@ def _watchdog_completion_case(mode):
         real_abandon = emit._FixtureProcess._abandon_unfinished_launch
         real_finish = emit._FixtureProcess._finish_close
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
-            return live
+        open_fds = _fixture_fd_census
 
         def no_children():
             try:
