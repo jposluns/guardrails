@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Eight hooks are published here, each listed with its checksum and link in the integrity table below.
+Nine hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -23,9 +23,11 @@ rule that a standing constraint persists across context loss
 backs the rule that a rerun pass does not erase an earlier failure
 ([the rule text](../.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)); both are linked in the
 [enforcement register](../ENFORCEMENT.md). The other hooks guard completion
-records, background polling loops, and existing working-record files. Each one is a discipline
-guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
-error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
+records, background polling loops, and existing working-record files, and `char-policy-write.py` applies
+your repository's own character policy to file writes; it backs no rule in the pack and claims none. Each
+one is a discipline guard against accidental drift, not a security boundary, and each one fails open: if
+the hook hits an error or input it cannot evaluate, it gets out of the way rather than blocking your
+work. The one
 exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
@@ -67,6 +69,17 @@ the authority, and the summary further down this page only points to it.
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
+- **`char-policy-write.py`** denies a file write that would add a character your repository's character
+  policy forbids, in a file that policy covers. The policy is the data file `.aiqt/char-policy.json` at the
+  repository root, the one the pack's CI gate `tools/check_no_dashes.py` reads: it lists the characters, a
+  name for each, optional advice, and the folders, file suffixes and files in scope. The hook names no
+  character of its own; this repository's policy forbids the en dash and the em dash in Markdown and in the
+  hook files. An edit is denied only when it adds more of a character than it removes, so a file that
+  already holds one can still be edited, and a whole-file write is compared with the file it replaces. The
+  reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
+  A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
+  ahead; the CI gate still checks the file. It does not skip worker processes.
+  Event: `PreToolUse`, matcher `Write|Edit|MultiEdit`.
 - **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
   refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
   (while it can keep its state: if its state lock cannot be taken at all, it reminds of a compaction once
@@ -142,6 +155,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
+| `char-policy-write.py` | `ec18dba46e63402ca4cc14328cf2ea8b944a35e0123ecaf89ec6a7a6f7ca779b` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -211,7 +225,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the eight hooks:
+   Use this launch line for each of the nine hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -225,8 +239,8 @@ fails and report it; do not work around a failed check.
      of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
-     `constraint-reread.py`, and `rerun-pass-check.py` do not define a `REGISTRATION` constant; use this
-     same guard for them.
+     `constraint-reread.py`, `rerun-pass-check.py`, and `char-policy-write.py` do not define a
+     `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
@@ -236,7 +250,7 @@ fails and report it; do not work around a failed check.
      `error: <file> requires Python 3.14 or newer` to standard error, and exits.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
+     assistant and nothing is blocked; for the five `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
      `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
@@ -252,10 +266,11 @@ fails and report it; do not work around a failed check.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the eight hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the nine hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
+   `future-stamp-write.py` matches file writes and shell commands, `char-policy-write.py` matches file writes
+   only, and the other three match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
    `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
@@ -288,6 +303,7 @@ fails and report it; do not work around a failed check.
        ],
        "PreToolUse": [
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
+         { "matcher": "Write|Edit|MultiEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/char-policy-write.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] }
@@ -301,18 +317,21 @@ fails and report it; do not work around a failed check.
    not yet published here. Those checks report `SKIPPED` until the reference files are available;
    skipped is not a pass. The `record-remove-check.py` differential check also reports
    `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
+   The `char-policy-write.py` self-test compares its policy reader and scope test with the CI gate
+   `tools/check_no_dashes.py`, found at `../tools/` from the hook's folder as in a checkout of this
+   repository; installed on its own, that comparison reports skipped.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other seven, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other eight, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the eight above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the nine above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -322,9 +341,9 @@ you type directly (in Claude Code, a line starting with `!`).
 ## Configuration
 
 The hooks read their settings from environment variables. Each feature has its own off state, and nothing
-beyond these variables is assumed. Each `AIQT_` variable also accepts an older spelling with the prefix
-`ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is unset, so "unset" below means
-both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
+beyond these variables is assumed. Each `AIQT_` variable except `AIQT_CHAR_POLICY_ROOT` also accepts an
+older spelling with the prefix `ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is
+unset, so "unset" below means both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
 `ORCH_VERIFY_OWNER`; if your environment sets either for another purpose, the hooks stay silent there.
 
 - The current time needs no setting. `clock-inject.py` always reads it from the clock and injects it, and
@@ -346,6 +365,10 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   calls. For an intended destruction, put `# record-rm-ok: <reason>` after the last command token on the
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
+- **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
+  unset, empty or relative, the hook does nothing, and with no policy file under that root it does nothing
+  either. It has no opt-out comment: to allow a character, write it in words, or narrow the policy's scope
+  in a reviewed change to the policy file.
 
 The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
 command. Their reasons are optional; text inside quotes does not opt out.
@@ -354,6 +377,7 @@ command. Their reasons are optional; text inside quotes does not opt out.
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
+| `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
@@ -497,6 +521,18 @@ section of its opening docstring. Read that section before relying on a hook; in
   without a `stop_hook_active`
   field in the input, once it has refused twice in a row every later conclusive turn end is allowed with
   the warning until a final message names a disclosure word (a missed refusal).
+- **`char-policy-write.py`** sees only the `Write`, `Edit` and `MultiEdit` tools: shell commands
+  (redirections, here-documents, in-place `sed`, `tee`, one-line interpreter scripts), generator scripts,
+  notebook edits, other tools and other harnesses are not checked, nor is a session without the hook, so
+  the CI gate is the only check on those writes. It is off until you install it and set its root. A
+  character written as an HTML entity is not decoded. Moving an existing character within one edit is
+  allowed, and a `MultiEdit` call where a later edit removes what an earlier one added is denied. A hard
+  link, a case-insensitive or Unicode-normalizing filesystem, or a symbolic link inside the root can make
+  its scope differ from the gate's. A malformed policy file lets every write through with a note, while the
+  gate fails on it. A reviewed edit to the policy file narrows the hook and the gate together, and only
+  review guards that edit. The repository's other character checks, with their own fixed lists, are not
+  read. The file can change between the check and the write, and a payload over 64 MiB is allowed
+  silently.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

@@ -31,6 +31,7 @@ format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    ".preview/char-policy-write.py",
     ".preview/clock-inject.py",
     ".preview/constraint-reread.py",
     ".preview/future-stamp-write.py",
