@@ -489,6 +489,15 @@ expected-check-ids = [
   "forced/surfaced-set-written",
   "forced/clean-after-triage",
   "forced/failed-record-in-banner",
+  # ---------- round 21: a failed guard-events append on a deny is warned about ----------
+  "r21/stop-deny-holds-and-warns",
+  "r21/stop-deny-counted",
+  "r21/teammate-idle-deny-holds-and-warns",
+  "r21/schedule-deny-holds-and-warns",
+  "r21/quiet-claim-deny-holds-and-warns",
+  "r21/ask-deny-holds-and-warns",
+  "r21/checkpoint-bound-drop-warns",
+  "r21/stop-deny-recorded-no-warning",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

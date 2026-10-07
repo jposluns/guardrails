@@ -3517,6 +3517,77 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
 
+        # ROUND 21, A FAILED GUARD-EVENTS APPEND ON A DENY IS WARNED ABOUT AND THE DENY HOLDS: with
+        # guard-events.jsonl a directory (a real failed append, no patched seam), the shared Stop and
+        # TeammateIdle path still blocks (exit 2) with the recording-failure warning on its block reason (it
+        # has no banner); both scheduling denies (the backlog deny and the quiet-claim deny) and the
+        # unattended-ask deny still deny, with the warning in the deny reason and the banner; a bound-forced
+        # checkpoint drop under a clean ALLOW is warned about in the banner. Red on b02061bd, where each of
+        # these dropped the failed row silently. The control leg (the directory removed) shows the warning
+        # is absent when the row is written.
+        _r21 = Fixture(tmp, "r21-events")
+        _r21_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r21.root)))
+        _r21_ge = _r21_sd / "guard-events.jsonl"
+        _r21_ge.mkdir(parents=True, exist_ok=True)
+        _r21.set_items([item("R21-1")])
+
+        def _r21_block(result, event):
+            code, obj, err = result
+            return (code, obj, "R21-1" in (err or ""),
+                    ("Additionally, the guard-events row for this deny ({}) could not be written; "
+                     "record it manually (nocncl).".format(event)) in (err or ""))
+
+        def _r21_deny(result, kind):
+            obj = result[1] if isinstance(result[1], dict) else {}
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            warn = "the guard-events row for this deny ({}) could not be written".format(kind)
+            return (_verdict(result), warn in reason, warn in str(obj.get("systemMessage", "")))
+        _r21.set_turn_state({})
+        check("r21/stop-deny-holds-and-warns",
+              _r21_block(aiqt_hooks.orch_stop_guard(_r21.payload("Stop")), "Stop"),
+              (2, None, True, True))
+        check("r21/stop-deny-counted", _r21.turn_state().get("stop_denials"), 1)
+        _r21.set_turn_state({})
+        check("r21/teammate-idle-deny-holds-and-warns",
+              _r21_block(aiqt_hooks.orch_teammate_idle(_r21.payload("TeammateIdle")), "TeammateIdle"),
+              (2, None, True, True))
+        _r21.set_turn_state({})
+        check("r21/schedule-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_yield_tool(_r21.payload(
+                  "PreToolUse", "ScheduleWakeup", {"prompt": "recheck R21-1 later"})), "yield-tool"),
+              ("deny", True, True))
+        _r21.set_turn_state({"last_human_input_utc": now_iso(0)})
+        check("r21/quiet-claim-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_yield_tool(_r21.payload(
+                  "PreToolUse", "ScheduleWakeup",
+                  {"prompt": "user quiet for 20 minutes; recheck R21-1"})), "yield-tool"),
+              ("deny", True, True))
+        _r21.mode.write_text("Operating-mode: unattended\n", encoding="utf-8")
+        check("r21/ask-deny-holds-and-warns",
+              _r21_deny(aiqt_hooks.orch_ask_guard(_r21.payload(
+                  "PreToolUse", "AskUserQuestion", {"questions": [{"question": "which?"}]})), "ask-guard"),
+              ("deny", True, True))
+        _r21.mode.write_text("", encoding="utf-8")
+        _r21.set_items([item("R21-P{:05d}".format(n), state="proposed")
+                        for n in range(aiqt_hooks._ORCH_CHECKPOINT_MAX + 5)])
+        _r21.set_turn_state({})
+        _r21_res = aiqt_hooks.orch_stop_guard(_r21.payload("Stop"))
+        check("r21/checkpoint-bound-drop-warns",
+              (_verdict(_r21_res),
+               "the guard-events row for this dropped (checkpoint-bound) could not be written"
+               in str((_r21_res[1] or {}).get("systemMessage", ""))),
+              ("warn", True))
+        _r21_ge.rmdir()
+        _r21.set_items([item("R21-1")])
+        _r21.set_turn_state({})
+        _r21_ctl = aiqt_hooks.orch_stop_guard(_r21.payload("Stop"))
+        _r21_rows = aiqt_hooks._orch_read_jsonl(str(_r21_ge))[0] or []
+        check("r21/stop-deny-recorded-no-warning",
+              (_r21_ctl[0], "Additionally" in (_r21_ctl[2] or ""),
+               [(r.get("kind"), r.get("decision")) for r in _r21_rows]),
+              (2, False, [("Stop", "deny")]))
+
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
         esched = lambda ti: aiqt_hooks.orch_yield_tool(

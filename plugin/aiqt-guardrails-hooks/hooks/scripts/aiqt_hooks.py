@@ -8587,6 +8587,22 @@ def _orch_guard_event(root, kind, decision, detail):
                                "decision": decision, "detail": detail})
 
 
+def _orch_event_warn(root, kind, decision, detail):
+    """_orch_guard_event for a path that must not lose its row silently (a deny, an allow with findings,
+    or a recorded fact): returns '' when the append succeeded, else the short recording-failure warning
+    the caller appends to its output (the block reason of a denied Stop or TeammateIdle, else the
+    banner, and the deny reason too on a PreToolUse deny). The decision is never changed here."""
+    if _orch_guard_event(root, kind, decision, detail):
+        return ""
+    return ("Additionally, the guard-events row for this {} ({}) could not be written; record it "
+            "manually (nocncl).".format(decision, kind))
+
+
+def _orch_warn_tail(*warns):
+    """The recording-failure warnings of one hook call, each preceded by a space ('' when none)."""
+    return "".join(" " + w for w in warns if w)
+
+
 def _orch_turn_state(root):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
     bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
@@ -9262,10 +9278,10 @@ def _orch_token_present(needle, hay):
     return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
 
 
-_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
+_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged or warned about
 
 
-def _orch_checkpoint_union(root, payload, record=True):
+def _orch_checkpoint_union(root, payload, record=True, warnings=None):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
@@ -9281,7 +9297,9 @@ def _orch_checkpoint_union(root, payload, record=True):
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
     COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
-    preview makes no state change.
+    preview makes no state change. Each guard-events append made here (a bound-forced drop, an unwritable
+    checkpoint, an unwritable init marker) that fails adds its recording-failure warning to the caller's
+    warnings list, which the hook surfaces in its output, so none of the three rows is lost silently.
 
     FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
@@ -9336,31 +9354,35 @@ def _orch_checkpoint_union(root, payload, record=True):
     for it in payload:
         if it["state"] != "closed":
             union[it["id"]] = current[it["id"]]
+    events = []
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
         union = {iid: union[iid] for iid in sorted(union)[:_ORCH_CHECKPOINT_MAX]}
-        if record:
-            _orch_guard_event(root, "checkpoint-bound", "dropped",
-                              "{} id(s) past the {} bound: {}".format(
-                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
+        events.append(("checkpoint-bound", "dropped",
+                       "{} id(s) past the {} bound: {}".format(
+                           len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10]))))
     if record:
         if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
                                               "ids": union}):
-            _orch_guard_event(root, "checkpoint-unwritable", "recorded",
-                              "the checkpoint could not be rewritten; the next window compares "
-                              "against the prior state")
+            events.append(("checkpoint-unwritable", "recorded",
+                           "the checkpoint could not be rewritten; the next window compares "
+                           "against the prior state"))
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
             # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
             # never a silent gap, consistent with the other recorders.
             if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
-                _orch_guard_event(root, "checkpoint-marker-unwritable", "recorded",
-                                  "the checkpoint-init marker could not be written; a later "
-                                  "checkpoint deletion would be undetectable this window")
+                events.append(("checkpoint-marker-unwritable", "recorded",
+                               "the checkpoint-init marker could not be written; a later "
+                               "checkpoint deletion would be undetectable this window"))
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
+        for ev_kind, ev_decision, ev_detail in events:
+            warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
+            if warn and warnings is not None:
+                warnings.append(warn)
     return injected
 
 
@@ -9368,7 +9390,8 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
     (ctx, turn_state_or_None, basis). The C.1 escape unpack, the C.2 attestation threading, and the
     C.3 checkpoint injection all land HERE, never in decide_yield: the decision core's verdict
-    lattice is untouched, and ctx["escape_spoof"] is a recorder-only key decide_yield never reads."""
+    lattice is untouched, and ctx["escape_spoof"] and ctx["record_warn"] (the checkpoint's recording-failure
+    warnings, '' when none) are recorder-only keys decide_yield never reads."""
     staleness = _orch_validate("staleness", reg.get("staleness"))[1]
     task_hours = staleness["task_hours"]
     ts = _orch_turn_state(root)
@@ -9378,6 +9401,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
+    record_warn = []
     if status == "ok":
         live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
         classes = classify_backlog(payload, live_ids, ledger_readable,
@@ -9387,7 +9411,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
         # with no closed receipt is held (cannot-evaluate); the injected ids enter the class-tagged
         # basis below, so under D12 a shrink is a CHANGED basis, never premature cap relief.
         classes["cannot_evaluate"].extend(
-            _orch_checkpoint_union(root, payload, record=record_checkpoint))
+            _orch_checkpoint_union(root, payload, record=record_checkpoint, warnings=record_warn))
         enum_detail = ""
         # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
         # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
@@ -9412,6 +9436,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     basis_unchanged = tstate["schedule_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
+           "record_warn": " ".join(record_warn),
            "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
@@ -9448,10 +9473,11 @@ def _orch_record_escape_spoof(root, detail):
     audit raises it: normally once, again at each later audit while its rename fails, and never where a
     later sentinel overwrote escape-spoof.json before that audit (only the later one is raised from it;
     the earlier one keeps only its guard-events row, where that append succeeded). FIX 6: the recording
-    is FAIL-LOUD: returns '' on success, else the warning text the caller MUST append to its banner, so
-    an ignored sentinel whose guard-events row or escape-spoof.json could not be written is never
-    silently dropped: the banner names the failed write and asks for a manual record (when both writes
-    fail, the resume audit has nothing to raise)."""
+    is FAIL-LOUD: returns '' on success, else the warning text the caller MUST append to its output (its
+    banner, or the block reason of a denied Stop or TeammateIdle, which has no banner; a PreToolUse deny
+    carries it in both its reason and its banner), so an ignored sentinel whose guard-events row or
+    escape-spoof.json could not be written is never silently dropped: the warning names the failed write
+    and asks for a manual record (when both writes fail, the resume audit has nothing to raise)."""
     ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
     ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
                                {"ts": _orch_now().isoformat(), "detail": detail})
@@ -9527,26 +9553,29 @@ def _orch_stop_family(data, event_name, kind):
         if not _orch_record_denial(root, ts, kind, basis):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
                     "failing OPEN with findings rather than re-denying. Underlying: " + reason)
-            _orch_guard_event(root, event_name, "allow_unpersistable", warn)
+            ev = _orch_event_warn(root, event_name, "allow_unpersistable", warn)
             return _stop_warn("AIQT guardrail ({}): {}{}".format(
-                event_name, warn, " " + spoof_warn if spoof_warn else ""))
-        _orch_guard_event(root, event_name, "deny", reason)
-        # a DENY blocks (exit 2); if the spoof record itself failed, surface it on the block reason too
-        return (2, None, reason + (" " + spoof_warn if spoof_warn else ""))
-    _orch_guard_event(root, event_name, verdict.lower(), reason)
+                event_name, warn, _orch_warn_tail(ev, spoof_warn, ctx["record_warn"])))
+        ev = _orch_event_warn(root, event_name, "deny", reason)
+        # a DENY blocks (exit 2) and carries no banner, so every recording-failure warning (the deny's own
+        # guard-events row, the spoof record, the checkpoint rows) goes on the block reason
+        return (2, None, reason + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, event_name, verdict.lower(), reason)
         extra = ""
         if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
             extra = _orch_record_forced_exit(root, event_name, ctx, reason)
-        tail = " ".join(x for x in (extra, spoof_warn) if x)
         return _stop_warn("AIQT guardrail ({}): {}{}".format(
-            event_name, reason, " " + tail if tail else ""))
-    if spoof_warn:
-        # a clean ALLOW whose spoof record FAILED still surfaces the failure (never a silent None)
-        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, spoof_warn))
+            event_name, reason, _orch_warn_tail(extra, ev, spoof_warn, ctx["record_warn"])))
+    # a clean ALLOW's row is the over-fire metric only: best effort, a failed append is not surfaced
+    _orch_guard_event(root, event_name, verdict.lower(), reason)
+    tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _stop_warn("AIQT guardrail ({}):{}".format(event_name, tail))
     return _allow()
 
 
@@ -9623,23 +9652,26 @@ def orch_yield_tool(data):
                   "Re-issue without the unmeasured claim.".format(claim.group(1), measured_min))
         # The quiet-claim DENY has a trivial legit exit (re-issue without the claim), so it does NOT
         # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
-        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work). A recording-failure warning
+        # goes on both the deny reason and the banner.
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
+                               ctx["record_warn"])
+        return _deny(reason + tail,
                      "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
-                     "contradicts the measured figure.")
+                     "contradicts the measured figure." + tail)
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
         _orch_record_denial(root, ts, kind, basis)
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
-                     "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
+                               ctx["record_warn"])
+        return _deny(reason + tail,
+                     "AIQT guardrail: denied a {} call past the enumerated backlog.{}".format(tool, tail))
     if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
         _orch_register_wake(root, ts, tool_input.get("prompt"))
-    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, "yield-tool", verdict.lower(), reason)
         msg = "AIQT guardrail: {}".format(reason)
         forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
@@ -9651,11 +9683,13 @@ def orch_yield_tool(data):
             extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
             if extra:
                 msg += " " + extra
-        if spoof_warn:
-            msg += " " + spoof_warn
-        return _allow_note(msg)
-    if spoof_warn:
-        return _allow_note("AIQT guardrail: {}".format(spoof_warn))
+        return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
+    # a clean ALLOW's row is the over-fire metric only: best effort, a failed append is not surfaced
+    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+    tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _allow_note("AIQT guardrail:" + tail)
     return _allow()
 
 
@@ -9686,9 +9720,13 @@ def orch_ask_guard(data):
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
     mode = _orch_mode(reg, root)
     if mode is None or "unattended" not in mode:
-        if mode is None:
-            _orch_guard_event(root, "ask-guard", "fail-open",
-                              "mode record absent, empty, or prose with no declaration or JSON marker")
+        if mode is None and not _orch_guard_event(
+                root, "ask-guard", "fail-open",
+                "mode record absent, empty, or prose with no declaration or JSON marker"):
+            # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
+            return _allow_note("AIQT guardrail: the ask guard failed open (no operating-mode record it "
+                               "could read as a declaration), and the guard-events row recording that "
+                               "fail-open could not be written; record it manually (nocncl).")
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
@@ -9710,12 +9748,12 @@ def orch_ask_guard(data):
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
               "the mode record first, then re-issue.")
-    _orch_guard_event(root, "ask-guard", "deny",
-                      "pending key {}{}".format(key, "" if recorded else " (NOT persisted)"))
+    tail = _orch_warn_tail(_orch_event_warn(
+        root, "ask-guard", "deny", "pending key {}{}".format(key, "" if recorded else " (NOT persisted)")))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
               if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
               "pending row could NOT be persisted; record the decision manually (nocncl).")
-    return _deny(reason, banner)
+    return _deny(reason + tail, banner + tail)
 
 
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
@@ -11064,10 +11102,10 @@ def _orch_pending_artefact_findings(root):
     overwrites escape-spoof.json, so only the later one is raised from it. The lasting record of each
     ignored sentinel is its append-only guard-events.jsonl row of kind escape-spoof
     (_orch_record_escape_spoof) only where that append succeeded: a failed append was warned about in the
-    banner of the hook that ignored the sentinel, which asks for a manual record, and no row exists for
-    it. Forced exits are an append-only log surfaced via _orch_forced_exit_findings so multiple exits are
-    each normally raised once (at least once if recording that one was raised fails) and never
-    clobbered."""
+    output of the hook that ignored the sentinel (its banner, or the block reason of a denied Stop or
+    TeammateIdle), which asks for a manual record, and no row exists for it. Forced exits are an
+    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each normally raised
+    once (at least once if recording that one was raised fails) and never clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "escape-spoof.json")
@@ -11185,13 +11223,14 @@ def orch_resume_audit(data):
     except (OSError, ValueError):
         pass  # the previous barrier is left unchanged and the warning still surfaces; never wedge SessionStart
     if findings:
-        _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
+        tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",
+                                                "; ".join(findings)[:1000]))
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
                           "observed reality: {}. Correct the record, or for a truncation guard finding "
                           "the condition it names (for example a directory's permissions, or the "
                           "registry's file type), then re-run "
                           "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
-                          "acknowledgement alone does not clear it.".format("; ".join(findings)))
+                          "acknowledgement alone does not clear it.{}".format("; ".join(findings), tail))
     return _allow()
 
 
@@ -11828,13 +11867,12 @@ def _wrtscp_target_companion_store(target, stores):
 
 
 def _wrtscp_deny(root, detail, reason, banner):
-    """A write-scope DENY that also makes a BEST-EFFORT guard-events append (the over-fire metric) when root
-    is resolvable. The append is best-effort: _orch_guard_event may return False and this ignores it, so a
-    failed append neither blocks nor alters the denial and the over-fire metric may be lost for that event."""
-    if root is not None:
-        _orch_guard_event(root, "wrtscp", "deny", detail)
-    return _deny("AIQT rule wrtscp (write-scope): {}".format(reason),
-                 "AIQT guardrail: {} (rule wrtscp).".format(banner))
+    """A write-scope DENY that also appends a guard-events row (the over-fire metric) when root is
+    resolvable. A failed append adds the recording-failure warning to the deny reason and the banner and
+    never alters the denial; with no resolvable root no row is attempted."""
+    tail = _orch_warn_tail(_orch_event_warn(root, "wrtscp", "deny", detail) if root is not None else "")
+    return _deny("AIQT rule wrtscp (write-scope): {}{}".format(reason, tail),
+                 "AIQT guardrail: {} (rule wrtscp).{}".format(banner, tail))
 
 
 def write_scope_guard(data):
@@ -12146,9 +12184,13 @@ def write_scope_guard(data):
                                     "orchestration-registry surface instead.".format(target),
                                     "denied a {} to a declared companion store's frozen orchestration "
                                     "registry file".format(tool_name))
-            _orch_guard_event(root, "wrtscp", "allow",
-                              "companion-store write to the declared store {} (target {})"
-                              .format(store, target))
+            ev = _orch_event_warn(root, "wrtscp", "allow",
+                                  "companion-store write to the declared store {} (target {})"
+                                  .format(store, target))
+            if ev:
+                # the allow stands; its unwritten audit row is surfaced, never lost silently
+                return _allow_note("AIQT guardrail: allowed a {} to the declared companion store {} "
+                                   "(rule wrtscp). {}".format(tool_name, store, ev))
             return _allow()                                                                   # companion store
         return _wrtscp_deny(root, "outside toplevel",
                             "the write target resolves OUTSIDE this repository ({}); a guarded-tool write "
