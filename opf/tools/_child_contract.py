@@ -138,7 +138,11 @@ THE CONTRACT, in the order it runs:
    reproduced: a bytes subclass whose __bytes__ returned itself ran its own slicing in the seal
    loop), and the handler releases its last reference to the callback's objects before that check
    too, so none of their finalizers runs in the seal loop (QA r14, claude MINOR 1, reproduced: a
-   descriptor's __del__ ran when the seal loop rebound its names). The price of reading no
+   descriptor's __del__ ran when the seal loop rebound its names). A DETACH of the original error
+   stream, left in place at the last restore, is read there through the C member of the
+   wrapper that holds its buffer, which runs no Python code, and refused by name: a detach
+   is not a change of closed state, so the price below does not cover it (merge train 2 QA
+   r15, claude MINOR 3). The price of reading no
    snapshotted object after the second read: a change to the error stream object's closed state,
    made by the final check's last read or after it, anywhere but the original file object
    captured at construction (its own Python-level `closed`, or a re-initialisation over another
@@ -148,10 +152,23 @@ THE CONTRACT, in the order it runs:
    diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
    hook the loaded code added, which cannot be removed, does not run after the decision; no
    Python-level stream write or flush, no collection, no callback. The rest of the class:
-     - signal handlers: the handler blocks every blockable signal in its thread when it starts, so
-       a handler the loaded code installed does not run after the final check (one already
-       pending runs at the next check's entry, before the checks); delivery through another thread
-       is residual (c);
+     - signal handlers: the handler blocks every blockable signal in its thread when it starts
+       and captures the mask that results, so a handler the loaded code installed does not run
+       after the final check (one already pending runs at the entry of the next check, before
+       the checks). Loaded code run by a check can UNBLOCK a signal again (merge train 2 QA
+       r15, codex MAJOR, reproduced: the final `closed` read of a re-initialised stream
+       unblocked SIGALRM and armed a timer, so the handler of that signal ran during the seal,
+       after the decision, with a passing seal), so the disarming compares the mask with the
+       captured one before and after its own work and refuses a changed mask by name, puts the
+       captured mask back (no signal is delivered to this thread again), and resets every
+       Python-level signal handler to SIG_DFL, keeping each replaced handler alive: a signal
+       DELIVERED in the unblocked window whose handler had not yet run would run it later even
+       with the mask put back (the mask stops deliveries, not a handler already tripped), and
+       CPython runs no tripped handler that is no longer a Python callable. A tripped handler
+       that fires during the disarming itself, before its reset, is a callback firing during
+       the disarming, judged like the rest (the deliberate re-arming shape is residual (e));
+       delivery through another thread is residual (c), and one arriving after the reset ends
+       the child by the default action instead of running Python, so the parent fails closed;
      - threading.setprofile and threading.settrace store a function used only when a thread
        STARTS, and no thread starts after the decision without code already running; a profile or
        trace function set on ANOTHER thread runs in that thread, residual (c);
@@ -185,7 +202,8 @@ callers' docstrings point here instead of restating them):
       the os._exit unobserved; only a thread started inside the record handler is refused. Such a
       thread also runs CONCURRENTLY with the handler, so step 6's ordering does not bind it: it can
       act after the final check (and a signal delivered to it runs its Python handler in the
-      handler's thread at any point); the self-test measures the plain case (it passes).
+      thread of the record handler at any point before the disarming resets the signal
+      handlers); the self-test measures the plain case (it passes).
   (d) the identity comparison is by id(): a finalizer that frees tracked objects and creates
       replacements that receive the SAME addresses within one pass, the counts equal, reads as a
       pass that changed nothing (CPython reuses freed addresses; not reproduced -- the probing
@@ -225,6 +243,7 @@ import operator
 import os
 import signal
 import sys
+import _signal
 
 # How many collection passes the record handler may make before one settles (changes nothing). A
 # deeper chain of finalizers that keep creating work is refused by name, never shown complete.
@@ -256,6 +275,10 @@ _write, _exit = os.write, os._exit
 # stream is closed: reading `closed` on the stream object itself runs whatever the loaded code
 # re-initialised that object over (merge train 2 QA r12, claude MEDIUM 1, reproduced).
 _FileIO, _fileio_closed = io.FileIO, io.FileIO.closed.__get__
+# The C member of io.TextIOWrapper that holds its buffer, for the read by the last restore of
+# whether the original error stream was DETACHED (the member then reads None); a member read
+# runs no Python code and raises no audit event (merge train 2 QA r15, claude MINOR 3).
+_textio_buffer = io.TextIOWrapper.buffer.__get__
 # The conversions the record handler makes BEFORE its final check, so that after it the seal loop
 # and the os._exit handle only an exact int and exact bytes: bytes() returns the very object a
 # __bytes__ returns when that is a bytes subclass, whose slicing, length and buffer then run its
@@ -272,6 +295,18 @@ _monitoring_get_tool, _monitoring_free_tool_id, _monitoring_clear = (
         _MONITORING.get_tool, _MONITORING.free_tool_id,
         getattr(_MONITORING, "clear_tool_id", None)
         or (lambda tool, set_events=_MONITORING.set_events: set_events(tool, 0))))
+# The signal functions the record handler calls once its final check has run, bound here for
+# the same reason as _write above (merge train 2 QA r15, codex MAJOR). These are the C
+# functions of _signal, not the Lib/signal.py wrappers: the pthread_sigmask wrapper creates
+# a generator expression on every call, which the no-function rule after the final read
+# forbids (QA r12, claude MINOR 2; the function-watcher case measures it). pthread_sigmask
+# is absent on some platforms; the mask capture and comparison are skipped there (without a
+# per-thread mask nothing was blocked to unblock), the handler reset is not.
+_signal_signal, _SIG_DFL = _signal.signal, _signal.SIG_DFL
+_VALID_SIGNALS = tuple(sorted(signal.valid_signals()))
+_pthread_sigmask = getattr(_signal, "pthread_sigmask", None)
+_SIG_BLOCK = getattr(_signal, "SIG_BLOCK", None)
+_SIG_SETMASK = getattr(_signal, "SIG_SETMASK", None)
 
 
 def reporting_snapshot():
@@ -343,6 +378,7 @@ class FailClosedChild:
         self._settled = []
         self._threads_started = []
         self._held = []
+        self._sigmask = None
         self._snapshot = reporting_snapshot()
         self._stderr_file = _file_under(self._snapshot[0][3])
 
@@ -400,7 +436,9 @@ class FailClosedChild:
         attribute of that object: it reads the file object under it, captured at construction,
         through the C getter bound at import (QA r12, claude MEDIUM 1), so it judges a
         replacement of any snapshotted object and a close of that original file object, made by
-        that read or anything since; with no such file object (an error stream that was not
+        that read or anything since; it also reads, through the C member bound at import, whether
+        the original stream object was DETACHED from its buffer, and refuses that by name, a
+        change that is not one of closed state (QA r15, claude MINOR 3); with no such file object (an error stream that was not
         file-backed at construction) it reads nothing there, and the final check's own read
         stands. The price of running no loaded code after the final read (QA r13, claude MINOR
         1, and QA r14, claude MINOR 2, both shapes measured by the self-test): a change to the
@@ -427,8 +465,15 @@ class FailClosedChild:
         if not last:
             if getattr(self._snapshot[0][3], "closed", True):
                 swapped.append("sys.stderr (closed)")
-        elif self._stderr_file is not None and _fileio_closed(self._stderr_file):
-            swapped.append("sys.stderr (closed)")
+        else:
+            if self._stderr_file is not None and _fileio_closed(self._stderr_file):
+                swapped.append("sys.stderr (closed)")
+            try:
+                detached = _textio_buffer(self._snapshot[0][3]) is None
+            except TypeError:
+                detached = False   # no TextIOWrapper at construction: nothing to read there
+            if detached:
+                swapped.append("sys.stderr (detached)")
         return swapped
 
     def settle(self, code):
@@ -444,10 +489,13 @@ class FailClosedChild:
             return   # never settled: no record, and the parent fails closed
         stage = "before the record"
         try:
-            if hasattr(signal, "pthread_sigmask"):
+            if _pthread_sigmask is not None:
                 # A signal handler the loaded code installed must not run after the final check
                 # (contract step 6): blocked here, a signal stays pending until the os._exit.
-                signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+                # The mask that results is captured, so the disarming can compare, refuse an
+                # unblock by name and put it back (merge train 2 QA r15, codex MAJOR).
+                _pthread_sigmask(_SIG_BLOCK, _VALID_SIGNALS)
+                self._sigmask = frozenset(_pthread_sigmask(_SIG_BLOCK, ()))
             code = self._decide(_index(self._settled[0]), len(self._threads_started))
             seen, threads = len(self.faults), len(self._threads_started)
             stage = "in the record callback"
@@ -494,8 +542,12 @@ class FailClosedChild:
         except BaseException as exc:
             # Never a `finally: os._exit(code)`: that swallowed the exception and kept the
             # success code (merge train 2 QA r7, codex MAJOR). A handler that did not return
-            # normally exits fail_code, whatever the callback wrote before it raised.
+            # normally exits fail_code, whatever the callback wrote before it raised. The
+            # exception object is kept alive until the os._exit: released when this block
+            # ends, objects of the loaded code it references (through its traceback too)
+            # would run their finalizers after the decision (QA r15, claude MINOR 4).
             code = self.fail_code
+            self._held.append(exc)
             self._handler_fault(stage, exc)
         _exit(code)
 
@@ -596,9 +648,28 @@ class FailClosedChild:
         calls raises an audit event either); when something is, a callback firing on these very
         calls runs here, before the decision, and the run is refused anyway. Every mechanism is
         read again once all are off, so one a callback re-armed meanwhile is refused too (residual
-        (e) of the module docstring is the shape this second read cannot see)."""
+        (e) of the module docstring is the shape this second read cannot see). The signal mask
+        is compared with the captured one by both of those reads and put back between them,
+        and every Python-level signal handler is reset to SIG_DFL there too, so no handler a
+        signal tripped in an unblocked window runs after the decision (QA r15, codex MAJOR;
+        none of these signal calls raises an audit event either, measured)."""
         _gc_disable()
         armed = self._armed()
+        if _pthread_sigmask is not None:
+            # The mask the handler captured is put back (a changed one was just named by
+            # _armed): from here no signal is delivered to this thread again.
+            _pthread_sigmask(_SIG_SETMASK, self._sigmask)
+        for signum in _VALID_SIGNALS:
+            # A signal DELIVERED while unblocked trips its Python handler even once the mask
+            # is back (the mask stops deliveries, not a handler already tripped), so every
+            # handler is reset to SIG_DFL: CPython runs no tripped handler that is no longer
+            # a Python callable. Each replaced handler is kept alive, so no finalizer of one
+            # runs here; SIGKILL, SIGSTOP and a signal the platform refuses raise and keep
+            # their disposition, which no Python-level handler can hold anyway.
+            try:
+                self._held.append(_signal_signal(signum, _SIG_DFL))
+            except (OSError, ValueError):
+                pass
         if _gc_callbacks:
             del _gc_callbacks[:]
         if _getprofile() is not None:
@@ -618,6 +689,10 @@ class FailClosedChild:
         """The interpreter-level callback mechanisms armed right now, by name (reads only, through
         the functions bound at import, so no module object's attribute hook runs here)."""
         armed = ["gc.callbacks"] if _gc_callbacks else []
+        if (_pthread_sigmask is not None and self._sigmask is not None
+                and _pthread_sigmask(_SIG_BLOCK, ()) != self._sigmask):
+            # Blocking no signals changes nothing and returns the mask: a read.
+            armed.append("the signal mask (a signal the handler blocked was unblocked)")
         if _getprofile() is not None:
             armed.append("sys.setprofile")
         if _gettrace() is not None:
@@ -1358,17 +1433,24 @@ _LATE_STAGES = ("disarming the interpreter callbacks", "sealing the record")
 # so those methods run only there: exit 0, record, seal, empty error stream. Each also has a
 # finalizer that does the same (QA r14, claude MINOR 1): on 3320ccc7 the seal loop's rebinding
 # freed the callback's last pair and ran it after the final read; now the handler releases that
-# pair before the final check.
+# pair before the final check. The probe also fires between the return of the final check and
+# the disarming (stage still "after the record callback" with no _check frame on the stack),
+# so a release moved past the final check is caught too (QA r15, claude MINOR 1).
 _SEED_SEAL_OBJECTS = """
 getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
 ran = []
 
 
 def after_final_read():
-    frame = getframe()
+    frame, in_check = getframe(), False
     while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        if frame.f_code.co_name == "_check":
+            in_check = True
         frame = frame.f_back
-    if frame is not None and not ran and frame.f_locals.get("stage") in {late!r}:
+    if frame is None or ran:
+        return
+    stage = frame.f_locals.get("stage")
+    if stage in {late!r} or (stage == "after the record callback" and not in_check):
         ran.append("seal")
         write(2, b"loaded code ran after the final read\\n")
         setprofile(lambda frame, event, arg: late_fault())
@@ -1459,9 +1541,139 @@ class Stream(io.RawIOBase):
 
 sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
 """
+# Merge train 2 QA r15 (codex MAJOR), the reproduction: the final `closed` read of a
+# re-initialised error stream unblocks SIGALRM and arms a repeating timer, and the handler the
+# loaded code installed acts only once the record handler is sealing. On 70cf9753 nothing read
+# the mask again: the handler ran during the 8 MiB seal write, after the decision, and the child
+# exited 0 with a passing seal and the report below on its error stream. Now the disarming
+# refuses the unblock by name, puts the mask back and resets the handler, so the handler never
+# runs: exit 2, no seal.
+_SEED_SIGMASK_UNBLOCK_AT_FINAL_READ = """
+import signal
+
+getframe = sys._getframe
+held = []
+real = sys.stderr.buffer
+
+
+def stage_and_settled():
+    frame, settled = getframe(), None
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        if frame.f_code.co_name == "_check":
+            settled = frame.f_locals.get("settled")
+        frame = frame.f_back
+    return (None if frame is None else frame.f_locals.get("stage")), settled
+
+
+def on_alarm(signum, frame):
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        frame = frame.f_back
+    if frame is not None and frame.f_locals.get("stage") == "sealing the record":
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        os.write(2, b"a signal handler ran after the decision\\n")
+
+
+signal.signal(signal.SIGALRM, on_alarm)
+
+
+class Stream(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def write(self, data):
+        return real.write(data)
+
+    def flush(self):
+        real.flush()
+
+    @property
+    def closed(self):
+        if not held and stage_and_settled() == ("after the record callback", True):
+            held.append(self)
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+            signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+        return False
+
+
+def seal_pairs(code):
+    return [(contract.saved_stdout,
+             b"x" * (8 * 1024 * 1024) + "seal {}\\n".format(code).encode("ascii"))]
+
+
+sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
+"""
+# QA r15 (claude MINOR 3): the same shape, but the final `closed` read DETACHES the original
+# error stream instead. A detach is not a change of closed state, so it is not within the
+# stated price: the last restore reads the buffer member of the original stream object through
+# the C member bound at import (no Python code runs) and refuses the detach by name. On
+# 70cf9753 nothing read it: exit 0 with a passing seal.
+_SEED_STDERR_DETACH_AT_FINAL_READ = """
+getframe = sys._getframe
+held = []
+real = sys.stderr.buffer
+
+
+def stage_and_settled():
+    frame, settled = getframe(), None
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        if frame.f_code.co_name == "_check":
+            settled = frame.f_locals.get("settled")
+        frame = frame.f_back
+    return (None if frame is None else frame.f_locals.get("stage")), settled
+
+
+class Stream(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def write(self, data):
+        return real.write(data)
+
+    def flush(self):
+        real.flush()
+
+    @property
+    def closed(self):
+        if not held and stage_and_settled() == ("after the record callback", True):
+            # Marked first: the detach flushes, and the flush reads this property again.
+            held.append(self)
+            held.append(sys.stderr.detach())
+        return False
+
+
+sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
+"""
+# QA r15 (claude MINOR 4): on the failing path the caught exception used to be released when
+# the except block of the record handler ended, after the decision, so a finalizer of an object
+# the loaded code made ran there (here one that forges a passing seal on the saved stdout). The
+# handler now keeps the exception alive until the os._exit, so the finalizer never runs: exit 2,
+# the named diagnostic, and no passing seal.
+_SEED_FAIL_EXC_FINALIZER = """
+class Forger(RuntimeError):
+    def __del__(self):
+        os.write(contract.saved_stdout, b"seal 0\\n")
+
+
+def seal_pairs(code):
+    raise Forger("the seal could not be made")
+"""
 # QA r14, claude MINOR 3: a settled code and a fail_code that are not exact ints (an object
 # with only __index__) are normalised where the handler takes them, so the record callback and
-# the exit see the exact int; without that the record would carry the object itself.
+# the exit see the exact int; without that the record would carry the object itself. The
+# fail-code case passes value 3, not the default 2, so a fail_code the handler takes but
+# ignores in favour of the default is caught too (QA r15, claude MINOR 2).
 _SEED_CODE = """
 class Code:
     def __index__(self):
@@ -1576,11 +1788,19 @@ _CASES = (
         data="\"seal {}\\n\".format(code).encode(\"ascii\")"), 0, "record 0", (), True),
     ("stderr-reinitialised-closed-at-final-read-passes", "",
      _SEAL_FAULT + _SEED_STDERR_REINIT_AT_FINAL_READ, 0, "record 0", (), True),
+    ("sigmask-unblocked-at-final-read-refused", "", _SEED_SIGMASK_UNBLOCK_AT_FINAL_READ, 2,
+     "record 0", _ARMED + ("(the signal mask (a signal the handler blocked was unblocked))",),
+     False),
+    ("stderr-detached-at-final-read-refused", "", _SEED_STDERR_DETACH_AT_FINAL_READ, 2,
+     "record 0", ("a fault was observed during the record callback",
+                  "sys.stderr (detached)", "exit 2"), False),
+    ("handler-exception-finalizer-never-runs", "", _SEED_FAIL_EXC_FINALIZER, 2, "record 0",
+     ("the record handler raised Forger in the record callback", "exit 2"), False),
     ("settled-code-not-an-exact-int", "", _SEED_CODE.format(value=0) + "contract.settle(Code())\n",
      0, "record 0", (), True),
     ("fail-code-not-an-exact-int",
-     _SEED_CODE.format(value=2) + "contract = _child_contract.FailClosedChild(record=record, "
-     "fault_line=fault_line, fail_code=Code())\n", _SEED_FAULT, 2, "record 2",
+     _SEED_CODE.format(value=3) + "contract = _child_contract.FailClosedChild(record=record, "
+     "fault_line=fault_line, fail_code=Code())\n", _SEED_FAULT, 3, "record 3",
      ("child-contract-fault", "a cleanup fault reached sys.unraisablehook"), False),
     ("stderr-closed-by-cleanup", "", "atexit.register(sys.stderr.close)\n", 2, "record 2",
      ("sys.stderr (closed)",), False),
@@ -1697,7 +1917,14 @@ def self_test():
           "methods after the final read (QA r13), nor its finalizer; an error stream the final "
           "check's last read re-initialises over a buffer it then closes passes with its seal, "
           "the same measured price, and a settled code and a fail_code that are not exact ints "
-          "reach the record as exact ints (QA r14); no handler code "
+          "reach the record as exact ints (QA r14), and the fail-code case carries a value "
+          "the default would not produce (QA r15); a signal the final `closed` read unblocked "
+          "is refused by name, its mask put back and every signal handler reset, so no signal "
+          "handler of the loaded code runs after the decision (QA r15); an error stream that "
+          "read DETACHED is refused by the last restore (QA r15); the exception a failing "
+          "record callback raised stays alive, so no finalizer the loaded code made runs "
+          "after the decision on the failing path, and the seal probes also watch the window "
+          "between the final check and the disarming (QA r15); no handler code "
           "after the final read creates a function (checked statically, and through a function "
           "watcher {}); and every passing child's stdout ends with the seal written after the "
           "final check)".format("that never runs there" if watcher else
