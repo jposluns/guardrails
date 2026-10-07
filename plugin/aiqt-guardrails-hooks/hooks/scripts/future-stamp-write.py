@@ -3976,19 +3976,38 @@ def _self_test():
             # tokens (tokenize), each alone on its line, directly above the one parsed FIFO_GUARD assignment
             # (ast). QA round 5 (codex MINOR, claude MINOR): a residual reworded to contradict its limitation
             # kept the pinned fragments, so the residuals are pinned as whole sentences: the block ends with
-            # exactly these three, and "Not covered:" opens a sentence once, the first of them
+            # exactly these three, and "Not covered:" opens a sentence once, the first of them. QA round 6 (codex
+            # MEDIUM, claude MINOR): the parse counted only plain assignments, so a dummy `FIFO_GUARD = None` above
+            # the annotated real one, or a plain `FIFO_GUARD = FIFO_GUARD` after it, passed. Every occurrence of the
+            # name in the parse is now counted (any binding form: plain, chained, tuple, annotated or augmented
+            # assignment, walrus, for, with, del, import, def, class, argument, except, match, global or
+            # nonlocal, and a string constant naming it, as in an f_locals store), a load alone excepted, and the
+            # one occurrence allowed is the operative binding: the single-target `FIFO_GUARD = ...` statement of
+            # _self_test's own body. Not covered: a name built at run time. QA round 6 (claude MINOR): "alone on
+            # its line" reads the token's own line, as splitlines() also breaks at characters (a form feed among
+            # them) tokenize does not count as line ends, which shifted the row checked
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
                 src = f.read()
-            assigns = [node.lineno for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Assign)
-                       and [getattr(t, "id", None) for t in node.targets] == ["FIFO_GUARD"]]
-            self.assertEqual(len(assigns), 1, assigns)
-            lines = src.splitlines()
+            name = "_".join(("FIFO", "GUARD"))  # spelled in parts: a string constant equal to it counts below
+            tree = ast.parse(src)
+            hits = [node for node in ast.walk(tree) for _, value in ast.iter_fields(node)
+                    for v in (value if isinstance(value, list) else [value])
+                    if isinstance(v, str) and v.split(".")[0] == name
+                    and not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))]
+            tests = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_self_test"]
+            self.assertEqual(len(tests), 1, tests)
+            operative = [node for node in tests[0].body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                         and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name]
+            self.assertEqual(len(operative), 1, operative)
+            self.assertTrue(len(hits) == 1 and hits[0] is operative[0].targets[0],
+                            [(type(node).__name__, getattr(node, "lineno", None)) for node in hits])
+            at = operative[0].lineno
             comments = {tok.start[0]: tok.string for tok in tokenize.generate_tokens(io.StringIO(src).readline)
-                        if tok.type == tokenize.COMMENT and not lines[tok.start[0] - 1][:tok.start[1]].strip()}
-            row = assigns[0] - 1
+                        if tok.type == tokenize.COMMENT and not tok.line[:tok.start[1]].strip()}
+            row = at - 1
             while row in comments:
                 row -= 1
-            block = [comments[i] for i in range(row + 1, assigns[0])]
+            block = [comments[i] for i in range(row + 1, at)]
             self.assertTrue(block and block[0].startswith("# The FIFO guard for a child:"), block)
             text = " ".join(" ".join(c[1:] for c in block).split())
             residuals = " ".join((

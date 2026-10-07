@@ -2082,13 +2082,29 @@ def _self_test():
             os.environ.clear()
             os.environ.update(old_env)
 
-    # A child interpreter reads the real clock: freeze_clocks freezes this process only, and no child's verdict
-    # depends on the clock (QA round 5: CHILD_FREEZE, a freeze of the children's clocks, guarded nothing). The
-    # one clock read a child reaches is prune_state's time.time_ns, in in_subprocess's guarded child and in
-    # test_r32's child: every child passes evaluate a fixed now and none runs main, and test_r5's child
-    # evaluates a Stop with no transcript_path, which reads and writes no state. A prune removes only a
-    # subdirectory unwritten for PRUNE_AGE_NS, and each child's state directory is fresh (setUp's, or one the
-    # child makes), so its prune removes nothing.
+    # The clocks a child reads. freeze_clocks freezes the wall clock of this process only, so a child
+    # interpreter reads the real clocks. CHILD_FREEZE (removed in QA round 5) froze the module's time.time and
+    # time.time_ns in in_subprocess's children and test_r32's child, and no other clock; QA round 6 (codex
+    # MINOR, claude MINOR) found the account of its removal too broad, so each read is named here with the
+    # reason no verdict rests on it.
+    # Wall clock, prune_state's time.time_ns: reached by in_subprocess's guarded child and test_r32's child,
+    # each of which passes evaluate a fixed now. A prune removes only a subdirectory unwritten for
+    # PRUNE_AGE_NS, and each such child's state directory is fresh (setUp's, or one the child makes), so its
+    # prune removes nothing whatever the reading; removing CHILD_FREEZE changed no verdict here.
+    # Wall clock, main's datetime.datetime.now(UTC): reached by one child only,
+    # test_r24_worker_skip_warns_and_output_error_fails_open's, which runs the hook script itself (no
+    # --self-test, no worker marker) and hands that real reading to evaluate. Its Stop has no transcript_path,
+    # so it reads and writes no state and prunes nothing, and the test asserts its exit status alone, which
+    # main returns as 0 on every hook path; CHILD_FREEZE never reached this child (it is no CHILD_HEAD child). The
+    # other hook-script child, test_closed_stderr_line_never_reaches_stdout's, carries the worker marker, so
+    # main returns before reading the clock.
+    # No other child reads the wall clock: each one that evaluates passes evaluate or check_message a fixed
+    # now (test_r5's child evaluates a Stop with no transcript_path, which reads and writes no state).
+    # CPU time: GROWTH_SRC reads time.process_time in growth_in_child's children, and a growth check
+    # (test_pathological_inputs_linear among them) compares the ratio of two such readings with LINEAR_LIMIT,
+    # so those verdicts do rest on the CPU clock, by design (see GROWTH_SRC's notes below).
+    # test_growth_refuses_sub_floor_samples replaces that clock with a counter. CHILD_FREEZE never froze
+    # the CPU clock, so removing it left these verdicts as they were.
     CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
@@ -3347,19 +3363,38 @@ def _self_test():
             # tokens (tokenize), each alone on its line, directly above the one parsed FIFO_GUARD assignment
             # (ast). QA round 5 (codex MINOR, claude MINOR): a residual reworded to contradict its limitation
             # kept the pinned fragments, so the residuals are pinned as whole sentences: the block ends with
-            # exactly these three, and "Not covered:" opens a sentence once, the first of them
+            # exactly these three, and "Not covered:" opens a sentence once, the first of them. QA round 6 (codex
+            # MEDIUM, claude MINOR): the parse counted only plain assignments, so a dummy `FIFO_GUARD = None` above
+            # the annotated real one, or a plain `FIFO_GUARD = FIFO_GUARD` after it, passed. Every occurrence of the
+            # name in the parse is now counted (any binding form: plain, chained, tuple, annotated or augmented
+            # assignment, walrus, for, with, del, import, def, class, argument, except, match, global or
+            # nonlocal, and a string constant naming it, as in an f_locals store), a load alone excepted, and the
+            # one occurrence allowed is the operative binding: the single-target `FIFO_GUARD = ...` statement of
+            # _self_test's own body. Not covered: a name built at run time. QA round 6 (claude MINOR): "alone on
+            # its line" reads the token's own line, as splitlines() also breaks at characters (a form feed among
+            # them) tokenize does not count as line ends, which shifted the row checked
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
                 src = f.read()
-            assigns = [node.lineno for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Assign)
-                       and [getattr(t, "id", None) for t in node.targets] == ["FIFO_GUARD"]]
-            self.assertEqual(len(assigns), 1, assigns)
-            lines = src.splitlines()
+            name = "_".join(("FIFO", "GUARD"))  # spelled in parts: a string constant equal to it counts below
+            tree = ast.parse(src)
+            hits = [node for node in ast.walk(tree) for _, value in ast.iter_fields(node)
+                    for v in (value if isinstance(value, list) else [value])
+                    if isinstance(v, str) and v.split(".")[0] == name
+                    and not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))]
+            tests = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_self_test"]
+            self.assertEqual(len(tests), 1, tests)
+            operative = [node for node in tests[0].body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                         and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name]
+            self.assertEqual(len(operative), 1, operative)
+            self.assertTrue(len(hits) == 1 and hits[0] is operative[0].targets[0],
+                            [(type(node).__name__, getattr(node, "lineno", None)) for node in hits])
+            at = operative[0].lineno
             comments = {tok.start[0]: tok.string for tok in tokenize.generate_tokens(io.StringIO(src).readline)
-                        if tok.type == tokenize.COMMENT and not lines[tok.start[0] - 1][:tok.start[1]].strip()}
-            row = assigns[0] - 1
+                        if tok.type == tokenize.COMMENT and not tok.line[:tok.start[1]].strip()}
+            row = at - 1
             while row in comments:
                 row -= 1
-            block = [comments[i] for i in range(row + 1, assigns[0])]
+            block = [comments[i] for i in range(row + 1, at)]
             self.assertTrue(block and block[0].startswith("# The FIFO guard for a child:"), block)
             text = " ".join(" ".join(c[1:] for c in block).split())
             residuals = " ".join((
