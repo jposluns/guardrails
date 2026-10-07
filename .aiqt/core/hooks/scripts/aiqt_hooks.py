@@ -7246,6 +7246,14 @@ _GATE_INTERPRETERS = (
     (re.compile(r"^(?:bash|sh|zsh|dash|ksh)$"), "c", (), "oO", (), ""),
 )
 _GATE_PIPES = frozenset(("|", "|&"))
+# Compound commands the pipe walk tracks: an opener (in the leading keyword run of a segment) and the closer
+# that ends it. The output of the whole compound, its condition and its body, goes to the closer's pipe
+# ('for f in a; do pytest; done | tail', 'if pytest; then :; fi | tail'). After for, select and case the
+# words are a header (a name, 'in', a word list), not keywords.
+_GATE_COMPOUND_OPENERS = {"{": "{", "if": "if", "while": "loop", "until": "loop", "for": "loop",
+                          "select": "loop", "case": "case"}
+_GATE_COMPOUND_CLOSERS = {"}": "{", "fi": "if", "done": "loop", "esac": "case"}
+_GATE_HEADER_OPENERS = frozenset(("for", "select", "case"))
 
 
 def _gate_word(token):
@@ -7426,26 +7434,31 @@ def _gate_pipe_out(segments, start):
     """The index of the segment whose separator pipes the output of segments[start] onward, or None. That
     is the segment itself when it ends with '|' or '|&'; when it sits inside a group, the group's own pipe:
     a ')' that closes a group or a $( substitution enclosing it (the lexer gives the following, usually
-    empty, segment the separator after the ')'), or a '}' segment that closes an enclosing brace group.
-    Groups opened AFTER start are tracked so a sibling's pipe is never mistaken for this segment's; a $(
-    substitution opened inside the segment continues it after its ')'."""
-    stack = []      # groups opened after start: ("(", continues-this-unit) or ("{", False)
+    empty, segment the separator after the ')'), or a '}', 'done', 'fi' or 'esac' segment that closes an
+    enclosing brace group, loop, if or case compound. Groups and compounds opened AFTER start are tracked so
+    a sibling's pipe is never mistaken for this segment's; a $( substitution opened inside the segment
+    continues it after its ')'."""
+    stack = []      # opened after start: ("(", continues-this-unit), or ("{"/"if"/"loop"/"case", False)
     carry = False   # the previous segment's ')' made this segment carry an enclosing group's separator
     for k in range(start, len(segments)):
         argv, sep = segments[k]
         unit = k == start or carry
         carry = False
         if k > start and argv:
-            stripped = argv
-            while stripped and stripped[0] in _GATE_LEADING_KEYWORDS and stripped[0] != "{":
-                stripped = stripped[1:]
-            if argv[0] == "}":
+            closes = _GATE_COMPOUND_CLOSERS.get(argv[0])
+            if closes is not None:
                 if not stack:
-                    unit = True      # it closes a brace group that encloses start
-                elif stack[-1][0] == "{":
+                    unit = True      # it closes a brace group or compound command that encloses start
+                elif stack[-1][0] == closes:
                     stack.pop()
-            elif stripped[:1] == ["{"]:
-                stack.append(("{", False))
+            else:
+                for word in argv:
+                    if word in _GATE_COMPOUND_OPENERS:
+                        stack.append((_GATE_COMPOUND_OPENERS[word], False))
+                        if word in _GATE_HEADER_OPENERS:
+                            break
+                    elif word not in _GATE_LEADING_KEYWORDS:
+                        break
         if unit and sep in _GATE_PIPES:
             return k
         if sep == "(":
@@ -7474,7 +7487,9 @@ def _verification_sink(segments):
     output reaches a truncating sink, or None. From each _is_verification_run segment the walk follows '|'
     and '|&' through any number of stages (a non-truncating filter such as 'grep -v DEBUG' passes the cut
     on), skipping empty newline segments (the gw-at lesson), and returns the first stage
-    _truncating_sink_kind matches; a group closed by ')' or '}' counts as the producer. A real-file tee stage
+    _truncating_sink_kind matches; a group closed by ')' or '}', and a compound command closed by done, fi or
+    esac (a for, select, while or until loop, an if, a case) whose condition or body holds the run, counts as
+    the producer. A real-file tee stage
     earlier in the pipeline does NOT exempt the command (the exit status is still the sink's), but it is
     returned so the message can point at that file."""
     n = len(segments)
@@ -7570,8 +7585,9 @@ def gate_weakening(data):
     immediately). The checker-output check has TWO TIERS. DENY tier: a narrow VERIFICATION RUN
     (_is_verification_run: the segment runs a check in verification mode, not a read, a listing, help, a dry
     run or inline code) whose output reaches a truncating sink (_verification_sink: through any number of
-    '|'/'|&' stages, out of a ')' or '}' group, over empty newline segments; _truncating_sink_kind: head,
-    tail, cut, grep -m/-q/-c/-l/-L, sed -n or q, awk NR limits or exit) DENIES-and-educates, naming the fix
+    '|'/'|&' stages, out of a ')' or '}' group or a loop, if or case compound closed by done, fi or esac,
+    over empty newline segments; _truncating_sink_kind: head, tail, cut, grep -m/-q/-c/-l/-L (rg without -L,
+    its --follow), sed -n or q, awk NR limits or exit) DENIES-and-educates, naming the fix
     (write the full output to a file at an absolute path and read it). The rule forbids piping a check to a
     truncating sink without conditions, and 'set -o pipefail' gives no exemption (it keeps the status but
     the output is still cut). The deny is held until the segment loop ends so a --no-verify deny keeps its
@@ -7580,7 +7596,9 @@ def gate_weakening(data):
     '|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE - a benign optional probe ('test -d /cache
     || true', 'pytest || true' while iterating, 'pytest --collect-only | tail') is common and is not a gate
     bypass. On a parse error the partially lexed complete segments are judged for the deny tier first (DENY
-    outranks the parse error); otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an
+    outranks the parse error); otherwise the raw fallback stands. The segment the lexer was still inside is
+    dropped, so a sink there ('pytest | tail "unbalanced') is not proof and keeps the raw note (the
+    parse-error residual). Disclosed residuals: R1 a check inside an
     sh -c/bash -c, eval or xargs body; R2 an alias or shell function; R3 a gate whose name and options carry
     no checker part (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc',
     which are not counted as truncating sinks. Predicted false refusals of the deny tier are a test-listing
@@ -10221,7 +10239,7 @@ def _orch_effective_sink_word(argv):
 # is the gate-discipline guard's own, kept apart from _ORCH_TRUNCATING_SINKS so orch_truncation_guard's
 # behaviour is unchanged. head, tail and cut always truncate (unless asked only for --help or --version);
 # grep and kin truncate only with a count/limit/quiet/list option (the rule's "textual success token" form
-# for -q and -c); sed truncates with -n or a q/Q quit command; the awk family truncates when the program
+# for -q and -c; rg -L is --follow, so it is not one); sed truncates with -n or a q/Q quit command; the awk family truncates when the program
 # compares NR or calls exit. A plain filter ('grep FAIL', "sed 's/q/x/'", "awk '{print NR, $0}'") is not a
 # truncating sink here (residual R4 covers '| grep PATTERN' and '| wc').
 _GATE_ALWAYS_TRUNCATING = frozenset(("head", "tail", "cut"))
@@ -10230,6 +10248,10 @@ _GATE_SED_SINKS = frozenset(("sed", "gsed"))
 _GATE_AWK_SINKS = frozenset(("awk", "gawk", "mawk", "nawk"))
 _GATE_GREP_TRUNC_SHORT = frozenset("mqclL")
 _GATE_GREP_VALUE_SHORT = frozenset("efABCdD")   # a short cluster stops at a value letter (its value follows)
+# ripgrep shares -m, -q, -c and -l, but its -L is --follow (not files-without-match) and its value letters
+# differ (-E, -j, -g, -t, -T, -M, -r take a value; rg 15.1.0 -h, checked 2026-10-07).
+_GATE_RG_TRUNC_SHORT = frozenset("mqcl")
+_GATE_RG_VALUE_SHORT = frozenset("efEjgdtTABCMr")
 _GATE_GREP_TRUNC_LONG = ("--max-count", "--quiet", "--silent", "--count", "--files-with")
 _GATE_GREP_VALUE_LONG = frozenset(("--regexp", "--file"))
 _GATE_SED_QUIT_RE = re.compile(r"(?:^|[;\n{}])\s*(?:\d+|\$|/(?:[^/\\]|\\.)*/)?\s*[qQ]\s*\d*\s*(?:$|[;\n}])")
@@ -10240,7 +10262,10 @@ def _grep_truncation(word, args):
     """The truncating option of a grep-family stage, or None: -m/-q/-c/-l/-L anywhere in a short cluster
     (the scan of a cluster stops at a value letter e/f/A/B/C/d/D, whose value is the rest of the token or
     the next token), or a --max-count/--quiet/--silent/--count/--files-with(out)-match(es) long option.
+    For rg the short letters are -m/-q/-c/-l (rg -L is --follow) and its own value letters stop the scan.
     Scanning stops at '--'."""
+    trunc_short, value_short = ((_GATE_RG_TRUNC_SHORT, _GATE_RG_VALUE_SHORT) if word == "rg"
+                                else (_GATE_GREP_TRUNC_SHORT, _GATE_GREP_VALUE_SHORT))
     skip = False
     for tok in args:
         if skip:
@@ -10258,9 +10283,9 @@ def _grep_truncation(word, args):
         if tok.startswith("-") and len(tok) > 1:
             body = tok[1:]
             for i, ch in enumerate(body):
-                if ch in _GATE_GREP_TRUNC_SHORT:
+                if ch in trunc_short:
                     return "{} -{}".format(word, ch)
-                if ch in _GATE_GREP_VALUE_SHORT:
+                if ch in value_short:
                     skip = i == len(body) - 1   # a bare value letter: its value is the next token
                     break
     return None
