@@ -2295,12 +2295,17 @@ def bash_absolute_paths(data):
 # REMOVED OVERRIDE: a leading GUARDRAIL_ALLOW_DISCARD assignment once short-circuited a pristine bare git
 # command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
 # could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
-# operator channel is hook configuration. The assignment is now an ordinary leading env assignment that
-# grants nothing the same command without it, or with any other leading assignment of the same value, would
-# not get: _segment_dir_simple still treats it as benign (it redirects nothing), so with a metacharacter-free
-# value a prefixed pristine form is classified exactly as the bare one; a value carrying a shell
-# metacharacter, even quoted, makes the command non-pristine (_SHELL_META_RE scans the raw string), so it
-# takes the guard's existing non-pristine path exactly as FOO=<the same value> would. The pattern accepts
+# operator channel is hook configuration. The assignment is now an ordinary leading env assignment, and no
+# code reads its value to permit anything: only _segment_dir_simple (benign, it redirects nothing) and
+# _removed_prefix_note (reason text only) read the name. When the command without it already names a
+# recognized work-losing git verb and the prefixed command is pristine (it parses and _SHELL_META_RE finds
+# nothing in the raw string), the pristine path reads only the token list, so the prefixed command gets the
+# decision of the command without it. Outside that bound the value is raw text the raw scans read: a
+# metacharacter, even quoted, makes the command non-pristine; an unbalanced quote makes it unparseable;
+# _RAW_DISCARD_REDIRECT_RE in the unparseable fallback matches a -C/--git-dir/--work-tree/GIT_DIR=/
+# GIT_WORK_TREE= inside it; and _raw_has_lossy_git matches a lossy keyword inside it, so the decision can
+# differ from the bare one. Neither the non-pristine path nor the fallback reads the name, so there it gets
+# what FOO=<the same value> gets. The pattern accepts
 # both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
 # _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
 # empty final assignment (bash last-wins) and fold a '+=' append.
@@ -2355,8 +2360,7 @@ def _removed_prefix_note(tokens):
     """MIGRATION (this release only): _REMOVED_DISCARD_PREFIX_NOTE when THIS pristine git segment's leading
     assignment region carries a truthy final GUARDRAIL_ALLOW_DISCARD value (bash last-wins; an empty value or
     0, false, no or off, case-insensitive, is not truthy; a '+=' appends to the value an earlier assignment
-    in the same region set), else the empty string. It adds reason text only: the caller's decision is the
-    one the unprefixed command gets."""
+    in the same region set), else the empty string. It adds reason text only and changes no decision."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
         m = _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok)
@@ -3751,7 +3755,9 @@ def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
     segment safely, so scan the RAW string. No override exists on this path (or any other), so an
     unparseable in-scope command ALWAYS ASKS whatever leading prefix it carries, and the removed-prefix
-    migration note is not emitted here (the guard cannot parse the command's leading assignments). If git is
+    migration note is not emitted here (the guard cannot parse the command's leading assignments). The raw
+    scans read a leading assignment's value like any other text, so a target-redirect word inside it (a
+    GUARDRAIL_ALLOW_DISCARD or FOO value of '-C /tmp') reaches the redirect DENY below. If git is
     present AND a recognized work-losing verb keyword is present (an
     always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
     boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
@@ -4719,11 +4725,14 @@ def git_discard(data):
     is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
     a dirty tree), or on a provably-clean tree - worst case it ASKS; no in-band override exists (a leading
-    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, grants nothing the same command without it, or
-    with any other leading assignment of the same value, would not get: a metacharacter-free value leaves the
-    bare command's decision, and a value carrying a shell metacharacter, even quoted, takes the existing
-    non-pristine path as that other assignment would, which with no session cwd and no resolved redirect
-    target takes no snapshot and allows with a note); the guarantee is bounded to
+    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, is an ordinary assignment whose value no code
+    reads to permit anything: when the command without it names a recognized work-losing verb and the
+    prefixed command is pristine, it gets the decision of the command without it; otherwise its value is raw
+    text the raw scans read like any other, so a metacharacter value takes the existing non-pristine path,
+    an unbalanced quote or a value with a target-redirect word on an unparseable command takes the fallback,
+    and a lossy keyword in the value brings a command into scope, each exactly as FOO=<the same value>
+    would; the non-pristine path with no session cwd and no resolved redirect target takes no snapshot and
+    allows with a note); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
@@ -4913,8 +4922,9 @@ def git_discard(data):
                   "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
                   "resolved plus the session directory before allowing", np_snap)
 
-    # A pristine single bare git command. No in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD
-    # assignment (the removed override; a pristine one carries no metacharacter) changes no decision below. MIGRATION (this release only): every
+    # A pristine single bare git command. No in-band override exists: below, only _segment_dir_simple (benign)
+    # and _removed_prefix_note (text) read a leading GUARDRAIL_ALLOW_DISCARD, and nothing reads the raw
+    # command string, so the prefix changes no decision below. MIGRATION (this release only): every
     # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
     # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
     note = _removed_prefix_note(pristine)

@@ -1930,11 +1930,13 @@ def _main_isolated(monitor):
         expect("(r15-optout-redirect-bare) the same -C form without the prefix -> DENY",
                "git -C /tmp reset --hard", "deny", cwd=rp)
 
-        # === REMOVED OVERRIDE: the GUARDRAIL_ALLOW_DISCARD prefix (vectors rmo-1 to rmo-5) ================
+        # === REMOVED OVERRIDE: the GUARDRAIL_ALLOW_DISCARD prefix (vectors rmo-1 to rmo-8) ================
         # The prefix was writable by the guarded actor and skipped the recovery snapshot, so it is removed; a
-        # leading assignment of it is an ordinary env assignment that grants nothing: with a metacharacter-
-        # free value the command gets the unprefixed command's decision (rmo-1), and with a metacharacter
-        # value it gets exactly what FOO=<the same value> gets (rmo-6).
+        # leading assignment of it is an ordinary env assignment whose value no code reads to permit
+        # anything: on a pristine command whose unprefixed form is in scope it gets the unprefixed command's
+        # decision (rmo-1), and where the raw scans read its value (a metacharacter, rmo-6; a target-redirect
+        # word on an unparseable command or a lossy keyword, rmo-8) it gets exactly what FOO=<the same value>
+        # gets, which can differ from the unprefixed command's decision.
         _rmo = "GUARDRAIL_ALLOW_DISCARD=1 "
         _rmo_note = (getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_NOTE", None)
                      or "(the removed-prefix migration note is missing)").strip()
@@ -1997,18 +1999,31 @@ def _main_isolated(monitor):
                 failures.append("(rmo-2-deny-{}) expected a deny that does not name the removed prefix, got {} "
                                 "{!r}".format(_i, _dec, _text))
         # (rmo-2) structural: no string in the hook module (reason, banner or docstring) spells the prefix as
-        # an assignment, the form every retired advertisement used, in ANY spelling: any value, '=' or '+=',
-        # any case, or assembled by '+' concatenation or an f-string. The one exempt string is the pattern of
-        # _REMOVED_DISCARD_PREFIX_RE itself, which recognizes the assignment and advertises nothing.
+        # an assignment, the form every retired advertisement used: any value, '=' or '+=', any case, a '+'
+        # chain of literals, or an f-string whose fields are literals or such chains. BOUNDARY (disclosed): the
+        # scan folds literals only, so a spelling assembled from a name, a call, %-formatting, str.format or
+        # str.join is not resolved (an f-string field it cannot fold reads as '', and a '+' chain with such an
+        # operand is skipped). The one exempt string is the pattern of _REMOVED_DISCARD_PREFIX_RE itself,
+        # which recognizes the assignment and advertises nothing.
         _rmo_adv_re = re.compile(r"(?i)GUARDRAIL_ALLOW_DISCARD[\s()\\+?]*=")
         _rmo_exempt = getattr(getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_RE", None), "pattern", None)
 
         def _rmo_fold(node):
-            """The text of a str constant, a '+' chain of them, or an f-string (fields as ''), else None."""
+            """The text of a str constant, a '+' chain of them, or an f-string (a field folds when it is such a
+            literal or chain with no conversion or format spec, else reads as ''), else None."""
             if isinstance(node, ast.Constant):
                 return node.value if isinstance(node.value, str) else None
             if isinstance(node, ast.JoinedStr):
-                return "".join(v.value if isinstance(v, ast.Constant) else "" for v in node.values)
+                _parts = []
+                for _v in node.values:
+                    if isinstance(_v, ast.Constant):
+                        _parts.append(_v.value)
+                    elif (isinstance(_v, ast.FormattedValue) and _v.conversion == -1
+                          and _v.format_spec is None):
+                        _parts.append(_rmo_fold(_v.value) or "")
+                    else:
+                        _parts.append("")
+                return "".join(_parts)
             if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
                 _l, _r = _rmo_fold(node.left), _rmo_fold(node.right)
                 return None if _l is None or _r is None else _l + _r
@@ -2027,13 +2042,15 @@ def _main_isolated(monitor):
         if _rmo_adv:
             failures.append("(rmo-2-source) aiqt_hooks.py strings still spell a GUARDRAIL_ALLOW_DISCARD "
                             "assignment at lines {}".format(_rmo_adv))
-        # (rmo-2-scan) the scan itself catches every spelling a retired advertisement could take, and passes
-        # a mention that spells no assignment.
+        # (rmo-2-scan) the scan catches each literal spelling below (including an f-string whose field is a
+        # literal or a '+' chain of literals), and passes a mention that spells no assignment.
         for _src in ('X = "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override."',
                      'X = "prefix GUARDRAIL_ALLOW_DISCARD=true"', 'X = "set guardrail_allow_discard=yes"',
                      'X = "GUARDRAIL_ALLOW_DISCARD+=1 git reset --hard"',
                      'X = "GUARDRAIL_ALLOW_DISCARD" + "=1"', 'X = "GUARDRAIL_ALLOW_" + ("DISCARD" + "=on")',
-                     'X = f"GUARDRAIL_ALLOW_DISCARD={v}"', 'def f():\n    "Use GUARDRAIL_ALLOW_DISCARD = 1."\n'):
+                     'X = f"GUARDRAIL_ALLOW_DISCARD={v}"', 'def f():\n    "Use GUARDRAIL_ALLOW_DISCARD = 1."\n',
+                     'X = f"GUARDRAIL_ALLOW_{\'DISCARD\'}=1"',
+                     'X = f"GUARDRAIL_ALLOW_{\'DIS\' + \'CARD=on\'}"'):
             if not _rmo_adv_lines(_src):
                 failures.append("(rmo-2-scan) the advertisement scan misses {!r}".format(_src))
         if _rmo_adv_lines('X = "the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard"'):
@@ -2094,8 +2111,14 @@ def _main_isolated(monitor):
         # (rmo-7) The prefix pattern accepts the token shapes _ENV_ASSIGN_RE treats as a leading assignment:
         # '+=' (the migration note folds it as an append, bash last-wins) and a value spanning a newline, so
         # _segment_dir_simple and _removed_prefix_note agree on every token. MIGRATION, this release only:
-        # the next release deletes the note half of this vector together with rmo-4.
+        # the next release deletes the note half of this vector together with rmo-4. The '=1 +=' case tells
+        # the '+=' append fold from a plain last-wins overwrite (bash keeps '1'; an overwrite would read '').
+        _rmo_note_fn = getattr(aiqt_hooks, "_removed_prefix_note", None)
+        if _rmo_note_fn is None:
+            failures.append("(rmo-7-missing) aiqt_hooks._removed_prefix_note is not defined")
+            _rmo_note_fn = lambda _t: ""
         for _toks, _want_note in (
+                (["GUARDRAIL_ALLOW_DISCARD=1", "GUARDRAIL_ALLOW_DISCARD+=", "git", "reset", "--hard"], True),
                 (["GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
                 (["GUARDRAIL_ALLOW_DISCARD=0", "GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
                 (["GUARDRAIL_ALLOW_DISCARD=", "GUARDRAIL_ALLOW_DISCARD+=", "git", "reset", "--hard"], False),
@@ -2104,7 +2127,7 @@ def _main_isolated(monitor):
                 (["GUARDRAIL_ALLOW_DISCARD=a\nb", "git", "commit"], True),
                 (["GUARDRAIL_ALLOW_DISCARD=\n0", "git", "commit"], True)):
             _simple = aiqt_hooks._segment_dir_simple(_toks)
-            _has_note = bool(aiqt_hooks._removed_prefix_note(_toks))
+            _has_note = bool(_rmo_note_fn(_toks))
             if not _simple or _has_note != _want_note:
                 failures.append("(rmo-7) {!r}: expected a benign assignment (simple) with note={}, got "
                                 "simple={} note={}".format(_toks, _want_note, _simple, _has_note))
@@ -2112,6 +2135,21 @@ def _main_isolated(monitor):
         if _dec != "deny" or _rmo_note not in _text:
             failures.append("(rmo-7-append) the '+=' prefixed dirty clobber must deny like the bare command, "
                             "with the migration sentence, got {} {!r}".format(_dec, _text))
+        # (rmo-8) Bounded equivalence (the residue's cases c and d): the raw scans read the prefix's value as
+        # text, so where they match it the prefixed command gets exactly what FOO=<the same value> gets, and
+        # that can differ from the unprefixed command's decision. (c) On an unparseable command (an unquoted <<EOF heredoc whose body holds a lone quote) the
+        # fallback's target-redirect scan matches '-C' in the value and denies, where the unprefixed command
+        # snapshots then allows with a note. (d) A lossy keyword in the value brings 'git log -1' into scope
+        # and it denies, where the unprefixed command is allowed silently.
+        for _case, _bare_cmd, _v, _want_bare, _want_pref in (
+                ("c-unparseable-redirect", "git reset --hard <<EOF\n'\nEOF", "'-C /tmp'", "allow-note", "deny"),
+                ("d-scope-keyword", "git log -1", "reset", "allow", "deny")):
+            _got_bare = _rmo_text(_bare_cmd, rp)[0]
+            _got = [_rmo_text("{}={} {}".format(_n, _v, _bare_cmd), rp)[0]
+                    for _n in ("GUARDRAIL_ALLOW_DISCARD", "FOO")]
+            if _got_bare != _want_bare or _got != [_want_pref, _want_pref]:
+                failures.append("(rmo-8-{}) expected the unprefixed command {} and the prefix and FOO both {}, "
+                                "got {} and {}".format(_case, _want_bare, _want_pref, _got_bare, _got))
         # (rmo-5) Dead code: the retired opt-out names are bound in neither script copy (the source module
         # live, and both files by their top-level bindings), so no future caller resurrects the path.
         _rmo_dead = ("_DISCARD_OPTOUT_RE", "_DISCARD_FALSY", "_segment_has_optout", "_OPTOUT_PRISTINE",
