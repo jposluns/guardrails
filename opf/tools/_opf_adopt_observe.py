@@ -1284,6 +1284,8 @@ def _cancellation_self_test():
     """
     import builtins
     import dis
+    import errno
+    import fcntl
     import gzip
     import inspect
     import textwrap
@@ -1411,16 +1413,78 @@ def _cancellation_self_test():
         return original_import(name, *args, **kwargs)
 
     def descriptors():
+        # (number, identity) pairs, identity (st_dev, st_ino, st_mode, access
+        # mode): a number closed and reopened on another file between two
+        # censuses is a new pair. The access-mode bits are the F_GETFL bits
+        # F_SETFL cannot change. Only EBADF reads as closed (the listing's own
+        # descriptor); any other read failure refuses naming the descriptor.
+        try:
+            names = os.listdir("/proc/self/fd")
+        except OSError as exc:
+            raise AssertionError("descriptor census: cannot list /proc/self/fd: "
+                                 + str(exc)) from exc
+        access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
         present = set()
-        for value in os.listdir("/proc/self/fd"):
+        for value in names:
+            fd = int(value)
             try:
-                os.fstat(int(value))
+                info = os.fstat(fd)
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             except OSError as exc:
-                if exc.errno != 9:
-                    raise
+                if exc.errno != errno.EBADF:
+                    raise AssertionError("descriptor census: cannot read descriptor "
+                                         + str(fd) + ": " + str(exc)) from exc
             else:
-                present.add(value)
+                present.add((fd, (info.st_dev, info.st_ino, info.st_mode, flags & access)))
         return present
+
+    def census_self_check():
+        # The leak comparison below must see a number closed and reopened on a
+        # different file, and an unreadable census must refuse, never pass.
+        with tempfile.TemporaryDirectory(prefix="opf-census-", dir="/dev/shm") as temp:
+            paths = [os.path.join(temp, name) for name in ("a", "b")]
+            for path in paths:
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+            held = [os.open(paths[0], os.O_RDONLY)]
+            try:
+                first = held[0]
+                before = descriptors()
+                os.close(held.pop())
+                held.append(os.open(paths[1], os.O_RDONLY))
+                if held[0] != first or not descriptors() - before:
+                    raise AssertionError("descriptor census missed a number reused for another file")
+                real_listdir, real_fstat = os.listdir, os.fstat
+
+                def eio_listdir(path=".", *args):
+                    if str(path) == "/proc/self/fd":
+                        raise OSError(errno.EIO, "injected")
+                    return real_listdir(path, *args)
+
+                def eio_fstat(fd, *args):
+                    if fd == held[0]:
+                        raise OSError(errno.EIO, "injected")
+                    return real_fstat(fd, *args)
+
+                for name, fake, needle in (("listdir", eio_listdir, "cannot list"),
+                                           ("fstat", eio_fstat,
+                                            "cannot read descriptor " + str(held[0]) + ":")):
+                    setattr(os, name, fake)
+                    try:
+                        descriptors()
+                    except AssertionError as exc:
+                        if needle not in str(exc):
+                            raise AssertionError("descriptor census refusal did not name "
+                                                 + needle) from exc
+                    else:
+                        raise AssertionError("descriptor census passed an injected " + name + " EIO")
+                    finally:
+                        os.listdir, os.fstat = real_listdir, real_fstat
+            finally:
+                for fd in held:
+                    os.close(fd)
+
+    census_self_check()
 
     scope_files = {__file__, schema.__file__}
     exemption_reasons = {
@@ -1716,9 +1780,9 @@ def _cancellation_self_test():
                 sys.dont_write_bytecode = original_bytecode
                 os.environ.clear()
                 os.environ.update(original_environment)
-                for value in descriptors() - before_fds:
+                for value, _identity in descriptors() - before_fds:
                     try:
-                        os.close(int(value))
+                        os.close(value)
                     except OSError as exc:
                         if exc.errno != 9:  # already-closed enumeration fd
                             raise
