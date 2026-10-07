@@ -39,7 +39,11 @@ dependency is a MISMATCH.
   check_brief_claims.py --self-test                        deterministic self-test (tempdir layer)
 
 WHAT IT CHECKS. The brief's own text is every line outside fenced blocks, `>` lines and declared verbatim
-sections, with Unicode format characters (category Cf: a BOM, a zero-width space) removed. Quoted
+sections. Both sides are compared in ONE normalized form: every default-ignorable or invisible character
+(a BOM, a zero-width space, a variation selector, a combining grapheme joiner, a control character) is
+removed, every whitespace or blank-rendering character (a no-break space, a thin space, a Hangul filler,
+the blank Braille pattern) is a space, and claims and sources are NFKC-normalized (a file name is read
+without NFKC, as it is spelled on disk). Quoted
 strings are the brief's own text and are checked; to quote other text, use a fence, a `>` line or a
 verbatim section. A fence follows CommonMark: at most three spaces of indentation, three or more
 backticks or tildes, and no backtick in a backtick fence's info string (a line of inline code opens
@@ -51,8 +55,10 @@ whose basename full-matches the review-file pattern, or an absolute path under -
 resolve inside --input-dir to a readable UTF-8 regular file (a similarly named sibling is never
 substituted). Binding: a balanced parenthetical directly after a named file is split at family words.
 The text before the first family word, and a segment of that file's own family and round, bind to that
-file itself; another family's segment binds to the named file of that family, item and round ("from
-round N" rebinds to round N). A family word followed by claims elsewhere in the brief's own text binds to
+file itself; another family's segment binds to the named file of that family, item and round. "from
+round N" rebinds a segment to round N, with or without a family word (without one, to the same family);
+a round longer than nine digits, or two different rounds, is cannot-evaluate. A family word followed by
+claims elsewhere in the brief's own text binds to
 the named file of that family. Named tokens that resolve to one path are one candidate; two or more
 candidates is ambiguous, never a choice.
 
@@ -61,26 +67,41 @@ boundaries, a space inside a token matching any run of whitespace; an occurrence
 token's occurrence belongs to the longer token; occurrences of two tokens that partly overlap (NO
 BLOCKERS FOUND under NO BLOCKERS and BLOCKERS FOUND) are ambiguous. A named file's verdict is its single
 operative verdict record: a line that starts at column 0 with `VERDICT:` and whose value holds exactly one
-token. A verdict-like line that is indented, BOM-prefixed, decorated or differently cased (`**VERDICT:**`,
-`Verdict:`), an empty value, a value with no token or several, and a second record (even an identical
-one) are cannot-evaluate.
+token. An empty value, a value with no token or several, and a second record (even an identical one) are
+cannot-evaluate. The line between a competing record and prose is a configured token: any other line that
+holds the word verdict (any case or decoration) AND a configured token is a competing record, so the file
+is cannot-evaluate (`Final VERDICT: X`, `1. VERDICT: X`, `VERDICT (revised): X`, `**Verdict:** X`, `VERDICT -
+X`, a table cell, an indented or BOM-prefixed record, `Previous verdict: X`); a verdict line with no
+configured token (`**Verdict:** the change is sound`) is prose and is ignored. On the brief side, different
+tokens joined only by "or" or "/" (an instruction: "end with VERDICT: X or VERDICT: Y") are options, not a
+claim.
 
 Other claims: finding ids (GRADE-n, GRADE n, ranges, declared aliases), "GRADE:" (at least one finding at
-that grade), "n GRADEs" (the graded-finding count), and "N word" predicate counts. For a predicate count
-the source is split into clauses at , ; : . ! ? before whitespace and at line ends; the predicate word
-pairs with the one number among the three words before it in its clause. Two numbers in that window, or
-the predicate paired with different numbers in different clauses, is ambiguous; a predicate never paired
-is not compared. A claim segment that is a verbatim excerpt of its bound file's operative text passes; an
-excerpt of a different named file only is a misattribution. Embedded verbatim sections are attributed to
+that grade), "n GRADEs" (the graded-finding count), and "N word" and "N of M word" predicate counts. For a
+predicate count the source is split into clauses at , ; : . ! ? before whitespace and at line ends; the
+predicate word reads "N of M word" when the three words before it are exactly that, and otherwise pairs
+with the one number among the three words before it in its clause. Numbers keep their sign (- + U+2212);
+the supported number grammar is ASCII digits, optionally grouped by commas in threes, at most 18 digits,
+and any other number form on either side (a decimal, a malformed group, the sign U+00B1, another script) is
+cannot-evaluate. Two numbers in the window, a number that is itself the M of "N of M", the predicate
+paired differently in different clauses, and a bare count that equals one number of an "N of M" reading
+are ambiguous; a predicate never paired is not compared. A claim segment that is a verbatim excerpt of its
+bound file's operative text stands for its ids, grades and counts, and an excerpt of a different named
+file only is a misattribution; a verdict token in either is still judged against the verdict record, so
+no excerpt passes a contradictory verdict. Embedded verbatim sections are attributed to
 the named file holding a majority of their long lines (VERDICT lines do not vote), whose family and
 verdict must equal the section's. With --template, a parenthetical identical to the template's but
 attached to a different file, and an identical title naming a round the named inputs have moved past, are
 mismatches.
 
 BOUNDS. The two adopter regexes (review-file-pattern, id-pattern) are capped at 512 characters and are
-matched only in a child interpreter (python -I -B, its address space capped at 1 GiB where the platform
-allows) under a 20-second deadline per brief; an overrun or a failed child is cannot-evaluate (exit 2),
-so an adopter regex cannot hang the gate. Every other regex is built from escaped configured words.
+matched only in a child interpreter (python -I -B) under a 20-second deadline per brief. The child runs
+under a CPU-time limit (RLIMIT_CPU, 21 seconds) and, on Linux, dies with its parent (PR_SET_PDEATHSIG), so
+it cannot outlive a killed gate; its address space is capped at 1 GiB where the platform allows. An
+overrun, a failed child, a child that writes anything to stderr, and a platform with no RLIMIT_CPU are
+cannot-evaluate (exit 2), so an adopter regex cannot hang the gate. Every other regex is built from
+escaped configured words. A round, finding number or grade count longer than nine digits is never
+converted (cannot-evaluate).
 
 TIERS. Blocking: unresolved or unreadable inputs; verdicts, including a verdict claim with no resolvable
 binding; misattributed excerpts; embedded attribution; template carry-over; foreign ids; and every
@@ -92,9 +113,13 @@ claim whose family has no named file.
 WHAT IT DOES NOT PROVE (class c, partial). It sees only the claim shapes above, inside one line. Outside
 it: a claim in other wording, including a verdict outside a parenthetical or family segment ("FILE: NO
 BLOCKERS", "FILE says NO BLOCKERS"), a verdict token in another case or with lookalike letters (a Cyrillic
-O); a multi-line parenthetical; a binding through a file it cannot name; and a predicate count in a form
-other than "N word". A family word in instructions ("ask alpha to end with VERDICT: ...") binds like a
-claim. An indented code block is the brief's own text. Recall and the true-negative rate are not
+O, a letter with a combining mark); a round named in other wording ("round 4: NO BLOCKERS" without
+"from"); a multi-line parenthetical; a binding through a file it cannot name; and a predicate count in a
+form other than "N word" or "N of M word". A family word in an instruction that names ONE verdict token
+("ask alpha to end with VERDICT: X") binds like a claim. A source line that uses the word verdict and a
+configured token in another sense ("the verdict line must read X") makes that file cannot-evaluate.
+Verdict classification is quadratic in the occurrences in one segment. An indented code block is the
+brief's own text. Recall and the true-negative rate are not
 measured. A MATCH says the restated token occurs in the bound file, not that the brief is right. The
 configuration-only form, which is the shipped CI step, examines no brief: a brief is checked only when it
 is named on the command line.
@@ -116,6 +141,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import functools
 import hashlib
 import json
 import os
@@ -144,19 +170,33 @@ TOKEN_RE = re.compile(r"[^\s()\[\]{}<>,;\"'`|*"
 FROM_ROUND_RE = re.compile(r"\bfrom\s+round\s+(\d+)\b", re.I)
 TITLE_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 ROUND_RE = re.compile(r"\bround\s+(\d+)\b", re.I)
-PRED_RE = re.compile(r"(?<![\w,.-])(\d{1,3}(?:,\d{3})+|\d{2,})\s+([A-Za-z][A-Za-z-]*)")
-SRC_WORD_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d+|[A-Za-z][A-Za-z-]*")
+SIGNS = "-+\u2212\u00b1"
+NUMBER = r"[-+\u2212\u00b1]?\d(?:[\d.,]*\d)?"  # every number-like token; _number decides if it is supported
+NOT_AFTER = r"(?<![\w,.\-+\u2212\u00b1])"
+PRED_RE = re.compile(NOT_AFTER + "(" + NUMBER + r")\s+([A-Za-z][A-Za-z-]*)")
+PRED_OF_RE = re.compile(NOT_AFTER + "(" + NUMBER + r")\s+of\s+(" + NUMBER + r")\s+([A-Za-z][A-Za-z-]*)", re.I)
+SUPPORTED_NUMBER_RE = re.compile(r"([-+\u2212]?)([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)")
+SRC_WORD_RE = re.compile(NUMBER + r"|[A-Za-z][A-Za-z-]*")
 CLAUSE_RE = re.compile(r"[,;:.!?](?=\s|$)|\n")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
-VERDICT_LIKE_RE = re.compile(r"^[\s*_#+-]*verdict[\s*_]*:", re.I)
-VERDICT_LINE_RE = re.compile(r"VERDICT:[ \t]*(.*?)\s*$")
+VERDICT_WORD_RE = re.compile(r"(?<![A-Za-z])verdicts?(?![A-Za-z])", re.I)
+OPTION_GAP_RE = re.compile(r"[\s\"'*_:,]*(?:or|/)[\s\"'*_:,]*(?:verdict[\s*_]*:[\s\"'*_]*)?", re.I)
+# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): removed before any comparison.
+IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+             (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+             (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+             (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+# Characters that render as a blank (the Hangul fillers, the blank Braille pattern) read as a space.
+BLANKS = frozenset((0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800))
 LONG_LINE = 40       # an embedded line this long (stripped) votes on the section's source
 MIN_EXCERPT = 24     # a claim segment this long may pass as a verbatim excerpt of its bound file
 MAX_RANGE = 50       # a wider id range is cannot-evaluate, never expanded
 MAX_PATTERN = 512    # an adopter regex longer than this is a malformed configuration or registry
-MAX_ROUND_DIGITS = 9  # a longer round number is not parsed (int() refuses very long digit strings)
+MAX_ROUND_DIGITS = 9  # a longer round, finding number or grade count is not parsed (cannot-evaluate)
+MAX_NUMBER_DIGITS = 18  # a predicate count with more digits is outside the supported number grammar
 REGEX_DEADLINE = 20.0  # seconds for one brief's adopter-regex matching in the child interpreter
+CHILD_CPU = int(REGEX_DEADLINE) + 1  # the child's CPU-time limit in seconds (RLIMIT_CPU), past the deadline
 CHILD_MEMORY = 1 << 30  # the child's address-space cap, where the platform allows one
 MATCH, MISMATCH, CANNOT, WARN, EXEMPT = "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT"
 BLOCKING, ADVISORY = "blocking", "advisory"
@@ -306,28 +346,44 @@ def load_registry(path):
 
 # --- bounded adopter regexes ------------------------------------------------------------------------
 
-def _child_limits():
-    """In the regex child only: cap its address space. Best effort; the deadline is the bound."""
+def _child_limits(parent):
+    """In the regex child only, before it runs: a CPU-time limit (RLIMIT_CPU: SIGXCPU after CHILD_CPU
+    seconds), which bounds the child even when no parent is left to enforce the deadline; on Linux,
+    SIGKILL when the parent dies (PR_SET_PDEATHSIG) and an immediate exit when the parent is already
+    gone; and an address-space cap (best effort). A failure of the first two raises, so the child never
+    starts unbounded (subprocess reports it and bounded_regex fails closed)."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_CPU, (CHILD_CPU, CHILD_CPU + 1))
+    if sys.platform.startswith("linux"):
+        import ctypes
+        import signal
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(1, int(signal.SIGKILL), 0, 0, 0) != 0:  # 1 is PR_SET_PDEATHSIG
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+        if os.getppid() != parent:
+            os._exit(2)
     try:
-        import resource
         resource.setrlimit(resource.RLIMIT_AS, (CHILD_MEMORY, CHILD_MEMORY))
-    except (ImportError, ValueError, OSError):
+    except (ValueError, OSError):
         pass
 
 
 def bounded_regex(jobs):
     """Match adopter regexes in a child interpreter under REGEX_DEADLINE seconds. A job is (pattern, op,
     items): op "fullmatch" answers a groupdict or None per item, op "findall" the matched texts per item.
-    An overrun or a failed child is a GateError (exit 2): an adopter regex can never hang the gate."""
+    An overrun, a failed child, or a child that writes anything to stderr is a GateError (exit 2): an
+    adopter regex can never hang the gate, and a child's answers count only from a clean run."""
     if not any(items for _, _, items in jobs):
         return [[] for _ in jobs]
     if not sys.executable:
         raise GateError("no interpreter path for the regex child")
+    if os.name != "posix":
+        raise GateError("the regex child needs a POSIX CPU-time limit, which this platform lacks")
     payload = json.dumps([dict(pattern=p, op=op, items=items) for p, op, items in jobs]).encode("ascii")
     argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--regex-worker"]
     try:
         done = subprocess.run(argv, input=payload, capture_output=True, timeout=REGEX_DEADLINE,
-                              preexec_fn=_child_limits if os.name == "posix" else None)
+                              preexec_fn=functools.partial(_child_limits, os.getpid()))
     except subprocess.TimeoutExpired:
         raise GateError("an adopter regex did not finish within the {:g}-second deadline (it exceeds "
                         "the bound)".format(REGEX_DEADLINE))
@@ -336,6 +392,9 @@ def bounded_regex(jobs):
     if done.returncode != 0:
         tail = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:]
         raise GateError("the regex child failed with exit {} ({})".format(done.returncode, " ".join(tail)))
+    if done.stderr:
+        tail = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:]
+        raise GateError("the regex child wrote to stderr ({}); its answers do not count".format(" ".join(tail)))
     try:
         answers = json.loads(done.stdout.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -361,11 +420,50 @@ def regex_worker():
 
 # --- text regions -----------------------------------------------------------------------------------
 
+def _invisible(c):
+    """A character that renders as nothing: a default-ignorable code point, a format character (Cf), or a
+    control character (Cc) that is not whitespace."""
+    o = ord(c)
+    cat = unicodedata.category(c)
+    return cat == "Cf" or (cat == "Cc" and not c.isspace()) or any(a <= o <= b for a, b in IGNORABLE)
+
+
 def _clean(line):
-    """The line with Unicode format characters (category Cf: a BOM, a zero-width space) removed."""
-    if line.isascii():
+    """One line with every invisible character removed and every whitespace or blank-rendering character
+    a space. File names are read from this form."""
+    if line.isascii() and line.isprintable():
         return line
-    return "".join(c for c in line if unicodedata.category(c) != "Cf")
+    return "".join(" " if c.isspace() or ord(c) in BLANKS else c for c in line
+                   if ord(c) in BLANKS or not _invisible(c))
+
+
+def _norm(line):
+    """The comparison form of one line, the same on the brief side and the source side: _clean, NFKC,
+    then _clean again (NFKC can produce a blank or a space)."""
+    if line.isascii() and line.isprintable():
+        return line
+    return _clean(unicodedata.normalize("NFKC", _clean(line)))
+
+
+def _bounded_int(text, limit=MAX_ROUND_DIGITS):
+    """int(text) for a decimal string of at most limit digits, else None: int() is never given an
+    unbounded string (CPython refuses one over 4300 digits with a ValueError)."""
+    if text and text.isdecimal() and len(text) <= limit:
+        return int(text)
+    return None
+
+
+def _number(tok):
+    """The signed value of a number token in the supported grammar (ASCII digits, optionally grouped by
+    commas in threes, an optional + - or U+2212 sign, at most MAX_NUMBER_DIGITS digits), else None: a
+    decimal, a malformed group, another sign or script is outside the grammar."""
+    m = SUPPORTED_NUMBER_RE.fullmatch(tok)
+    if m is None:
+        return None
+    value = _bounded_int(m.group(2).replace(",", ""), MAX_NUMBER_DIGITS)
+    if value is None:
+        return None
+    return -value if m.group(1) in ("-", "\u2212") else value
 
 
 def _fence(line):
@@ -455,9 +553,7 @@ def _groups(found):
     """item, round and family of a review-file-pattern groupdict (None for no match)."""
     if found is None:
         return None
-    rnd = found.get("round")
-    ok = bool(rnd) and rnd.isdecimal() and len(rnd) <= MAX_ROUND_DIGITS
-    return {"item": found.get("item"), "round": int(rnd) if ok else None,
+    return {"item": found.get("item"), "round": _bounded_int(found.get("round")),
             "family": (found.get("family") or "").casefold()}
 
 
@@ -550,22 +646,28 @@ def classify_verdict(value, cfg):
 
 
 def verdict_records(lines, cfg):
-    """Every operative verdict-like line as (lineno, token or None, problem or None). Only a line that
-    starts at column 0 with `VERDICT:` is well formed; any other verdict-like line is a malformed record,
-    never skipped."""
+    """Every verdict record among raw operative lines as (lineno, token or None, problem or None). The one
+    well-formed record is a line that starts at column 0 with `VERDICT:`; its value (in the _norm form) is
+    classified by classify_verdict. Any OTHER line that names a verdict (the word verdict in any case or
+    decoration) AND carries a configured verdict token is a competing record in another form (`Final
+    VERDICT: X`, `1. VERDICT: X`, `VERDICT (revised): X`, `**Verdict:** X`, a table cell, an indented or
+    BOM-prefixed record), so it is a problem, never skipped. A verdict line with no configured token
+    (`**Verdict:** the change is sound`) is prose, not a record."""
     out = []
-    for n, line in lines:
-        if not VERDICT_LIKE_RE.match(_clean(line)):
+    for n, raw in lines:
+        if raw.startswith("VERDICT:"):
+            value = _norm(raw[len("VERDICT:"):]).strip()
+            if not value:
+                out.append((n, None, "line {} is an empty VERDICT line".format(n)))
+            else:
+                token, why = classify_verdict(value, cfg)
+                out.append((n, token, None if why is None else "line {}: {}".format(n, why)))
             continue
-        m = VERDICT_LINE_RE.match(line)
-        if m is None:
-            out.append((n, None, "line {} is a malformed verdict line (indented, BOM-prefixed, decorated "
-                                 "or differently cased): {!r}".format(n, line.strip())))
-        elif not m.group(1):
-            out.append((n, None, "line {} is an empty VERDICT line".format(n)))
-        else:
-            token, why = classify_verdict(m.group(1), cfg)
-            out.append((n, token, None if why is None else "line {}: {}".format(n, why)))
+        line = _norm(raw)
+        if VERDICT_WORD_RE.search(line) and any(verdict_hits(line, cfg)):
+            out.append((n, None, "line {} states a verdict token outside a column-0 VERDICT: record "
+                                 "(indented, BOM-prefixed, decorated, numbered, qualified, tabulated or "
+                                 "differently cased): {!r}".format(n, line.strip())))
     return out
 
 
@@ -577,8 +679,8 @@ def single_verdict(lines, unclosed, cfg):
     if not recs:
         return None, "no operative VERDICT line"
     if len(recs) > 1:
-        return None, "{} operative verdict lines (lines {}); exactly one is required".format(
-            len(recs), ", ".join(str(r[0]) for r in recs))
+        return None, "{} operative verdict lines (lines {}); exactly one is required{}".format(
+            len(recs), ", ".join(str(r[0]) for r in recs), "".join("; " + r[2] for r in recs if r[2])[:300])
     return recs[0][1], recs[0][2]
 
 
@@ -588,18 +690,27 @@ def analyze_source(text, cfg):
     """Graded findings of a source file: numbered items, grade headings, and labelled lines (table rows
     skipped). Returns a dict: ids, the set of (grade, n); counts, findings per grade; text, the operative
     text; unclosed, the line of a fence never closed (or None); verdict, single_verdict's answer."""
-    findings, ordinal = [], dict()
+    findings, ordinal, bad = [], dict(), []
     lines, unclosed = operative_lines(text)
-    for _, line in lines:
+    normed = [(n, _norm(line)) for n, line in lines]
+    for n, line in normed:
         if line.lstrip().startswith("|"):
             continue
         m = cfg["numbered_re"].match(line)
         if m:
-            findings.append((m.group(2).upper(), int(m.group(1))))
+            num = _bounded_int(m.group(1))
+            if num is None:
+                bad.append(n)
+            else:
+                findings.append((m.group(2).upper(), num))
             continue
         m = cfg["heading_re"].match(line)
         if m:
-            findings.append((m.group(1).upper(), int(m.group(2)) if m.group(2) else None))
+            num = _bounded_int(m.group(2)) if m.group(2) else None
+            if m.group(2) and num is None:
+                bad.append(n)
+            else:
+                findings.append((m.group(1).upper(), num))
             continue
         m = cfg["label_re"].search(line)
         if m:
@@ -611,8 +722,10 @@ def analyze_source(text, cfg):
             ordinal[grade] = ordinal.get(grade, 0) + 1
             num = ordinal[grade]
         ids.add((grade, num))
-    return dict(ids=ids, counts=counts, text="\n".join(l for _, l in lines), unclosed=unclosed,
-                verdict=single_verdict(lines, unclosed, cfg))
+    return dict(ids=ids, counts=counts, text="\n".join(l for _, l in normed), unclosed=unclosed,
+                verdict=single_verdict(lines, unclosed, cfg),
+                full="\n".join(_norm(l) for l in text.splitlines()),
+                bad=("source line {} carries a finding number too long to read".format(bad[0]) if bad else None))
 
 
 def id_present(info, grade, num):
@@ -622,32 +735,55 @@ def id_present(info, grade, num):
     return bool(lit.search(info["text"]))
 
 
-def predicate_check(num, pred, text):
-    """(status, detail) for an "N word" claim, or None when the source never pairs the word. Clauses end
-    at , ; : . ! ? before whitespace and at line ends; the word pairs with the one number among the three
-    words before it in its clause. Two numbers in that window, or different numbers in different clauses,
-    is ambiguous (cannot-evaluate), never a pairing across an intervening number."""
-    pairs, unclear = [], []
+def _reading(toks, i):
+    """How the source pairs the predicate word toks[i]: ("of", N, M) for "N of M word"; ("one", N) for the
+    one number among the three words before it; ("unclear", wording) for two numbers there, or a number
+    that is itself the M of "N of M"; None for no number."""
+    isnum = [t[0] in SIGNS or t[0].isdigit() for t in toks]
+    if i >= 3 and isnum[i - 1] and toks[i - 2].lower() == "of" and isnum[i - 3]:
+        return ("of", toks[i - 3], toks[i - 1])
+    window = [j for j in range(max(0, i - 3), i) if isnum[j]]
+    if not window:
+        return None
+    j = window[0]
+    if len(window) > 1 or (j >= 2 and toks[j - 1].lower() == "of" and isnum[j - 2]):
+        return ("unclear", " ".join(toks[max(0, min(j - 2, i - 3)):i + 1]))
+    return ("one", toks[j])
+
+
+def predicate_check(claim, pred, text):
+    """(status, detail) for a predicate claim, or None when the source never pairs the word. claim is the
+    brief's number tokens: (N,) for "N word", (N, M) for "N of M word". Clauses end at , ; : . ! ? before
+    whitespace and at line ends; _reading pairs the word within its clause. A number keeps its sign; a
+    number outside the supported grammar (_number) on either side, two numbers in the window, different
+    readings in different clauses, or a bare count that equals one number of an "N of M" reading is
+    ambiguous (cannot-evaluate), never a pairing across an intervening number."""
+    readings, unclear = [], []
     for clause in CLAUSE_RE.split(text):
         toks = SRC_WORD_RE.findall(clause)
         for i, t in enumerate(toks):
-            if t.lower() != pred:
-                continue
-            window = [x for x in toks[max(0, i - 3):i] if x[0].isdigit()]
-            if len(window) > 1:
-                unclear.append(" ".join(toks[max(0, i - 3):i + 1]))
-            elif window:
-                pairs.append(window[0])
+            if t.lower() == pred:
+                r = _reading(toks, i)
+                if r is not None:
+                    (unclear if r[0] == "unclear" else readings).append(r)
+    if not readings and not unclear:
+        return None
     if unclear:
-        return CANNOT, "source wording {!r} pairs {!r} with more than one number".format(unclear[0], pred)
-    values = sorted(set(x.replace(",", "") for x in pairs))
+        return CANNOT, "source wording {!r} pairs {!r} with more than one number".format(unclear[0][1], pred)
+    bad = [x for r in readings for x in r[1:] if _number(x) is None] + [x for x in claim if _number(x) is None]
+    if bad:
+        return CANNOT, ("number {!r} is outside the supported grammar (ASCII digits, commas in threes, a sign, "
+                        "at most {} digits)".format(bad[0], MAX_NUMBER_DIGITS))
+    values = sorted(set(tuple(_number(x) for x in r[1:]) for r in readings))
     if len(values) > 1:
         return CANNOT, "source pairs {!r} with different numbers {}".format(pred, values)
-    if values == [num]:
-        return MATCH, "source states {} {}".format(pairs[0], pred)
-    if values:
-        return MISMATCH, "source binds {!r} to {}, not {}".format(pred, pairs[0], num)
-    return None
+    have, want = values[0], tuple(_number(x) for x in claim)
+    shown = " of ".join(str(v) for v in have)
+    if have == want:
+        return MATCH, "source states {} {}".format(shown, pred)
+    if len(have) == len(want) or not set(have) & set(want):
+        return MISMATCH, "source binds {!r} to {}, not {}".format(pred, shown, " of ".join(claim))
+    return CANNOT, "source wording '{} {}' pairs {!r} with more than one number".format(shown, pred, pred)
 
 
 # --- claims -----------------------------------------------------------------------------------------
@@ -668,7 +804,8 @@ def parse_claims(text, cfg):
     claims = []
     buf = FROM_ROUND_RE.sub(_blank, text)
     hits, amb = verdict_hits(buf, cfg)
-    claims.extend(("verdict", token, None) for _, _, token in hits)
+    options = _options(buf, hits)
+    claims.extend(("verdict", h[2], None) for k, h in enumerate(hits) if k not in options)
     claims.extend(("verdict?", " ".join(buf[a:b].split()), None) for a, b in _clusters(amb))
     for a, b, _ in hits + amb:
         buf = buf[:a] + " " * (b - a) + buf[b:]
@@ -683,12 +820,33 @@ def parse_claims(text, cfg):
     take(cfg["id_re"], "id")
     take(cfg["alias_re"], "alias")
     take(cfg["colon_re"], "colon")
+    for m in PRED_OF_RE.finditer(buf):
+        claims.append(("pred", " ".join(m.group(0).split()), ((m.group(1), m.group(2)), m.group(3).lower())))
+    buf = PRED_OF_RE.sub(_blank, buf)
     for m in PRED_RE.finditer(buf):
         word = m.group(2).upper()
         if word in cfg["grades"] or word.rstrip("S") in cfg["grades"]:
             continue
-        claims.append(("pred", m.group(0).strip(), m))
+        plain = SUPPORTED_NUMBER_RE.fullmatch(m.group(1))
+        if plain and "," not in plain.group(2) and len(plain.group(2)) < 2:
+            continue  # a one-digit count is not a predicate claim
+        claims.append(("pred", m.group(0).strip(), ((m.group(1),), m.group(2).lower())))
     return claims
+
+
+def _options(buf, hits):
+    """Indexes of verdict hits that form an option list: two or more different tokens joined only by "or"
+    or "/" (an instruction such as "end with VERDICT: X or VERDICT: Y"). It asserts neither token, so it is
+    not a claim; any other occurrence in the segment still is."""
+    drop, run = set(), [0]
+    for k in range(1, len(hits) + 1):
+        if k < len(hits) and OPTION_GAP_RE.fullmatch(buf[hits[k - 1][1]:hits[k][0]]):
+            run.append(k)
+            continue
+        if len(set(hits[j][2] for j in run)) > 1:
+            drop.update(run)
+        run = [k]
+    return drop
 
 
 def _res(status, tier, lineno, claim, src, detail):
@@ -697,6 +855,8 @@ def _res(status, tier, lineno, claim, src, detail):
 
 def _ids_of(kind, m, fam, cfg):
     """Expand an id, range or alias claim to [(grade, n)], or raise ValueError(reason) (cannot-evaluate)."""
+    if None in [_bounded_int(x) for x in m.groups()[1:] if x and x.isdecimal()]:
+        raise ValueError("a number in {!r} is longer than {} digits".format(m.group(0), MAX_ROUND_DIGITS))
     if kind == "id":
         return [(m.group(1).upper(), int(m.group(2)))]
     if kind == "range":
@@ -751,20 +911,26 @@ def judge_segment(seg, files, cfg, infos):
             out.append(_res(CANNOT, BLOCKING, n, excerpt, src, "a fence opened at source line {} is never "
                             "closed; the operative text cannot be read".format(info["unclosed"])))
         return out
+    excerpt_only = False  # an excerpt stands for its ids, grades and counts, never for a verdict claim in it
     if long_excerpt:
-        if excerpt in info["text"]:
-            return [_res(MATCH, BLOCKING, n, excerpt, src, "verbatim excerpt of its bound file")]
         others = sorted(o["path"] for t, o in files.items() if t != seg["token"] and excerpt in infos[t]["text"])
-        if others:
-            return [_res(MISMATCH, BLOCKING, n, excerpt, src,
-                         "misattributed: a verbatim excerpt of {}, not of its bound file".format(others[0]))]
-    if not claims:
-        return out
+        if excerpt in info["text"]:
+            excerpt_only = True
+            out.append(_res(MATCH, BLOCKING, n, excerpt, src, "verbatim excerpt of its bound file (a verdict "
+                            "claim in it is judged on its own)"))
+        elif others:
+            excerpt_only = True
+            out.append(_res(MISMATCH, BLOCKING, n, excerpt, src,
+                            "misattributed: a verbatim excerpt of {}, not of its bound file".format(others[0])))
     fam = (f["groups"] or dict()).get("family")
     regrade = cfg["regrade"] in seg["text"]
     for kind, claim, m in claims:
         if kind in ("verdict", "verdict?"):
             out.append(_judge_verdict(kind, claim, info, cfg, n, src, regrade))
+        elif excerpt_only:
+            continue
+        elif kind != "pred" and info["bad"] is not None:
+            out.append(_res(CANNOT, ADVISORY, n, claim, src, info["bad"]))
         elif kind in ("id", "range", "alias"):
             try:
                 wanted = _ids_of(kind, m, fam, cfg)
@@ -781,12 +947,16 @@ def judge_segment(seg, files, cfg, infos):
             out.append(_res(MATCH if have else MISMATCH, ADVISORY, n, claim, src,
                             "{} {} finding(s) in the source".format(have, m.group(1).upper())))
         elif kind == "count":
-            grade, num = m.group(2).upper(), int(m.group(1))
+            grade, num = m.group(2).upper(), _bounded_int(m.group(1))
+            if num is None:
+                out.append(_res(CANNOT, ADVISORY, n, claim, src, "the count is longer than {} digits".format(
+                    MAX_ROUND_DIGITS)))
+                continue
             have = info["counts"].get(grade, 0)
             out.append(_res(MATCH if have == num else MISMATCH, ADVISORY, n, claim, src,
                             "the source grades {} finding(s) {}".format(have, grade)))
         else:
-            verdict = predicate_check(m.group(1).replace(",", ""), m.group(2).lower(), info["text"])
+            verdict = predicate_check(m[0], m[1], info["text"])
             if verdict is not None:
                 out.append(_res(verdict[0], BLOCKING if verdict[0] == CANNOT else ADVISORY, n, claim, src,
                                 verdict[1]))
@@ -829,35 +999,42 @@ def collect_segments(own, refs, cfg, files):
             continue
         i, j = found
         if j is None:
-            segs.append(dict(lineno=ref["lineno"], text=line[i + 1:], token=None, ambiguous=False,
+            segs.append(dict(lineno=ref["lineno"], text=_norm(line[i + 1:]), token=None, ambiguous=False,
                              why="unbalanced parenthetical after {}".format(ref["token"])))
             used.setdefault(ref["lineno"], []).append((i, len(line)))
             continue
-        content = line[i + 1:j]
+        content = _norm(line[i + 1:j])
         used.setdefault(ref["lineno"], []).append((i, j + 1))
         parens.append((ref, content))
         g = ref["groups"]
         for fam, text in split_families(content, cfg):
-            if fam is None:
+            rounds = set(_bounded_int(r) for r in FROM_ROUND_RE.findall(text))
+            if fam is None and not rounds:
                 segs.append(dict(lineno=ref["lineno"], text=text, token=ref["token"], why="", ambiguous=False))
-            elif g is None:
-                segs.append(dict(lineno=ref["lineno"], text=text, token=None, ambiguous=False,
-                                 why="{} carries no item and round for family {}".format(ref["token"], fam)))
+                continue
+            what = "family {}".format(fam) if fam else "a round-qualified segment"
+            if g is None:
+                bound = dict(token=None, ambiguous=False,
+                             why="{} carries no item and round for {}".format(ref["token"], what))
+            elif None in rounds or len(rounds) > 1:
+                bound = dict(token=None, ambiguous=True, why="{} names a round longer than {} digits, or "
+                             "several rounds".format(what, MAX_ROUND_DIGITS))
             else:
-                m = FROM_ROUND_RE.search(text)
-                rnd = int(m.group(1)) if m else g["round"]
+                fam = fam or g["family"]
+                rnd = rounds.pop() if rounds else g["round"]
                 if fam == g["family"] and rnd == g["round"]:
                     bound = dict(token=ref["token"], why="", ambiguous=False)
                 else:
                     key = (g["item"], rnd, fam)
-                    bound = _bind(refs, files, lambda h: (h["item"], h["round"], h["family"]) == key,
+                    bound = _bind(refs, files, lambda h, key=key: (h["item"], h["round"], h["family"]) == key,
                                   "named {} file for item {} round {}".format(fam, g["item"], rnd))
-                segs.append(dict(lineno=ref["lineno"], text=text, **bound))
+            segs.append(dict(lineno=ref["lineno"], text=text, **bound))
     # Family-attributed claims elsewhere in the brief's own text bind to the named file of the family.
     for n, line in own:
         spans = list(used.get(n, [])) + [(r["start"], r["end"]) for r in refs if r["lineno"] == n]
         for a, b in spans:
             line = line[:a] + " " * (b - a) + line[b:]
+        line = _norm(line)
         marks = list(cfg["family_re"].finditer(line))
         for k, m in enumerate(marks):
             stop = marks[k + 1].start() if k + 1 < len(marks) else len(line)
@@ -872,11 +1049,11 @@ def collect_segments(own, refs, cfg, files):
 def check_sections(sections, files, cfg, infos):
     out = []
     for sec in sections:
-        longs = [l.strip() for l in sec["lines"]
-                 if len(l.strip()) >= LONG_LINE and not l.strip().startswith("VERDICT:")]
+        longs = [_norm(l).strip() for l in sec["lines"]]
+        longs = [l for l in longs if len(l) >= LONG_LINE and not l.startswith("VERDICT:")]
         best = None
         for token in sorted(files):
-            hits = sum(1 for l in longs if l in files[token]["text"])
+            hits = sum(1 for l in longs if l in infos[token]["full"])
             if longs and hits * 2 > len(longs) and (best is None or hits > best[1]):
                 best = (token, hits)
         n, claim = sec["lineno"], "embedded section ({})".format(sec["family"])
@@ -922,7 +1099,7 @@ def check_template(own, refs, parens, files, t_own, t_refs):
     for ref in t_refs:
         found = _paren_after(t_lines[ref["lineno"]], ref["end"])
         if found is not None and found[1] is not None:
-            t_parens.append((ref["base"], " ".join(t_lines[ref["lineno"]][found[0] + 1:found[1]].split())))
+            t_parens.append((ref["base"], " ".join(_norm(t_lines[ref["lineno"]][found[0] + 1:found[1]]).split())))
     for ref, content in parens:
         norm = " ".join(content.split())
         moved = sorted(set(b for b, c in t_parens if c == norm and b != ref["base"]))
@@ -934,7 +1111,11 @@ def check_template(own, refs, parens, files, t_own, t_refs):
     if title is not None and title == _title(t_own)[1]:
         m = ROUND_RE.search(title)
         rounds = set(r["groups"]["round"] for r in refs if r["groups"] and r["groups"]["round"] is not None)
-        if m and rounds and int(m.group(1)) not in rounds and max(rounds) > int(m.group(1)):
+        said = _bounded_int(m.group(1)) if m else None
+        if m and rounds and said is None:
+            out.append(_res(CANNOT, BLOCKING, n, title, None, "the title's round number is longer than {} "
+                            "digits".format(MAX_ROUND_DIGITS)))
+        elif m and rounds and said not in rounds and max(rounds) > said:
             out.append(_res(MISMATCH, BLOCKING, n, title, None,
                             "title carried over from the template names round {}; the named inputs are "
                             "round {}".format(m.group(1), max(rounds))))
@@ -1075,8 +1256,9 @@ def parse_args(argv):
 
 # --- self-test --------------------------------------------------------------------------------------
 # Every vector runs the real run() over a synthetic tempdir tree. Placeholder families, items and files
-# only. No randomness, no network; the only clock is the regex child's deadline, which the two
-# catastrophic-backtracking vectors shorten to two seconds.
+# only. No randomness, no network; the clocks are the regex child's deadline (two catastrophic-
+# backtracking vectors shorten it to two seconds), its CPU limit (one vector lowers it to one second), and
+# the Linux parent-death probe (a copy of this gate in the tempdir, killed once its child exists).
 
 GOOD_CFG = """format-version = 1
 families = ["alpha", "beta"]
@@ -1550,6 +1732,208 @@ def _cases_round2(sc, check, base):
     check("ci/configuration-only-examines-no-brief", rc == 0 and "NO brief was examined" in out, out)
 
 
+def _proc_fields(pid):
+    """Linux: the /proc stat fields of pid from its state onward ([state, ppid, ...]), or None if gone."""
+    try:
+        with open("/proc/{}/stat".format(pid), "rb") as handle:
+            data = handle.read().decode("ascii", "replace")
+    except OSError:
+        return None
+    return data[data.rindex(")") + 2:].split()
+
+
+def _orphan_probe(base):
+    """Linux: run a copy of this gate on a catastrophic adopter regex, SIGKILL the gate once its regex child
+    exists, and require the child to be gone within five seconds. Returns (ok, detail)."""
+    import shutil
+    import signal
+    import time
+    root = os.path.join(base, "orphan")
+    indir = os.path.join(root, "in")
+    os.makedirs(indir)
+    _write(os.path.join(root, CONFIG_REL), GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>(a+)+)"))
+    _write(os.path.join(root, "brief.md"), "Inputs: " + "a" * 40 + "x\n")
+    gate = os.path.join(root, "tools", os.path.basename(__file__))
+    os.makedirs(os.path.dirname(gate))
+    shutil.copyfile(os.path.abspath(__file__), gate)
+    child = None
+    with subprocess.Popen([sys.executable, "-I", "-B", gate, "--input-dir", indir, os.path.join(root, "brief.md")],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
+        until = time.monotonic() + 15
+        while child is None and time.monotonic() < until and proc.poll() is None:
+            child = next((int(p) for p in os.listdir("/proc") if p.isdigit()
+                          and (_proc_fields(p) or ["", ""])[1] == str(proc.pid)), None)
+            time.sleep(0.05)
+        proc.kill()
+    if child is None:
+        return False, "no regex child was seen"
+    until = time.monotonic() + 5
+    while time.monotonic() < until:
+        fields = _proc_fields(child)
+        if fields is None or fields[0] in ("Z", "X"):
+            return True, ""
+        time.sleep(0.05)
+    os.kill(child, signal.SIGKILL)
+    return False, "regex child {} outlived its parent".format(child)
+
+
+def _cases_round3(sc, check, base, skipped):
+    """QA round 2: excerpts never skip a verdict, verdict records in other forms, one normalization on both
+    sides, signed and unsupported numbers, "N of M" pairing, round rebinding, bounded numbers, option lists,
+    and the regex child's CPU limit, parent death, clean stderr and isolation."""
+    def one(name, source, claim, args=("--strict",), fname="it7-r5-alpha.txt"):
+        return sc(name, "Inputs: {} ({})\n".format(fname, claim), files=dict([(fname, source)]), args=list(args))
+
+    rc, out = one("x3_judged", "Earlier text: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
+                  "NO BLOCKERS (review complete)", ())
+    check("excerpt/verdict-still-judged", rc == 1 and "MISMATCH [blocking] brief line 1: NO BLOCKERS" in out, out)
+    rc, out = one("x3_prev", "Previous verdict: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
+                  "NO BLOCKERS (review complete)", ())
+    check("excerpt/competing-record", rc == 2, out)
+    rc, out = one("x3_dup", "VERDICT: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
+                  "VERDICT: NO BLOCKERS (review complete)", ())
+    check("excerpt/duplicate-record", rc == 2 and "2 operative verdict lines" in out, out)
+    forms = [("numbered-before", "1. VERDICT: BLOCKERS FOUND\nVERDICT: NO BLOCKERS\n"),
+             ("final", "VERDICT: NO BLOCKERS\nFinal VERDICT: BLOCKERS FOUND\n"),
+             ("revised", "VERDICT: NO BLOCKERS\nVERDICT (revised): BLOCKERS FOUND\n"),
+             ("numbered-after", "VERDICT: NO BLOCKERS\n1. VERDICT: BLOCKERS FOUND\n"),
+             ("bold-final", "VERDICT: NO BLOCKERS\n**Final verdict:** BLOCKERS FOUND\n"),
+             ("dash", "VERDICT: NO BLOCKERS\nVERDICT - BLOCKERS FOUND\n"),
+             ("table", "VERDICT: NO BLOCKERS\n| VERDICT: | BLOCKERS FOUND |\n")]
+    for name, source in forms:
+        rc, out = one("v3_" + name.replace("-", "_"), source, "NO BLOCKERS")
+        check("src-verdict/token-in-other-form-" + name, rc == 2 and "outside a column-0 VERDICT" in out, out)
+    prose = [("bold", BETA5 + "**Verdict:** the change is sound; two minors remain.\n"),
+             ("bullet", BETA5 + "- Verdict: approve after the two minors.\n")]
+    for name, source in prose:
+        rc, out = one("v3_prose_" + name, source, "NO BLOCKERS", fname="it7-r5-beta.txt")
+        check("src-verdict/prose-without-token-" + name, rc == 0 and "MATCH [blocking]" in out, out)
+    account = "Verdict: PATCH DELIVERED\nSweep: 41 of 42 mutants killed; one survives.\n"
+    rc, out = one("v3_account", account, "PATCH DELIVERED; 41 of 42 mutants killed")
+    check("src-verdict/account-form", rc == 0 and "MATCH [advisory] brief line 1: 41 of 42 mutants" in out, out)
+    for cp in ("\u034f", "\ufe0f", "\u3164", "\u115f", "\u2800"):
+        rc, out = one("n3_" + hex(ord(cp)), ALPHA5, "NO" + cp + " BLOCKERS", ())
+        check("norm/invisible-U+{:04X}".format(ord(cp)), rc == 1 and "MISMATCH [blocking]" in out, out)
+    for cp in ("\u3164", "\u2800"):
+        rc, out = one("n3_glued_" + hex(ord(cp)), ALPHA5, "NO" + cp + "BLOCKERS", ())
+        check("norm/blank-reads-as-space-U+{:04X}".format(ord(cp)), rc == 1, out)
+    for cp in ("\u00a0", "\u2009"):
+        rc, out = sc("n3_space_" + hex(ord(cp)), "Inputs: it7-r5-alpha.txt" + cp + "(NO BLOCKERS)\n")
+        check("norm/space-before-parenthetical-U+{:04X}".format(ord(cp)), rc == 1, out)
+    rc, out = one("n3_nfkc_brief", ALPHA5, "\uff2e\uff2f BLOCKERS", ())
+    check("norm/nfkc-brief", rc == 1, out)
+    wide = ALPHA5.replace("VERDICT: BLOCKERS", "VERDICT: \uff22\uff2c\uff2f\uff23\uff2b\uff25\uff32\uff33")
+    rc, out = one("n3_nfkc_source", wide, "BLOCKERS FOUND")
+    check("norm/nfkc-source", rc == 0 and "MATCH [blocking]" in out, out)
+    section = ("Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n"
+               "3. **Major** - the cache key ignores the locale and\u00a0returns stale rows.\nEND VERBATIM\n")
+    rc, out = sc("n3_section", section, args=["--strict"])
+    check("norm/embedded-section", rc == 0 and "MATCH [blocking] brief line 2: embedded section" in out, out)
+
+    tail = "VERDICT: NO BLOCKERS\n"
+    rc, out = one("p3_sign", "-20 accepted.\n" + tail, "20 accepted")
+    check("pred/sign-kept-source", rc == 1 and "to -20" in out, out)
+    rc, out = one("p3_sign_both", "-20 accepted.\n" + tail, "\u221220 accepted")
+    check("pred/sign-kept-both", rc == 0 and "MATCH [advisory]" in out, out)
+    rc, out = one("p3_decimal_src", "20.5 accepted.\n" + tail, "20 accepted", ())
+    check("pred/unsupported-source-number", rc == 2 and "outside the supported grammar" in out, out)
+    rc, out = one("p3_decimal_brief", "20 accepted.\n" + tail, "20.5 accepted", ())
+    check("pred/unsupported-brief-number", rc == 2 and "outside the supported grammar" in out, out)
+    rc, out = one("p3_long", "20 accepted.\n" + tail, "9" * 30 + " accepted", ())
+    check("pred/over-long-number", rc == 2 and "outside the supported grammar" in out, out)
+    sweep = "Sweep: 41 of 42 mutants killed; one survives.\n" + tail
+    for name, claim, want in (("restated", "41 of 42 mutants killed", 0), ("of-differs", "40 of 42 mutants", 1),
+                              ("bare-differs", "43 mutants", 1), ("bare-total", "42 mutants", 2),
+                              ("verb-after-noun", "41 killed", 2)):
+        rc, out = one("p3_of_" + name.replace("-", "_"), sweep, claim)
+        check("pred/n-of-m-" + name, rc == want, out)
+    rc, out = one("x3_counts", "20 seeded 10 accepted by the grammar here.\n" + tail,
+                  "20 seeded 10 accepted by the grammar here")
+    check("excerpt/stands-for-counts", rc == 0 and "verbatim excerpt" in out, out)
+    rc, out = sc("n3_nfkc_prose", "Inputs: it7-r5-alpha.txt. The alpha verdict: \uff2e\uff2f BLOCKERS.\n")
+    check("norm/nfkc-prose-family-claim", rc == 1, out)
+    rc, out = sc("n3_nfkc_template", "# Fix item seven round 5\n"
+                 "Inputs: it7-r5-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n",
+                 extra=dict([("tmpl.md", "# Fix item seven round 4\n"
+                              "Inputs: it7-r4-alpha.txt (alpha \uff2dEDIUM-1 and MAJOR-2 remain open)\n")]),
+                 args=["--template", "@ROOT@/tmpl.md"])
+    check("norm/nfkc-template", rc == 1 and "carried over" in out, out)
+    rc, out = one("n3_source_text", "The retry loop never backs off\u00a0between attempts.\n" + tail,
+                  "The retry loop never backs off between attempts")
+    check("norm/source-operative-text", rc == 0 and "verbatim excerpt" in out, out)
+    rc, out = one("p3_one_digit", "4 accepted.\n" + tail, "3 accepted")
+    check("pred/one-digit-not-a-claim", rc == 0 and "result(s) none" in out, out)
+    rc, out = one("b3_huge_id", ALPHA5, "MAJOR-" + "9" * 5000, ())
+    check("bound/finding-id", rc == 0 and "longer than" in out, out)
+    rc, out = one("p3_line_end", "Count 30\n20 accepted by the grammar.\n" + tail, "20 accepted")
+    check("pred/clause-ends-at-line-end", rc == 0 and "MATCH [advisory]" in out, out)
+    rc, out = one("f3_same_char", "```\n~~~\nVERDICT: BLOCKERS FOUND\n```\n" + BETA5, "NO BLOCKERS")
+    check("fence/closer-same-character", rc == 0 and "MATCH [blocking]" in out, out)
+    r45 = dict([("it7-r4-alpha.txt", ALPHA5), ("it7-r5-alpha.txt", tail)])
+    rc, out = sc("b3_round", "Inputs: it7-r4-alpha.txt, it7-r5-alpha.txt (from round 4: NO BLOCKERS)\n", files=r45)
+    check("bind/round-qualified-segment-rebinds", rc == 1 and any(
+        l.startswith("MISMATCH") and "it7-r4-alpha.txt sha256" in l for l in out.splitlines()), out)
+    rc, out = sc("b3_round_same", "Inputs: it7-r4-alpha.txt, it7-r5-alpha.txt (from round 5: NO BLOCKERS)\n",
+                 files=r45, args=["--strict"])
+    check("bind/round-qualified-own-round", rc == 0 and "MATCH [blocking]" in out, out)
+    rc, out = sc("b3_round_none", "Inputs: it7-r5-alpha.txt (from round 6: NO BLOCKERS)\n", files=r45)
+    check("bind/round-qualified-unnamed", rc == 2 and "none named" in out, out)
+    huge = "9" * 5000
+    rc, out = sc("b3_huge", "Inputs: it7-r5-alpha.txt (alpha NO BLOCKERS from round " + huge + ")\n")
+    check("bound/rebinding-round", rc == 2 and "longer than" in out, out)
+    rc, out = sc("b3_huge_count", "Inputs: it7-r5-alpha.txt (" + huge + " MAJORs)\n")
+    check("bound/grade-count", rc == 0 and "longer than" in out, out)
+    rc, out = one("b3_huge_src", huge + ". **Major** - x.\nVERDICT: BLOCKERS FOUND\n", "MAJOR-2")
+    check("bound/source-finding-number", rc == 2 and "too long to read" in out, out)
+    rc, out = sc("b3_huge_title", "# Fix round " + huge + "\nInputs: it7-r5-alpha.txt.\n",
+                 extra=dict([("tmpl.md", "# Fix round " + huge + "\n")]), args=["--template", "@ROOT@/tmpl.md"])
+    check("bound/template-title-round", rc == 2 and "longer than" in out, out)
+
+    rc, out = sc("o3_options", "alpha leg: review the diff, then end with VERDICT: BLOCKERS FOUND or VERDICT: NO "
+                 "BLOCKERS\nInputs: it7-r5-alpha.txt\n", args=["--strict"])
+    check("verdict/option-list-not-a-claim", rc == 0 and "result(s) none" in out, out)
+    rc, out = sc("o3_not_options", "Inputs: it7-r5-alpha.txt (alpha NO BLOCKERS, not BLOCKERS FOUND)\n")
+    check("verdict/two-tokens-not-options", rc == 1 and "MISMATCH [blocking]" in out, out)
+
+    me = sys.modules[__name__]
+    real_run = me.subprocess.run
+
+    def noisy(*args, **kwargs):
+        done = real_run(*args, **kwargs)
+        return subprocess.CompletedProcess(done.args, done.returncode, done.stdout, b"Warning: noise\n")
+    me.subprocess.run = noisy
+    try:
+        rc, out = sc("r3_stderr", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n")
+    finally:
+        me.subprocess.run = real_run
+    check("regex/child-stderr-fails-closed", rc == 2 and "wrote to stderr" in out, out)
+    planted = os.path.join(base, "planted")
+    _write(os.path.join(planted, "hashlib.py"), "raise SystemExit(7)\n")
+    saved_env = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = planted
+    try:
+        rc, out = sc("r3_isolated", "Inputs: it7-r5-alpha.txt (NO BLOCKERS)\n")
+    finally:
+        if saved_env is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = saved_env
+    check("regex/child-isolated", rc == 1 and "MISMATCH [blocking]" in out, out)
+    saved = (me.REGEX_DEADLINE, me.CHILD_CPU)
+    me.REGEX_DEADLINE, me.CHILD_CPU = 60.0, 1
+    try:
+        slow = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>(a+)+)")
+        rc, out = sc("r3_cpu", "Inputs: " + "a" * 40 + "x\n", cfg=slow)
+    finally:
+        me.REGEX_DEADLINE, me.CHILD_CPU = saved
+    check("regex/child-cpu-limit", rc == 2 and "failed with exit" in out and "deadline" not in out, out)
+    if sys.platform.startswith("linux"):
+        ok, detail = _orphan_probe(base)
+        check("regex/child-dies-with-parent", ok, detail)
+    else:
+        skipped.append("regex/child-dies-with-parent (Linux only)")
+
+
 def self_test_main():
     import shutil
     import tempfile
@@ -1568,6 +1952,7 @@ def self_test_main():
         _cases_claims(sc, check, base)
         _cases_template(sc, check)
         _cases_round2(sc, check, base)
+        _cases_round3(sc, check, base, skipped)
     finally:
         shutil.rmtree(base, ignore_errors=True)
     if failures:
