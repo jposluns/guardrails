@@ -2127,72 +2127,67 @@ read, written as 64 lowercase hexadecimal digits, or, where that check could not
 copy because it is absent or unreadable, the token `not-read`, which a report MUST NOT carry with
 any runtime result other than `cannot_evaluate`. A restatement differs from that file's declaration
 where it gives a different value for any field the file carries, or states a field the file does not
-carry. A conformance report of a release is a report that an installation of that release emits
-whose installed-copy digest and shipped-file digest both equal the digest of that file's bytes as
-the release ships them, a fact that a check of the conformance reports can test because it reads
-those bytes, and that the runtime result rule below does not exclude; a report from an unmodified
-installation whose emitter writes a wrong restatement is a conformance report of that release. A
-report whose installed-copy digest is that digest and whose shipped-file digest is missing, written
-in any other form, or other than that digest, such as a report from an installation whose carried
-shipped-file digest was edited while its installed copy was not, is not a conformance report of that
-release, MUST NOT be presented as one, and does not make that release nonconformant. A report whose
-installed-copy digest and shipped-file digest both equal that digest and whose runtime result is
-written as `pass`, `fail`, or `cannot_evaluate` but is other than one that the runtime check of a
-fresh, unmodified installation of that release yields over an installed copy holding exactly those
-bytes, such as a report from an installation whose runtime check was altered while its installed
-copy was not, is not a conformance report of that release, MUST NOT be presented as one, and does
-not make that release nonconformant. A report whose installed-copy digest is 64 lowercase
-hexadecimal digits that differ from that digest, such as a report from an installation whose
-installed copy was edited alone, edited together with the shipped-file digest the implementation
-carries, or rewritten by its installer, is not a conformance report of that release, MUST NOT be
-presented as one, and does not make that release nonconformant. Such a report that states a runtime
-result other than `cannot_evaluate` is inconsistent with that release, because a runtime check that
-compares an installed copy with the shipped-file digest this section requires the release to carry
-yields cannot-evaluate for an installed copy whose bytes differ from those the release ships, so
-such a report shows a modified implementation, a defective emitter, or a release that carries a
-shipped-file digest other than the one this section requires or whose runtime check does not compare
-the installed copy's bytes with the digest the implementation carries or does not yield
-cannot-evaluate where they differ: it remains outside that scope, MUST NOT be presented as evidence
-that the installation or the release conforms, and a check of the conformance reports MUST report it
-as inconsistent with that release. A report whose installed-copy digest is the token `not-read` and
-whose runtime result is `cannot_evaluate` is not a conformance report of that release, MUST NOT be
-presented as one, and does not make that release nonconformant. A report that an installation of a
-release emits whose shipped-file digest is the digest of that file's bytes as the release ships them
-and that lacks the installed-copy digest, or writes it in any form other than those two, `not-read`
-with a runtime result other than `cannot_evaluate` or with none included, MUST be treated as a
-conformance report of that release wherever this section names a conformance report of that release,
-so a missing or malformed installed-copy digest never takes a report out of that scope. A release
-does not conform to this section, and a conformance claim MUST NOT be made for it, where its
-documentation or any conformance report of that release omits the declaration or a field the file
-carries or states a declaration that differs from that file's, where any conformance report of that
-release omits the installed-copy digest or the runtime result, writes the installed-copy digest in
-any other form, `not-read` with a runtime result other than `cannot_evaluate` included, or writes
-the runtime result in any form other than `pass`, `fail`, and `cannot_evaluate`, or where its
-documentation does not state where the implementation carries the shipped-file digest. Each such
-failure is a release nonconformance, never a runtime state of the declaration: it MUST NOT be
-treated as making the declaration malformed or contradictory, and it does not change what a runtime
-check of the installed copy yields. A check of the documentation or the conformance reports of a
-release MUST compare each restatement, each shipped-file digest, and each installed-copy digest with
-that file's bytes as the release ships them, never with an installed copy. A fresh, unmodified
-installation of a release is one made as the documentation of that release directs and changed by
-nothing since. A release also does not conform to this section, and a conformance claim MUST NOT be
-made for it, where the runtime check of a fresh, unmodified installation of that release whose
-installed copy holds exactly that file's bytes as the release ships them yields a result other than
-the one this section requires for those bytes, that is, where it yields cannot-evaluate although no
-rule of this section makes it yield cannot-evaluate for those bytes, or does not yield
-cannot-evaluate or authorizes a store operation although one does, or where a report that a fresh,
-unmodified installation of that release emits carries a shipped-file digest other than the digest of
-that file's bytes as the release ships them; no report of another installation is needed to
-establish either, and none can establish either. A check that tests the runtime result of a report
-MUST run the runtime check of such an installation whose installed copy holds exactly that file's
-bytes as the release ships them and compare the result it yields with that runtime result, never
-with the result of any other installation; where no such installation holds those bytes, as where
-the installer of that release rewrites that file, no report whose installed-copy digest and
-shipped-file digest both equal the digest of those bytes and whose runtime result is written as
-`pass`, `fail`, or `cannot_evaluate` is a conformance report of that release, and the runtime check
-of that release makes it nonconformant under this section only where a fresh, unmodified
-installation of it holds those bytes, which section 17 discloses. An implementation that declares no
-class MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
+carry. A fresh, unmodified installation of a release is one made as the documentation of that
+release directs and changed by nothing since, and a fresh run of a release is a run of the runtime
+check and the emitter of a fresh, unmodified installation of that release whose installed copy holds
+exactly that file's bytes as the release ships them. A conformance report of a release is a report
+that an installation of that release emits whose restatement, shipped-file digest, installed-copy
+digest, and runtime result, compared as written, an omitted part included, equal those of a report
+that at least one fresh run of that release emits; a report whose content in those four parts no
+fresh run of that release emits is not a conformance report of that release, MUST NOT be presented
+as one, and does not make that release nonconformant, whatever the installation that emitted it, one
+whose installed copy, carried shipped-file digest, runtime check, or emitter was altered included. A
+conformance report of a release is evidence about that release alone: it MUST NOT be presented as
+evidence that the installation that emitted it is unmodified, and it shows a release nonconformance
+only where a fresh run of that release emits a report of the same content that shows it under the
+rule below on the reports of a fresh run. A report whose installed-copy digest is 64 lowercase
+hexadecimal digits that differ from the digest of that file's bytes as the release ships them and
+whose runtime result is other than `cannot_evaluate` is inconsistent with that release, because a
+runtime check that compares an installed copy with the shipped-file digest this section requires the
+release to carry yields cannot-evaluate for an installed copy whose bytes differ from those the
+release ships, so such a report shows a modified implementation, a defective emitter, or a release
+that carries a shipped-file digest other than the one this section requires or whose runtime check
+does not compare the installed copy's bytes with the digest the implementation carries or does not
+yield cannot-evaluate where they differ: it MUST NOT be presented as evidence that the installation
+or the release conforms, and a check of the conformance reports MUST report it as inconsistent with
+that release. A release does not conform to this section, and a conformance claim MUST NOT be made
+for it, where its documentation omits the declaration or a field the file carries, states a
+declaration that differs from that file's, or does not state where the implementation carries the
+shipped-file digest. A release also does not conform to this section, and a conformance claim MUST
+NOT be made for it, where a report that a fresh run of that release emits omits the declaration or a
+field the file carries, states a declaration that differs from that file's, omits the shipped-file
+digest, the installed-copy digest, or the runtime result, writes any of them in a form other than
+the one this section sets, `not-read` with a runtime result other than `cannot_evaluate` included,
+or states an installed-copy digest other than the one this section defines for that run's installed
+copy or a runtime result other than the one that run's runtime check yielded, or where a report that
+a fresh, unmodified installation of that release emits, whatever its installed copy holds, carries a
+shipped-file digest other than the digest of that file's bytes as the release ships them. A release
+also does not conform to this section, and a conformance claim MUST NOT be made for it, where the
+runtime check of a fresh run of that release yields a result other than the one this section
+requires for that file's bytes as the release ships them, that is, where it yields cannot-evaluate
+although no rule of this section makes it yield cannot-evaluate for those bytes, or does not yield
+cannot-evaluate or authorizes a store operation although one does. Each rule on a fresh run applies
+where any one fresh run of that release, or for the shipped-file digest any one report of a fresh,
+unmodified installation of it, shows the failure, whether or not another does; no report of another
+installation is needed to establish such a failure, and none can establish one. No rule of this
+section makes a runtime check yield `fail` rather than `pass`, or `pass` rather than `fail`, for a
+declaration that no rule of this section makes yield cannot-evaluate, so fresh runs that differ only
+in yielding `pass` or `fail` over that file's bytes as the release ships them show no failure under
+the rule on the runtime check of a fresh run, and a report that states either is a conformance
+report of that release where a fresh run emits a report of the same content. Each such failure is a
+release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making
+the declaration malformed or contradictory, and it does not change what a runtime check of the
+installed copy yields. A check of the documentation or the conformance reports of a release MUST
+compare each restatement, each shipped-file digest, and each installed-copy digest with that file's
+bytes as the release ships them, never with an installed copy. A check that tests whether a report
+is a conformance report of a release, or tests a report's runtime result, MUST make fresh runs of
+that release and compare that report with the reports they emit and the results their runtime checks
+yield, never with those of any other installation; where no fresh, unmodified installation of that
+release holds that file's bytes as the release ships them, as where the installer of that release
+rewrites that file, there is no fresh run, so no report is a conformance report of that release and
+the rules on a fresh run do not apply, the shipped-file digest rule on a report of a fresh,
+unmodified installation aside, which section 17 discloses. An implementation that declares no class
+MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
 malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
 operation. A declaration that is absent, or that omits its release identity, its `spec_version`, its
 homes generation, or its worklog storage generation, is malformed rather than one that declares no
@@ -2610,68 +2605,84 @@ The gates in this standard are strong where they are strong and say so where the
   cannot-evaluate where that copy is malformed or contradictory on other grounds. A report from that
   installation whose runtime check read the edited copy and whose emitter writes the installed-copy
   digest as section 16.1 defines it states a digest that differs from the digest of that file's
-  bytes as the release ships them, so that report is not a conformance report of the release and
-  does not make it nonconformant, and such a report that states a runtime result other than
-  `cannot_evaluate` is inconsistent with the release (section 16.1). The scope of the conformance
-  reports of a release rests on the two digests a report states, which the installation's emitter
-  writes: an emitter defect that writes an installed-copy digest of 64 lowercase hexadecimal digits
-  that differ from the digest of that file's bytes as the release ships them, or that writes
-  `not-read` with `cannot_evaluate` over an installed copy that the runtime check read, or that
-  writes any shipped-file digest other than that digest, takes that report out of scope, so its
-  other defects do not make the release nonconformant. A check of the conformance reports reports
-  such a report as inconsistent with the release only where its installed-copy digest is 64
-  lowercase hexadecimal digits that differ from the digest of that file's bytes as the release ships
-  them and its runtime result is other than `cannot_evaluate`, so such a report that states
-  `cannot_evaluate` over a runtime check that did not yield cannot-evaluate is reported neither as a
-  release nonconformance nor as inconsistent with the release. A report whose installed-copy digest
-  and shipped-file digest both equal the digest of that file's bytes as the release ships them and
-  whose runtime result, written as `pass`, `fail`, or `cannot_evaluate`, is other than one that the
-  runtime check of a fresh, unmodified installation of that release yields over an installed copy
-  holding exactly those bytes, such as `cannot_evaluate` where that check authorizes store
-  operations, is not a conformance report of the release and does not make it nonconformant (section
-  16.1); a check of the conformance reports tells such a report apart only by running such an
-  installation, and where no fresh, unmodified installation of that release holds those bytes, as
-  where its installer rewrites that file, no such report is a conformance report of the release. An
-  installation whose runtime check or carried shipped-file digest is altered while its installed
-  copy is unchanged therefore cannot make the release as shipped nonconformant through the runtime
-  result or the shipped-file digest its reports state, because a report whose runtime result or
-  shipped-file digest differs as above is not a conformance report of the release; section 16.1
-  instead establishes a fault in the release's own runtime check, or in the shipped-file digest its
-  reports carry, from a fresh, unmodified installation of the release alone. An installation whose
-  emitter is altered, whether or not its installed copy is, can put its reports in scope, where they
-  can make the release as shipped nonconformant although it is not at fault, because the scope test
-  cannot tell an altered emitter from an unmodified installation. Such an emitter can, for example,
-  write the digest of the shipped bytes in place of its installed copy's, omit the installed-copy
-  digest or write it in any other form, write `not-read` with a runtime result other than
-  `cannot_evaluate`, or, over an installed copy that is unchanged, write a wrong restatement or omit
-  the runtime result. An anchor outside the installation, such as a signature over that file that
-  the implementation verifies or an independent anchor like the one that section 14.1 has a plan's
+  bytes as the release ships them, so it is a conformance report of the release only where a fresh
+  run emits a report of the same content, a fault of the release's own emitter that section 16.1
+  establishes from that fresh run alone, and otherwise it is not one and does not make the release
+  nonconformant; such a report that states a runtime result other than `cannot_evaluate` is
+  inconsistent with the release (section 16.1). The scope of the conformance reports of a release
+  rests on what a fresh run of the release emits, never on the installation that emitted a report: a
+  report is in scope only where its restatement, its two digests, and its runtime result, compared
+  as written, equal those of a report that at least one fresh run emits, so a defect of the
+  release's own emitter is a release nonconformance through the report that a fresh run emits
+  (section 16.1), and a report that only a modified installation writes is out of scope whatever it
+  states. A check of the conformance reports reports a report as inconsistent with the release only
+  where its installed-copy digest is 64 lowercase hexadecimal digits that differ from the digest of
+  that file's bytes as the release ships them and its runtime result is other than
+  `cannot_evaluate`, so a report out of scope that states `cannot_evaluate` over a runtime check
+  that did not yield cannot-evaluate, or that misstates any other part, is reported neither as a
+  release nonconformance nor as inconsistent with the release. A report whose runtime result,
+  written as `pass`, `fail`, or `cannot_evaluate`, is one that the runtime check of no fresh run
+  yields, such as `cannot_evaluate` where every fresh run's runtime check authorizes store
+  operations, is out of scope and does not make the release nonconformant (section 16.1); a check of
+  the conformance reports tells a report in scope from one out of scope only by making fresh runs,
+  and where no fresh, unmodified installation of the release holds that file's bytes as the release
+  ships them, as where its installer rewrites that file, no report is a conformance report of the
+  release. Where fresh runs of a release differ, a report is in scope where at least one of them
+  emits a report of the same content, and section 16.1 makes the release nonconformant where any one
+  of them yields a runtime result other than the one that section requires or emits a report that
+  breaks its report rules; a check that has made finitely many fresh runs and met none that emits a
+  report of a given content has not thereby established that no fresh run emits one, so it can
+  establish that a report is in scope, never that it is out of scope, and a report, in scope or not,
+  makes the release nonconformant only through a fresh run that shows the same failure. Section 16.1
+  sets no trigger for `fail`: no rule of that section makes a runtime check yield `fail` rather than
+  `pass`, or `pass` rather than `fail`, for a declaration that no rule of that section makes yield
+  cannot-evaluate, so fresh runs that yield `pass` and fresh runs that yield `fail` over the same
+  bytes are each permitted, that difference is no release nonconformance, and a report that states
+  either is in scope where a fresh run emits a report of the same content. An installation whose
+  installed copy, carried shipped-file digest, runtime check, or emitter is altered therefore cannot
+  make the release as shipped nonconformant through any report it emits: a report it emits whose
+  content no fresh run emits is not a conformance report of the release, and one whose content a
+  fresh run emits shows no failure that the fresh run's own report does not show; section 16.1
+  establishes every report-borne nonconformance, and every fault in the release's own runtime check,
+  from a fresh, unmodified installation of the release alone. An installation whose emitter is
+  altered, whether or not its installed copy is, can put a report in scope only by writing content
+  that a fresh run emits, so such a report makes the release as shipped nonconformant only where
+  that fresh run's own report does, and a release that is not at fault cannot be made nonconformant
+  that way; such a report is evidence about the release, never that the installation that emitted it
+  is unmodified (section 16.1). Such an emitter can, for example, write over an edited installed
+  copy exactly the content that a fresh run emits, the digest of the shipped bytes in place of its
+  installed copy's included, and that report is in scope although its installed copy was edited,
+  while each report it writes with content that no fresh run emits, such as one that omits the
+  installed-copy digest or writes it in any other form, writes `not-read` with a runtime result
+  other than `cannot_evaluate`, writes a wrong restatement, or omits the runtime result, is out of
+  scope, so none of those defects makes the release nonconformant unless a fresh run's own report
+  shows it. An anchor outside the installation, such as a signature over that file that the
+  implementation verifies or an independent anchor like the one that section 14.1 has a plan's
   `manifest_sha256` checked against, is the stronger option only against an edit that does not also
   change the implementation's verification key or its anchor check; section 16.1 does not require
   one. An installer that rewrites that file's bytes, such as by converting its line endings, makes
   every runtime check of the rewritten copy yield cannot-evaluate (fail-closed) where the
-  implementation carries the digest of that file's bytes as the release ships them, and a report
-  that installation emits with its installed copy's digest is not a conformance report of the
-  release, because that digest differs from the digest of that file's bytes as the release ships
-  them. Where a release's implementation instead carries the digest of the rewritten bytes, each
-  runtime check that reads a copy holding exactly those bytes passes the byte comparison and then
-  validates that copy as the declaration, so it still yields cannot-evaluate where that copy is
-  malformed or contradictory on other grounds. Such a release carries no digest of that file's bytes
-  as the release ships them, so it does not conform to section 16.1, yet where every emitter writes
-  the shipped-file digest the implementation carries, every report carries that other digest, so no
-  report is in scope to show that: a check of the conformance reports then finds no conformance
-  report of the release and reports as inconsistent with it each report whose installed-copy digest
-  differs from the digest of that file's bytes as the release ships them and that states a runtime
-  result other than `cannot_evaluate`, and only a report that a fresh, unmodified installation of
-  the release emits (section 16.1), or an inspection of the implementation, shows that the fault is
-  the release's. A report that an installation emits whose shipped-file digest is the digest of that
-  file's bytes as the release ships them and that lacks the installed-copy digest, or writes it in a
-  form other than 64 lowercase hexadecimal digits or `not-read` with `cannot_evaluate`, is treated
-  as a conformance report of the release whatever its installed copy holds, and that omission or
-  form is itself a release nonconformance (section 16.1). A check of the documentation detects a
-  release whose documentation states no place where the implementation carries the shipped-file
-  digest; it cannot confirm that the implementation carries that digest at the stated place, which
-  only an inspection of the implementation establishes.
+  implementation carries the digest of that file's bytes as the release ships them, and no report is
+  a conformance report of the release, because no fresh, unmodified installation of it holds those
+  bytes, so there is no fresh run (section 16.1). Where a release's implementation instead carries
+  the digest of the rewritten bytes, each runtime check that reads a copy holding exactly those
+  bytes passes the byte comparison and then validates that copy as the declaration, so it still
+  yields cannot-evaluate where that copy is malformed or contradictory on other grounds. Such a
+  release carries no digest of that file's bytes as the release ships them, so it does not conform
+  to section 16.1, yet no report is in scope to show that, because there is no fresh run: a check of
+  the conformance reports then finds no conformance report of the release and reports as
+  inconsistent with it each report whose installed-copy digest differs from the digest of that
+  file's bytes as the release ships them and that states a runtime result other than
+  `cannot_evaluate`, and only the shipped-file digest that a report of a fresh, unmodified
+  installation of the release carries (section 16.1), or an inspection of the implementation, shows
+  that the fault is the release's. A report that omits the installed-copy digest or the runtime
+  result, or writes either in a form other than the one section 16.1 sets, is out of scope unless a
+  fresh run emits a report of the same content, and then the fresh run's own report makes the
+  release nonconformant (section 16.1), so a missing or malformed part never makes the release
+  nonconformant through the report of an installation that no fresh run matches. A check of the
+  documentation detects a release whose documentation states no place where the implementation
+  carries the shipped-file digest; it cannot confirm that the implementation carries that digest at
+  the stated place, which only an inspection of the implementation establishes.
 
 ## Appendix A: record envelope example
 
