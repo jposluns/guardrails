@@ -237,12 +237,20 @@ replaces the reporting machinery outright (a forged record over a clean exit), e
 there. Offline, stdlib only; imported by opf.py as a sibling and by tools/ callers through an
 explicit opf/tools path insert.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _child_contract.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import gc
 import io
 import operator
 import os
 import signal
-import sys
 import _signal
 
 # How many collection passes the record handler may make before one settles (changes nothing). A

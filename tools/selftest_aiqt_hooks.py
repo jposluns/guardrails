@@ -106,6 +106,15 @@ floor synthesized in-tree, removed in the finally.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import collections
 import contextlib
@@ -117,7 +126,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -267,7 +275,10 @@ def _note_constructor_shape_failures(path=None):
     assembled at run time ("system" + "Message", an f-string, a join, a decode, a dict built from a
     variable key), a constructor or note reached through getattr, globals(), vars(), importlib or another
     module's copy of the hook source, or a patched json.dumps, print or sys.stdout, for example). Review,
-    not this check, closes those."""
+    not this check, closes those.
+    Exempt: the PYTHON-FLOOR prelude, the one top-level `if` right after the FLOOR_FAIL_OPEN_MODES
+    assignment. It runs before any constructor exists, so it writes its own fail-open note, and
+    tools/check_python_floor.py pins that statement to its HOOK_GUARD_TEMPLATE by AST."""
     path = Path(path or aiqt_hooks.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     out = []
@@ -328,6 +339,13 @@ def _note_constructor_shape_failures(path=None):
             out.append("(note-shape-deny-note-{}) the deny constructor {} returns a note constructor's call; "
                        "declare it in NOTE_CONSTRUCTORS so its callers are inventoried".format(name, name))
     docs = _docstring_ids(tree)
+    floor_guard = set()
+    for before, node in zip(tree.body, tree.body[1:]):
+        if (isinstance(before, ast.Assign) and len(before.targets) == 1
+                and isinstance(before.targets[0], ast.Name) and before.targets[0].id == "FLOOR_FAIL_OPEN_MODES"
+                and isinstance(node, ast.If)):
+            floor_guard.update(id(child) for child in ast.walk(node))
+            break
     deny_ok = set()
     for name in deny_names & leaves:
         for node in ast.walk(bodies[name]):
@@ -345,7 +363,7 @@ def _note_constructor_shape_failures(path=None):
             key_text = "attribute"
         elif isinstance(node, ast.Name) and node.id == "systemMessage":
             key_text = "name"
-        if key_text == "keyword" and id(node) in inside_leaf:
+        if key_text == "keyword" and id(node) in inside_leaf or id(node) in floor_guard:
             continue
         if key_text is None or inside_leaf.get(id(node)) in names or id(node) in deny_ok:
             continue
@@ -745,7 +763,8 @@ def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's;
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's and
+    review_dispatch_pin's;
     the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
     fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
     are selftest_orch_hooks.Fixture repos under tmp."""
@@ -813,6 +832,9 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+    rd = orch.RdpFixture(base, "review-dispatch")
+    note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
+         rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -1485,10 +1507,6 @@ def main():
 
 
 def _main_with_recorder():
-    if sys.version_info < (3, 12):
-        print("SELF-TEST ERROR: the note-site coverage monitor needs sys.monitoring, which requires Python "
-              "3.12 or later; this interpreter is {}.{}".format(*sys.version_info[:2]), file=sys.stderr)
-        return 2
     monitor = _NoteSiteMonitor()
     monitor.start()
     try:
@@ -1497,11 +1515,32 @@ def _main_with_recorder():
         monitor.stop()
 
 
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-hooks-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-hooks-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
@@ -7469,6 +7508,15 @@ def _main_isolated(monitor):
         if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
                 aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
+
+        # (pf-modes) PYTHON-FLOOR: the floor guard runs before HANDLER_EVENT exists, so it carries its own
+        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open, or an
+        # older interpreter would block a Stop-type event (or wave a PreToolUse one through).
+        _pf_want = tuple(sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
+                                if event in aiqt_hooks.FAIL_OPEN_EVENTS))
+        if aiqt_hooks.FLOOR_FAIL_OPEN_MODES != _pf_want:
+            failures.append("(pf-modes) FLOOR_FAIL_OPEN_MODES {!r} differs from the fail-open handlers in "
+                            "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
         _test_note_literal_sites(failures, tmp)

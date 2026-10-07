@@ -207,10 +207,18 @@ stubs do not produce (including gitleaks absent and the NOT RUN branch), and unt
 combinations of failing gates. Harness detection can hide even a single-gate reset;
 it does not require a combination of failures or the gitleaks NOT RUN branch.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_ci_parity.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import re
 import shlex
-import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -4598,7 +4606,6 @@ def self_test():
             ("_scrub_scoped_first", "read_text"): 1,
             ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
-            ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
         },

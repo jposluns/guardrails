@@ -39,9 +39,17 @@ Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (fa
 proves the gate FAILS on a seeded internal name (a provenance id, a host path, and a hashed codename) and
 passes clean generic content, so removing a layer makes a case fail.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_internal_names.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import re
 import stat
-import sys
 from pathlib import Path
 
 # Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.

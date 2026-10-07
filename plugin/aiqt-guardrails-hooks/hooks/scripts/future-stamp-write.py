@@ -319,12 +319,23 @@ Contract: WARN ONLY. Silent = no stdout, exit 0; a finding = ONE JSON object {"s
 stdout, exit 0, where <line> is a single line of at most 100 characters (see _warn_line). The hook never
 denies, blocks, or asks: where this text says a write is "denied" or a "false deny", read "warned" or a
 "false warning". Fail-OPEN (allow) on unparseable input or any internal error, including an argument,
-stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a security boundary. The
-payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
-error writing the warning (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
+stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a security boundary. The one
+exception to both is an interpreter older than Python 3.14 that can start the hook: the guard at the top of
+this file reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or
+newer` to stderr and exits 2. Run directly from a PreToolUse entry, that exit blocks every matching Write,
+Edit, MultiEdit and Bash call until Python is upgraded or the hook's entry is removed. The pack's plugin
+runs this file through a fixed launcher that reports any nonzero exit as exit 1, a non-blocking error, so
+under the plugin every matching call goes ahead unchecked. An older interpreter that cannot start the hook
+never reaches the guard and fails with Python's own error first: one that predates the -I option exits 2,
+which still blocks every matching call (the plugin's launcher passes -I too), and one that accepts -I but
+cannot compile this file (Python 3.4 and 3.5 cannot: it uses f-strings) exits 1, directly or under the
+launcher, a non-blocking error, so every matching call goes ahead unchecked; .preview/README.md (Moved to
+the pack) describes the launcher. The payload is read as BYTES and parsed by json.loads, so its decoding
+does not depend on the process locale. An error writing the warning (a closed or full stdout) also fails
+open (round 24): it is swallowed and the hook
 exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with os._exit(0), so no
 exit-time flush can fail it. There is no worker bypass: no environment variable skips the check, and the
-hook writes nothing to stderr.
+hook writes nothing to stderr apart from the interpreter guard's line.
 Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
 main-session calls, with no skip: a subagent applies store writes on the main session's behalf, and a helper
 can compose a timestamp that is then relayed into a record, so exempting it would open the very drift path
@@ -456,6 +467,15 @@ Self-test: python3 -I -S -B future-stamp-write.py --self-test
 It needs no sibling file: the code shared verbatim with a companion hook is compared by a repository gate.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: future-stamp-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import bisect
 import collections
 import datetime
@@ -463,7 +483,6 @@ import json
 import os
 import re
 import stat
-import sys
 import time
 
 UTC = datetime.timezone.utc

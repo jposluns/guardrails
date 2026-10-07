@@ -21,7 +21,8 @@ former companions, `clock-inject.py` and `future-stamp-write.py`, are now part o
 [Moved to the pack](#moved-to-the-pack). The other hooks guard completion
 records, background polling loops, and existing working-record files. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
-error or input it cannot evaluate, it gets out of the way rather than blocking your work. Each file states
+error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
+exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
@@ -60,10 +61,10 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `e6c3acafa2a61e2f621b2f495094917002afc73091504e6b68e6f1b9c6eee1b4` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
+| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
+| `stamp-truth-stop.py` | `87e9652ee4d18bb330f5c5c9518069025c3cb7f17a4b525edb161123f348d164` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -111,7 +112,12 @@ What changed in the pack copies:
   the file is missing, cannot be read or parsed, raises an error, or exits with any code other than 0
   through `sys.exit` or by returning. Run directly, Python exits 2 on a missing file, and exit 2 on
   `PreToolUse` blocks the call. Exit 1 is a non-blocking hook error (from the host hook documentation,
-  not a live probe). Five cases fall outside the launcher. A `python3` older than 3.4 rejects `-I` and
+  not a live probe). On a `python3` that accepts `-I` but is older than the floor the hooks require,
+  each pack script either cannot be compiled (an interpreter that predates f-strings, which both scripts
+  use) or stops at its own interpreter guard, which writes its one-line error (the form shown in
+  [Installing a hook](#installing-a-hook), step 4) to standard error and exits 2; the launcher reports
+  both as exit 1, so the call goes ahead with no warning and no clock line. Five cases fall outside the
+  launcher. A `python3` older than 3.4 rejects `-I` and
   exits 2. A `python3` that cannot be found or started gets whatever outcome the host gives it (not
   verified). A script that ends the process with `os._exit(2)` exits 2; the shipped scripts call
   `os._exit` only with 0. A standard stream that is a directory makes Python exit 1 at startup, before
@@ -153,7 +159,8 @@ fails and report it; do not work around a failed check.
    If it prints anything other than `<file>: OK`, delete the downloaded file and stop. A mismatch means
    the file is not the one this page describes.
 
-3. Run the hook's own self-test and require it to pass:
+3. Check that `python3 --version` reports at least Python 3.14, which the hooks require; if it does not,
+   stop. Then run the hook's own self-test and require it to pass:
 
    ```sh
    python3 -I -S -B ~/.claude/hooks/<file> --self-test
@@ -188,7 +195,21 @@ fails and report it; do not work around a failed check.
      a `REGISTRATION` constant; use this same guard for it.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with.
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
+     Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
+     `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
+     start the hook, each hook reads no input, writes one line beginning
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
+     Claude Code reads the exit by event: for the three `PreToolUse` hooks the exit is 2 and every
+     matching tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking
+     error, so every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap
+     would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
+     the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
+     that predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates
+     f-strings cannot compile `stamp-truth-stop.py`, which uses them, and exits 1. Exit 1 is a
+     non-blocking error on every event; exit 2 denies every matching `PreToolUse` call, and on `Stop` it
+     blocks the stop, and the hook's own block cap never runs. If you see any of these errors, upgrade
+     Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 

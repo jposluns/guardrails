@@ -25,6 +25,12 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
+  "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
+                      "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
+                                 "path": "Review-path:", "repo": "Review-repo:",
+                                 "branch": "Review-branch:"},
+                      "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
+                      "max_brief_bytes": 1048576},
   "mistakes_register": "path",
   "attestations": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
@@ -152,6 +158,184 @@ silently replaced and its line dropped. Any nonphysical line-boundary or separat
 otherwise smuggle a second item onto one physical line or embed content inside a sentinel; the enumerator
 rejects it rather than guess. Lines are otherwise split on physical newlines only (CR, LF, CRLF).
 
+## The review dispatch binding
+
+The optional `review_dispatch` key turns on the review dispatch hook (`review-dispatch-pin`, rule
+vfxcmt). Without it the hook does nothing. The key is checked strictly: an unknown key, a missing
+`commands`, `brief_option`, `labels` or `authority`, or a value of the wrong type makes the binding
+malformed.
+
+- `commands` lists the basenames of the commands that dispatch a review.
+- `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
+- `labels` names the five brief labels. They must be distinct.
+- `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
+  with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
+  for the hook's own git reads, and it must print exactly one full commit id: the
+  authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
+  check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
+  when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`. The check runs in a worker
+  thread that the hook waits for only until the budget ends, so a read blocked in the kernel cannot
+  hold the hook. Every file read also checks the budget before each read, and a result reached after
+  the budget has run out is never an allow.
+- `max_brief_bytes` caps the brief size (default 1048576).
+
+The hook checks only a provably plain dispatch, decided on the raw characters before any lexing by
+the shared plain-command specification. A command is plain only when every character is printable
+ASCII (no tab, newline, NUL or non-ASCII character); none of `$`, backquote, backslash, `;`, `&`,
+`|`, `<`, `>`, `(`, `)`, `{`, `}`, `[`, `]`, `*`, `?`, `!`, `#` or `~` appears outside a single-quoted
+segment; a double-quoted segment holds none of them; no quote is left open; words are separated by
+spaces only; and the command word is a bare name or path, unquoted, that is not a shell, an
+interpreter, `eval`, `exec`, `source`, `.`, `env`, `command`, `builtin`, `xargs`, `nohup`, `timeout`,
+`sudo` or another wrapper that runs a command. A plain dispatch is therefore the only command of the
+call: no operator, no redirection (not even `</dev/null`) and no second command. Its command word is
+a declared command (a path to it counts), compared without regard to case. The brief must be the last
+argument, given once as `--brief PATH` or `--brief=PATH`, with no `--` before it; a two-character
+brief option is never accepted in its `-b=PATH` form, which a getopt parser reads as the value
+`=PATH`. A parser the hook does not know may also take a brief from an alias or a grouped short
+option, so a brief given last is the one a last-wins parser keeps. A second brief, including an
+abbreviation such as `--brie PATH`, is refused. A relative brief path resolves against the session
+cwd; a path under `/proc` or `/dev` is withheld as `UNVERIFIABLE:`, since it can name a different file
+in the hook's process (a sandbox may give each process its own `/dev/shm`). The brief is opened once, without blocking and without following a symlink,
+and must be a regular file; one leading byte-order mark is dropped.
+
+In a session that a binding scopes, every Bash call must be one plain command. A command that is not
+plain is withheld as `UNVERIFIABLE:`, whatever it names, with a message that says how to split the work
+into plain calls and write the dispatch plainly: a dispatcher name assembled at run time (a variable
+joined to text, a glob, command output) is not in the raw text, so no name check can clear a command
+that is not plain. A plain command that names a declared command other than as its command word (a
+`git -c` alias that runs it, say), compared without regard to case, is withheld too. A plain command
+that names no declared command is allowed.
+
+The hook reads labels only from the brief, only at column 0, and only as the exact label followed by
+one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
+boundary other than a physical newline.
+
+- `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
+  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row.
+- `Reviewed-revision:` is required, once, for a `revision` target. It must be the full lowercase
+  commit id, at the length of the repository's object format. A short id, a branch name or `HEAD`
+  is refused.
+- `Review-path:` lines list the review set, one path per line, each kept exactly as written.
+- `Review-repo:` (optional) is the absolute path of the repository top level the review reads. It
+  defaults to the session repository root.
+- `Review-branch:` (optional) is informational. If it does not resolve to the pin, the dispatch is
+  allowed with a note.
+
+For a `revision` target, the hook checks the following in order. The first failure decides.
+
+1. The pin resolves to exactly that commit. A tag object id is not accepted.
+2. The authority prints the same commit id.
+3. Every parent named in the raw commit is present.
+4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
+   of a merge, or the empty tree for a root commit.
+5. No declared path is staged against the pin, and the working tree matches the pin at every
+   declared path. The working tree is compared by content: the hook hashes each declared file, or
+   reads each symlink target, and compares the result and the file mode with the pin's tree entry.
+   An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
+   or a configured filter therefore cannot report a changed file as clean. A path the pin deletes
+   must be absent. A checked-out submodule must be at the pinned commit. With `core.fileMode`
+   false, a file that differs from the pin only in its executable bit is clean, as git reads it.
+
+Every git read disables replacement refs, grafts, pathspec magic, the commit-graph cache, the
+fsmonitor, the untracked cache and submodule recursion, and takes no optional locks. The changed set
+and the staged state are read with `--ignore-submodules=none`, so a `.gitmodules` `ignore` value
+cannot hide a submodule change. A file the pin replaces with a directory holding the pin's own
+entries counts as clean.
+
+The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
+reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
+duplicate label, an unreadable brief, a failed or timed-out git probe, an exhausted time budget, and
+an authority that fails or prints anything other than one commit id. A linked worktree is scoped
+by its main worktree's registry, found through git or, when git cannot run (a broken shared
+configuration), through the raw `.git` and `commondir` files. A linked worktree whose main worktree
+cannot be located (a git directory separated from the main worktree) withholds every Bash call,
+whether or not git can run. When git cannot say where the main worktree is (a failed or timed-out
+probe), the raw `.git` and `commondir` files are read instead. A linked worktree of a bare repository
+(`core.bare` true) has no main worktree and is not withheld, and a failed probe where `.git` is a
+directory is no linked worktree, so a session with no registry anywhere is not withheld. Setting
+`core.bare` to true in a separated git directory's configuration would end that withholding. A registry without a binding never ends the search: the session
+repository's registry, its main worktree's, and every registry on the cwd's ancestors are read,
+nearest first, and the first binding decides, so a registry of `{"version": 1}` checked out, written
+or nested below an orchestrated tree cannot hide its binding. This hook reads each registry file on
+its own, so a local `.aiqt/orchestration.local.json` without a binding cannot hide a binding in the
+committed `.aiqt/orchestration.json`. In a bound session, a plain command that names a registry file
+or the `.aiqt` directory is refused unless its command word only reads (`cat`, `head`, `tail`, `wc`,
+`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A command that changes the registry without naming it (a git
+command that writes or removes work-tree files, a checkout from a subtree, the removal of a parent
+directory, a script) is not predicted. Instead, when the hook first sees a registry of the session
+repository, or of its main worktree, bind review dispatch, it records the binding (its digest, the binding
+and the registry paths) in hook-owned state outside the work tree:
+`GIT_COMMON_DIR/aiqt/review-dispatch-binding/KEY.json` in the repository's resolved common git directory,
+KEY the sha256 of the worktree's identity there (`.` for the main worktree, `worktrees/NAME` for a linked
+one) and the registry's path relative to that worktree's top level, never an absolute path, so a renamed or
+moved repository keeps its record. It is written without following a symbolic link, mode 0600 in directories
+of mode 0700. The common git directory is resolved once per check; where git cannot name it, every Bash call
+is withheld. No allowlisted git subcommand writes there. In a bound session, a plain command other than a
+read is refused when one of its words, resolved against the cwd as written and with every symbolic link
+followed, is the resolved common git directory or lies inside it, whatever its spelling: a separated git
+directory not named `.git` is protected like `.git`. A directory holding it is refused only to a command
+that can delete, move or recursively rewrite it: `rm` with `-r`, `-R` or `-d`, `rmdir`, `mv` of it (or
+`mv --exchange` into it), `chmod` in any form (a mode alone can cut every path to the git directory),
+`cp -r` or `cp -a` of it, a `cp`, `mv` or `ln` whose written path merges into it (`x/.`, `-T`) or
+resolves into the git directory, `opf` naming it, and an option word the coreutils option tables do not
+model. A dispatch command may name a directory holding the git directory (`--workdir .`); one naming the
+git directory or a path inside it is refused. Writing a new file or directory into it (`cp x .`,
+`touch ./f`, `mkdir d`, `ln -s t ./l`) is allowed, and `git add .` is not refused, since git writes its own
+directory through no pathspec. Where git cannot resolve the session repository, the git directory the
+raw `.git` and `commondir` files name is protected, and one they cannot locate refuses every command but a
+read. Each check reads each registry once: the record comparison and the enforcement use that one read, and
+an own registry with a record is enforced with the recorded binding, so a registry removed during a check
+cannot end it. While a record exists, a registry that is missing, unreadable, without a binding, or binding
+differently from the record withholds every dispatch as UNVERIFIABLE, naming the change and the record, and
+other plain commands are still judged under the recorded binding. An operator either restores the recorded binding or, outside
+the session, removes the record (`rm "$(git rev-parse --git-common-dir)/aiqt/review-dispatch-binding/KEY.json"`,
+the full path given in the refusal), and the next check records the binding then in force. A record that
+cannot be read withholds every Bash call, and a binding that cannot be recorded withholds every dispatch.
+Not caught: a process that removes both the registry and the record (an operator, a non-Bash tool, or a
+command that reaches the record without naming it, such as an alias of the git directory through a bind
+mount), and a registry changed before the hook first saw it bind, since a repository where no check ran
+while it was bound has no record; where git cannot resolve the session repository, no record is read. Ordinary git commands (`add`,
+`commit`, `checkout`, `restore`, `reset`) are allowed whatever the registry's git state; `git clean`,
+`git am` and `git apply` are off the allowlist. When git cannot resolve the session
+repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
+no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
+moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one
+that is not the registry's own (a nested repository, a moved top level), and a binding is found,
+every dispatch is withheld as `UNVERIFIABLE:`. The authority runs from the top level of the worktree
+whose registry binds the dispatch, so a relative `authority.argv` is always the registry's own. A
+dispatch is withheld as `UNVERIFIABLE:` when the environment sets a variable that moves the
+repository, index, object store or history git reads (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_QUARANTINE_PATH`,
+`GIT_NAMESPACE`, `GIT_REPLACE_REF_BASE`, `GIT_GRAFT_FILE`, `GIT_SHALLOW_FILE`): the hook's reads ignore
+it, but the dispatch inherits it. A malformed binding, a registry that cannot be read (including a
+FIFO, a device or a symlink in its place), or an ancestor search that cannot be made withholds every
+Bash call, foreground or background, until an operator repairs it.
+
+Limits:
+
+- A dispatch through an undeclared command, an alias, a function, a script, a nested shell string or
+  a non-Bash tool is not seen.
+- The hook checks the declaration and the repository, not what the worker reads. The worker must
+  read from a checkout of the pinned revision, so point `Review-repo:` at a worktree checked out
+  there.
+- A misdeclared target bypasses the check.
+- The authority's own correctness is the adopter's concern.
+- Delivery acceptance is not checked.
+- A plain command whose program runs an argument or its own configuration as shell text (a `git -c`
+  alias, a pager or editor setting, a package script, a makefile) can assemble a dispatcher name the
+  hook does not see; only a name written in full in the command is found.
+- The dispatcher's own options other than the brief option (a `--family` or a working directory, say)
+  are its own; the hook checks the brief and the repository, not what those options select.
+- Variables that configure git without moving the repository (`GIT_CONFIG_*`, `GIT_CONFIG_PARAMETERS`)
+  are not refused: the hook's own reads drop them, but the verifier inherits them.
+- Many commands are refused although they dispatch nothing: in a session a binding scopes, every
+  command that is not plain (a pipeline, `&&`, a redirection, a variable, a glob, a wrapper), and any
+  plain command that mentions a declared command name outside one plain dispatch, such as
+  `grep orch-dispatch` or a commit message that names it. Run each command as a call of its own, and
+  redirect output another way.
+- Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
+  endings or a filter) differs by content from the pin and is refused.
+
 ## Platforms without hooks
 
 The decision algorithm binds as an operating procedure: before any stop, idle wake, or drained
@@ -160,6 +344,10 @@ act on its disposition table; the deterministic gates (record drift, mistakes re
 are the enforced part on a hookless platform. The preflight is visibility only, not a blocking control,
 and carries no enforceability-ledger row; this prose operating procedure is never advertised as
 equivalent to a blocking hook.
+
+A dispatcher without hooks can run the review dispatch check as a preflight: pipe the PreToolUse
+payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to `aiqt_hooks.py review_dispatch_pin`,
+and withhold the dispatch on exit 2 or on a printed `deny` decision.
 
 ## Honest limits (suite-level)
 

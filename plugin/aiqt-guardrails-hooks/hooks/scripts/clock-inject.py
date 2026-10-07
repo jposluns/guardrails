@@ -49,12 +49,20 @@ process zone.
 
 Contract: context = hookSpecificOutput {hookEventName, additionalContext} JSON on stdout, exit 0. This hook
 NEVER fails the tool: any error at all exits 0, including an argument, stdin, or JSON error before the
-payload is evaluated. The payload is read as BYTES and parsed by json.loads, so its decoding does not depend
-on the process locale. Unparseable hook input still emits the clock line under PostToolUse (the clock does not
+payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
+hook: the guard at the top of this file reads no input, writes one line beginning
+`error: clock-inject.py requires Python 3.14 or newer` to stderr and exits 2. Under PostToolUse and
+PostToolUseFailure the tool call has already run, so that exit blocks nothing and no clock line is added: run
+directly, the exit is 2 and the line reaches the assistant; the pack's plugin runs this file through a fixed
+launcher that reports any nonzero exit as exit 1, a non-blocking error. An older interpreter that cannot
+start the hook never reaches the guard and fails with Python's own error first; .preview/README.md (Moved to
+the pack) describes those cases. The payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the process locale.
+Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
 os._exit(0), so no exit-time flush can fail it. There is no worker bypass: no environment variable skips
-the hook, so a subordinate session gets the clock line too. The hook writes nothing to stderr.
+the hook, so a subordinate session gets the clock line too. The hook writes nothing to stderr apart from
+the interpreter guard's line.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
 
@@ -76,12 +84,20 @@ Self-test: python3 -I -S -B clock-inject.py --self-test
 It needs no sibling file: the code shared verbatim with a companion hook is compared by a repository gate.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: clock-inject.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import json
 import os
 import re
 import stat
-import sys
 
 LEASE_MAX_BYTES = 1 << 20
 _SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-(\d{8}T\d{6}Z)")

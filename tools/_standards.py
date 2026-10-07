@@ -6,7 +6,7 @@ ids that a rule's `map-<key>` frontmatter is permitted to cite. `gen_rules` deri
 these files (a key exists only if its manifest does); `check_mappings` validates every mapped id against
 them. An id that is not in its manifest cannot ship, so a fabricated mapping is structurally impossible.
 
-Requires Python 3.11+ for tomllib (CI pins 3.14).
+Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml.
 """
 import os
 import re
@@ -17,8 +17,21 @@ from urllib.parse import urlparse
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: the standards loader requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:
+    if tuple(sys.version_info[:2]) < (3, 14):
+        # Reached only through an importer that carries no floor guard yet (every guarded
+        # entrypoint refuses an older Python that can start it first; one that cannot start
+        # it fails with Python's own error before reaching here): the version is the
+        # problem, so name it.
+        sys.stderr.write(
+            "error: the standards loader requires Python 3.14 or newer; this is Python %d.%d.%d "
+            "(%s). Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    else:  # every Python 3.14 ships tomllib, so this installation is incomplete
+        sys.stderr.write(
+            "error: the standards loader cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 # Required top-level fields in every manifest. Attribution (licence, source-url) is intentionally NOT
 # required here: it is added, per-source verified, with the public NOTICE. This file's job is to make
