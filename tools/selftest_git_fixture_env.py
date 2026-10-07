@@ -57,9 +57,12 @@ reached its time bound, so this run is no verdict on that member: the timeout is
 CANNOT EVALUATE, never as a failure of that member. A finding is folded into the cannot-evaluate
 list only when it is attributed to a recorded timeout (see _timeout_cause and
 _registered_offenders: the finding's own result is that timeout's message, which names the member,
-or it lists only members whose run timed out with no hook, monitor or exposure evidence); every
-other finding is definite and outranks cannot-evaluate, so the run exits 1 (SELF-TEST FAIL, with the
-timeouts listed beside it). tools/check_selftest_execution.py treats any child exit outside {0, 1}
+or it lists only members whose run timed out with no hook, monitor or exposure evidence, or, for a
+check over several scenarios, every scenario that did not time out matched; see
+_partial_timeout_cause); every other finding is definite and outranks cannot-evaluate, so the run
+exits 1 (SELF-TEST FAIL, with the timeouts listed beside it). A definite finding over a lane never
+names a member whose run only timed out: that member is listed by its own timeout message under
+cannot evaluate (_registered_offenders, _lifecycle_finding). tools/check_selftest_execution.py treats any child exit outside {0, 1}
 as CANNOT EVALUATE and itself exits 2 (its self-test leg st/child-rc2-2), so a timeout never reads as
 a pass or as a code failure there either.
 
@@ -1406,10 +1409,20 @@ def _config_injection_lane(base):
 # (the isolation matrix's 31 cases at 180 s each plus a 30 s launch margin), above this default;
 # the tools/check_selftest_execution.py members set no internal bound of their own (the CI job
 # timeout is their outer bound). The kill-timeout rule ("A kill timeout outlives the wait it
-# bounds", AGENTS.md) allows a deadline below a callee's budget only when reaching it is
-# attributed to the deadline rather than reported as the callee's failure; this suite does that:
-# a member that reaches its bound is cannot-evaluate (exit 2 when nothing definite was found),
-# never a FAIL of that member and never a pass.
+# bounds", AGENTS.md) allows a deadline below a callee's budget only where cutting the work short
+# is the explicit intent, and only when reaching it is attributed to the deadline rather than
+# reported as the callee's failure.
+# CHOICE: the default is NOT raised above 5610 s; it stays a deliberate shorter deadline, and
+# cutting a member short is the explicit intent here because this lane owns no member's verdict.
+# Every roster member is a registered step or the runner behind a registered --suite step
+# (_registered_selftests reads the CI workflow, both standalone runners and the suite manifest),
+# and that step runs the member to completion under no deadline from this suite, so no member's
+# pass or fail depends on this bound. This lane asks a different question (does the
+# member stay clean under injected caller hooks, ignore files, attributes and fsmonitor), it
+# reruns each member in three config lanes (combined, malformed, system), and the bound caps how
+# long one stalled rerun can hold that answer back. Cutting a rerun short leaves the question
+# unanswered, never answered wrongly: reaching the bound is cannot-evaluate (exit 2 when nothing
+# definite was found), never a FAIL of that member and never a pass.
 CONFIG_MEMBER_BOUND_DEFAULT = 1200
 CONFIG_MEMBER_BOUNDS = {
     # MEASURED (2026-10-07, nice 10, load5 about 12 to 14 on a 16-CPU host): one complete run took
@@ -1478,8 +1491,12 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
     A timeout is RECORDED FIRST, in cannot_evaluate (default CANNOT_EVALUATE), and announced as
     banner + message on report (default sys.stdout, never stderr: the cannot-evaluate path is a
     stdout report plus exit 2, and the execution gate requires the suite's error stream to hold
-    only declared bytes); only then is the child cleaned up (_stop_member_group, bounded), and a
-    cleanup problem is printed on the same stream as a second line without changing the result.
+    only declared bytes); only then is the child cleaned up (_stop_member_group, bounded), in a
+    finally that runs whatever the record or the announcement does (a raising stream still has
+    the child killed and reaped before the exception propagates), and a cleanup problem is
+    printed on the same stream as a second line without changing the result.
+    config/member-timeout-record-before-cleanup and config/member-timeout-cleanup-on-raise pin
+    that order.
     DISCLOSED RESIDUAL: a descendant that moved itself to another process group survives the
     kill; its pipe is drained for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are
     closed. In its own session the child has no controlling terminal: a read of an inherited
@@ -1496,13 +1513,15 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
             stdout, stderr = proc.communicate(timeout=bound)
         except subprocess.TimeoutExpired:
             message = "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(label, bound)
-            (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
-            print(banner + message, file=sink, flush=True)
-            problems = _stop_member_group(proc)
-            if problems:
-                print("{}cleanup after that timeout was incomplete (the timeout stays "
-                      "cannot-evaluate): {}".format(banner, "; ".join(problems)),
-                      file=sink, flush=True)
+            try:
+                (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+                print(banner + message, file=sink, flush=True)
+            finally:
+                problems = _stop_member_group(proc)
+                if problems:
+                    print("{}cleanup after that timeout was incomplete (the timeout stays "
+                          "cannot-evaluate): {}".format(banner, "; ".join(problems)),
+                          file=sink, flush=True)
             return message, "", ""
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             _stop_member_group(proc)
@@ -1532,18 +1551,37 @@ def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=Non
     return rc
 
 
-def _registered_offenders(results):
-    """The registered argv whose config run was not clean, in results order, and the timeout
-    messages that finding is attributed to: non-empty only when EVERY offender's run timed out
-    (its exit-code slot is a timeout message naming it) with no hook, monitor or exposure
-    evidence, so a timed-out member that also leaked, or any other offender, keeps the finding
-    definite."""
+def _split_offenders(results, recorded=None):
+    """The registered argv whose config run was not clean, split in results order into
+    (definite, timed_out, timeout messages). A member is timed_out when its run only TIMED OUT:
+    its exit-code slot is a timeout message (which names it) recorded in recorded (default
+    CANNOT_EVALUATE), with no hook, monitor or exposure evidence. A timed-out member that also
+    leaked, an unrecorded timeout message, and every other unclean result are definite."""
+    recorded = CANNOT_EVALUATE if recorded is None else recorded
     clean = (0, b"", b"", b"")
-    offenders = [argv for argv, value in results.items() if value != clean]
-    causes = [value[0] for argv, value in results.items()
-              if isinstance(value, tuple) and len(value) == 4 and _is_timeout(value[0])
-              and value[1:] == (b"", b"", b"")]
-    return offenders, (tuple(causes) if offenders and len(causes) == len(offenders) else ())
+    definite, timed_out, causes = [], [], []
+    for argv, value in results.items():
+        if value == clean:
+            continue
+        if (isinstance(value, tuple) and len(value) == 4 and _is_timeout(value[0])
+                and value[1:] == (b"", b"", b"") and value[0] in recorded):
+            timed_out.append(argv)
+            causes.append(value[0])
+        else:
+            definite.append(argv)
+    return definite, timed_out, tuple(causes)
+
+
+def _registered_offenders(results, recorded=None):
+    """(offenders, cause) for a config lane's check (_split_offenders). When any definite
+    offender exists, offenders lists ONLY the definite ones and cause is (): the FAIL never names
+    a member whose run only timed out, which is reported by its own recorded timeout message on
+    the cannot-evaluate list instead. Otherwise offenders lists the timed-out members and cause
+    their timeout messages, so the finding is attributed to those timeouts."""
+    definite, timed_out, causes = _split_offenders(results, recorded)
+    if definite:
+        return definite, ()
+    return timed_out, causes
 
 
 def _pid_state(pid, proc_root="/proc"):
@@ -1584,6 +1622,177 @@ _MAIN_VERDICT_CHILD = "\n".join((
     "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
     "sys.exit(suite.main(None, lanes))",
 ))
+MAIN_VERDICT_EXPECTED = [(True, True, True, False, False, True, ""),
+                         (True, True, False, True, True, True, "")]
+
+
+def _partial_timeout_cause(observed, expected):
+    """The timeout messages a per-scenario observation list is attributed to: its timed-out
+    entries, and only when every entry that did NOT time out equals its own expectation. A
+    definite mismatch in any other entry returns (), so the finding stays definite (exit 1)."""
+    timeouts = tuple(entry for entry in observed if _is_timeout(entry))
+    if timeouts and len(observed) == len(expected) and all(
+            _is_timeout(entry) or entry == want for entry, want in zip(observed, expected)):
+        return timeouts
+    return ()
+
+
+def _main_verdict_scenarios(sleeper, fixture, run=None):
+    """Run _MAIN_VERDICT_CHILD for the attributed and the definite scenario through run (default
+    _run_bounded); return (observed, cause) for config/member-timeout-main-verdict. An entry is
+    the scenario's observation tuple, or its timeout message when that child reached its own
+    bound; cause is _partial_timeout_cause against MAIN_VERDICT_EXPECTED, so one scenario's
+    timeout never hides the other scenario's definite mismatch."""
+    run = _run_bounded if run is None else run
+    observed = []
+    for scenario, want_rc in (("attributed", 2), ("definite", 1)):
+        line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(
+            sleeper)
+        rc, out, err = run(
+            [sys.executable, "-I", "-B", "-c", _MAIN_VERDICT_CHILD, str(ROOT / "tools"),
+             str(sleeper), scenario], str(fixture), dict(os.environ), 300,
+            "member-timeout-main-verdict child ({})".format(scenario), "CONTROL ")
+        if _is_timeout(rc):
+            observed.append(rc)
+            continue
+        observed.append((rc == want_rc, line in out, "SELF-TEST CANNOT EVALUATE" in out,
+                         "SELF-TEST FAIL" in out, "probe/definite" in out,
+                         "probe/attributed-rc" in out, err))
+    return observed, _partial_timeout_cause(observed, MAIN_VERDICT_EXPECTED)
+
+
+def _mixed_timeout_controls(sleeper):
+    """config/member-timeout-main-verdict-mixed: _main_verdict_scenarios over an injected runner
+    in which one scenario's child reaches its bound while the other returns, in BOTH scenario
+    orders: a definite mismatch beside the timeout (the attributed child times out and the
+    definite child exits 2, or the definite child times out and the attributed child exits 1)
+    keeps the finding definite and _verdict exits 1; a correct result beside the timeout is
+    attributed and exits 2.
+    config/timeout-offenders-split: a lane with one member that only timed out and one definite
+    offender lists ONLY the definite one, in _registered_offenders and in _lifecycle_finding, in
+    both results orders; with only the timed-out member the finding is attributed; an
+    unrecorded timeout message is definite."""
+    import contextlib
+    import io
+
+    line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(sleeper)
+    right = {"attributed": (2, line + "SELF-TEST CANNOT EVALUATE\n  - probe/attributed-rc\n", ""),
+             "definite": (1, line + "SELF-TEST FAIL:\n  - probe/definite\n  - "
+                          "probe/attributed-rc\n", "")}
+    codes = []
+    for plan in ({"attributed": "timeout", "definite": (2, "", "")},
+                 {"attributed": (1, "", ""), "definite": "timeout"},
+                 {"attributed": "timeout", "definite": "right"},
+                 {"attributed": "right", "definite": "timeout"}):
+        def fake(argv, cwd, env, bound, label, banner, plan=plan):
+            outcome = plan[argv[-1]]
+            if outcome == "timeout":
+                return "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(
+                    label, bound), "", ""
+            return right[argv[-1]] if outcome == "right" else outcome
+
+        observed, cause = _main_verdict_scenarios(sleeper, sleeper.parent, fake)
+        finding = "config/member-timeout-main-verdict: got {!r}".format(observed)
+        timeouts = [entry for entry in observed if _is_timeout(entry)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = _verdict([finding] if observed != MAIN_VERDICT_EXPECTED else [], timeouts,
+                            {finding: cause} if cause else {})
+        codes.append((len(cause), code))
+    check("config/member-timeout-main-verdict-mixed", codes, [(0, 1), (0, 1), (1, 2), (1, 2)])
+
+    timeout = "TIMEOUT: opf/tools/x.py --self-test reached its 1 s bound (cannot evaluate)"
+    stalled = (("opf/tools/x.py", "--self-test"), (timeout, b"", b"", b""))
+    failed = (("opf/tools/y.py", "--self-test"), (1, b"", b"", b""))
+    got = []
+    for pairs in ((stalled, failed), (failed, stalled), (stalled,)):
+        results = dict(pairs)
+        got.append((_registered_offenders(results, [timeout]),
+                    _lifecycle_finding(list(results), results, set(), [], [timeout])))
+    got.append(_registered_offenders(dict((stalled,)), []))
+    check("config/timeout-offenders-split", got,
+          [(([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
+           (([("opf/tools/y.py", "--self-test")], ()), ((["opf/tools/y.py"], []), ())),
+           (([("opf/tools/x.py", "--self-test")], (timeout,)),
+            ((["opf/tools/x.py"], []), (timeout,))),
+           ([("opf/tools/x.py", "--self-test")], ())])
+
+
+def _timeout_cleanup_order_controls(sleeper):
+    """config/member-timeout-record-before-cleanup: when _run_bounded's cleanup starts, the
+    timeout is already in the record (a cleanup moved ahead of the record fails this).
+    config/member-timeout-cleanup-on-raise: when the announcement stream raises, or the record
+    itself raises, the exception still propagates AND the child has been killed and reaped
+    (returncode -SIGKILL) first (a cleanup skipped by the raise leaves returncode None and fails
+    this). Every child spawned here is killed afterwards whatever the code under test did."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
+    real_stop = _stop_member_group
+    real_popen = subprocess.Popen
+    spawned = []
+
+    def spawn(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        spawned.append(child)
+        return child
+
+    class RaisingStream:
+        def write(self, text):
+            raise RuntimeError("injected announcement failure")
+
+        def flush(self):
+            pass
+
+    class RaisingRecord:
+        def append(self, entry):
+            raise RuntimeError("injected record failure")
+
+    argv = [sys.executable, "-I", "-B", str(sleeper)]
+    snapshots = []
+    recorded = []
+
+    def stop_after_record(proc):
+        snapshots.append(list(recorded))
+        return real_stop(proc)
+
+    order, outcomes = "not run", []
+    try:
+        with patch.object(subprocess, "Popen", spawn), \
+                patch.object(this, "_stop_member_group", stop_after_record), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                    "record-order control", "CONTROL ", recorded, io.StringIO())
+        order = (_is_timeout(rc), recorded == [rc], snapshots == [[rc]])
+        for record, stream in (([], RaisingStream()), (RaisingRecord(), io.StringIO())):
+            first = len(spawned)
+            try:
+                with patch.object(subprocess, "Popen", spawn), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    _run_bounded(argv, str(sleeper.parent), dict(os.environ), 2,
+                                 "cleanup-on-raise control", "CONTROL ", record, stream)
+                raised = None
+            except RuntimeError as exc:
+                raised = str(exc)
+            outcomes.append((raised, [child.returncode for child in spawned[first:]],
+                             [_is_timeout(entry) for entry in record]
+                             if isinstance(record, list) else None))
+    finally:
+        for child in spawned:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    child.kill()
+                try:
+                    child.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+    check("config/member-timeout-record-before-cleanup", order, (True, True, True))
+    check("config/member-timeout-cleanup-on-raise", outcomes,
+          [("injected announcement failure", [-signal.SIGKILL], [True]),
+           ("injected record failure", [-signal.SIGKILL], None)])
 
 
 def _member_timeout_controls(base):
@@ -1601,7 +1810,9 @@ def _member_timeout_controls(base):
     stdout, never stderr. config/timeout-verdict-exit and config/timeout-attribution: _verdict's
     ordering and the attribution helpers. config/member-timeout-main-verdict: main() in a child,
     with production defaults, exits 2 for a timeout with only attributed findings and 1 when a
-    definite finding is also present, the diagnostic on stdout and stderr empty.
+    definite finding is also present, the diagnostic on stdout and stderr empty; one scenario's
+    timeout never hides the other's definite mismatch (_mixed_timeout_controls). The timeout
+    record and cleanup order is pinned by _timeout_cleanup_order_controls.
     config/member-bound-table pins the per-member bound table against the registered roster. A
     fixture that never got going inside its bound is attributed to that timeout, never a red."""
     import contextlib
@@ -1719,34 +1930,19 @@ def _member_timeout_controls(base):
     check("config/timeout-attribution",
           ([_timeout_cause(got) for got in (timeout, [0, timeout], [1, timeout], [False, timeout],
                                             "[Errno 2] launch", [0], 0)],
-           [_registered_offenders(results) for results in (
+           [_registered_offenders(results, [timeout]) for results in (
                {("a",): clean}, {("a",): (timeout, b"", b"", b"")},
                {("a",): (timeout, b"hook\n", b"", b"")},
                {("a",): (timeout, b"", b"", b""), ("b",): (1, b"", b"", b"")},
                {("a",): ("[Errno 2] launch", b"", b"", b"")}, {("a",): None})]),
           ([(timeout,), (timeout,), (), (), (), (), ()],
-           [([], ()), ([("a",)], (timeout,)), ([("a",)], ()), ([("a",), ("b",)], ()),
+           [([], ()), ([("a",)], (timeout,)), ([("a",)], ()), ([("b",)], ()),
             ([("a",)], ()), ([("a",)], ())]))
 
-    observed = []
-    for scenario, want_rc in (("attributed", 2), ("definite", 1)):
-        line = "CONFIG-INJECTION TIMEOUT: {} reached its 5 s bound (cannot evaluate)\n".format(
-            sleeper)
-        rc, out, err = _run_bounded(
-            [sys.executable, "-I", "-B", "-c", _MAIN_VERDICT_CHILD, str(ROOT / "tools"),
-             str(sleeper), scenario], str(fixture), dict(os.environ), 300,
-            "member-timeout-main-verdict child ({})".format(scenario), "CONTROL ")
-        if _is_timeout(rc):
-            observed.append(rc)
-            continue
-        observed.append((rc, line in out, "SELF-TEST CANNOT EVALUATE" in out,
-                         "SELF-TEST FAIL" in out, "probe/definite" in out,
-                         "probe/attributed-rc" in out, err))
-        observed[-1] = (observed[-1][0] == want_rc,) + observed[-1][1:]
-    timeouts = tuple(entry for entry in observed if _is_timeout(entry))
-    check("config/member-timeout-main-verdict", observed,
-          [(True, True, True, False, False, True, ""), (True, True, False, True, True, True, "")],
-          timeouts or None)
+    observed, cause = _main_verdict_scenarios(sleeper, fixture)
+    check("config/member-timeout-main-verdict", observed, MAIN_VERDICT_EXPECTED, cause)
+    _mixed_timeout_controls(sleeper)
+    _timeout_cleanup_order_controls(sleeper)
 
     roster = set(_registered_selftests())
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
@@ -2081,18 +2277,9 @@ def _opf_home_lifecycles(config_results):
     roster = [argv for argv in _registered_selftests()
               if _command_identity(argv)[0].startswith("opf/tools/")]
     paths = {_command_identity(argv)[0] for argv in roster}
-    missing = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
-    # A member whose config run only timed out is still listed as missing, but that alone is
-    # attributed to its timeout; any other reason a path is missing is definite.
-    timed_out, timeouts = _registered_offenders(
-        {argv: config_results.get(argv) for argv in roster})
-    timed_out = {_command_identity(argv)[0] for argv in timed_out} if timeouts else set()
-    definite = set(missing)
-    for argv in roster:
-        if config_results.get(argv) != (0, b"", b"", b""):
-            missing.add(_command_identity(argv)[0])
-            if _command_identity(argv)[0] not in timed_out:
-                definite.add(_command_identity(argv)[0])
+    # Paths missing for a reason other than their config run; _lifecycle_finding adds the config
+    # runs and keeps a member whose run only timed out out of a definite finding.
+    definite = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
     problems = []
     try:
         trees = {Path(relative).stem: ast.parse(
@@ -2108,11 +2295,9 @@ def _opf_home_lifecycles(config_results):
         reason = OPF_LIFECYCLE_EXEMPTIONS.get(relative)
         if not delegates:
             if not reason or not reason.strip():
-                missing.add(relative)
                 definite.add(relative)
         elif reason is not None:
-            missing.add(relative)  # A stale exemption must be reviewed and removed.
-            definite.add(relative)
+            definite.add(relative)  # A stale exemption must be reviewed and removed.
         for entry, delegate in sorted(delegates.items()):
             env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                        GIT_CONFIG_NOSYSTEM="0")
@@ -2140,8 +2325,23 @@ def _opf_home_lifecycles(config_results):
         if (module, entry) not in results:
             problems.append("{}.{}: missing lifecycle observation".format(module, entry))
         check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
-    check("env/registered-opf-lifecycles", (sorted(missing), problems), ([], []),
-          timeouts if missing and not definite and not problems else ())
+    got, cause = _lifecycle_finding(roster, config_results, definite, problems)
+    check("env/registered-opf-lifecycles", got, ([], []), cause)
+
+
+def _lifecycle_finding(roster, config_results, definite, problems, recorded=None):
+    """(got, cause) for env/registered-opf-lifecycles. definite holds the paths missing for a
+    reason other than their config run; each roster argv whose config run was not clean adds its
+    path to it unless that run only timed out (_split_offenders). With any definite path or
+    problem, got lists ONLY the definite paths and cause is (): a member whose run only timed out
+    is reported by its own timeout message on the cannot-evaluate list, never in this FAIL.
+    Otherwise got lists the timed-out paths and cause their timeout messages."""
+    offenders, timed_out, causes = _split_offenders(
+        {argv: config_results.get(argv) for argv in roster}, recorded)
+    definite = set(definite) | {_command_identity(argv)[0] for argv in offenders}
+    if definite or problems:
+        return (sorted(definite), problems), ()
+    return (sorted({_command_identity(argv)[0] for argv in timed_out}), problems), causes
 
 
 def _build_decoy(base):
