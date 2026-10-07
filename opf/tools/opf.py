@@ -1335,7 +1335,13 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
     uncountable, exactly as _watchdog_finite_seconds refuses it. `transform`
     is a TRUSTED post-conversion hook (the wrapper's fixture allowance and
     sub-tick exemption), never user code. Returns the normalized (and
-    transformed) float, or None off the charged paths."""
+    transformed) float AND the one ledger bound at the BEGIN, as the
+    pair (normalized, ledger), or (None, None) off the charged
+    paths; the caller carries that ledger through every later step
+    (the deadline tick, the wrapper suppression depth), so the
+    stack is never re-read after a charge and neither an exemption
+    nor a suppression can migrate to a ledger that was not charged
+    (codex round-8 MAJOR 2)."""
     import threading
     while True:
         # Bind ONCE, before any user code: the conversion below may suspend
@@ -1345,9 +1351,9 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
         try:
             ledger = _WATCHDOG_LEDGERS[-1]
         except IndexError:
-            return None
+            return None, None
         if ledger["pid"] != os.getpid():
-            return None
+            return None, None
         # BEGIN: one atomic append of a unique token, before the closed
         # check. The report marks the ledger closed and THEN reads `begun`;
         # this side appends and THEN reads `closed`, so under the GIL every
@@ -1381,7 +1387,7 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
         if ledger["pid"] != os.getpid():
             # A forked child resuming the conversion: lands nothing (the
             # landing below is pid-gated too) and returns normally.
-            return None
+            return None, None
         if transform is not None:
             normalized = transform(normalized, ledger)
         me = threading.current_thread()
@@ -1393,7 +1399,7 @@ def _watchdog_charge(seconds, what, suppressible=True, transform=None):
             record = ("uncountable", "%s(%r)" % (what, normalized))
         else:
             record = ("wait", "%s(%r)" % (what, normalized), normalized)
-        return normalized
+        return normalized, ledger
     finally:
         # Exactly one LAND per BEGIN on every path, success or exception (a
         # user conversion may raise anything, and the depth read above may
@@ -1415,8 +1421,13 @@ def _watchdog_deadline(seconds):
     interrupted outer store."""
     import threading
     import time
-    normalized = _watchdog_charge(seconds, "deadline")
-    ledger = _watchdog_live_ledger()
+    # The ONE ledger the charge bound at its BEGIN is carried into
+    # the tick store below, never a re-read of the stack: the
+    # conversion may suspend this thread across the leg end, and a
+    # re-read here would hand the tick, and with it the sub-tick
+    # exemption, to an outer ledger that was never charged (codex
+    # round-8 MAJOR 2).
+    normalized, ledger = _watchdog_charge(seconds, "deadline")
     if (ledger is not None and normalized is not None
             and _watchdog_finite_seconds(normalized)):
         # Monotone-safe without a lock: only the opening thread appends to
@@ -1491,15 +1502,21 @@ def _watchdog_install_charges():
                 # Unsuppressible: a fixture call whose timeout cannot be
                 # introspected never runs uncounted, at ANY suppression depth
                 # (a nested unknown-default call still fails the leg).
-                _watchdog_charge(float("nan"), "%s(<unknown timeout>)" % name,
-                                 suppressible=False)
+                _, ledger = _watchdog_charge(
+                    float("nan"), "%s(<unknown timeout>)" % name,
+                    suppressible=False)
             elif timeout is not None:
                 # The RAW value goes in: the charge appends its BEGIN token
                 # before the value's own conversion or any formatting of it
                 # runs (registration precedes user code on every entry
                 # path), and the trusted transform (fixture allowance,
                 # sub-tick exemption) runs after the conversion.
-                _watchdog_charge(timeout, name, transform=transform)
+                _, ledger = _watchdog_charge(timeout, name, transform=transform)
+            else:
+                # No charge was made (an intentionally untimed
+                # primitive): with no charged ledger to carry, the
+                # depth bookkeeping alone binds the live one.
+                ledger = _watchdog_live_ledger()
             # Per-thread suppression, keyed by the Thread object (lifetime
             # identity, never a recyclable ident) and stored as an
             # append-only list of +1/-1 steps summed at read time (never a
@@ -1508,11 +1525,14 @@ def _watchdog_install_charges():
             # (fixture machinery, Condition.wait under Event.wait or
             # Queue.get) belong to the charge above. Other threads' waits
             # keep charging. Depth counts every registered call, charged or
-            # untimed. One bounded pid-keyed read; None in a forked child
-            # (plain calls there), and the exit append below is pid-gated
-            # too, so a child forked during the real call writes nothing to
-            # the inherited ledger on this path.
-            ledger = _watchdog_live_ledger()
+            # untimed, and goes on the ONE ledger the charge above
+            # bound at its BEGIN (codex round-8 MAJOR 2: a timeout
+            # conversion suspended across a nested leg end must not
+            # raise the suppression depth of an outer, uncharged
+            # ledger); None in a forked child (plain calls there),
+            # and the exit append below is pid-gated too, so a child
+            # forked during the real call writes nothing to the
+            # inherited ledger on this path.
             me = threading.current_thread()
             if ledger is not None:
                 ledger["depth"].setdefault(me, []).append(1)
@@ -1580,7 +1600,17 @@ def _watchdog_leg_entry(budget, case, *args):
     try:
         rc = case(*args)
     finally:
-        _WATCHDOG_LEDGERS.remove(ledger)
+        # Removal is by IDENTITY, never list.remove, which compares
+        # dicts by VALUE: a nested leg whose ledger has no charges
+        # is equal to a quiescent outer one, and remove would delete
+        # the OUTER ledger, leave this closed one on the stack, and
+        # raise ValueError at the outer leg exit (codex round-8
+        # MAJOR 1). The search runs from the top: this ledger is
+        # innermost on the orderly path.
+        for index in range(len(_WATCHDOG_LEDGERS) - 1, -1, -1):
+            if _WATCHDOG_LEDGERS[index] is ledger:
+                del _WATCHDOG_LEDGERS[index]
+                break
         if not _WATCHDOG_LEDGERS:
             while _WATCHDOG_ORIGINALS:
                 owner, name, real = _WATCHDOG_ORIGINALS.pop()
@@ -1653,7 +1683,9 @@ def _watchdog_ledger_case(mode, budget):
     vector's own process bound and reported as that vector's failure, never a
     hung suite and never a false pass. Returns the vector leg's own verdict
     int for the launching fixture to compare (3 marks a fixture that never
-    exercised its path). The held-landing vectors suspend one thread INSIDE
+    exercised its path); the two bool-return control modes
+    deliberately return a bool the launching fixture must REJECT
+    (codex round-8 MEDIUM). The held-landing vectors suspend one thread INSIDE
     the landing bookkeeping (a Thread subclass whose one-shot __hash__
     blocks at the suppression-depth read), exactly where any reintroduced
     ledger lock would be held: a design that locks registration never
@@ -2231,6 +2263,119 @@ def _watchdog_ledger_case(mode, budget):
         finally:
             _opf_emit.run_bounded = real
 
+    def empty_nested_leg():
+        # codex round-8 MAJOR 1: a nested leg whose ledger carries NO
+        # charges is VALUE-equal to a quiescent outer one, so an
+        # equality-based stack removal deletes the OUTER ledger, leaves
+        # the closed inner one on the stack, and raises ValueError at
+        # the outer leg exit. Removal by identity keeps the outer
+        # ledger on the stack and raises nothing; the retained check
+        # reads the stack by identity before the outer leg ends.
+        outer_box = []
+
+        def leg():
+            outer_box.append(_WATCHDOG_LEDGERS[-1])  # this outer leg ledger
+            inner_rc = _watchdog_leg_entry(1, lambda: EXIT_OK)
+            retained = any(entry is outer_box[0]
+                           for entry in _WATCHDOG_LEDGERS)
+            return outcome((inner_rc, retained), (EXIT_OK, True))
+        return _watchdog_leg_entry(budget, leg)
+
+    def nested_migration(mode):
+        # codex round-8 MAJOR 2: a numeric conversion begun INSIDE a
+        # nested leg suspends until that ledger has left the stack,
+        # then resumes. The charge itself lands on the inner ledger
+        # (bound at its BEGIN); the bookkeeping that FOLLOWS the
+        # charge must stay on that SAME ledger. Migrated to the outer,
+        # uncharged ledger, a deadline tick exempts the worker
+        # sub-tick sleep (deadline-exemption-migration) and the
+        # wrapper suppression depth suppresses the body sleep
+        # (wrapper-suppression-migration), so the outer leg passes its
+        # 0.01 budget with 0 charged; carried correctly, the 0.05
+        # sleep charges the outer ledger and overruns it, from
+        # declared timeouts alone. The initial zero charge makes the
+        # outer ledger VALUE-distinct from the inner one, so this
+        # vector stays red on a migration even where stack removal by
+        # identity is sound. Every handshake is untimed, and the
+        # release is keyed to OBSERVED ledger state (the inner ledger
+        # leaving the stack), never a timer.
+        deadline = mode == "deadline-exemption-migration"
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        inner_box = []
+        results = []
+
+        class Slow(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released once the inner leg has ended
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def body():
+            time.sleep(0.05)  # must charge the OUTER ledger, never be suppressed
+            return "done"
+
+        def worker_run():
+            if deadline:
+                _watchdog_deadline(Slow(100.0))
+                time.sleep(0.05)  # must charge the OUTER ledger, never be exempt
+            else:
+                results.append(_opf_emit.run_bounded(body, timeout_s=Slow(0.5)))
+
+        def releaser():
+            in_conversion.wait()  # untimed: the charge is mid-conversion
+            while any(entry is inner_box[0] for entry in _WATCHDOG_LEDGERS):
+                pass  # spin: the inner leg body has not yet returned
+            release.release()
+
+        worker = threading.Thread(target=worker_run)
+        monitor = threading.Thread(target=releaser)
+        # Term-exact inner budgets: the deadline charge is exactly
+        # 100.0, and the wrapper charge is exactly the pinned fixture
+        # allowance for its 0.5 timeout.
+        inner_budget = 100.0 if deadline else _deadline_case_budget(0.5)
+
+        def inner_leg():
+            inner_box.append(_WATCHDOG_LEDGERS[-1])  # this inner leg ledger
+            worker.start()
+            monitor.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        def leg():
+            _watchdog_charge(0.0, "distinguish")
+            inner_rc = _watchdog_leg_entry(inner_budget, inner_leg)
+            worker.join()  # untimed: never charged
+            monitor.join()  # untimed: never charged
+            return outcome((inner_rc, results),
+                           (EXIT_OK, [] if deadline else ["done"]))
+
+        if deadline:
+            return _watchdog_leg_entry(budget, leg)
+
+        def bounded_stub(body_thunk, timeout_s=30):
+            return body_thunk()
+
+        real = _opf_emit.run_bounded
+        _opf_emit.run_bounded = bounded_stub
+        try:
+            return _watchdog_leg_entry(budget, leg)
+        finally:
+            _opf_emit.run_bounded = real
+
     if mode == "charge-atomic":
         return charge_atomic()
     if mode == "reentrant-charge":
@@ -2260,6 +2405,19 @@ def _watchdog_ledger_case(mode, budget):
         return recycled_thread_sleep()
     if mode in ("cross-thread-over", "cross-thread-within"):
         return stubbed_cross_thread()
+    if mode == "empty-nested-leg":
+        return empty_nested_leg()
+    if mode in ("deadline-exemption-migration",
+                "wrapper-suppression-migration"):
+        return nested_migration(mode)
+    if mode == "bool-false-control":
+        # codex round-8 MEDIUM: boolean verdicts, which compare equal
+        # to 0 and 1 under a plain ==, must be REJECTED by the
+        # launching fixture comparison (type(rc) is int before
+        # equality). The budget is declared but no leg runs.
+        return False
+    if mode == "bool-true-control":
+        return True
     raise ValueError("unknown runtime ledger vector %r" % (mode,))
 
 
@@ -12260,6 +12418,29 @@ def _watchdog_regression_self_test():
         ("recycled-thread-sleep", 600.01, EXIT_FINDING),
         ("cross-thread-over", _deadline_case_budget(0.5) + 0.1, EXIT_FINDING),
         ("cross-thread-within", _deadline_case_budget(0.5) + 0.15, EXIT_OK),
+        # codex round-8 MAJOR 1: a nested leg with NO charges must
+        # leave the OUTER ledger on the stack when it ends, raising
+        # nothing (stack removal by identity, never dict equality,
+        # under which two quiescent ledgers compare equal).
+        ("empty-nested-leg", 1, EXIT_OK),
+        # codex round-8 MAJOR 2: a conversion suspended across a
+        # nested leg end keeps its deadline tick and its suppression
+        # depth on the ledger it charged; the outer, uncharged leg
+        # (budget 0.01) then fails on the worker sleep (0.05, from
+        # declared timeouts alone) instead of inheriting an
+        # exemption or a suppression.
+        ("deadline-exemption-migration", 0.01, EXIT_FINDING),
+        ("wrapper-suppression-migration", 0.01, EXIT_FINDING),
+    )
+    # Boolean-return controls (codex round-8 MEDIUM): each returns
+    # a bool verdict (False for expected 0, True for expected 1)
+    # that the launching fixture comparison must REJECT: the
+    # control fixture exits 0 only on that rejection, so a
+    # comparison loosened to a plain == (under which False == 0
+    # and True == 1) turns a control red.
+    ledger_controls = (
+        ("bool-false-control", 1, EXIT_OK),
+        ("bool-true-control", 1, EXIT_FINDING),
     )
     completion_modes = ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
                         "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
@@ -12288,7 +12469,8 @@ def _watchdog_regression_self_test():
                        + len(safety_modes)
                        + len(launcher_labels) * len(launcher_dispositions)
                        + len(completion_modes) + 1  # + blocked-isolation
-                       + len(ledger_expected)),  # one fixture per ledger vector
+                       + len(ledger_expected)   # one fixture per ledger
+                       + len(ledger_controls)),  # vector and control
         "shared": 1,             # a single patched run_status_owned launch
     }
     # Every other family follows the same rule (the kill-timeout rule): a leg's
@@ -12364,7 +12546,7 @@ def _watchdog_regression_self_test():
     # leg's own (the fixture passes it through), so the kill-bound rule
     # (budget + launch margin) prices each vector exactly.
     budgets.update(("ledger-" + mode, seconds)
-                   for mode, seconds, _want in ledger_expected)
+                   for mode, seconds, _want in ledger_expected + ledger_controls)
     entries = [(mode, "_watchdog_deadline_case", (mode,)) for mode in deadline_modes]
     entries.extend(("overlap-" + mode, "_watchdog_overlap_case", (mode,))
                    for mode in overlap_modes)
@@ -12400,11 +12582,27 @@ def _watchdog_regression_self_test():
     # crash or wrong verdict is a nonzero fixture status, and a hung
     # vector is killed at its own independent bound and reported as that
     # vector's failure, never a hung suite.
-    cases.extend(("ledger-" + mode, prefix
-                  + "return 0 if opf._watchdog_ledger_case(" + repr(mode)
-                  + ", " + repr(seconds) + ") == " + repr(want) + " else 3",
+    def ledger_fixture(mode, seconds, want, control=False):
+        # ONE comparison fragment serves the real vectors and the
+        # boolean-return controls (codex round-8 MEDIUM): only an
+        # EXACT int verdict passes (type(rc) is int, never a bool,
+        # whose False == 0 and True == 1). A control returns a bool
+        # and its fixture exits 0 only when this same fragment
+        # REJECTS it, so loosening the fragment to a plain ==
+        # turns a control red.
+        exact = "(type(rc) is int and rc == " + repr(want) + ")"
+        return (prefix + "rc = opf._watchdog_ledger_case(" + repr(mode)
+                + ", " + repr(seconds) + "); return "
+                + (("3 if " + exact + " else 0") if control
+                   else ("0 if " + exact + " else 3")))
+
+    cases.extend(("ledger-" + mode, ledger_fixture(mode, seconds, want),
                   bound("ledger-" + mode))
                  for mode, seconds, want in ledger_expected)
+    cases.extend(("ledger-" + mode,
+                  ledger_fixture(mode, seconds, want, control=True),
+                  bound("ledger-" + mode))
+                 for mode, seconds, want in ledger_controls)
     # The rule holds for every leg, and it is discriminating: the pre-fix flat
     # bounds (deadline 10 s, safety 15 s, completion 40 s) must be refused,
     # naming the deadline and safety legs and the completion modes they under-cover.
@@ -12505,7 +12703,17 @@ def _watchdog_regression_self_test():
     # red on the locked design); and a nested longer deadline opened from
     # inside the outer deadline's own clock read survives, because ticks
     # is an append-only list with max taken at read time
-    # (nested-deadline-monotone). Every
+    # (nested-deadline-monotone); a nested leg with NO charges
+    # leaves the OUTER ledger on the stack when it ends, with
+    # nothing raised, because stack removal is by IDENTITY, never
+    # dict equality, under which two quiescent ledgers compare
+    # equal (empty-nested-leg); and a timeout conversion suspended
+    # across a nested leg end keeps its deadline tick and its
+    # suppression depth on the ledger it charged, so the outer,
+    # uncharged leg fails on the worker sleep instead of
+    # inheriting an exemption or a suppression
+    # (deadline-exemption-migration,
+    # wrapper-suppression-migration). Every
     # registered primitive has an over-budget and a within-budget vector,
     # with over-budget vectors in BOTH positional and keyword form where the
     # primitive accepts both (time.sleep and select.select are
@@ -12527,7 +12735,8 @@ def _watchdog_regression_self_test():
     # _WATCHDOG_CLOSE_BOUND.
     # Every vector leg returns an explicit int verdict, the comparison
     # (vector_red for the in-process vectors below, the fixture's own
-    # comparison for the per-vector fixtures) requires an exact int, and
+    # comparison for the per-vector fixtures) requires an exact int (the
+    # boolean-return controls above hold that fragment exact), and
     # each fixture outcome is asserted separately: a fixture that never
     # exercised its path fails the vector even where the budget verdict
     # alone would mask it.
