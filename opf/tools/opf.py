@@ -1206,15 +1206,30 @@ def _watchdog_bound_faults(bounds, budgets):
 # exemption and that suppression are keyed by the Thread OBJECT (the thread's
 # lifetime identity), never threading.get_ident(), whose OS-level ident is
 # recycled once a thread exits and would hand a dead thread's exemption to an
-# unrelated successor. The ledger itself takes NO lock: every record is one
-# atomic append of an entry normalized to a plain float BEFORE any ledger
-# step, the per-thread maps (suppression depth, deadline ticks) are written
-# only by the thread that owns the key, and the total is summed once at
-# report time. No ledger step can therefore block, re-enter a lock it
-# already holds (a signal handler, finalizer or nested registered call
-# landing mid-charge on the same thread included), or leave a held lock to
-# a forked child; the wrappers additionally skip the inherited ledger
-# entirely in a forked child (the ledger is keyed to its creating pid).
+# unrelated successor. The ledger's only lock is a per-leg reentrant gate
+# held across pure bookkeeping alone (registering a charge in flight,
+# landing its record, sealing the leg), never across user code (the charged
+# value's conversion), a registered call, or the real wait. A charge BINDS
+# its ledger and registers itself in flight before any user code runs,
+# lands its record and deregisters in one gated step, and the leg's report
+# runs a CLOSING PROTOCOL: the ledger leaves the stack first (no new charge
+# can bind it), then the report waits, bounded by _WATCHDOG_CLOSE_BOUND,
+# for every in-flight charge to land, and only then seals the ledger and
+# sums the records. A charge that began during the leg is therefore either
+# in the verdict or, if it cannot land within the bound, fails the leg
+# loudly: a passing verdict is never issued over an in-flight or
+# unaccounted charge. A charge that finds its bound ledger already sealed
+# re-binds whichever ledger is innermost THEN (its real wait has not
+# started, so that is where the wait runs). The per-thread maps
+# (suppression depth, deadline ticks) are written only by the thread that
+# owns the key, and each ticks entry is an append-only list whose max is
+# taken at read time, so a nested longer deadline opened by a same-thread
+# signal handler is never overwritten by the interrupted store. The gate is
+# reentrant, so a signal handler, finalizer or nested registered call
+# landing mid-charge on the same thread re-acquires it or runs outside it
+# and can never self-deadlock; and no path a forked child takes acquires
+# one: the wrappers skip the inherited ledger entirely in a forked child
+# (the ledger is keyed to its creating pid, checked before any gate).
 # Charges go to the
 # INNERMOST live ledger in this process: while a nested _watchdog_leg_entry
 # runs, EVERY thread's registered wait, including an outer leg's concurrent
@@ -1246,8 +1261,31 @@ _WATCHDOG_POLL_TICK = 0.1
 # detected, but only at that slower bound -- a chosen trade of detection
 # latency for launch coverage, not a promptness proof.
 _WATCHDOG_FIXTURE_HOLD = 300
+# How long a leg's report waits for charges still in flight (registered
+# before any user code ran, their conversion unfinished) to land before it
+# refuses to pass: an in-flight charge that cannot land within this bound is
+# unaccountable and fails the leg loudly. Normal charges land in
+# microseconds and the closing loop exits on its first check, so the bound
+# prices only the adversarial case, never a passing leg.
+_WATCHDOG_CLOSE_BOUND = 5
 _WATCHDOG_LEDGERS = []
 _WATCHDOG_ORIGINALS = []
+# The pristine time.sleep, captured at install time BEFORE the wrapper
+# replaces it: the closing wait of a NESTED leg polls with it, so that poll
+# can never charge the outer leg's ledger.
+_WATCHDOG_REAL_SLEEP = None
+
+
+def _watchdog_live_ledger():
+    """The innermost ledger THIS process created, or None: one bounded read
+    that tolerates a concurrent leg end between the emptiness check and the
+    index (never IndexError), and never hands a forked child the inherited
+    ledger."""
+    try:
+        ledger = _WATCHDOG_LEDGERS[-1]
+    except IndexError:
+        return None
+    return ledger if ledger["pid"] == os.getpid() else None
 
 
 def _watchdog_charge(seconds, what, suppressible=True):
@@ -1260,55 +1298,106 @@ def _watchdog_charge(seconds, what, suppressible=True):
     call. An unsuppressible record (suppressible=False: a fixture timeout the
     ledger cannot introspect) is written to `uncountable` at ANY depth, so an
     unknown fixture timeout fails the leg even from inside a charged wait.
-    The ledger takes no lock: `seconds` is normalized to a plain float BEFORE
-    any ledger step (the value's own conversion, the only user code a charge
-    can run, therefore runs outside the bookkeeping and may itself make
-    registered calls without blocking), each record is one atomic list
-    append, and the leg's total is summed from `waits` at report time, so a
-    charge can never block, self-deadlock, or leave a lock held across
-    fork."""
+    The closing protocol's charge half: the ledger is bound ONCE and the
+    charge registered in flight under the ledger's gate BEFORE any user code
+    runs (the value's own conversion, the only user code a charge can run,
+    happens afterwards and OUTSIDE the gate, and may itself block or make
+    registered calls), and the record lands and deregisters in one gated
+    step. The leg's report therefore refuses to pass while this charge is in
+    flight, and a leg that ends mid-conversion neither crashes this thread
+    (the stack is never re-read after user code) nor loses the charge. A
+    charge whose bound ledger is already sealed re-binds whichever ledger is
+    innermost THEN: its real wait has not started, so it belongs there (or
+    to no leg). The gate is reentrant and never held across user code or a
+    real wait, so a signal handler, finalizer or nested registered call
+    landing mid-charge on the same thread can never self-deadlock, and a
+    forked child returns on the pid check before touching any gate."""
     import threading
-    if not _WATCHDOG_LEDGERS:
-        return
-    # Normalize FIRST: past this point no user-defined conversion runs
-    # mid-bookkeeping. A bool stays refused, exactly as
-    # _watchdog_finite_seconds refuses it.
-    if isinstance(seconds, bool):
-        seconds = float("nan")
-    else:
+    while True:
+        # Bind ONCE, before any user code: the conversion below may suspend
+        # this thread across the leg's end, and the stack is never re-read
+        # after it. The bounded read tolerates a concurrent leg end between
+        # the emptiness check and the index.
         try:
-            seconds = float(seconds)
-        except (TypeError, ValueError, OverflowError):
+            ledger = _WATCHDOG_LEDGERS[-1]
+        except IndexError:
+            return
+        if ledger["pid"] != os.getpid():
+            return
+        gate = ledger["gate"]
+        with gate:
+            if not ledger["closed"]:
+                # Registered BEFORE the conversion below: the leg's report
+                # waits for this charge to land before issuing any verdict.
+                ledger["inflight"].append(what)
+                break
+        # Sealed between the bind and the gate: that leg's verdict is out,
+        # and this wait has not yet started, so it belongs to the leg (if
+        # any) that is innermost NOW. Re-reading the stack here is sound
+        # because no user code has run yet; each retry binds a strictly
+        # outer ledger (a sealed ledger has already left the stack), so the
+        # loop terminates.
+    try:
+        # Normalize AFTER registering, OUTSIDE the gate: the value's own
+        # conversion is the only user code a charge runs, it may block or
+        # make registered calls, and past this point no user-defined
+        # conversion runs mid-bookkeeping. A bool stays refused, exactly as
+        # _watchdog_finite_seconds refuses it.
+        if isinstance(seconds, bool):
             seconds = float("nan")
-    ledger = _WATCHDOG_LEDGERS[-1]
-    if ledger["pid"] != os.getpid():
-        return
-    if not suppressible:
-        ledger["uncountable"].append(what)
-        return
-    if ledger["depth"].get(threading.current_thread()):
-        return
-    if not _watchdog_finite_seconds(seconds) and seconds != 0:
-        ledger["uncountable"].append(what)
-        return
-    ledger["waits"].append((what, seconds))
+        else:
+            try:
+                seconds = float(seconds)
+            except (TypeError, ValueError, OverflowError):
+                seconds = float("nan")
+    except BaseException:
+        with gate:
+            ledger["inflight"].remove(what)
+        raise
+    with gate:
+        # Record and land in ONE gated step: once `inflight` is empty, every
+        # landed record is already in the lists the report sums.
+        if not suppressible:
+            ledger["uncountable"].append(what)
+        elif not ledger["depth"].get(threading.current_thread()):
+            if not _watchdog_finite_seconds(seconds) and seconds != 0:
+                ledger["uncountable"].append(what)
+            else:
+                ledger["waits"].append((what, seconds))
+        ledger["inflight"].remove(what)
 
 
 def _watchdog_deadline(seconds):
     """A polling deadline `seconds` from now, charged to the running leg. While
     it is unexpired, the opening thread's (lifetime identity: this Thread
     object's, never a recycled ident's) sub-tick sleeps are polling steps the
-    deadline's own charge already covers."""
+    deadline's own charge already covers. The per-thread ticks entry is an
+    append-only LIST read through max(), never a read-modify-write store: a
+    nested longer deadline a same-thread signal handler opens mid-store
+    survives the interrupted outer store. The value is normalized FIRST, so
+    no user conversion runs between the bounded ledger read (never an
+    unguarded [-1]) and the tick append."""
     import threading
     import time
-    _watchdog_charge(seconds, "deadline(%r)" % (seconds,))
-    if _WATCHDOG_LEDGERS and _watchdog_finite_seconds(seconds):
-        ledger = _WATCHDOG_LEDGERS[-1]
-        if ledger["pid"] == os.getpid():
-            # Lock-free: only the opening thread ever writes its own key.
-            me = threading.current_thread()
-            ledger["ticks"][me] = max(ledger["ticks"].get(me, 0),
-                                      time.monotonic() + seconds)
+    label = "deadline(%r)" % (seconds,)
+    if isinstance(seconds, bool):
+        normalized = float("nan")
+    else:
+        try:
+            normalized = float(seconds)
+        except (TypeError, ValueError, OverflowError):
+            normalized = float("nan")
+    _watchdog_charge(normalized, label)
+    ledger = _watchdog_live_ledger()
+    if ledger is not None and _watchdog_finite_seconds(normalized):
+        # Monotone-safe without a lock: only the opening thread appends to
+        # its own key's list (setdefault is one atomic dict step, so a
+        # same-thread signal handler's nested append lands in the SAME
+        # list), and readers take the max of every deadline this thread
+        # ever opened, so an interleaved nested longer deadline is never
+        # overwritten by the interrupted store.
+        me = threading.current_thread()
+        ledger["ticks"].setdefault(me, []).append(time.monotonic() + normalized)
     return time.monotonic() + seconds
 
 
@@ -1321,6 +1410,12 @@ def _watchdog_install_charges():
     import threading
     import time
     import _opf_emit
+
+    # Captured before the sleep wrapper installs below: the closing wait of
+    # a nested leg polls with the pristine sleep, never charging the outer
+    # leg's ledger.
+    global _WATCHDOG_REAL_SLEEP
+    _WATCHDOG_REAL_SLEEP = time.sleep
 
     # The allowance inputs are pinned HERE, at install time, before the leg
     # body runs: a leg that patches the module constants the allowance derives
@@ -1360,14 +1455,17 @@ def _watchdog_install_charges():
                     seconds = (fixture_allowance(seconds)
                                if _watchdog_finite_seconds(seconds) else 0)
                 elif name == "sleep" and 0 <= seconds < _WATCHDOG_POLL_TICK:
-                    ledger = _WATCHDOG_LEDGERS[-1] if _WATCHDOG_LEDGERS else None
-                    tick = None
+                    # One bounded read (never an unguarded [-1], so a leg
+                    # ending concurrently can never raise IndexError here);
                     # pid-keyed: a forked child never reads the inherited
-                    # ledger (and no ledger lock exists for a fork to leave
-                    # held).
-                    if ledger is not None and ledger["pid"] == os.getpid():
-                        tick = ledger["ticks"].get(threading.current_thread())
-                    if tick is not None and time.monotonic() < tick:
+                    # ledger, and no gate is touched on this path.
+                    ledger = _watchdog_live_ledger()
+                    ticks = (ledger["ticks"].get(threading.current_thread())
+                             if ledger is not None else None)
+                    # max at read time: the largest deadline this thread ever
+                    # opened governs, so a nested longer deadline survives
+                    # the interrupted outer store.
+                    if ticks and time.monotonic() < max(ticks):
                         seconds = 0  # a polling step its charged deadline covers
                 _watchdog_charge(seconds, "%s(%r)" % (name, timeout))
             # Per-thread suppression, keyed by the Thread object (lifetime
@@ -1376,9 +1474,8 @@ def _watchdog_install_charges():
             # Condition.wait under Event.wait or Queue.get) belong to the
             # charge above. Other threads' waits keep charging. Depth counts
             # every registered call, charged or untimed.
-            ledger = _WATCHDOG_LEDGERS[-1] if _WATCHDOG_LEDGERS else None
-            if ledger is not None and ledger["pid"] != os.getpid():
-                ledger = None  # a forked child's calls run as plain calls
+            # One bounded read; None in a forked child: plain calls there.
+            ledger = _watchdog_live_ledger()
             me = threading.current_thread()
             if ledger is not None:
                 # Lock-free: only thread `me` ever writes its own depth key.
@@ -1419,13 +1516,23 @@ def _watchdog_install_charges():
 
 def _watchdog_leg_entry(budget, case, *args):
     """Run one watchdog leg against its declared budget: its charged bounded waits
-    must stay within the budget, or the leg fails (never a silent pass)."""
+    must stay within the budget, or the leg fails (never a silent pass). The
+    closing protocol: the ledger leaves the stack first (no new charge can
+    bind it), then the report waits, bounded by _WATCHDOG_CLOSE_BOUND, for
+    every charge registered in flight during the leg to land, and only then
+    seals the ledger and issues a verdict. A passing verdict is therefore
+    never issued while a charge of this leg is in flight, and an in-flight
+    charge that cannot land within the bound is unaccountable and fails the
+    leg loudly."""
     if not _watchdog_finite_seconds(budget):
         print("opf watchdog leg: FAIL (declared budget %r is not a finite positive number)"
               % (budget,))
         return EXIT_FINDING
     import math
-    ledger = dict(pid=os.getpid(), depth={}, ticks={}, waits=[], uncountable=[])
+    import threading
+    import time
+    ledger = dict(pid=os.getpid(), depth={}, ticks={}, waits=[], uncountable=[],
+                  inflight=[], closed=False, gate=threading.RLock())
     if not _WATCHDOG_LEDGERS:
         _watchdog_install_charges()
     _WATCHDOG_LEDGERS.append(ledger)
@@ -1439,8 +1546,39 @@ def _watchdog_leg_entry(budget, case, *args):
                 setattr(owner, name, real)
     if os.getpid() != ledger["pid"]:
         return rc
-    # The total is summed once HERE, at report time, from the atomic records
-    # (math.fsum: one correctly rounded sum, no order-dependent drift).
+    # The closing wait polls with the PRISTINE sleep captured at install
+    # time: a nested leg's report must never charge the outer leg's ledger.
+    sleep = _WATCHDOG_REAL_SLEEP if _WATCHDOG_REAL_SLEEP is not None else time.sleep
+    gate = ledger["gate"]
+    bound = time.monotonic() + _WATCHDOG_CLOSE_BOUND
+    unlanded = ["<the gate was never free>"]
+    while True:
+        if gate.acquire(timeout=0.1):
+            try:
+                if not ledger["inflight"]:
+                    # Sealed: every registered charge has landed, every
+                    # record is in `waits`/`uncountable` below, and a
+                    # registration arriving after this point re-binds
+                    # whichever ledger is innermost then.
+                    ledger["closed"] = True
+                    break
+                unlanded = list(ledger["inflight"])
+            finally:
+                gate.release()
+        if time.monotonic() >= bound:
+            # Fail-open refused: a charge began during this leg and never
+            # landed (its value's conversion is suspended or blocked), so no
+            # verdict can account for it. Seal and fail LOUDLY; whenever the
+            # charge finally lands, it lands in this sealed ledger, inert.
+            ledger["closed"] = True
+            print("opf watchdog leg: FAIL (%d charge(s) begun during the leg had "
+                  "not landed within the %ss closing bound: %s)" % (
+                      len(unlanded), _WATCHDOG_CLOSE_BOUND, ", ".join(unlanded)))
+            return EXIT_FINDING
+        sleep(0.005)
+    # The total is summed once HERE, after the ledger is sealed, from the
+    # landed records (math.fsum: one correctly rounded sum, no
+    # order-dependent drift).
     charged = math.fsum(seconds for _, seconds in ledger["waits"])
     print("opf watchdog leg: charged %ss of a %ss declared budget in %d waits" % (
         round(charged, 3), budget, len(ledger["waits"])))
@@ -11623,11 +11761,20 @@ def _watchdog_regression_self_test():
     # two concurrent charges BOTH land (charge-atomic suspends one charge
     # mid-record, through untimed handshakes, while the other charges); a
     # charge whose value's own conversion makes a registered call on the
-    # SAME thread completes, because no ledger step holds a lock the nested
-    # wrapper could need (reentrant-charge, which also runs a finalizer's
-    # registered call mid-charge); a child forked while another thread is
-    # mid-charge runs its registered calls as plain calls and exits
-    # (fork-mid-charge); and an unknown fixture
+    # SAME thread completes, because the gate never spans user code, so the
+    # nested wrapper can never block on anything its own thread holds
+    # (reentrant-charge, which also runs a finalizer's registered call
+    # mid-charge and stalls the whole charge behind an untimed handshake);
+    # a charge still mid-conversion when the leg body returns is WAITED FOR
+    # by the closing protocol and counted in the verdict
+    # (late-landing-charge), and one that cannot land within the closing
+    # bound fails the leg loudly, with the charging thread never raising
+    # (unlanded-charge); a nested longer deadline opened from inside the
+    # outer deadline's own clock read (where a same-thread signal handler
+    # lands) survives, because ticks is an append-only list with max taken
+    # at read time (nested-deadline-monotone); a child forked while another
+    # thread is mid-charge runs its registered calls as plain calls and
+    # exits (fork-mid-charge); and an unknown fixture
     # timeout fails the leg even from inside another charged wait. Every
     # registered primitive has an over-budget and a within-budget vector,
     # with over-budget vectors in BOTH positional and keyword form where the
@@ -11638,10 +11785,19 @@ def _watchdog_regression_self_test():
     # vector red. No vector's EXPECTED verdict depends on wall-clock timing,
     # and no vector's handshake carries a timed escape a stall could outrun:
     # each over-budget verdict follows from declared timeouts alone, the
-    # unexpired-deadline exemption vector pins time.monotonic for the window
-    # it needs instead of racing a stall against slack, and the one bounded
-    # escape (reentrant-charge's join) charges its declared 30 s whatever
-    # the wall clock does.
+    # deadline-exemption vectors control time.monotonic for the windows they
+    # need instead of racing a stall against slack, and NO timed join or
+    # timed wait decides any outcome (reentrant-charge joins untimed, so an
+    # arbitrarily long stall at the charge's entry delays the leg but never
+    # flips its verdict; unlanded-charge's shrunken closing bound caps that
+    # vector's DURATION only, its expected loud failure holding for any
+    # bound and any stall). Stated limit: a regression that reintroduces a
+    # self-deadlocking charge makes reentrant-charge (and any later leg)
+    # HANG until the surrounding runner's own independent process bound
+    # kills the run, loud and never a false pass, but detected at that
+    # outer bound rather than by a timed escape inside the vector; the old
+    # timed join bought no real escape (the locked design deadlocked before
+    # reaching it) while making this verdict depend on the wall clock.
     # Every vector leg returns an explicit int verdict, the comparison
     # (vector_red) requires an exact int, and each fixture outcome is
     # asserted separately: a fixture that never exercised its path fails the
@@ -11933,11 +12089,13 @@ def _watchdog_regression_self_test():
     def racing_charges():
         # Deterministic both-charges-land probe: thread A's charge is
         # suspended MID-RECORD, inside its value's own float conversion (the
-        # only user code a charge runs, and it runs BEFORE any ledger step),
-        # while thread B charges 3 and only then releases A. Every handshake
-        # is an UNTIMED unregistered Lock, never a timed escape a stall
-        # could outrun: B can always finish, because no ledger step holds a
-        # lock B's own charge would need. Records appended whole total
+        # only user code a charge runs, after it has registered in flight
+        # and OUTSIDE the gate), while thread B charges 3 and only then
+        # releases A. Every handshake is an UNTIMED unregistered Lock, never
+        # a timed escape a stall could outrun: B can always finish, because
+        # A's suspension point holds no gate (the gate never spans user
+        # code), and the leg's own closing wait holds the report open until
+        # A's registered charge lands. Records appended whole total
         # 2 + 3 = 5 over the 4.5 budget however the host stalls; an
         # accumulation that re-read a shared running total around user
         # conversion code would store A's stale sum and lose B's charge
@@ -11981,14 +12139,21 @@ def _watchdog_regression_self_test():
         # Self-deadlock probe: the charged value's conversion itself makes
         # registered calls on the SAME thread, directly and from a
         # finalizer, exactly where a signal handler or callback could land
-        # mid-charge. The ledger takes no lock, so the nested wrapper can
-        # never block on one its own thread holds; the worker must finish
-        # and its charges must land (30 join + 2 + two sleep(0) = 32.0,
-        # inside the 32 budget, a declared-timeout verdict). The join's
-        # 30 s timeout is the vector's bounded escape: a regression that
-        # reintroduces a self-deadlock turns the leg red through the
-        # outcome check instead of hanging the suite, and the join charges
-        # its declared 30 s whatever the wall clock does.
+        # mid-charge. The gate never spans user code, so the nested wrapper
+        # can never block on anything its own thread holds; the worker must
+        # finish and its charges must land (2 + two sleep(0) = 2.0, exactly
+        # the 2 budget, a declared-timeout verdict). Every handshake is
+        # UNTIMED, so no wall clock ever decides this verdict: the worker's
+        # charge is stalled at entry behind a plain lock a helper thread
+        # releases (the deterministic build of an arbitrarily long stall,
+        # at exactly the injection point of the old 31 s stall escape), and
+        # the main thread joins with NO timeout, reading `done` only after
+        # that join. Stated limit: a regression that reintroduces a
+        # self-deadlock HANGS this leg until the runner's own independent
+        # process bound kills the run (loud, never a false pass); the old
+        # join(timeout=30) bought no real escape (the locked design
+        # deadlocked before reaching it, in the worker's start-up) while
+        # making the verdict depend on the wall clock.
         class Sleeper(float):
             def _nested_calls(self):
                 class Final:
@@ -12009,14 +12174,26 @@ def _watchdog_regression_self_test():
 
         def leg():
             done = []
+            stalled = threading.Lock()
+            stalled.acquire()
+            joining = threading.Event()
 
             def body():
+                stalled.acquire()  # untimed: an arbitrary stall at charge entry
                 _watchdog_charge(Sleeper(2.0), "reentrant")
                 done.append(True)
 
+            def releaser():
+                joining.wait()  # untimed: never charged
+                stalled.release()
+
             worker = threading.Thread(target=body)
+            helper = threading.Thread(target=releaser)
             worker.start()
-            worker.join(timeout=30)  # charged 30: the bounded escape
+            helper.start()
+            joining.set()
+            worker.join()  # untimed: never charged, and no stall flips `done`
+            helper.join()  # untimed: never charged
             return outcome(bool(done), True)
         return leg
 
@@ -12025,8 +12202,10 @@ def _watchdog_regression_self_test():
         # suspended MID-CHARGE (on the locked design that suspension point
         # held the ledger lock across the fork), then the CHILD makes a
         # registered sub-tick sleep and must finish: the wrappers skip the
-        # inherited ledger in a foreign pid, and no ledger lock exists for
-        # the fork to have left held. The reap is an untimed unregistered
+        # inherited ledger in a foreign pid BEFORE touching its gate, and
+        # the suspension point (the value's conversion) never holds the
+        # gate, so the fork cannot leave it held on any path the child
+        # takes. The reap is an untimed unregistered
         # waitpid, so the verdict never depends on the wall clock: the
         # child always exits on the lock-free design, and a regression that
         # blocks the child turns the nested launcher legs' kill bound red
@@ -12084,6 +12263,154 @@ def _watchdog_regression_self_test():
                            (True, 0))
         return leg
 
+    def late_landing_vector():
+        # Closing-protocol probe (the late-append escape): a charge
+        # REGISTERS in flight (before any user code runs), then its value's
+        # conversion blocks on an untimed lock until AFTER the leg body has
+        # returned and the ledger has left the stack; the report must WAIT
+        # for the in-flight charge to land and count its 2.0 over the 1
+        # budget, never pass on the records landed so far. Deterministic:
+        # the release is keyed to OBSERVED ledger state (this leg's ledger
+        # leaving the stack), never a timer, every handshake is untimed,
+        # and the monitor SPINS instead of sleeping because a registered
+        # sleep here would itself charge the leg. On a report that sums
+        # without the closing wait, the leg passes on zero waits and the
+        # landing thread crashes on the vanished stack entry instead.
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        ledger_box = []
+
+        class LateLanding(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released once the leg has ended
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            _watchdog_charge(LateLanding(2.0), "late")
+
+        def releaser():
+            in_conversion.wait()  # untimed: the charge is mid-conversion
+            while any(entry is ledger_box[0] for entry in _WATCHDOG_LEDGERS):
+                pass  # spin: the leg body has not yet returned
+            release.release()
+
+        worker = threading.Thread(target=charger)
+        monitor = threading.Thread(target=releaser)
+
+        def leg():
+            ledger_box.append(_WATCHDOG_LEDGERS[-1])  # this leg's own ledger
+            worker.start()
+            monitor.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        result = _watchdog_leg_entry(1, leg)
+        worker.join()  # untimed: never charged
+        monitor.join()  # untimed: never charged
+        outcome(bool(handed), True)
+        return result
+
+    def unlanded_charge_vector():
+        # Fail-open probe (the blocked-conversion escape): a charge
+        # REGISTERS, then its conversion blocks on an untimed lock that is
+        # NOT released until after the report. The report must refuse to
+        # pass: at the closing bound the in-flight charge is unaccountable
+        # and the leg fails loudly, and the charging thread must never
+        # raise (its ledger was bound before any user code and the stack is
+        # never re-read after). The closing bound is shrunk for this
+        # vector's DURATION only: the expected verdict, a loud failure,
+        # holds for ANY bound and any stall, so no wall clock decides it.
+        release = threading.Lock()
+        release.acquire()
+        in_conversion = threading.Event()
+        handed = []
+        errors = []
+
+        class NeverLands(float):
+            def _hand_over(self):
+                if not handed:
+                    handed.append(True)
+                    in_conversion.set()
+                    release.acquire()  # untimed: released only after the report
+
+            def __float__(self):
+                self._hand_over()
+                return float.__float__(self)
+
+            def __radd__(self, other):
+                self._hand_over()
+                return float(other) + float.__float__(self)
+
+        def charger():
+            try:
+                _watchdog_charge(NeverLands(2.0), "unlanded")
+            except BaseException as exc:  # the probed crash, never expected
+                errors.append(repr(exc))
+
+        worker = threading.Thread(target=charger)
+
+        def leg():
+            worker.start()
+            # Untimed (never charged): returns only once the charge is
+            # registered and suspended inside its conversion.
+            in_conversion.wait()
+            return EXIT_OK
+
+        module = sys.modules[_watchdog_leg_entry.__module__]
+        saved = module._WATCHDOG_CLOSE_BOUND
+        module._WATCHDOG_CLOSE_BOUND = 0.2
+        try:
+            result = _watchdog_leg_entry(10, leg)
+        finally:
+            module._WATCHDOG_CLOSE_BOUND = saved
+            release.release()
+        worker.join()  # untimed; the late landing stays inert in the sealed ledger
+        outcome((bool(handed), errors), (True, []))
+        return result
+
+    def nested_deadline_leg():
+        # Monotone-tick probe: a nested LONGER _watchdog_deadline(100) fires
+        # from inside the outer _watchdog_deadline(1)'s own clock read,
+        # exactly where a same-thread signal handler (SIGUSR1) can land, and
+        # must survive: ticks is an append-only per-thread list whose max
+        # governs, so the interrupted outer store can never overwrite the
+        # nested 1100 tick with its stale 1001. The clock is CONTROLLED for
+        # both windows (reads return 1000, then 1002), so the verdict
+        # follows from the construction alone, whatever the host does:
+        # charges are exactly 1 + 100 = 101 (the sub-tick sleep at 1002 is
+        # exempt under the surviving 1100 tick), inside the 101 budget; a
+        # last-store-wins regression also charges the 0.05 sleep (its
+        # surviving tick is the stale 1001) and overruns.
+        from unittest import mock
+        state = dict(now=1000.0, fired=False)
+
+        def interrupting_clock():
+            if not state["fired"]:
+                state["fired"] = True
+                _watchdog_deadline(100)  # the nested, longer deadline
+            return state["now"]
+
+        with mock.patch("time.monotonic", interrupting_clock):
+            _watchdog_deadline(1)
+        state["now"] = 1002.0
+        with mock.patch("time.monotonic", lambda: state["now"]):
+            time.sleep(0.05)
+        return outcome(state["fired"], True)
+
     tick = _WATCHDOG_POLL_TICK
     installed = (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS))
     pristine = (time.sleep, threading.Thread.join, threading.Event.wait,
@@ -12109,8 +12436,12 @@ def _watchdog_regression_self_test():
             ("cross-thread-subtick",
              _watchdog_leg_entry(5.01, cross_thread_subtick_leg), EXIT_FINDING),
             ("charge-atomic", _watchdog_leg_entry(4.5, racing_charges()), EXIT_FINDING),
-            ("reentrant-charge", _watchdog_leg_entry(32, reentrant_charges()), EXIT_OK),
+            ("reentrant-charge", _watchdog_leg_entry(2, reentrant_charges()), EXIT_OK),
             ("fork-mid-charge", _watchdog_leg_entry(1, forked_child_runs()), EXIT_OK),
+            ("late-landing-charge", late_landing_vector(), EXIT_FINDING),
+            ("unlanded-charge", unlanded_charge_vector(), EXIT_FINDING),
+            ("nested-deadline-monotone",
+             _watchdog_leg_entry(101, nested_deadline_leg), EXIT_OK),
             ("above-tick-sleep-inside-deadline",
              _watchdog_leg_entry(0.2, slept(0.2, 0.15)), EXIT_FINDING),
             ("sleep-positional-over", _watchdog_leg_entry(0.1, slept(None, 0.15)), EXIT_FINDING),
