@@ -3488,7 +3488,9 @@ def _self_test():
     _BASE = tempfile.mkdtemp(prefix="fsw.", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
     PROJ = os.path.join(_BASE, "proj")
     STORE = os.path.join(PROJ, "private")
-    HANG_TIMEOUT = 120  # seconds: far above the timed runs' own total (a few seconds), so only a hang reaches it
+    # seconds: far above the timed runs' own total (a few seconds), so a hang reaches it; an expiry is a failure,
+    # never a pass, and heavy CPU oversubscription can bring a slow but correct run to it
+    HANG_TIMEOUT = 120
     # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
     # 2.0 s ceiling failed at 2.53 s on a slower CI runner). A GROWTH check (ratio in TIMED_PRELUDE) times one run
     # at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the pass is linear and
@@ -3964,12 +3966,23 @@ def _self_test():
 
         def test_fifo_guard_disclosures(self):
             # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
-            # non-blocking open are disclosed beside the ctypes residual
-            src = " ".join(inspect.getsource(_self_test).split())
+            # non-blocking open are disclosed beside the ctypes residual. QA round 4 (codex MEDIUM): the text
+            # searched is the guard's comment block alone, read from this file, from its first line through the
+            # line before FIFO_GUARD; a search of _self_test's source matched this test's own expected strings
+            # and passed with the disclosures deleted
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                lines = [line.strip() for line in f]
+            first = [i for i, line in enumerate(lines) if line.startswith("# The FIFO guard for a child:")]
+            end = [i for i, line in enumerate(lines) if line == "FIFO_GUARD = ("]
+            self.assertEqual((len(first), len(end)), (1, 1))
+            block = lines[first[0]:end[0]]
+            # comment lines only, so no string literal (this test's included) is searched
+            self.assertTrue(block and all(line.startswith("#") for line in block), block)
+            text = " ".join(" ".join(line[1:] for line in block).split())
             for s in ("Not covered: an open outside the audited interpreter calls",
                       "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
                       "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
-                self.assertIn(s, src)
+                self.assertIn(s, text)
 
         def test_clocks_frozen_for_fixture_and_code(self):
             # QA round 3 (codex MED, in the sibling stamp-truth-stop.py): a fixture built from the clock and the

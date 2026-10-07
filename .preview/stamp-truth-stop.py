@@ -2083,8 +2083,11 @@ def _self_test():
     CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
-    # A child that evaluates a Stop freezes the loaded module's time.time and time_ns at one reading (as
-    # freeze_clocks does in this process), so a prune it runs reads one instant; its fixtures pass a fixed now.
+    # A precaution that no test depends on: in_subprocess's children and test_r32's child freeze the loaded
+    # module's time.time and time_ns at one reading (as freeze_clocks does in this process), so a prune such a
+    # child runs reads one instant; their fixtures pass a fixed now. The children of growth_in_child and
+    # counted_in_child do not freeze, and some evaluate a Stop (test_r5_many_distinct_violations_linear_and_bounded's)
+    # whose prune reads the real clock; no child fixture has an aged mtime, so that read changes no verdict.
     CHILD_FREEZE = ("_ns = time.time_ns()\nm.time = type(time)('time')\nm.time.__dict__.update(vars(time))\n"
                     "m.time.time_ns, m.time.time = (lambda: _ns), (lambda: _ns / 10 ** 9)\n")
 
@@ -2241,7 +2244,9 @@ def _self_test():
     # adjustment the warmup relies on (QA round 4: healthy code with an inherited
     # MALLOC_TOP_PAD_=131072 false-REDs at 2.0 to 3.1x on a loaded host), so every timed child
     # launches with child_env(), which neutralizes ambient allocator settings.
-    HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
+    # seconds: a child's hang guard, far above a child's own run (a few seconds); an expiry is a failure, never a
+    # pass, and heavy CPU oversubscription can bring a slow but correct child to it
+    HANG_TIMEOUT = 120
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
     GROWTH_SRC = ("import json, tempfile\n"
@@ -2366,8 +2371,9 @@ def _self_test():
         time.time_ns) read the same instant, and an age a fixture sets up is exact however much wall time
         passes between the two reads (QA round 3: a transcript start taken 2h05 before the fixture's reading,
         and an mtime PRUNE_AGE_NS plus an hour before it, each flipped a verdict once the code's later reading
-        moved). A file the test creates keeps its real mtime, at or after the instant, so it never ages. A
-        child interpreter reads its own clocks (see CHILD_FREEZE)."""
+        moved). A file the test creates keeps its real mtime, within a clock tick of the instant (a tmpfs stamps
+        file times from the coarse kernel clock, which can read up to a tick before it), far short of
+        PRUNE_AGE_NS, so no prune removes it. A child interpreter reads its own clocks (see CHILD_FREEZE)."""
         real_time, real_dt = globals()["time"], globals()["datetime"]
         sec, frac = divmod(ns, 10 ** 9)
         tview = types.ModuleType("time")
@@ -3329,12 +3335,23 @@ def _self_test():
 
         def test_fifo_guard_disclosures(self):
             # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
-            # non-blocking open are disclosed beside the ctypes residual
-            src = " ".join(inspect.getsource(_self_test).split())
+            # non-blocking open are disclosed beside the ctypes residual. QA round 4 (codex MEDIUM): the text
+            # searched is the guard's comment block alone, read from this file, from its first line through the
+            # line before FIFO_GUARD; a search of _self_test's source matched this test's own expected strings
+            # and passed with the disclosures deleted
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                lines = [line.strip() for line in f]
+            first = [i for i, line in enumerate(lines) if line.startswith("# The FIFO guard for a child:")]
+            end = [i for i, line in enumerate(lines) if line == "FIFO_GUARD = ("]
+            self.assertEqual((len(first), len(end)), (1, 1))
+            block = lines[first[0]:end[0]]
+            # comment lines only, so no string literal (this test's included) is searched
+            self.assertTrue(block and all(line.startswith("#") for line in block), block)
+            text = " ".join(" ".join(line[1:] for line in block).split())
             for s in ("Not covered: an open outside the audited interpreter calls",
                       "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
                       "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
-                self.assertIn(s, src)
+                self.assertIn(s, text)
 
         def test_clocks_frozen_for_fixture_and_code(self):
             # QA round 3 (codex MED): a fixture built from the clock and the code it evaluates read the clock at
