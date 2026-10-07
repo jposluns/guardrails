@@ -4365,7 +4365,8 @@ def self_test():
     # ast (the F-367 maintenance-pin scan included), read harness, stub
     # call and Trace2 event logs (the F-367 maintenance probe), write the
     # selftest report, read the config-member timeout control's pid file
-    # and /proc stat, or split text the reader or a screen has already
+    # and /proc stat, split the timeout controls' captured diagnostics,
+    # or split text the reader or a screen has already
     # validated. A read
     # spelled another way (getattr, an alias) is outside this tripwire, as
     # the module docstring discloses. This vector fails without the
@@ -4433,9 +4434,11 @@ def self_test():
             ("_manifest_extra_setup_failures", "read_text"): 1,
             # The member-timeout control's fixture pid file: no runner text.
             ("_member_timeout_controls", "read_text"): 1,
+            # The cleanup-failure control's captured diagnostic lines: no runner text.
+            ("_member_timeout_controls", "splitlines"): 1,
             ("_opf_home_lifecycles", "read_text"): 1,
             # /proc/<pid>/stat, the timeout control's liveness probe.
-            ("_pid_alive", "open-text"): 1,
+            ("_pid_state", "open-text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,

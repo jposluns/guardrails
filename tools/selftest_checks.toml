@@ -642,13 +642,18 @@ expected-check-ids = [
 id = "git-fixture-env-selftest"
 runner = "tools/selftest_git_fixture_env.py"
 expected-check-ids = [
-  "config/member-bound-sized",
+  "config/member-bound-table",
+  "config/member-failure-diagnostic-stdout",
   "config/member-timeout-cannot-evaluate",
+  "config/member-timeout-cleanup-failure",
   "config/member-timeout-kills-group",
+  "config/member-timeout-main-verdict",
+  "config/pid-state-fail-closed",
   "config/registered-combined",
   "config/registered-malformed",
   "config/registered-system",
   "config/system-control",
+  "config/timeout-attribution",
   "config/timeout-verdict-exit",
   "config/xdg-malformed-control",
   "env/lifecycle-path-removal-red",
