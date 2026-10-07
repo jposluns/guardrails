@@ -87,6 +87,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 try:
@@ -1449,35 +1450,142 @@ def _stop_member_group(proc):
     """Bounded cleanup of a bounded child that must end: SIGKILL its process group, falling back
     to the leader alone when the group kill is refused, then drain its output for at most
     CONFIG_MEMBER_DRAIN_SECONDS and reap the leader for at most CONFIG_MEMBER_REAP_SECONDS.
-    Returns the problems met ([] when clean). It never raises, so a cleanup failure is reported
-    beside the timeout and cannot turn it into a FAIL or a traceback."""
+    Returns the problems met ([] when clean). A step that raises, an interrupt included, is
+    recorded as a problem and the cleanup goes on: an interrupted group kill is retried once and
+    an interrupted reap is retried once, each retry under the same bound. Only an exception
+    landing between its steps, outside their try statements, can escape it; _end_member_group,
+    which runs it with SIGINT and SIGTERM held pending, reports even that one instead of raising
+    it, so a cleanup failure never turns the outcome it follows into a FAIL or a traceback."""
     problems = []
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except Exception as exc:  # any refusal is reported, never raised
-        problems.append("group kill refused ({}: {}); killed the leader alone, so a descendant "
-                        "in its group may survive".format(type(exc).__name__, exc))
+    for attempt in (1, 2):
         try:
-            proc.kill()
-        except Exception as kill_exc:
-            problems.append("leader kill failed ({}: {})".format(type(kill_exc).__name__,
-                                                                 kill_exc))
+            os.killpg(proc.pid, signal.SIGKILL)
+            break
+        except ProcessLookupError:
+            break
+        except Exception as exc:  # any refusal is reported, never raised
+            problems.append("group kill refused ({}: {}); killed the leader alone, so a "
+                            "descendant in its group may survive".format(type(exc).__name__, exc))
+            try:
+                proc.kill()
+            except BaseException as kill_exc:
+                problems.append("leader kill failed ({}: {})".format(type(kill_exc).__name__,
+                                                                     kill_exc))
+            break
+        except BaseException as exc:  # an interrupt: recorded, and the kill retried once
+            problems.append("group kill interrupted on attempt {} ({}: {})".format(
+                attempt, type(exc).__name__, exc))
     try:
         proc.communicate(timeout=CONFIG_MEMBER_DRAIN_SECONDS)
     except subprocess.TimeoutExpired:
         problems.append("output still held after the {} s drain; the pipes are closed "
                         "unread".format(CONFIG_MEMBER_DRAIN_SECONDS))
-    except Exception as exc:
+    except BaseException as exc:
         problems.append("drain failed ({}: {})".format(type(exc).__name__, exc))
-    if proc.returncode is None:
+    for attempt in (1, 2):
+        if proc.returncode is not None:
+            break
         try:
             proc.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
-        except Exception as exc:
+        except subprocess.TimeoutExpired as exc:
             problems.append("leader not reaped within {} s ({}: {})".format(
                 CONFIG_MEMBER_REAP_SECONDS, type(exc).__name__, exc))
+            break
+        except BaseException as exc:  # an interrupt: recorded, and the reap retried once
+            problems.append("reap interrupted on attempt {} ({}: {})".format(
+                attempt, type(exc).__name__, exc))
     return problems
+
+
+# The signals _end_member_group holds pending across a bounded child's kill and reap.
+CLEANUP_HELD_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM")
+                             if hasattr(signal, name))
+# How many times _HeldSignals' release re-applies the caller's mask to run further handlers.
+HELD_SIGNALS_RELEASE_ATTEMPTS = 8
+
+
+class _HeldSignals:
+    """Hold signals pending across a bounded section, as a context manager: the one shared helper
+    that borrows the calling thread's signal mask. Entry reads the caller's mask (a handler whose
+    signal arrived earlier runs inside that read, before anything changed; its exception is
+    collected and the read retried), then blocks the signals. Exit restores the caller's EXACT
+    previous mask, never a fixed unblock, so it is nesting-safe: a signal the caller (or an outer
+    hold) already blocked stays blocked and pending for it. A signal that arrived during the
+    section is delivered at that restore, not dropped: its handler runs then, and the exception it
+    raises (KeyboardInterrupt for the default SIGINT handler) is collected in .delivered and
+    NEVER raised, so the caller decides how it is reported; the restore is re-applied (at most
+    HELD_SIGNALS_RELEASE_ATTEMPTS times) while handlers keep raising, so a second pending handler
+    runs here too rather than at an arbitrary later point. A handler that raised as the block took
+    effect is collected the same way, and the exit still restores the mask read before it. A
+    signal with no Python handler (SIGTERM at its default) acts at the restore: a default
+    termination ends the process once the section is done. The hold has no timer of its own; the
+    section it wraps must bound itself.
+    A no-op on a platform without signal.pthread_sigmask (the section then runs unheld) and on a
+    thread other than the main thread (CPython runs Python handlers only on the main thread, so
+    there no signal raises inside the section). NOT covered: an exception raised by other than a
+    signal handler (an injected exception, an asynchronous exception set from outside), a
+    process-directed signal the kernel delivers to another thread that leaves it unblocked
+    (CPython still runs its handler on the main thread, inside the section), and a handler that
+    runs in the few bytecodes before entry's first read. _stop_member_group's per-step guards
+    record such an exception and carry on."""
+    __slots__ = ("signals", "delivered", "_prev")
+
+    def __init__(self, signals):
+        self.signals, self.delivered, self._prev = tuple(signals), [], None
+
+    def __enter__(self):
+        if not self.signals or not hasattr(signal, "pthread_sigmask") \
+                or threading.current_thread() is not threading.main_thread():
+            return self
+        while True:
+            try:
+                prev = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+                break
+            except BaseException as exc:  # a pending handler ran inside the read: nothing changed
+                self.delivered.append(exc)
+        self._prev = prev
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, self.signals)
+        except BaseException as exc:  # a handler ran as the block took effect; exit restores prev
+            self.delivered.append(exc)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        prev, self._prev = self._prev, None
+        if prev is not None:
+            for _ in range(HELD_SIGNALS_RELEASE_ATTEMPTS):
+                try:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, prev)
+                    break
+                except BaseException as delivered:  # a held signal's handler, run at the restore
+                    self.delivered.append(delivered)
+        return False
+
+
+def _end_member_group(proc, sink, banner, timed_out, ended):
+    """Kill and reap proc's group (_stop_member_group) with CLEANUP_HELD_SIGNALS held pending
+    (_HeldSignals), appending True to ended once the hold is in effect. Every problem, an
+    exception escaping the cleanup, and every exception a held signal's handler raised when the
+    hold ended are reported as ONE line on sink, through _report_guarded: banner, a header naming
+    the outcome (a recorded timeout when timed_out is truthy, else the wait that ended early),
+    then the problems; none is raised, so the outcome the cleanup follows (a return, or an
+    exception already propagating) stands. The cleanup is bounded (_stop_member_group), so the
+    signals are held for a bounded time."""
+    with _HeldSignals(CLEANUP_HELD_SIGNALS) as held:
+        ended.append(True)
+        try:
+            problems = _stop_member_group(proc)
+        except BaseException as exc:
+            problems = ["cleanup raised ({}: {})".format(type(exc).__name__, exc)]
+    problems += ["{} arrived during the cleanup and was held until it ended; it was delivered "
+                 "then and yields to that outcome ({}: {})".format(
+                     "an interrupt" if isinstance(exc, KeyboardInterrupt) else "a signal",
+                     type(exc).__name__, exc) for exc in held.delivered]
+    if problems:
+        _report_guarded("{}cleanup after {}: {}".format(
+            banner, "that timeout was incomplete or interrupted (the timeout stays "
+            "cannot-evaluate)" if timed_out else "the wait ended early was incomplete or "
+            "interrupted (that outcome stands)", "; ".join(problems)), sink)
 
 
 def _report_guarded(text, sink):
@@ -1500,21 +1608,35 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
     A timeout is RECORDED FIRST, in cannot_evaluate (default CANNOT_EVALUATE), and announced as
     banner + message on report (default sys.stdout, never stderr: the cannot-evaluate path is a
     stdout report plus exit 2, and the execution gate requires the suite's error stream to hold
-    only declared bytes); only then is the child cleaned up (_stop_member_group, bounded), in a
-    finally that runs whatever the record or the announcement does (a raising record or stream
-    still has the child killed and reaped before its exception propagates). A cleanup problem is
-    printed on the same stream as a second line through _report_guarded: a stream that refuses
-    that line loses it, so the diagnostic never replaces the timeout return or the exception
-    already propagating. Any other exception from the wait, including a BaseException such as
-    KeyboardInterrupt, also has the group killed and reaped first; an OSError, SubprocessError or
-    ValueError is then returned as its message, and anything else propagates unchanged.
+    only declared bytes); only then is the child cleaned up. An OSError, SubprocessError or
+    ValueError from the wait is returned as its message; any other exception from the wait or
+    the timeout handler (the message, the record, the announcement), a BaseException such as
+    KeyboardInterrupt included, propagates unchanged.
+    CLEANUP ON EVERY EXIT PATH: however the wait and the timeout handler end, by a return or an
+    exception, a finally runs _end_member_group while the child is unreaped: it kills and reaps
+    the group with SIGINT and SIGTERM held pending (signal.pthread_sigmask, the caller's exact mask
+    restored afterwards), so a signal arriving during the bounded kill, drain and reap cannot
+    abandon them. THE OUTCOME WINS: the timeout return, the error return, or the exception already
+    propagating is never replaced by the cleanup. A signal held during the cleanup is delivered
+    when the hold ends; an exception its handler raises (a KeyboardInterrupt) is NOT raised but
+    reported, with any cleanup problem, as one line on the same stream through _report_guarded (a
+    stream that refuses that line loses it). So a Ctrl-C that lands during the cleanup after a
+    timeout is reported and consumed: the timeout is returned, the caller carries on, and the
+    next interrupt acts as usual. An interrupt arriving after the hold has ended belongs to the
+    caller and propagates as usual, the child already reaped. When an interrupt lands in the few
+    bytecodes before the hold takes effect (so the cleanup never started), a second cleanup runs
+    under a fresh hold and that interrupt then propagates in place of the outcome.
     config/member-timeout-record-before-cleanup, config/member-timeout-cleanup-on-raise,
-    config/member-timeout-diagnostic-guarded and config/member-timeout-interrupt-cleanup pin
-    that order and those guards.
-    DISCLOSED RESIDUAL: a descendant that moved itself to another process group survives the
-    kill; its pipe is drained for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are
-    closed. In its own session the child has no controlling terminal: a read of an inherited
-    terminal fails."""
+    config/member-timeout-diagnostic-guarded, config/member-timeout-interrupt-cleanup,
+    config/member-timeout-interrupt-points and config/member-cleanup-mask-restored pin that order
+    and those guards.
+    DISCLOSED RESIDUALS: on a platform without signal.pthread_sigmask nothing is held; a signal
+    during the cleanup then raises inside one of its steps, is recorded there, and the cleanup
+    goes on (_stop_member_group). An interrupt that lands inside Popen after the child started,
+    or between Popen returning and the try, leaves the child unmanaged: no cleanup covers that
+    window. A descendant that moved itself to another process group survives the kill; its pipe
+    is drained for at most CONFIG_MEMBER_DRAIN_SECONDS before the pipes are closed. In its own
+    session the child has no controlling terminal: a read of an inherited terminal fails."""
     sink = sys.stdout if report is None else report
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
@@ -1522,37 +1644,34 @@ def _run_bounded(argv, cwd, env, bound, label, banner, cannot_evaluate=None, rep
                                 start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc), "", ""
+    recorded, ended = [], []
     try:
         try:
             stdout, stderr = proc.communicate(timeout=bound)
         except subprocess.TimeoutExpired:
             message = "TIMEOUT: {} reached its {} s bound (cannot evaluate)".format(label, bound)
-            try:
-                (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
-                print(banner + message, file=sink, flush=True)
-            finally:
-                problems = _stop_member_group(proc)
-                if problems:
-                    _report_guarded("{}cleanup after that timeout was incomplete (the timeout "
-                                    "stays cannot-evaluate): {}".format(banner,
-                                                                        "; ".join(problems)),
-                                    sink)
+            (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
+            recorded.append(message)
+            print(banner + message, file=sink, flush=True)
             return message, "", ""
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            _stop_member_group(proc)
             return str(exc), "", ""
-        except BaseException:
-            # An interrupt (KeyboardInterrupt, SystemExit) or any other exception in the wait:
-            # the group is killed and reaped, then the exception propagates unchanged.
-            _stop_member_group(proc)
-            raise
         return proc.returncode, stdout, stderr
     finally:
-        for stream in (proc.stdout, proc.stderr):
+        try:
+            if proc.returncode is None:
+                _end_member_group(proc, sink, banner, recorded, ended)
+        finally:
             try:
-                stream.close()
-            except OSError:
-                pass
+                if proc.returncode is None and not ended:
+                    # An interrupt landed before the first cleanup's hold took effect.
+                    _end_member_group(proc, sink, banner, recorded, ended)
+            finally:
+                for stream in (proc.stdout, proc.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
 
 def _run_config_member(member, env, bound=None, cannot_evaluate=None, report=None):
@@ -1799,7 +1918,7 @@ def _timeout_cleanup_order_controls(sleeper):
 
     class RefusingCleanupReport(io.StringIO):
         def write(self, text):
-            if "cleanup after that timeout" in text:
+            if "cleanup after" in text:
                 raise OSError("injected cleanup-report failure")
             return super().write(text)
 
@@ -1900,6 +2019,165 @@ def _timeout_cleanup_order_controls(sleeper):
           ("InjectedInterrupt: injected interrupt in the wait", [-signal.SIGKILL]))
 
 
+def _timeout_interrupt_controls(sleeper):
+    """config/member-timeout-interrupt-points: a REAL SIGINT (signal.pthread_kill to the main
+    thread, its handler replaced for the control by one raising a numbered InjectedInterrupt) is
+    sent at each point of _run_bounded's exit paths, and every run must end with the child killed
+    and reaped (returncode -SIGKILL), the thread's signal mask as before, and the outcome
+    preserved: (format) while the timeout message is formatted, before the record: interrupt #1
+    propagates and nothing is recorded; (entry) as the first cleanup is entered, before its hold:
+    the second cleanup kills and reaps, and the interrupt propagates; (before-kill) just before
+    the group kill, after a recorded timeout: the timeout is returned and the held interrupt is
+    reported on the stream; (before-kill, raising record) the record's own RuntimeError
+    propagates; (kill-to-reap) just after the group kill, before the drain and reap: the timeout
+    is returned; (second) interrupt #1 in the wait and interrupt #2 during the cleanup's drain:
+    #1 propagates and #2 is reported. config/member-cleanup-mask-restored: with SIGINT already
+    blocked by the caller, a SIGINT sent just before the group kill leaves the timeout returned,
+    SIGINT still blocked and still pending for the caller (the hold restores the caller's exact
+    mask, never an unblock) and the child reaped; the caller's own restore then delivers it.
+    Every child spawned here is killed and reaped afterwards whatever the code under test did, and
+    the SIGINT handler is restored."""
+    import io
+    from unittest.mock import patch
+
+    this = sys.modules[__name__]
+    real_popen, real_killpg, real_end = subprocess.Popen, os.killpg, _end_member_group
+    spawned, sent, plan = [], [], dict()
+
+    class InjectedInterrupt(KeyboardInterrupt):
+        pass
+
+    class RaisingRecord:
+        def append(self, entry):
+            raise RuntimeError("injected record failure")
+
+    def on_sigint(signum, frame):
+        sent.append(signum)
+        raise InjectedInterrupt("interrupt #{}".format(len(sent)))
+
+    def interrupt_now():
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    def spawn(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        spawned.append(child)
+        waits = plan.get("waits", ())
+        if waits:
+            real_communicate, calls = child.communicate, []
+
+            def communicate(*c_args, **c_kwargs):
+                calls.append(True)
+                if len(calls) in waits:
+                    interrupt_now()
+                return real_communicate(*c_args, **c_kwargs)
+
+            child.communicate = communicate
+        return child
+
+    def killpg(pgid, sig):
+        when = plan.pop("kill", None)
+        if when == "before":
+            interrupt_now()
+        real_killpg(pgid, sig)
+        if when == "after":
+            interrupt_now()
+
+    def end_after_interrupt(*args):
+        if plan.pop("entry", None):
+            interrupt_now()
+        return real_end(*args)
+
+    class InterruptingLabel:
+        def __format__(self, spec):
+            interrupt_now()
+            return "interrupt-points control"
+
+    def run(case, label, bound, record, steps):
+        plan.clear()
+        plan.update(steps)
+        del sent[:]
+        first, stream, rc, raised = len(spawned), io.StringIO(), None, None
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        try:
+            with patch.object(subprocess, "Popen", spawn), patch.object(os, "killpg", killpg), \
+                    patch.object(this, "_end_member_group", end_after_interrupt):
+                rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), bound,
+                                        label, "CONTROL ", record, stream)
+        except (KeyboardInterrupt, Exception) as exc:
+            raised = "{}: {}".format(type(exc).__name__, exc)
+        text = stream.getvalue()
+        return (case, raised, _is_timeout(rc),
+                [_is_timeout(entry) for entry in record] if isinstance(record, list) else None,
+                [child.returncode for child in spawned[first:]],
+                signal.pthread_sigmask(signal.SIG_BLOCK, ()) == mask,
+                "InjectedInterrupt" in text and "held until it ended" in text)
+
+    argv = [sys.executable, "-I", "-B", str(sleeper)]
+    label = "interrupt-points control"
+    points, nested = "not run", "not run"
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    try:
+        points = [
+            run("format", InterruptingLabel(), 1, [], dict()),
+            run("entry", label, 1, [], dict(entry=True)),
+            run("before-kill", label, 1, [], dict(kill="before")),
+            run("before-kill-raising-record", label, 1, RaisingRecord(), dict(kill="before")),
+            run("kill-to-reap", label, 1, [], dict(kill="after")),
+            run("second", label, 60, [], dict(waits=(1, 2))),
+        ]
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT,))
+        delivered = []
+        try:
+            first = len(spawned)
+            plan.clear()
+            plan.update(dict(kill="before"))
+            del sent[:]
+            try:
+                with patch.object(subprocess, "Popen", spawn), \
+                        patch.object(os, "killpg", killpg):
+                    rc, _, _ = _run_bounded(argv, str(sleeper.parent), dict(os.environ), 1,
+                                            "mask control", "CONTROL ", [], io.StringIO())
+            except (KeyboardInterrupt, Exception) as exc:
+                rc = "{}: {}".format(type(exc).__name__, exc)
+            nested = (_is_timeout(rc),
+                      signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, ()),
+                      signal.SIGINT in signal.sigpending(),
+                      [child.returncode for child in spawned[first:]])
+        finally:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+            except InjectedInterrupt as exc:
+                delivered.append(str(exc))
+        nested = (nested, delivered)
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, ())  # runs any handler still pending
+        except InjectedInterrupt:
+            pass
+        signal.signal(signal.SIGINT, previous)
+        for child in spawned:
+            if child.poll() is None:
+                try:
+                    real_killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    child.kill()
+                try:
+                    child.wait(timeout=CONFIG_MEMBER_REAP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+    reaped = [-signal.SIGKILL]
+    check("config/member-timeout-interrupt-points", points,
+          [("format", "InjectedInterrupt: interrupt #1", False, [], reaped, True, False),
+           ("entry", "InjectedInterrupt: interrupt #1", False, [True], reaped, True, False),
+           ("before-kill", None, True, [True], reaped, True, True),
+           ("before-kill-raising-record", "RuntimeError: injected record failure", False, None,
+            reaped, True, True),
+           ("kill-to-reap", None, True, [True], reaped, True, True),
+           ("second", "InjectedInterrupt: interrupt #1", False, [], reaped, True, True)])
+    check("config/member-cleanup-mask-restored", nested,
+          ((True, True, True, reaped), ["interrupt #1"]))
+
+
 def _member_timeout_controls(base):
     """Controls for the bounded member runs.
     config/member-timeout-cannot-evaluate: a fixture member spawns a sleeping grandchild that
@@ -1918,7 +2196,8 @@ def _member_timeout_controls(base):
     definite finding is also present, the diagnostic on stdout and stderr empty; one scenario's
     timeout never hides the other's definite mismatch (_mixed_timeout_controls). The timeout
     record and cleanup order, the guarded cleanup diagnostic and the cleanup on an interrupted
-    wait are pinned by _timeout_cleanup_order_controls.
+    wait are pinned by _timeout_cleanup_order_controls; the cleanup under a real SIGINT at each
+    point of the exit paths, and the caller's signal mask, by _timeout_interrupt_controls.
     config/member-bound-table pins the per-member bound table against the registered roster. A
     fixture that never got going inside its bound is attributed to that timeout, never a red."""
     import contextlib
@@ -2048,6 +2327,7 @@ def _member_timeout_controls(base):
     _main_verdict_control(sleeper, fixture)
     _mixed_timeout_controls(sleeper)
     _timeout_cleanup_order_controls(sleeper)
+    _timeout_interrupt_controls(sleeper)
 
     roster = set(_registered_selftests())
     record = ("opf/tools/check_opf_record.py", "--self-test", "--red-on-revert")
