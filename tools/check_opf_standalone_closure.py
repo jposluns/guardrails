@@ -36,12 +36,19 @@ case's refutation. Attribution (see _preflight_exit): no opf/ subtree, a host pr
 OSError, or a child that did not finish within its bound; _harness_watch lists what is not watched),
 malformed input, or any other ordinary exception raised by a case's own code outside its attributed
 calls is cannot-evaluate; a crash or a wrong result of the code under test is a refutation.
-_check_attribution_inventory derives, by an AST walk of this file, every site at which a function a
-case reaches calls (or passes on to be called) the code under test, and requires each site to carry
-a pin that fires there (see _pin) or a recorded exclusion with its reason. The cases also observe
-what run() executes: the full member roster, under its bounds, over the isolated copy (never the
-repository's opf/), from a scratch directory outside the repository, with the isolated environment;
-and the negative leg's stream separation. When any preflight case was refuted
+_check_attribution_inventory checks that attribution where _derived_sites can see it: every load of
+a code-under-test name in the code a case reaches is a site, and each site needs a pin entry, fired
+at the site's own call instruction and covering its first call, or a recorded exclusion with its
+reason; each indirection the walk flags (a lookup by string or namespace, an import in a function,
+a module-level value holding this module's code) needs a recorded reason, or the inventory is
+cannot-evaluate. What the walk does not see is listed in _derived_sites. Of what run() executes,
+the preflight checks: _SUBSET and its bounds against the independent _DECLARED_ROSTER
+(closure/declared-roster); with _run_one stubbed, the arguments run() and the negative leg pass to
+it (_check_member_calls: roster in order, the copy's source, payload and location, the scratch
+directory's contents, the environment, the stream mode); and, through the real run() and _run_one
+over recording children, what is launched and what each child saw (_check_member_boundary,
+_check_launches). Those runs set GIT_ and PYTHON variables in os.environ (_ambient_sentinels), so
+the environment checks do not depend on the host. When any preflight case was refuted
 the self-test exits 1; when none was refuted but one could not be evaluated, it exits 2. In both of
 those outcomes the closure legs never run.
 Then the two closure legs:
@@ -62,13 +69,17 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import ast
 import contextlib
+import functools
+import hashlib
 import io
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import types
 from pathlib import Path
+from tempfile import gettempdir
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
@@ -264,9 +275,10 @@ def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, 
     None when the member ran to completion, _TIMEOUT when it was killed at its bound, or _HARNESS when
     its script is missing from the copy or the interpreter could not be launched (`text` is then the
     harness message). A non-None `cannot` is rc 2 and CANNOT-EVALUATE (closure was neither observed
-    nor refuted), distinct from a member that ran and failed. cwd is run_dir, which is OUTSIDE any git
-    repository and does not contain the tools/ tree, so only the copied opf/tools/ is reachable to
-    `python3 -I`."""
+    nor refuted), distinct from a member that ran and failed. cwd is run_dir: run() passes the scratch
+    directory holding the copy, and the self-test checks that it lies outside the repository at the
+    root and holds only the copy (_check_member_calls, _check_launches), so that only the copied
+    opf/tools/ is reachable to `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
         return 2, "missing subset script in the copy: {}".format(target), _HARNESS
@@ -509,69 +521,282 @@ def _captured(fn, *args):
     return result, out.getvalue(), err.getvalue()
 
 
+# The self-test's own declaration of the member roster, written out apart from _SUBSET and the bound
+# table on purpose: (name, script, args, kill bound in seconds), in run order. closure/declared-roster
+# compares _SUBSET, with each row's bound looked up as run() looks it up, to this list row for row;
+# the stubbed runs (_check_member_calls) and the boundary case (_check_member_boundary) reconcile
+# run()'s member calls and launches against it. So a change to _SUBSET, _SUBSET_TIMEOUT_S or
+# _MEMBER_TIMEOUT_S fails the self-test until this list is changed with it.
+_DECLARED_ROSTER = (
+    ("opf-homes-selftest", "check_opf_homes.py", ("--self-test",), 600),
+    ("opf-homes-contract", "check_opf_homes.py", (), 600),
+    ("opf-tooling-selftest", "opf.py", ("--self-test",), 1800),
+    ("opf-drift-selftest", "check_opf_drift.py", ("--self-test",), 600),
+    ("opf-doctor-selftest", "check_opf_doctor.py", ("--self-test",), 600),
+    ("opf-init-selftest", "check_opf_init.py", ("--self-test",), 600),
+    ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ("--self-test",), 600),
+    ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ("--self-test",), 600),
+    ("opf-upgrade-selftest", "check_opf_upgrade.py", ("--self-test",), 600),
+    ("opf-adopt-selftest", "_opf_adopt.py", ("--self-test",), 600),
+    ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ("--self-test",), 600),
+    ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ("--self-test",), 600),
+    ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ("--self-test",), 600),
+    ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ("--self-test",), 600),
+    ("opf-prompt-pack-selftest", "check_opf_prompt_pack.py", ("--self-test",), 600),
+    ("opf-prompt-pack", "check_opf_prompt_pack.py", (), 600),
+    ("opf-oplock-selftest", "_opf_oplock.py", ("--self-test",), 600),
+    ("opf-init-substrate-selftest", "_opf_init_substrate.py", ("--self-test",), 600),
+    ("opf-init-builders-selftest", "_opf_init.py", ("--self-test",), 600),
+    ("opf-init-operation-selftest", "_opf_init_operation.py", ("--self-test",), 600),
+    ("opf-init-p0-selftest", "check_opf_init_p0.py", ("--self-test", "--red-on-revert"), 600),
+    ("opf-init-observe-selftest", "check_opf_init_observe.py", ("--self-test", "--red-on-revert"), 600),
+    ("commonmark-headings-selftest", "selftest_commonmark_headings.py", ("--self-test",), 600),
+    ("commonmark-conformance", "selftest_commonmark_conformance.py", (), 600),
+)
+
+# The negative leg's one member call, as _DECLARED_ROSTER declares it.
+_DECLARED_NEGATIVE = tuple(row for row in _DECLARED_ROSTER if row[0] == "opf-tooling-selftest")
+
+
+def _check_declared_roster():
+    """_SUBSET, each row with the bound run() looks up for it (_MEMBER_TIMEOUT_S, else _SUBSET_TIMEOUT_S),
+    equals _DECLARED_ROSTER row for row and in order: names, scripts, args (compared as tuples) and
+    bounds. Raises AssertionError naming the first row that differs."""
+    got = [(name, script, tuple(args), _MEMBER_TIMEOUT_S.get(name, _SUBSET_TIMEOUT_S))
+           for name, script, args in _SUBSET]
+    for index in range(max(len(got), len(_DECLARED_ROSTER))):
+        have, want = got[index:index + 1], list(_DECLARED_ROSTER[index:index + 1])
+        if have != want:
+            raise AssertionError("closure/declared-roster: row {} of _SUBSET is {!r}, declared {!r}".format(
+                index + 1, have, want))
+
+
+# Ambient variables the isolated environment must drop. _ambient_sentinels sets them in os.environ
+# while the stubbed runs and the boundary case execute, so their environment checks observe a drop
+# (or a leak) of these variables on any host, whatever the host's own environment holds.
+_AMBIENT_SENTINELS = (
+    ("GIT_DIR", "/nonexistent/opf-closure-sentinel.git"),
+    ("GIT_OPF_CLOSURE_SENTINEL", "1"),
+    ("PYTHONPATH", "/nonexistent/opf-closure-sentinel"),
+    ("PYTHONHOME", "/nonexistent/opf-closure-sentinel"),
+)
+
+
+@contextlib.contextmanager
+def _ambient_sentinels():
+    """Set every _AMBIENT_SENTINELS variable in os.environ for the duration, restoring each variable's
+    previous value (or its absence) on every path."""
+    saved = [(key, os.environ.get(key)) for key, _value in _AMBIENT_SENTINELS]
+    os.environ.update(_AMBIENT_SENTINELS)
+    try:
+        yield
+    finally:
+        for key, value in saved:
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _env_fault(env):
+    """None when `env` is a dict with no GIT_-prefixed variable, no PYTHONPATH or PYTHONHOME, and
+    PYTHONDONTWRITEBYTECODE equal to "1"; otherwise a description of what differs."""
+    if not isinstance(env, dict):
+        return "an environment that is not a dict: {!r}".format(env)
+    leaked = sorted(key for key in env if key.startswith("GIT_") or key in ("PYTHONPATH", "PYTHONHOME"))
+    if leaked or env.get("PYTHONDONTWRITEBYTECODE") != "1":
+        return "{!r}, PYTHONDONTWRITEBYTECODE={!r}".format(leaked, env.get("PYTHONDONTWRITEBYTECODE"))
+    return None
+
+
+def _digest(path):
+    """The sha256 hex digest of the file at path, or None when it is absent or cannot be read."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _entries(path):
+    """The sorted names directly inside the directory at path, or None when it cannot be listed."""
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return None
+
+
 def _stub_member_runner(calls, outcomes):
-    """A stand-in for _run_one: records every call it receives as a dict (name: the _SUBSET member
-    with that script and args, or None for a row not in _SUBSET; script, args, timeout, opf_root,
-    run_dir, env and separate_streams: what the call passed) and returns outcomes.get(name) or a pass."""
-    by_row = {(script, tuple(args)): name for name, script, args in _SUBSET}
+    """A stand-in for _run_one: records each call it receives as a dict and returns outcomes.get(name)
+    or a pass. Recorded as the call passed them: script, args, timeout, opf_root, run_dir, env and
+    separate_streams; name, the _DECLARED_ROSTER member with that script and args (None for a row it
+    does not declare). Read when the call is made (the copy is removed once run() returns): entries,
+    the names directly inside run_dir; payload, the sha256 of opf_root/tools/opf.py and of
+    opf_root/tools/<script> (None for a file absent or unreadable)."""
+    by_row = {(script, args): name for name, script, args, _bound in _DECLARED_ROSTER}
 
     def stub(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, separate_streams=False):
         name = by_row.get((script, tuple(args)))
+        tools = Path(opf_root) / "tools"
         calls.append(dict(name=name, script=script, args=tuple(args), timeout=timeout_s, opf_root=opf_root,
-                          run_dir=run_dir, env=dict(env), separate_streams=separate_streams))
+                          run_dir=run_dir, env=dict(env), separate_streams=separate_streams,
+                          entries=_entries(run_dir),
+                          payload=tuple((part, _digest(tools / part)) for part in ("opf.py", script))))
         return outcomes.get(name, (0, "ok", None))
     return stub
 
 
 def _copy_recorder(made):
-    """A stand-in for _materialize that delegates to the one bound now and records each copy it returns."""
+    """A stand-in for _materialize that delegates to the one bound now and records each copy as (the
+    source it was given, the destination it was given, the path it returned)."""
     inner = _materialize
 
     def materialize(opf_src, dest):
-        made.append(inner(opf_src, dest))
-        return made[-1]
+        made.append((opf_src, dest, inner(opf_src, dest)))
+        return made[-1][2]
     return materialize
 
 
-def _roster(subset, table):
-    """The member calls `subset` must give under the bound table `table`, as (name, script, args, bound)."""
-    return [(name, script, tuple(args), table.get(name, _SUBSET_TIMEOUT_S)) for name, script, args in subset]
+def _check_copy(label, made, source, root):
+    """The one copy a run made, as _copy_recorder recorded it in `made`: exactly one copy, from
+    <source>/opf into <dest>/opf for the dest it was given (resolved paths compared), lying outside
+    the repository at `root`. Returns the copy's resolved path. Raises AssertionError (`label`-copy,
+    `label`-scratch), or _CannotEvaluate (`label`-scratch) when the host's temporary directory
+    (tempfile.gettempdir(), which TMPDIR sets) is itself inside that repository: no scratch directory
+    outside it can then be observed, so the case says so instead of refuting run() (a residual: such
+    a host cannot evaluate this check)."""
+    if len(made) != 1:
+        raise AssertionError("{}-copy: the run made {} copies of opf/, expected one".format(label, len(made)))
+    repo = Path(root).resolve()
+    src, dest, copy = (Path(part).resolve() for part in made[0])
+    want = Path(source).resolve() / "opf"
+    if src != want or copy != dest / "opf":
+        raise AssertionError("{}-copy: the run copied {} into {}, expected {} into {}".format(
+            label, src, copy, want, dest / "opf"))
+    host_tmp = Path(gettempdir()).resolve()
+    if host_tmp.is_relative_to(repo):
+        raise _CannotEvaluate("{}-scratch: the host's temporary directory {} is inside the repository {} "
+                              "(TMPDIR), so no scratch directory outside it can be observed".format(
+                                  label, host_tmp, repo))
+    if copy.is_relative_to(repo):
+        raise AssertionError("{}-scratch: the copy {} is inside the repository {}".format(label, copy, repo))
+    return copy
 
 
 def _check_member_calls(label, calls, made, root, separate_streams, roster):
-    """Reconcile what a run executed, as _stub_member_runner recorded it, with what it must execute:
-    exactly `roster` (no omission, no extra, no repeat; script, args and bound equal; in any order),
-    every call over the opf/ copy the run made (the last path _materialize returned in `made`, never
-    the repository's opf/), with run_dir the scratch directory holding that copy and outside the
-    repository at `root`, the isolated environment (no PYTHONPATH, PYTHONHOME or GIT_ variable, and
-    PYTHONDONTWRITEBYTECODE=1) and the stream mode `separate_streams`. Raises AssertionError naming
-    `label` and what differs."""
+    """Reconcile the member calls a stubbed run made, as _stub_member_runner recorded them, with what
+    the self-test requires. Each refutes with its own suffix of `label`:
+    -roster: the calls' (name, script, args, bound) equal `roster` in order (no omission, extra,
+      repeat or reordering);
+    -copy and -scratch: see _check_copy, with the source <root>/opf (-scratch is cannot-evaluate when
+      the host's temporary directory is inside the repository);
+    -root: each call's opf_root is that copy;
+    -run-dir: each call's run_dir is the directory holding the copy, and held only "opf" when the
+      call was made;
+    -payload: opf.py and the call's own script were in the copy when the call was made, each with
+      the sha256 of the file of the same name under <root>/opf/tools now;
+    -env: each call's env passes _env_fault;
+    -streams: each call's separate_streams is `separate_streams`.
+    These are the arguments run() (or the negative leg) passed to _run_one; what _run_one launches
+    with them is _check_member_boundary's. Not compared: the copy's other files. A payload file that
+    exists but cannot be read reads as missing (a refutation, never a pass)."""
     got = [(call["name"], call["script"], call["args"], call["timeout"]) for call in calls]
-    extra, missing = list(got), []
-    for row in roster:
-        if row in extra:
-            extra.remove(row)
-        else:
-            missing.append(row)
-    if missing or extra:
-        raise AssertionError("{}-roster: missing {!r}, extra {!r}".format(label, missing, extra))
-    if not made:
-        raise AssertionError("{}-root: the members ran but no opf/ copy was made".format(label))
-    repo, copy = Path(root).resolve(), Path(made[-1]).resolve()
+    for index in range(max(len(got), len(roster))):
+        have, want = got[index:index + 1], list(roster[index:index + 1])
+        if have != want:
+            raise AssertionError("{}-roster: call {} was {!r}, expected {!r} ({} calls, {} expected)".format(
+                label, index + 1, have, want, len(got), len(roster)))
+    copy = _check_copy(label, made, root, root)
+    tools = Path(root).resolve() / "opf" / "tools"
     for call in calls:
-        where, run_dir, env = Path(call["opf_root"]).resolve(), Path(call["run_dir"]).resolve(), call["env"]
-        if where != copy or where.is_relative_to(repo):
-            raise AssertionError("{}-root: {} ran over {}, not the copy {}".format(label, call["name"], where, copy))
-        if run_dir != copy.parent or run_dir.is_relative_to(repo):
-            raise AssertionError("{}-run-dir: {} ran in {}, not {} outside {}".format(
-                label, call["name"], run_dir, copy.parent, repo))
-        leaked = sorted(key for key in env if key.startswith("GIT_") or key in ("PYTHONPATH", "PYTHONHOME"))
-        if leaked or env.get("PYTHONDONTWRITEBYTECODE") != "1":
-            raise AssertionError("{}-env: {} ran with {!r}, PYTHONDONTWRITEBYTECODE={!r}".format(
-                label, call["name"], leaked, env.get("PYTHONDONTWRITEBYTECODE")))
+        name = call["name"]
+        where = Path(call["opf_root"]).resolve()
+        if where != copy:
+            raise AssertionError("{}-root: {} ran over {}, not the copy {}".format(label, name, where, copy))
+        run_dir = Path(call["run_dir"]).resolve()
+        if run_dir != copy.parent or call["entries"] != ["opf"]:
+            raise AssertionError("{}-run-dir: {} ran in {} holding {!r}, not {} holding only the copy".format(
+                label, name, run_dir, call["entries"], copy.parent))
+        for part, digest in call["payload"]:
+            if digest is None or digest != _digest(tools / part):
+                raise AssertionError("{}-payload: {} ran over a copy whose tools/{} is {}".format(
+                    label, name, part, "missing" if digest is None else "not the source's"))
+        fault = _env_fault(call["env"])
+        if fault is not None:
+            raise AssertionError("{}-env: {} ran with {}".format(label, name, fault))
         if call["separate_streams"] is not separate_streams:
             raise AssertionError("{}-streams: {} ran with separate_streams={!r}".format(
-                label, call["name"], call["separate_streams"]))
+                label, name, call["separate_streams"]))
+
+
+# The recording child of _check_member_boundary, written as every member's script in a scratch copy:
+# it prints one JSON line on stdout saying how it was launched.
+_RECORDER = (
+    "import json, os, sys\n"
+    "print(json.dumps(dict(argv=sys.argv, isolated=sys.flags.isolated,\n"
+    "                      no_bytecode=sys.flags.dont_write_bytecode, cwd=os.getcwd(),\n"
+    "                      entries=sorted(os.listdir(os.getcwd())), env=dict(os.environ))))\n")
+
+
+def _launch_recorder(launches):
+    """A stand-in for the subprocess module bound now: run delegates to its run and records each
+    launch as (the argument list, the keyword arguments, the child's stdout decoded); every other
+    attribute reads through. Built once the watch is bound, so a launch the host refuses is observed."""
+    inner = subprocess.run
+
+    def launch(cmd, **kwargs):
+        proc = inner(cmd, **kwargs)
+        launches.append((list(cmd), dict(kwargs), (proc.stdout or b"").decode("utf-8", "replace")))
+        return proc
+    return _Overlay(subprocess, run=launch)
+
+
+def _check_launches(label, launches, made, source, root, roster, stderr):
+    """Reconcile the launches a run made through the real _run_one, as _launch_recorder recorded
+    them, with `roster`. Each refutes with its own suffix of `label`: -copy and -scratch (see
+    _check_copy, the source <source>/opf); -launches: one launch per roster row; -argv: in roster
+    order, the argument list is [sys.executable, "-I", "-B", <copy>/tools/<script>, *args]; -kwargs:
+    exactly cwd, env, stdout, stderr and timeout were passed; -cwd: cwd is the directory holding the
+    copy; -env: env passes _env_fault; -streams: stdout is PIPE and stderr is `stderr`; -timeout: the
+    row's bound; -child: the child's own report (the last line of its stdout, from _RECORDER) gives
+    its argv as the script path and args, sys.flags.isolated and dont_write_bytecode set, a working
+    directory that is the directory holding the copy and holds only "opf", and an environment that
+    passes _env_fault."""
+    copy = _check_copy(label, made, source, root)
+    if len(launches) != len(roster):
+        raise AssertionError("{}-launches: {} launches, expected {}".format(label, len(launches), len(roster)))
+    for (cmd, kwargs, out), (name, script, args, bound) in zip(launches, roster):
+        target = copy / "tools" / script
+        if (cmd[:3] != [sys.executable, "-I", "-B"] or len(cmd) < 4 or Path(cmd[3]).resolve() != target
+                or cmd[4:] != list(args)):
+            raise AssertionError("{}-argv: {} launched {!r}".format(label, name, cmd))
+        if sorted(kwargs) != ["cwd", "env", "stderr", "stdout", "timeout"]:
+            raise AssertionError("{}-kwargs: {} launched with {!r}".format(label, name, sorted(kwargs)))
+        if kwargs["cwd"] is None or Path(kwargs["cwd"]).resolve() != copy.parent:
+            raise AssertionError("{}-cwd: {} launched in {!r}, not {}".format(label, name, kwargs["cwd"], copy.parent))
+        fault = _env_fault(kwargs["env"])
+        if fault is not None:
+            raise AssertionError("{}-env: {} launched with {}".format(label, name, fault))
+        if kwargs["stdout"] != subprocess.PIPE or kwargs["stderr"] != stderr:
+            raise AssertionError("{}-streams: {} launched with stdout={!r}, stderr={!r}".format(
+                label, name, kwargs["stdout"], kwargs["stderr"]))
+        if kwargs["timeout"] != bound:
+            raise AssertionError("{}-timeout: {} launched with timeout={!r}, not {}".format(
+                label, name, kwargs["timeout"], bound))
+        lines = out.strip().splitlines()
+        try:
+            report = json.loads(lines[-1])
+        except (IndexError, ValueError):
+            report = None
+        if not isinstance(report, dict):
+            raise AssertionError("{}-child: {} gave no report: {!r}".format(label, name, out[-300:]))
+        fault = _env_fault(report.get("env"))
+        if (report.get("argv") != [cmd[3], *args] or report.get("isolated") != 1
+                or report.get("no_bytecode") != 1
+                or Path(str(report.get("cwd"))).resolve() != copy.parent or report.get("entries") != ["opf"]
+                or fault is not None):
+            report.pop("env", None)
+            raise AssertionError("{}-child: {} reported {!r}, environment {}".format(
+                label, name, report, fault or "isolated"))
 
 
 class _CannotEvaluate(Exception):
@@ -612,8 +837,10 @@ def _harness_watch(broke):
     timeout that the caller's own wrong argument caused (a nonexistent dir= for mkdtemp, a too-short
     timeout for a child) still reads as the host's, so the outcome is cannot-evaluate (exit 2),
     fail-closed, never a pass. Host I/O outside these primitives is not watched: the removal of
-    scratch directories (errors ignored), the path
-    resolution in _check_member_calls, and the is_dir and is_file probes in run(), _run_one and
+    scratch directories (errors ignored), the path resolution and the file and directory reads of
+    _check_copy, _check_member_calls, _check_launches, _stub_member_runner (_digest, _entries) and
+    gettempdir, where an unreadable payload file reads as missing (a refutation, never a pass),
+    and the is_dir and is_file probes in run(), _run_one and
     _require_subtree, where an unreadable path reads as absent. _require_subtree then makes the case
     cannot-evaluate, but a probe that reads a path as absent after the case found or wrote it (a path
     that became unreadable in between) is a refutation where the case judges that probe's outcome:
@@ -682,21 +909,22 @@ def _attributed(label, call, injected=None):
 
 
 def _stubbed_run(root, outcomes):
-    """run(root) with _run_one stubbed by outcomes, through _attributed; returns (rc, stdout, stderr,
-    calls). Cannot-evaluate when root has no opf/ subtree, or when the watch saw the scratch
-    directory or the copy fail (the message then names run()'s exit code and its own error).
-    Otherwise a run() that crashed, or exited before any subset member ran, is refuted; the
-    refutation says whether its copy was built, as observed at _materialize. So is a run() whose
-    member calls do not reconcile with the full _SUBSET roster under its bounds, over the copy it
-    made, in a run_dir outside the repository, with the isolated environment and merged streams
-    (_check_member_calls, its labels starting closure/member-)."""
+    """run(root) with _run_one stubbed by outcomes, through _attributed, while _ambient_sentinels
+    sets GIT_ and PYTHON variables in os.environ; returns (rc, stdout, stderr, calls).
+    Cannot-evaluate when root has no opf/ subtree, or when the watch saw the scratch directory or
+    the copy fail (the message then names run()'s exit code and its own error). Otherwise a run()
+    that crashed, or exited before any subset member ran, is refuted; the refutation says whether
+    its copy was built, as observed at _materialize. So is a run() whose member calls do not
+    reconcile with _DECLARED_ROSTER as _check_member_calls states it, with merged streams (labels
+    starting closure/member-)."""
     _require_subtree(root)
     calls, seen, made = [], [], []
 
     def stubs():
         return dict(_run_one=_stub_member_runner(calls, outcomes), _materialize=_copy_recorder(made))
     try:
-        _attributed("closure/stubbed-run", lambda: seen.append(_captured(run, root)), injected=stubs)
+        with _ambient_sentinels():
+            _attributed("closure/stubbed-run", lambda: seen.append(_captured(run, root)), injected=stubs)
     except _HarnessFailure as exc:
         if not seen:
             raise
@@ -708,7 +936,7 @@ def _stubbed_run(root, outcomes):
             rc, "with its copy built" if made else "without building its copy",
             err.strip().replace("\n", " | ")))
     _attributed("closure/member-calls", lambda: _check_member_calls(
-        "closure/member", calls, made, root, False, _roster(_SUBSET, _MEMBER_TIMEOUT_S)))
+        "closure/member", calls, made, root, False, _DECLARED_ROSTER))
     return rc, out, err, calls
 
 
@@ -885,12 +1113,13 @@ def _check_verdict_tables():
 
 
 def _check_leg_wiring(root):
-    """Both legs stubbed (run() and the flipped copy's runner) through the real _closure_legs: the
-    flipped opf.py --self-test runs under its bound row, over the negative leg's own copy, in the
-    scratch directory holding it (outside the repository), with the isolated environment and its
-    stdout and stderr captured apart (_check_member_calls, labelled closure/negative-run-...); and
-    the self-test exits 2 (not 0, not 1) when only cannot-evaluate remains, 1 when a leg was refuted
-    whatever else could not be evaluated."""
+    """Both legs stubbed (run() and the flipped copy's runner) through the real _closure_legs, while
+    _ambient_sentinels sets GIT_ and PYTHON variables in os.environ: the positive leg gives run()
+    the root itself (closure/positive-root, resolved paths compared); the flipped copy's one member
+    call is _DECLARED_NEGATIVE, reconciled as _check_member_calls states it with its stdout and
+    stderr captured apart (labels starting closure/negative-run-); and the self-test exits 2 (not 0,
+    not 1) when only cannot-evaluate remains, 1 when a leg was refuted whatever else could not be
+    evaluated."""
     wiring = [
         (2, (2, "timed out after 1800s", _TIMEOUT), 2),
         (0, (2, "timed out after 1800s", _TIMEOUT), 2),
@@ -909,9 +1138,9 @@ def _check_leg_wiring(root):
     ]
     _require_subtree(root)
     for run_rc, neg, want in wiring:
-        calls, made = [], []
+        calls, made, roots = [], [], []
 
-        def wired(run_rc=run_rc, neg=neg, want=want, calls=calls, made=made):
+        def wired(run_rc=run_rc, neg=neg, want=want, calls=calls, made=made, roots=roots):
             failures, cannot = _closure_legs(root)
             # A store that is not UTF-8 text (judged here through the watched _not_utf8, not from the
             # leg's message) is malformed input: the flip cannot be made, so the case is
@@ -925,17 +1154,19 @@ def _check_leg_wiring(root):
                 raise AssertionError("closure/negative-bound-lookup: {!r}".format(bounds))
             # What the flipped copy's run executes: opf.py --self-test over the negative leg's own
             # copy, in its scratch directory, isolated, with the two streams captured apart.
-            _check_member_calls("closure/negative-run", calls, made, root, True,
-                                [("opf-tooling-selftest", "opf.py", ("--self-test",), 1800)])
+            _check_member_calls("closure/negative-run", calls, made, root, True, _DECLARED_NEGATIVE)
+            if [Path(where).resolve() for where in roots] != [Path(root).resolve()]:
+                raise AssertionError("closure/positive-root: run() was given {!r}, expected {}".format(roots, root))
             got = _captured(_self_test_exit, failures, cannot)[0]
             if got != want:
                 raise AssertionError("closure/self-test-exit: run()={} flipped={!r} gave {}, expected {}".format(
                     run_rc, neg, got, want))
-        stub_run = (lambda rc: (lambda _root: rc))(run_rc)
-        _attributed("closure/self-test-exit", wired, injected=(
-            lambda stub_run=stub_run, neg=neg, calls=calls, made=made: dict(
-                run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg}),
-                _materialize=_copy_recorder(made))))
+        stub_run = (lambda rc, roots: (lambda where: roots.append(where) or rc))(run_rc, roots)
+        with _ambient_sentinels():
+            _attributed("closure/self-test-exit", wired, injected=(
+                lambda stub_run=stub_run, neg=neg, calls=calls, made=made: dict(
+                    run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg}),
+                    _materialize=_copy_recorder(made))))
 
 
 def _not_utf8(path):
@@ -1050,9 +1281,11 @@ def _check_absent_subtree(root):
         except OSError as exc:
             raise _CannotEvaluate("closure/absent-subtree-scratch: {}".format(exc))
         absent = tmp / "no-opf-root"
-        for check in (_check_timeout_mapping, _check_harness_mapping, _check_failure_first,
-                      _check_leg_wiring, _check_scratch_and_copy_errors):
-            _expect_cannot(check, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_timeout_mapping, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_harness_mapping, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_failure_first, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_leg_wiring, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_scratch_and_copy_errors, absent, str(absent), "closure/absent-subtree")
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1106,6 +1339,57 @@ def _check_missing_input(_root):
                 if rc != 2 or calls:
                     raise AssertionError("{}: run() gave {} with {} member call(s)".format(label, rc, len(calls)))
             _attributed(label, refused, injected=dict(_run_one=_stub_member_runner(calls, {})))
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _check_member_boundary(root):
+    """The subprocess boundary, through the REAL run() and _run_one, over a scratch root whose
+    opf/tools/ holds _RECORDER as opf.py and as every _DECLARED_ROSTER script (and an _opf_store.py
+    the negative leg can flip), while _ambient_sentinels sets GIT_ and PYTHON variables in
+    os.environ and _launch_recorder records each launch over the watch. closure/boundary-run: run()
+    exits 0 and its launches reconcile with _DECLARED_ROSTER as _check_launches states it, with
+    stderr merged into stdout. closure/boundary-negative: the real _closure_legs over the same root,
+    run() stubbed to record its argument, gives run() that root, observes no cannot-evaluate, and its
+    one launch reconciles with _DECLARED_NEGATIVE, stderr captured apart. Needs a scratch directory
+    but no opf/ subtree; `root` is the repository the copies must lie outside. A host failure
+    building the fixture, or one the watch sees, is cannot-evaluate. Not covered: the members' own
+    scripts (the children here are recorders), and what run() does with a real member's output."""
+    tmp = None
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-boundary-"))
+            fixture = tmp / "root"
+            scripts = sorted(set(["opf.py"] + [row[1] for row in _DECLARED_ROSTER]))
+            _write_fixture(fixture, [("opf/tools/" + script, _RECORDER.encode("utf-8")) for script in scripts]
+                           + [("opf/tools/_opf_store.py", b"from _semver import _parse\n")])
+        except OSError as exc:
+            raise _CannotEvaluate("closure/boundary-scratch: could not build the fixture: {}".format(exc))
+        made, launches = [], []
+
+        def boundary_run():
+            rc = _captured(run, fixture)[0]
+            if rc != 0:
+                raise AssertionError("closure/boundary-run: run() exited {} over recording children".format(rc))
+            _check_launches("closure/boundary-run", launches, made, fixture, root, _DECLARED_ROSTER,
+                            subprocess.STDOUT)
+        with _ambient_sentinels():
+            _attributed("closure/boundary-run", boundary_run, injected=lambda: dict(
+                subprocess=_launch_recorder(launches), _materialize=_copy_recorder(made)))
+        neg_made, neg_launches, roots = [], [], []
+
+        def boundary_negative():
+            _failures, cannot = _closure_legs(fixture)
+            if cannot or [Path(where).resolve() for where in roots] != [fixture.resolve()]:
+                raise AssertionError("closure/boundary-negative: run() was given {!r}, cannot-evaluate {!r}".format(
+                    roots, cannot))
+            _check_launches("closure/boundary-negative", neg_launches, neg_made, fixture, root,
+                            _DECLARED_NEGATIVE, subprocess.PIPE)
+        with _ambient_sentinels():
+            _attributed("closure/boundary-negative", boundary_negative, injected=lambda: dict(
+                run=lambda where: roots.append(where) or 0, subprocess=_launch_recorder(neg_launches),
+                _materialize=_copy_recorder(neg_made)))
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1377,18 +1661,24 @@ def _check_preflight_failure_first(root):
 
 
 def _red_bound_lookup(root):
-    """RED cases: with the bound table emptied, each lookup check must refuse the 600 s it now passes.
-    Each check runs through _attributed under its own label, so a crash is not read as the RED."""
-    for check, label in ((_check_timeout_mapping, "closure/member-bound-lookup"),
-                         (_check_leg_wiring, "closure/negative-bound-lookup")):
-        try:
-            _attributed("closure/red-bound-lookup", lambda: check(root), injected=dict(_MEMBER_TIMEOUT_S=dict()))
-        except AssertionError as exc:
-            if not str(exc).startswith(label):
-                raise
-        else:
-            raise AssertionError(label + "-not-red")
-        print("RED closure-bound-lookup -> " + label)
+    """RED cases: with the bound table emptied, run() passes 600 s to opf-tooling-selftest, and each
+    check must refuse it: _check_timeout_mapping at its reconciliation with _DECLARED_ROSTER
+    (closure/member-roster), _check_leg_wiring at the negative leg's bound lookup."""
+    _red_one(root, _check_timeout_mapping, "closure/member-roster")
+    _red_one(root, _check_leg_wiring, "closure/negative-bound-lookup")
+
+
+def _red_one(root, check, label):
+    """check(root) with the bound table emptied, through _attributed under its own label (so a crash is
+    not read as the RED), must be refuted with a message starting `label`."""
+    try:
+        _attributed("closure/red-bound-lookup", lambda: check(root), injected=dict(_MEMBER_TIMEOUT_S=dict()))
+    except AssertionError as exc:
+        if not str(exc).startswith(label):
+            raise
+    else:
+        raise AssertionError(label + "-not-red")
+    print("RED closure-bound-lookup -> " + label)
 
 
 def _rootless(fn):
@@ -1415,14 +1705,28 @@ class _Overlay:
         return getattr(self._target, key)
 
 
-def _nth_call(name, attr, n, mode, fired, frames=None):
+def _stack_positions():
+    """(co_qualname, (line, end line, column, end column)) of every frame of this file on the caller's
+    stack, innermost first: the source position, read through co_positions, of the instruction at the
+    frame's f_lasti. For a frame that is waiting on a call, that instruction is the call, so two
+    calls on one line have different positions."""
+    here = sys._getframe()
+    frame, found = here.f_back, []
+    while frame is not None:
+        if frame.f_code.co_filename == here.f_code.co_filename:
+            found.append((frame.f_code.co_qualname, tuple(list(frame.f_code.co_positions())[frame.f_lasti // 2])))
+        frame = frame.f_back
+    return found
+
+
+def _nth_call(name, attr, n, mode, fired, stacks=None):
     """A patch for the global `name` (or its attribute `attr`) that delegates to the one bound now,
     except that its n-th outermost call (1-based, counted from now; a call made while an earlier one
-    is still running is delegated and not counted) appends n to `fired`, appends to `frames` (when
-    given) the (co_qualname, current line) of every frame of this file then on the stack, and then,
-    by mode:
+    is still running is delegated and not counted) appends n to `fired` and then, by mode:
     "crash" raises RuntimeError, "none" returns None (a malformed result), "oserror" raises OSError
-    and "timeout" raises subprocess.TimeoutExpired (the last two stand for a host failure)."""
+    and "timeout" raises subprocess.TimeoutExpired (the last two stand for a host failure). When
+    `stacks` is given, EVERY counted call first appends _stack_positions() to it, so stacks[k - 1]
+    is where call k was made."""
     target = globals()[name]
     inner = getattr(target, attr) if attr else target
     count, depth = [0], [0]
@@ -1431,6 +1735,8 @@ def _nth_call(name, attr, n, mode, fired, frames=None):
         if depth[0]:
             return inner(*args, **kwargs)
         count[0] += 1
+        if stacks is not None:
+            stacks.append(_stack_positions())
         if count[0] != n:
             depth[0] += 1
             try:
@@ -1438,13 +1744,6 @@ def _nth_call(name, attr, n, mode, fired, frames=None):
             finally:
                 depth[0] -= 1
         fired.append(n)
-        if frames is not None:
-            here = sys._getframe()
-            frame = here.f_back
-            while frame is not None:
-                if frame.f_code.co_filename == here.f_code.co_filename:
-                    frames.append((frame.f_code.co_qualname, frame.f_lineno))
-                frame = frame.f_back
         if mode == "crash":
             raise RuntimeError(_PIN_MARKER)
         if mode == "oserror":
@@ -1456,7 +1755,7 @@ def _nth_call(name, attr, n, mode, fired, frames=None):
     return {name: _Overlay(target, **{attr: call}) if attr else call}
 
 
-def _pin(entry, root, absent_root, span=None):
+def _pin(entry, root, absent_root, where=None):
     """Run one _ATTRIBUTION_PINS entry: the case's check, over root (or over absent_root, a path with
     no opf/ subtree, when the entry says so), with its target's n-th call patched by mode, under this
     pin's own watch (a host failure there is _HarnessFailure). Nothing is attributed for the check:
@@ -1468,16 +1767,20 @@ def _pin(entry, root, absent_root, span=None):
     cannot-evaluate (its setup was missing), except for an absent-root entry, where reaching the
     call without the subtree is the point, so it is a refutation; a pass is a refutation (the call
     was skipped); any other exception is raised as is.
-    With `span` (the entry's derived site, as (qualname, first line, last line)), a patched call that
-    fired held only when a frame of the site's function was then executing a line of the site's
-    statement (or lambda): the entry exercised the site it names."""
+    With `where` (the entry's derived site, as (qualname, dispatch); see _site_walk), a patched call
+    that fired holds only when, at that call, a frame of the site's code was executing the site's
+    dispatch call: the instruction at its f_lasti has the dispatch's exact source position (line,
+    end line, column, end column), so a call on the same line, or one made by another call of the
+    same function, does not hold for it. A site whose dispatch is None is refuted (no call can be
+    identified with it). Returns True when no earlier counted call of the patched target was made at
+    the site (this entry pins the site's first such call), else False; without `where`, False."""
     label, check, absent, name, attr, n, mode, want = entry
     site = "{} {}{}#{} {}".format(label, name, "." + attr if attr else "", n, mode)
     if absent and absent_root is None:
         raise _CannotEvaluate("closure/attribution-pin: {}: no scratch directory for a root with no opf/".format(site))
-    fired, host, frames = [], [], []
+    fired, host, stacks = [], [], []
     with _patched(**_harness_watch(host)):
-        with _patched(**_nth_call(name, attr, n, mode, fired, frames)):
+        with _patched(**_nth_call(name, attr, n, mode, fired, stacks)):
             try:
                 _captured(check, absent_root if absent else root)
             except Exception as exc:
@@ -1497,11 +1800,15 @@ def _pin(entry, root, absent_root, span=None):
             expected = "a refutation naming {!r}".format(want)
         if not held:
             raise AssertionError("closure/attribution-pin: {} gave {!r}, expected {}".format(site, got, expected))
-        if span is not None and not any(qualname == span[0] and span[1] <= line <= span[2]
-                                        for qualname, line in frames):
-            raise AssertionError("closure/attribution-pin: {} fired outside its site ({}, lines {} to {}): "
-                                 "{!r}".format(site, span[0], span[1], span[2], frames))
-        return
+        if where is None:
+            return False
+        if where[1] is None:
+            raise AssertionError("closure/attribution-pin: {} names a site that is neither a call nor a call's "
+                                 "argument, so no call can be identified with it ({!r})".format(site, where))
+        if where not in stacks[n - 1]:
+            raise AssertionError("closure/attribution-pin: {} fired outside its site ({} executing the call at "
+                                 "{!r}): {!r}".format(site, where[0], where[1], stacks[n - 1]))
+        return not any(where in stack for stack in stacks[:n - 1])
     if isinstance(got, AssertionError):
         raise got
     if isinstance(got, _CannotEvaluate) and not absent:
@@ -1512,13 +1819,27 @@ def _pin(entry, root, absent_root, span=None):
     raise got
 
 
-def _check_pin_rules():
+def _check_pin_rules(spans):
     """Pins _pin itself, over a pure target: an attributed crash holds; a crash that escapes raw, or
     that the case turns into cannot-evaluate, is refuted; a case that never reaches the call is
     cannot-evaluate, or refuted when the entry is over a root with no opf/ (or the case passed); a
-    watched host failure holds, and the same failure outside any watch is refuted."""
+    watched host failure holds, and the same failure outside any watch is refuted. With the site
+    positions `spans` (from _derived_sites): an attributed call pinned at its own site holds as its
+    site's first call; a call that fired at another call on the same line as the site is refuted;
+    a call pinned at the second pass of a loop holds but is not its site's first call."""
     def attributed(_root):
         _attributed("closure/pin-probe", lambda: _positive_leg_verdict(0))
+
+    def sameline(_root):
+        _attributed("closure/pin-probe", lambda: _positive_leg_verdict(0)); _positive_leg_verdict(0)  # noqa: E702
+
+    def later(_root):
+        for bare in (True, False):
+            probe = lambda: _positive_leg_verdict(0)  # noqa: E731
+            if bare:
+                probe()
+            else:
+                _attributed("closure/pin-probe", probe)
 
     def bare(_root):
         _positive_leg_verdict(0)
@@ -1540,40 +1861,63 @@ def _check_pin_rules():
 
     def unwatched(_root):
         _write_fixture(Path("."), ())
+    here = "_check_pin_rules.<locals>."
     probes = (
-        (attributed, False, "_positive_leg_verdict", "crash", None),
-        (bare, False, "_positive_leg_verdict", "crash", AssertionError),
-        (masked, False, "_positive_leg_verdict", "crash", AssertionError),
-        (unreached, False, "_positive_leg_verdict", "crash", _CannotEvaluate),
-        (unreached, True, "_positive_leg_verdict", "crash", AssertionError),
-        (skipped, False, "_positive_leg_verdict", "crash", AssertionError),
-        (watched, False, "_write_fixture", "oserror", None),
-        (unwatched, False, "_write_fixture", "oserror", AssertionError),
+        (attributed, False, "_positive_leg_verdict", "crash", 1, None, None, False),
+        (bare, False, "_positive_leg_verdict", "crash", 1, None, AssertionError, None),
+        (masked, False, "_positive_leg_verdict", "crash", 1, None, AssertionError, None),
+        (unreached, False, "_positive_leg_verdict", "crash", 1, None, _CannotEvaluate, None),
+        (unreached, True, "_positive_leg_verdict", "crash", 1, None, AssertionError, None),
+        (skipped, False, "_positive_leg_verdict", "crash", 1, None, AssertionError, None),
+        (watched, False, "_write_fixture", "oserror", 1, None, None, False),
+        (unwatched, False, "_write_fixture", "oserror", 1, None, AssertionError, None),
+        (attributed, False, "_positive_leg_verdict", "crash", 1,
+         here + "attributed.<locals>.<lambda> _positive_leg_verdict#1", None, True),
+        (sameline, False, "_positive_leg_verdict", "crash", 1, here + "sameline _positive_leg_verdict#1",
+         AssertionError, None),
+        (later, False, "_positive_leg_verdict", "crash", 2, here + "later.<locals>.<lambda> _positive_leg_verdict#1",
+         None, False),
     )
-    for check, absent, name, mode, want in probes:
+    for check, absent, name, mode, n, key, want, want_first in probes:
+        first = None
         try:
-            _pin(("closure/pin-probe", check, absent, name, None, 1, mode, "closure/pin-probe"),
-                 None, Path("no-opf-root") if absent else None)
+            first = _pin(("closure/pin-probe", check, absent, name, None, n, mode, "closure/pin-probe"),
+                         None, Path("no-opf-root") if absent else None, None if key is None else spans[key])
         except (AssertionError, _CannotEvaluate) as exc:
             got = exc
         else:
             got = None
-        if (type(got) if got is not None else None) is not want:
-            raise AssertionError("closure/pin-rules: {} over {} ({}) gave {!r}, expected {}".format(
-                check.__name__, name, mode, got, want.__name__ if want else "a pass"))
+        if (type(got) if got is not None else None) is not want or first is not want_first:
+            raise AssertionError("closure/pin-rules: {} over {} ({}, call {}) gave {!r} (first call: {!r}), "
+                                 "expected {} (first call: {!r})".format(
+                                     check.__name__, name, mode, n, got, first,
+                                     want.__name__ if want else "a pass", want_first))
 
 
-def _site_walk(node, scope, span, targets, raw, names):
-    """Collect under `node` every module-level name it loads (into `names`) and every load of a name
-    in `targets` as a raw site (qualname, name, line, column, span) into `raw`. `scope` is (the
-    co_qualname of the code that evaluates `node`, the qualname prefix of a function or class
-    defined there); `span` is the (first, last) line of the innermost statement, lambda or generator
-    expression around `node`. A def, lambda or class has its defaults, decorators and bases walked
-    where it stands and its body under its own qualname (annotations are not walked); a generator
+# What a load must not do unseen (see _derived_sites): these builtins and module-level names look
+# code up by a string or through a namespace, and these attributes reach a namespace of globals.
+_INDIRECTION_NAMES = frozenset(("globals", "locals", "vars", "getattr", "setattr", "delattr", "eval", "exec",
+                                "compile", "__import__", "__name__", "__file__", "__spec__", "__loader__",
+                                "__builtins__"))
+_INDIRECTION_ATTRS = frozenset(("modules", "f_globals", "f_locals", "f_builtins", "__globals__", "__dict__",
+                                "__builtins__"))
+_THIS_MODULE, _THIS_FILE = __name__, __file__
+
+
+def _site_walk(node, scope, targets, held, found, dispatch=None):
+    """Collect under `node`, into the dict `found`: in "names", every name it loads; in "raw", every
+    load of a name in `targets` as a site (qualname, name, line, column, dispatch); in "flags", every
+    indirection as (qualname, token, line, column): a load of a name in _INDIRECTION_NAMES or in
+    `held` (token: the name), an attribute in _INDIRECTION_ATTRS (token: "." and the attribute), or
+    an import statement (token: "import"). `scope` is (the co_qualname of the code that evaluates
+    `node`, the qualname prefix of a function or class defined there). A site's dispatch is the
+    (line, end line, column, end column) of the call it belongs to: the call whose callee it is, or
+    whose positional or keyword argument it is, directly; it is None for every other load (an
+    element of a tuple, an assigned value, an operand, a starred argument), which no call can be
+    identified with. A def, lambda or class has its defaults, decorators and bases walked where it
+    stands and its body under its own qualname (annotations are not walked); a generator
     expression, which runs in a frame of its own, likewise (its first iterable where it stands)."""
     qualname, prefix = scope
-    if isinstance(node, ast.stmt):
-        span = (node.lineno, node.end_lineno)
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
         outer = list(getattr(node, "decorator_list", ()))
         if isinstance(node, ast.ClassDef):
@@ -1581,65 +1925,115 @@ def _site_walk(node, scope, span, targets, raw, names):
         else:
             outer += node.args.defaults + [value for value in node.args.kw_defaults if value is not None]
         for sub in outer:
-            _site_walk(sub, scope, span, targets, raw, names)
+            _site_walk(sub, scope, targets, held, found)
         own = prefix + ("<lambda>" if isinstance(node, ast.Lambda) else node.name)
         inner = (own, own + ("." if isinstance(node, ast.ClassDef) else ".<locals>."))
-        if isinstance(node, ast.Lambda):
-            _site_walk(node.body, inner, (node.lineno, node.end_lineno), targets, raw, names)
-        else:
-            for sub in node.body:
-                _site_walk(sub, inner, span, targets, raw, names)
+        for sub in ([node.body] if isinstance(node, ast.Lambda) else node.body):
+            _site_walk(sub, inner, targets, held, found)
         return
     if isinstance(node, ast.GeneratorExp):
-        _site_walk(node.generators[0].iter, scope, span, targets, raw, names)
+        _site_walk(node.generators[0].iter, scope, targets, held, found)
         own = prefix + "<genexpr>"
-        inner, span = (own, own + ".<locals>."), (node.lineno, node.end_lineno)
+        inner = (own, own + ".<locals>.")
         for index, generator in enumerate(node.generators):
             for sub in [generator.target] + ([generator.iter] if index else []) + generator.ifs:
-                _site_walk(sub, inner, span, targets, raw, names)
-        _site_walk(node.elt, inner, span, targets, raw, names)
+                _site_walk(sub, inner, targets, held, found)
+        _site_walk(node.elt, inner, targets, held, found)
         return
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        found["flags"].append((qualname, "import", node.lineno, node.col_offset))
+    if isinstance(node, ast.Attribute) and node.attr in _INDIRECTION_ATTRS:
+        found["flags"].append((qualname, "." + node.attr, node.lineno, node.col_offset))
     if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-        names.add(node.id)
+        found["names"].add(node.id)
+        if node.id in _INDIRECTION_NAMES or node.id in held:
+            found["flags"].append((qualname, node.id, node.lineno, node.col_offset))
         if node.id in targets:
-            raw.append((qualname, node.id, node.lineno, node.col_offset, span))
+            found["raw"].append((qualname, node.id, node.lineno, node.col_offset, dispatch))
+    if isinstance(node, ast.Call):
+        here = (node.lineno, node.end_lineno, node.col_offset, node.end_col_offset)
+        for sub in [node.func] + node.args + [keyword.value for keyword in node.keywords]:
+            _site_walk(sub, scope, targets, held, found, here if isinstance(sub, ast.Name) else None)
+        return
     for child in ast.iter_child_nodes(node):
-        _site_walk(child, scope, span, targets, raw, names)
+        _site_walk(child, scope, targets, held, found)
+
+
+def _holds_code(value, depth=0):
+    """True when `value` is, or holds within 8 levels (deeper counts as holding), a function, class,
+    module or other object of this module: through a tuple, list, set, frozenset or dict, a
+    functools.partial, a method, a builtin's __self__, or an object's instance attributes. A
+    callable of any other kind (not a function, class, method, partial or builtin) counts as holding
+    code, since what it calls cannot be read here."""
+    if depth > 8:
+        return True
+    if value is None or isinstance(value, (str, bytes, int, float, complex, Path)):
+        return False
+    if isinstance(value, types.ModuleType):
+        return value.__name__ == _THIS_MODULE
+    if isinstance(value, type):
+        return value.__module__ == _THIS_MODULE
+    if isinstance(value, types.FunctionType):
+        return value.__module__ == _THIS_MODULE or value.__code__.co_filename == _THIS_FILE
+    if isinstance(value, types.MethodType):
+        return _holds_code(value.__func__, depth + 1) or _holds_code(value.__self__, depth + 1)
+    if isinstance(value, types.BuiltinFunctionType):
+        return _holds_code(value.__self__, depth + 1)
+    if isinstance(value, functools.partial):
+        return any(_holds_code(part, depth + 1) for part in (value.func, value.args, value.keywords))
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return any(_holds_code(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_code(item, depth + 1) for pair in value.items() for item in pair)
+    if type(value).__module__ == _THIS_MODULE or callable(value):
+        return True
+    return any(_holds_code(item, depth + 1) for item in getattr(value, "__dict__", dict()).values())
 
 
 def _derived_sites():
-    """The attribution inventory's authoritative set, derived from this file's own source by an AST
-    walk. The code under test is every module-level function that main reaches by name (the gate,
-    the closure legs, the preflight runner and the entry points) plus every _PREFLIGHT_CASES case's
-    function (a case that calls another case's check tests it). A site is a load of one of those
-    names (called there, or passed to be called) inside a function a case reaches: the case's own
-    function and, transitively, every module-level function or class it names that is not code
-    under test, with their nested defs, lambdas and generator expressions. Its key is "<co_qualname
-    of the code holding it> <name>#<k>", k counting that name's loads in that code in source order.
-    Returns (spans, reach): spans maps every key in any module-level definition to (qualname, first
-    line, last line of its statement, lambda or generator expression); reach maps each case's
-    function name to the set of keys it reaches. Not followed: a function reached only through a
-    value (a module-level assignment, a table such as _PREFLIGHT_CASES, an argument or a patched
-    global), whose calls are therefore not sites. A source that cannot be read is cannot-evaluate;
-    a case with no module-level definition is a refutation."""
+    """The attribution inventory's authoritative sets, derived from this file's own source by an AST
+    walk (_site_walk). The code under test is every module-level function that main reaches by name
+    (the gate, the closure legs, the preflight runner and the entry points) plus every
+    _PREFLIGHT_CASES case's function (a case that calls another case's check tests it). The code a
+    case reaches is the case's own function and, transitively, every top-level def or class it
+    loads by name that is not code under test, with their nested defs, lambdas and generator
+    expressions. A site is EVERY load of a code-under-test name in that code (a call, an argument,
+    an identity test, an assignment: every load counts). Its key is "<co_qualname of the code holding
+    it> <name>#<k>", k counting that name's loads in that code in source order. An indirection is a
+    load or statement in that code through which code can be reached without a site (see
+    _site_walk's flags): a builtin or module-level name in _INDIRECTION_NAMES (globals, getattr and
+    the like), an attribute in _INDIRECTION_ATTRS (modules, __dict__, f_globals and the like), an
+    import statement, or a load of a module-level name that is not a top-level def or class and
+    whose value, read from this module now, holds this module's code (_holds_code: a table such as
+    _PREFLIGHT_CASES, an alias, a functools.partial). Its key is "<co_qualname> <token>#<k>".
+    Returns (spans, reach, flagged): spans maps every site key in any top-level definition to
+    (qualname, dispatch); reach maps each case's function name to the set of site keys it reaches;
+    flagged is the set of indirection keys any case reaches. Not seen by the walk: a load of a
+    name it does not list here (for example an imported API such as importlib.import_module given
+    this module's name as a literal string, or an object whose class is not this module's reached
+    through another module), and code reached through an argument supplied from outside the code
+    a case reaches. A source that cannot be read is cannot-evaluate; a case with no module-level
+    definition is a refutation."""
     try:
-        source = Path(__file__).read_text(encoding="utf-8")
+        source = Path(_THIS_FILE).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise _CannotEvaluate("closure/attribution-walk: could not read this file's source: {}".format(exc))
     defs = {node.name: node for node in ast.parse(source).body
             if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     functions = {name for name, node in defs.items() if isinstance(node, ast.FunctionDef)}
+    held = frozenset(name for name, value in globals().items()
+                     if name not in defs and not name.startswith("__") and _holds_code(value))
 
     def walk(name, targets):
-        raw, names = [], set()
-        _site_walk(defs[name], ("", ""), (defs[name].lineno, defs[name].end_lineno), targets, raw, names)
-        return raw, names
+        found = dict(names=set(), raw=[], flags=[])
+        _site_walk(defs[name], ("", ""), targets, held, found)
+        return found
     production, queue = set(), ["main"]
     while queue:
         name = queue.pop()
         if name not in production:
             production.add(name)
-            queue.extend(sorted(walk(name, frozenset())[1] & functions))
+            queue.extend(sorted(walk(name, frozenset())["names"] & functions))
     cases = []
     for label, check in _PREFLIGHT_CASES:
         function = getattr(check, "__wrapped__", check)
@@ -1648,17 +2042,20 @@ def _derived_sites():
                 label, function.__name__))
         cases.append(function.__name__)
     targets = frozenset(production | set(cases))
-    spans, keys, follows = {}, {}, {}
+    spans, keys, flag_keys, follows = {}, {}, {}, {}
     for name in defs:
-        raw, names = walk(name, targets)
-        count, keys[name] = {}, []
-        follows[name] = sorted(names & set(defs) - targets)
-        for qualname, target, line, column, span in sorted(raw, key=lambda site: (site[2], site[3])):
+        found = walk(name, targets)
+        count, keys[name], flag_keys[name] = {}, [], []
+        follows[name] = sorted(found["names"] & set(defs) - targets)
+        for qualname, target, line, column, dispatch in sorted(found["raw"], key=lambda site: (site[2], site[3])):
             count[qualname, target] = count.get((qualname, target), 0) + 1
             key = "{} {}#{}".format(qualname, target, count[qualname, target])
-            spans[key] = (qualname,) + tuple(span)
+            spans[key] = (qualname, dispatch)
             keys[name].append(key)
-    reach = {}
+        for qualname, token, line, column in sorted(found["flags"], key=lambda flag: (flag[2], flag[3])):
+            count[qualname, token] = count.get((qualname, token), 0) + 1
+            flag_keys[name].append("{} {}#{}".format(qualname, token, count[qualname, token]))
+    reach, flagged = {}, set()
     for case in cases:
         seen, queue = set(), [case]
         while queue:
@@ -1667,29 +2064,36 @@ def _derived_sites():
                 seen.add(name)
                 queue.extend(follows[name])
         reach[case] = set(key for name in seen for key in keys[name])
-    return spans, reach
+        flagged.update(key for name in seen for key in flag_keys[name])
+    return spans, reach, flagged
 
 
 def _check_attribution_inventory(root):
-    """The attribution inventory, against a DERIVED set. _derived_sites walks this file's AST and
-    enumerates every site, in the functions a _PREFLIGHT_CASES case reaches, that calls or passes on
-    the code under test. Refuted: a derived site with neither an _ATTRIBUTION_PINS entry nor an
-    _ATTRIBUTION_EXCLUSIONS entry (so a new call site added to a case fails until it is pinned or
-    excluded with a reason); a pin naming a site the walk does not find in what its case reaches;
-    an exclusion naming a site the walk does not find, one also pinned or excluded twice, or one
-    with no reason. Then every entry is fired (see _pin): its patched call must fire while a frame
-    of its site's code is executing that site's statement, and give the attribution its mode
-    requires. So reverting a pinned site's attribution (calling it bare, or interpreting its result
-    outside _attributed) fails here, and so do widening the watch past OSError and TimeoutExpired
-    and requiring the opf/ subtree before the sub-checks of _check_scratch_and_copy_errors,
+    """The attribution inventory, against the sets _derived_sites derives from this file's AST (the
+    sites and indirections it can see; its docstring lists what it cannot). Refuted: a derived site
+    with neither an _ATTRIBUTION_PINS entry nor an _ATTRIBUTION_EXCLUSIONS entry (so a new load of
+    the code under test in the code a case reaches fails until it is pinned or excluded with a
+    reason); a pin naming a site the walk does not find in what its case reaches; an exclusion
+    naming a site the walk does not find, one also pinned or excluded twice, or one with no reason;
+    an _ATTRIBUTION_INDIRECTIONS record naming an indirection the walk does not find, recorded twice,
+    or with no reason. Then every pin entry is fired (see _pin): its patched call must fire while a
+    frame of its site's code is executing the site's own call instruction (exact source position,
+    columns included), and give the attribution its mode requires; and each pinned site needs one
+    entry whose call is the first call of its patched target made at that site (closure/attribution-
+    first-call), so a site reached bare on a loop's first pass and attributed later is refuted. So
+    reverting a pinned site's attribution (calling it bare, or interpreting its result outside
+    _attributed) fails here, and so do widening the watch past OSError and TimeoutExpired and
+    requiring the opf/ subtree before the sub-checks of _check_scratch_and_copy_errors,
     _check_negative_copy_error and _check_absent_subtree that do not need it (the entries over a
-    root with no opf/). A site is pinned at one call at least (in a loop, its first iteration);
-    the pins do not prove every iteration. _check_pin_rules runs first, then the walk (an unreadable
-    source is cannot-evaluate). Unlike the other cases, this one does not stop at its first
-    cannot-evaluate entry: it runs every entry and is failure-first over them, raising the first
-    refutation at once and the cannot-evaluate entries together at the end."""
-    _check_pin_rules()
-    spans, reach = _derived_sites()
+    root with no opf/). Not proved: the attribution of a site's later calls (pins cover chosen
+    calls, the first among them), and a site execution that never calls the patched target.
+    Cannot-evaluate: an unreadable source, an indirection with no record, an entry whose case could
+    not reach its call. The walk runs first, then _check_pin_rules. Unlike the other cases, this one
+    does not stop at its first cannot-evaluate entry: it runs every entry and is failure-first over
+    them, raising the first refutation at once and the cannot-evaluate entries together at the
+    end."""
+    spans, reach, flagged = _derived_sites()
+    _check_pin_rules(spans)
     derived = set().union(*reach.values())
     pinned, excluded = set(), set()
     for site, label, check, *_entry in _ATTRIBUTION_PINS:
@@ -1703,10 +2107,21 @@ def _check_attribution_inventory(root):
             raise AssertionError("closure/attribution-stale-exclusion: {!r} (a site the walk does not find, "
                                  "one also pinned or excluded, or no reason)".format(site))
         excluded.add(site)
+    recorded = set()
+    for key, reason in _ATTRIBUTION_INDIRECTIONS:
+        if key not in flagged or key in recorded or not reason.strip():
+            raise AssertionError("closure/attribution-stale-indirection: {!r} (an indirection the walk does not "
+                                 "find, one recorded twice, or no reason)".format(key))
+        recorded.add(key)
     unpinned = sorted(derived - pinned - excluded)
     if unpinned:
         raise AssertionError("closure/attribution-unpinned: {}".format("; ".join(unpinned)))
-    unevaluated = []
+    unevaluated, unrecorded = [], sorted(flagged - recorded)
+    if unrecorded:
+        unevaluated.append("closure/attribution-indirection: the walk cannot follow {} (code reached through "
+                           "a string, a namespace or a value is no site; record each in "
+                           "_ATTRIBUTION_INDIRECTIONS with a reason, or remove it)".format("; ".join(unrecorded)))
+    first, unknown = set(), set()
     tmp = None
     try:
         try:
@@ -1715,12 +2130,18 @@ def _check_attribution_inventory(root):
             unevaluated.append("closure/attribution-pin: no scratch directory for a root with no opf/: {}".format(exc))
         for site, *entry in _ATTRIBUTION_PINS:
             try:
-                _pin(tuple(entry), root, None if tmp is None else tmp / "no-opf-root", spans[site])
+                if _pin(tuple(entry), root, None if tmp is None else tmp / "no-opf-root", spans[site]):
+                    first.add(site)
             except _CannotEvaluate as exc:
                 unevaluated.append(str(exc))
+                unknown.add(site)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+    late = sorted(pinned - first - unknown)
+    if late:
+        raise AssertionError("closure/attribution-first-call: no entry pins the first call made at {}".format(
+            "; ".join(late)))
     if unevaluated:
         raise _CannotEvaluate(" | ".join(unevaluated))
 
@@ -1728,16 +2149,17 @@ def _check_attribution_inventory(root):
 # The attribution inventory (see _check_attribution_inventory and _pin): entries pinning the sites
 # _derived_sites finds, as (the site's key, the case's label, its check, True when the entry runs
 # over a root with no opf/ subtree, the patched global, its patched attribute or None, which call to
-# patch, mode, the label the refutation must name or None for a host failure). Every derived site
-# has at least one entry here or one in _ATTRIBUTION_EXCLUSIONS. A site in a loop is pinned at its
-# first iteration at least; some sites carry several entries (one per mode, or per iteration); and
-# an entry may patch, instead of the site's own callee, a host primitive or a function that callee
-# calls, provided the patched call fires while the site is executing (which _pin checks).
+# patch, mode, the label the refutation must name or None for a host failure).
+# _check_attribution_inventory requires every derived site to have an entry here or one in
+# _ATTRIBUTION_EXCLUSIONS, and each pinned site an entry for the first call made there; some sites
+# carry several entries (one per mode, or per iteration); and an entry may patch, instead of the
+# site's own callee, a host primitive or a function that callee calls, provided the patched call
+# fires while the site's call instruction is executing (which _pin checks).
 _PACK_REG, _ADOPT_REG, _ROWS = (_rootless(_pack_manifest_registration_self_test),
                                 _rootless(_adopt_observe_registration_self_test),
                                 _rootless(_member_timeout_rows_self_test))
 _VERDICTS, _COLLECTION = _rootless(_check_verdict_tables), _rootless(_check_preflight_collection)
-_ENTRY = _rootless(_check_entry_points)
+_ENTRY, _DECLARED = _rootless(_check_entry_points), _rootless(_check_declared_roster)
 _ATTRIBUTION_PINS = (
     ("_pack_manifest_registration_self_test.<locals>.<lambda> _check_pack_manifest_registration#1",
      "pack-manifest-registration", _PACK_REG, False, "_check_pack_manifest_registration", None, 1, "crash",
@@ -1910,6 +2332,12 @@ _ATTRIBUTION_PINS = (
      "closure/red-bound-lookup"),
     ("_red_bound_lookup _check_leg_wiring#1",
      "red-bound-lookup", _red_bound_lookup, False, "_check_leg_wiring", None, 1, "crash", "closure/red-bound-lookup"),
+    ("_check_member_boundary.<locals>.boundary_run run#1",
+     "member-boundary", _check_member_boundary, False, "run", None, 1, "crash", "closure/boundary-run"),
+    ("_check_member_boundary.<locals>.boundary_run run#1",
+     "member-boundary", _check_member_boundary, False, "subprocess", "run", 1, "oserror", None),
+    ("_check_member_boundary.<locals>.boundary_negative _closure_legs#1",
+     "member-boundary", _check_member_boundary, False, "_closure_legs", None, 1, "none", "closure/boundary-negative"),
     ("_check_entry_points.<locals>.entry self_test_main#1",
      "entry-points", _ENTRY, False, "self_test_main", None, 1, "crash", "closure/entry-self-test"),
     ("_check_entry_points.<locals>.entry main#1",
@@ -1920,6 +2348,40 @@ _ATTRIBUTION_PINS = (
      "missing-input", _check_missing_input, False, "run", None, 2, "crash", "closure/missing-input-empty"),
     ("_check_missing_input.<locals>.refused run#1",
      "missing-input", _check_missing_input, False, "run", None, 3, "crash", "closure/missing-input-no-opf-py"),
+)
+
+# The indirections (see _derived_sites) the cases reach on purpose, each with the recorded reason.
+_ATTRIBUTION_INDIRECTIONS = (
+    ("_Overlay.__getattr__ getattr#1",
+     "reads an attribute of the wrapped target by the name Python asked for; calls nothing itself"),
+    ("_Overlay.__init__ .__dict__#1",
+     "stores the replacement attributes the caller passed; their code is the caller's, walked there"),
+    ("_check_attribution_inventory _ATTRIBUTION_PINS#1",
+     "reads the pin table to check each entry's site key against the walk; calls nothing from it"),
+    ("_check_attribution_inventory _ATTRIBUTION_PINS#2",
+     "fires each pin entry through _pin, which runs the entry's case raw on purpose to judge its outcome"),
+    ("_check_attribution_inventory getattr#1",
+     "reads __wrapped__ to name the case function of a pin entry; calls nothing"),
+    ("_check_preflight_failure_first _PREFLIGHT_CASES#1",
+     "runs the other preflight cases through _preflight_exit, under _attributed; each case is walked as a case"),
+    ("_derived_sites _PREFLIGHT_CASES#1",
+     "reads the case table to find each case's function; calls nothing from it"),
+    ("_derived_sites getattr#1",
+     "reads __wrapped__ to find a case's function; calls nothing"),
+    ("_derived_sites globals#1",
+     "reads this module's values to find which hold code (_holds_code); calls nothing"),
+    ("_holds_code getattr#1",
+     "reads an object's instance attributes to inspect them; calls nothing"),
+    ("_nth_call getattr#1",
+     "reads the attribute a pin entry names, to patch it; the call is made at the case's site, pinned there"),
+    ("_nth_call getattr#2",
+     "reads the patched callable's __name__ for diagnostics; calls nothing"),
+    ("_nth_call globals#1",
+     "reads the global a pin entry names, to patch it; the call is made at the case's site, pinned there"),
+    ("_patched globals#1",
+     "rebinds the globals a case names; the replacement values are the case's own code, walked where defined"),
+    ("_site_walk getattr#1",
+     "reads an AST node's decorator list; calls nothing"),
 )
 
 # The derived sites that carry no pin, each with the recorded reason (see _check_attribution_inventory).
@@ -1940,6 +2402,12 @@ _ATTRIBUTION_EXCLUSIONS = (
      "a probe target of _check_pin_rules, called bare on purpose to judge _pin's own rules"),
     ("_check_pin_rules.<locals>.masked _positive_leg_verdict#1",
      "a probe target of _check_pin_rules, masked on purpose to judge _pin's own rules"),
+    ("_check_pin_rules.<locals>.sameline.<locals>.<lambda> _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules: the attributed call beside the bare one on the same line"),
+    ("_check_pin_rules.<locals>.sameline _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules, called bare on purpose beside an attributed call on its line"),
+    ("_check_pin_rules.<locals>.later.<locals>.<lambda> _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules, called bare on a loop's first pass and attributed on its second"),
     ("_check_preflight_failure_first _check_preflight_failure_first#1",
      "an identity test that leaves this case out of the cases it runs (running it would recurse); never called"),
     ("_check_preflight_failure_first _check_attribution_inventory#1",
@@ -1948,7 +2416,7 @@ _ATTRIBUTION_EXCLUSIONS = (
 
 
 # The self-test's preflight: the registration cases and the in-process stubbed cases (no subset member
-# runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first six need
+# runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first seven need
 # no scratch directory and no opf/ subtree; the rest build fixtures or stub run() over the real subtree,
 # each ordered by the setup its sub-checks need (see _preflight_exit). The attribution inventory runs
 # last, once every case it pins has run on its own.
@@ -1956,6 +2424,7 @@ _PREFLIGHT_CASES = (
     (None, _PACK_REG),
     (None, _ADOPT_REG),
     (None, _ROWS),
+    ("closure/declared-roster", _DECLARED),
     ("closure/self-test-leg-verdicts", _VERDICTS),
     ("closure/preflight-collection", _COLLECTION),
     ("closure/entry-points", _ENTRY),
@@ -1966,6 +2435,7 @@ _PREFLIGHT_CASES = (
     ("closure/scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors),
     ("closure/negative-copy-cannot-evaluate", _check_negative_copy_error),
     ("closure/missing-input", _check_missing_input),
+    ("closure/member-boundary", _check_member_boundary),
     ("closure/absent-subtree-cannot-evaluate", _check_absent_subtree),
     ("closure/undecodable-fixture-cannot-evaluate", _check_undecodable_fixture),
     ("closure/undecodable-attribution", _check_undecodable_attribution),
@@ -1982,15 +2452,16 @@ def _preflight_exit(root):
     The attribution rule: a failure of the HOST (a scratch directory, copy, fixture write, store read,
     flip write or child launch that raised an OSError, or a child that did not finish within its
     bound, at any point, including one step inside a case after others succeeded) is cannot-evaluate;
-    a crash or a wrong result of the CODE UNDER TEST is a refutation. Every call a case makes to the
-    code under test goes through _attributed (or _observed, when the case judges the raised outcome
-    itself), with any indexing or unpacking of its result inside that call. (Around run(), _captured
+    a crash or a wrong result of the CODE UNDER TEST is a refutation. The cases are written so that
+    each call they make to the code under test goes through _attributed (or _observed, when the case
+    judges the raised outcome itself), with any indexing or unpacking of its result inside that
+    call; that is a design rule, checked only as stated below. (Around run(), _captured
     always gives a (rc, stdout, stderr) triple whose rc alone comes from the code under test, and rc
     is only compared and printed.) _attributed tells a host failure apart by watching the host
     primitives themselves (_harness_watch, which documents what it does not watch), never the code's
-    messages. _check_attribution_inventory derives every such call site and requires a pin that
-    fires there or a recorded exclusion; it and _check_pin_rules call cases and a probe target
-    without _attributed on purpose, to judge their raw outcome (see _pin).
+    messages. _check_attribution_inventory checks this rule at the sites _derived_sites can see
+    (a pin that fires at the site's call, or a recorded exclusion); it and _check_pin_rules call
+    cases and a probe target without _attributed on purpose, to judge their raw outcome (see _pin).
 
     So an AssertionError is that case's refutation (SELF-TEST FAIL). A _CannotEvaluate, or any other
     Exception (one raised by the case's own code outside every attributed call: a fixture it could not
@@ -2002,8 +2473,9 @@ def _preflight_exit(root):
     (every case held). Within ONE case (except _check_attribution_inventory, which runs all its
     entries) the first sub-check that cannot be evaluated ends that case: its later sub-checks do not
     run, so a refutation they would give stays unobserved until that case can be set up. Hence the
-    cases are split and ordered by setup: the pure cases need none; _check_negative_copy_error and
-    _check_missing_input need a scratch directory but no opf/ subtree, so each is its own case; in
+    cases are split and ordered by setup: the pure cases need none; _check_negative_copy_error,
+    _check_missing_input and _check_member_boundary need a scratch directory but no opf/ subtree,
+    so each is its own case; in
     _check_scratch_and_copy_errors and _check_absent_subtree the sub-checks that need no opf/
     subtree run before it is required (the inventory's entries over a root with no opf/ pin that
     order). Within a case whose fixture
