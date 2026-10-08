@@ -2150,17 +2150,19 @@ deviates from the expected report where any of the four compared parts is omitte
 another form, or holds another value; no other content of a report is compared, the base result of a
 report a reference run emits over a store its admission check refuses (the base-result part below)
 apart. The runtime-result part also deviates where its token disagrees with whether that run
-authorized store operations, the performed operations the checker observes; this comparison and the
-store-coupled cannot-evaluate rule above read the run's own observed behaviour, which makes the
-runtime result the only part of the expected report not fixed by the shipped bytes alone. A `pass`
-token beside no performed store operation, a `fail` token beside one, and a `cannot_evaluate` token
-beside one each disagree that way, whatever the expected result, since a run that yields
-cannot-evaluate authorizes no store operation. Both behaviour-coupled comparisons read only the
-writes the checker observed: a run for which the checker cannot determine whether it observed every
-write gives it no evidence under either comparison, so a result-part or store-part failure that only
-those two comparisons of such runs could show MUST be reported as unresolved, never as established,
-a residual section 17 discloses; the rest of the expected-report comparison reads such a run's
-report as any other.
+authorized store operations, the performed operations the checker observes; this comparison reads
+the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved,
+and together they make the runtime result the only part of the expected report not fixed by the
+shipped bytes alone. A `pass` token beside no performed store operation, a `fail` token beside one,
+and a `cannot_evaluate` token beside one each disagree that way, whatever the expected result, since
+a run that yields cannot-evaluate authorizes no store operation. The behaviour-coupled comparisons
+are exactly two, the token comparison above and the store part below, and they read only the writes
+the checker observed: a run for which the checker cannot determine whether it observed every write
+gives it no evidence under either comparison, so a result-part or store-part failure that only those
+two comparisons of such runs could show MUST be reported as unresolved, never as established, a
+residual section 17 discloses; the rest of the expected-report comparison, the store-coupled
+cannot-evaluate expected result included, reads such a run's report as any other, over the store
+that run resolved as the checker observes it.
 
 An execution environment is unaltered where it is a stock install of a platform and version within
 what the documentation of the release names or, where that documentation names none, of the platform
@@ -2195,7 +2197,8 @@ otherwise, an installed copy a documented run cannot read, an installation step 
 complete, and a first run whose writes leave the second run with an installed copy that no longer
 holds the shipped bytes are each a failure of this rule. A reference run of a release MUST NOT emit
 a report that deviates from the expected report, and its runtime check MUST NOT authorize any store
-operation where the expected runtime result is `cannot_evaluate`.
+operation where the expected runtime result is `cannot_evaluate` or where its admission check, the
+pre-scan included, refused the store that run resolved.
 
 Only a checker's own attempts and reference runs are evidence under the two rules above: a report of
 any other run or installation, altered or not, MUST NOT be presented as establishing or countering
@@ -2222,10 +2225,13 @@ the parts above read, the fresh-only admission, lease, recovery, and sync conduc
 a property of the bytes the release ships, and a breach of it is judged by that inspection alone,
 never by this procedure. A run that is no reference run and belongs to none of the checker's
 attempts, a run of another command over a store the checker made and the Appendix E scratch-copy
-probe over an edited installed copy included, is such an inspection of the implementation's
-behaviour and nothing more: however often it is repeated, it is no evidence under the two rules
-above and shows and establishes nothing there, and section 17 discloses what every inspection,
-behavioural or static, rests on. An availability failure is shown by a failed attempt and
+probe over an edited installed copy included, is an observation of the implementation's behaviour,
+never an inspection of the bytes the release ships or a reading of the documentation of the release:
+however often it is repeated, it is no evidence under the two rules above, it shows and establishes
+nothing there, and it decides no verdict under this section, on one showing or many, since only
+those two rules, that inspection, and that reading decide; it can only direct the checker to what an
+inspection of the bytes the release ships then finds, and section 17 discloses what every inspection
+and such an observation rest on. An availability failure is shown by a failed attempt and
 established by a second failed attempt of the same checker on the same platform and version; it has
 no part, so the same-part condition does not apply to it. Under the reference-run rule the same-part
 condition applies to every failure, a store operation performed where the expected runtime result is
@@ -2686,30 +2692,33 @@ The gates in this standard are strong where they are strong and say so where the
   know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's
   eligibility report what only such attempts show as unresolved, never established. It covers
   whether a checker observed every write of a run the same way: the section 16.1 runtime-result
-  comparison and store part read the writes the checker observed, so a write a checker missed could
-  make an honest token read as disagreeing, and a checker that cannot determine whether it observed
-  every write of a run reports what only the behaviour-coupled comparisons of such runs show as
-  unresolved, never established. The working and temporary locations a checker chose are its own,
-  and what sits there alters nothing, the installation apart: the installed files, the installed
-  copy included, and the files a documented step or the release's own code wrote stay part of the
-  installation wherever they sit, so the Appendix E scratch-copy probe, which edits an installed
-  copy, alters the installation it probes. That probe, like every run outside the checker's own
-  attempts and reference runs, is a behavioural inspection of the implementation, never an attempt
-  or a reference run: it establishes nothing under the section 16.1 rules however often it is
-  repeated, and it informs only the section 16.1 inspection of the implementation, which rests on
-  the same observer-local attribution. A requirement of section 16.1 on the conduct of the
+  token comparison and store part read the writes the checker observed, so a write a checker missed
+  could make an honest token read as disagreeing, and a checker that cannot determine whether it
+  observed every write of a run reports what only the behaviour-coupled comparisons of such runs
+  show as unresolved, never established. The working and temporary locations a checker chose are its
+  own, and what sits there alters nothing, the installation apart: the installed files, the
+  installed copy included, and the files a documented step or the release's own code wrote stay part
+  of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an
+  installed copy, alters the installation it probes. That probe, like every run outside the
+  checker's own attempts and reference runs, is an observation of the implementation's behaviour,
+  never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes
+  nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its
+  own, and it informs only the section 16.1 inspection of the implementation, which rests on the
+  same observer-local attribution. A requirement of section 16.1 on the conduct of the
   implementation's commands that its two rules do not compare, the fresh-only admission, lease,
   recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a
-  checker cannot attribute to the bytes the release ships decides nothing for that checker. A
-  failure that a checker cannot show twice in its own attempts and reference runs stays unresolved,
-  however many other checkers each show it once, and an unresolved failure neither establishes nor
-  counters any conformance or nonconformance of the release. Where the documentation of a release
-  directs that a file the release does not ship be installed and does not pin its bytes, attempts
-  made at different times can differ as the bytes the directed source serves differ, a residual of
-  the release's own documentation. Appendix E gives informative guidance for checking release
-  conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration
-  across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte
-  comparison, and an optional content-addressed reference environment.
+  checker cannot attribute to the bytes the release ships decides nothing for that checker, and one
+  it can attribute is decided by what that inspection finds in those bytes, never by the observed
+  run itself on any number of showings. A failure that a checker cannot show twice in its own
+  attempts and reference runs stays unresolved, however many other checkers each show it once, and
+  an unresolved failure neither establishes nor counters any conformance or nonconformance of the
+  release. Where the documentation of a release directs that a file the release does not ship be
+  installed and does not pin its bytes, attempts made at different times can differ as the bytes the
+  directed source serves differ, a residual of the release's own documentation. Appendix E gives
+  informative guidance for checking release conformance: a record of attempts, redaction of secrets,
+  sharing and repetition, corroboration across checkers, a consistency probe over third-party
+  reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference
+  environment.
 
 ## Appendix A: record envelope example
 
