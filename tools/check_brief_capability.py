@@ -6,9 +6,9 @@ A brief is the text sent to one worker family. When the family cannot run a comm
 .aiqt/core/worker-capabilities.toml says `execute = "no"`), a request to run a command, a tool, or git
 can only come back as an asserted value that nobody measured, or as UNVERIFIABLE. This lint reads the
 brief before it is sent. It REFUSES (exit 1) only on a structural signal: an executable fence, or a
-command line in the text the family is addressed by (S1 to S3), unless one of three explicit data contexts
-demotes it. The signal is structural, not certain: the lint fails closed, so some text a human would pass
-refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
+command line in the text the family is addressed by (S1 to S3), unless a closed shape demotes it. The
+signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
+RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
 `read-only-sandbox`) no rule applies and the result is OK.
 
@@ -48,42 +48,25 @@ clusters such as `-I -B`, `-W` or `-X` with an attached or a separate value, lon
 path or a tests directory; or a code span that opens with make, pytest, tox, nox, npm, npx, cargo, go, uv,
 pip, pip3 or docker and an argument. A bare path (`tools/t.py`) is a file name, not a command line.
 
-DEMOTIONS. A command line is INFO (printed, never refusing) only in one of three explicit data contexts.
-Each is HEURISTIC: it is read from listed words, so it can pass a request phrased to fit it and refuse
-data phrased outside it. In all three, a sentence that holds a reversal word outside a code span (ignore,
-disregard, override, instead, otherwise, rather, actually, anyway, regardless, but, then, now, also, again,
-afterwards, later, yourself, manually, directly, live) demotes nothing, and so does every sentence of a
-block (a numbered item or a paragraph) that also has an R1 or R5 hit: the demotion is cancelled and the
-command line is HARD.
-  QUOTED SOURCE TEXT  The command line is in the object of a Quote, Cite or Show-the-text-of request at a
-                      clause start, not negated: a SOURCE NOUN (row, entry, line, docstring, example,
-                      comment, string, sentence, usage, field, tuple, statement, command, call, code,
-                      case, item, text, README, ...) comes between the verb and the command; no clause
-                      break comes between them except a comma or `and` before a determiner ("the def
-                      line and the line in it that runs ..."); no preposition that makes the command the
-                      text's source comes right before it (of, from, in, by, via, using, through, on,
-                      after, when, ...: "the first line of `git log`" refuses); and the sentence holds,
-                      outside code spans and command lines, no result word (output, stdout, stderr,
-                      result, prints, returns, emits, produces, shows, exit code, return code, log, ...)
-                      and no execution verb (run, ran, execute, invoke, launch, call, spawn, use, try,
-                      do, perform, reproduce, repeat, ...), except one that opens a relative clause
-                      right after `that` or `which` ("the line that runs `git push`") and run, call, use
-                      or try right after a determiner ("the call that obtains the git dir"). "Quote the
-                      README command `make test`" is INFO; "Quote the output of `make test`" and "Quote
-                      what `git log` prints" refuse.
-  PROHIBITED          The command line is the object of a prohibition right before it (do not, don't,
-                      never, must not, may not or should not, then run, execute, invoke, call, use or
-                      try), in a sentence that holds exactly one execution verb (EXEC_WORD_RE) and no
-                      EXCEPTION word (the reversal words, and except, only, other than, apart from,
-                      unless, until, before, after, first, without, more than, alone, once, twice, if
-                      (but not "even if"), when, whenever, where). "cannot run" is not a prohibition.
-  PAST REPORT         The sentence opens with a named run (CI, or the, this, its, ... with at most two
-                      words, then gate, check, job, build, run, test, self-test, suite, workflow,
-                      pipeline, lint or step) and a past verb (failed, passed, crashed, ran, exited,
-                      succeeded, errored), and the command line comes right after a past verb with at
-                      most two place phrases between ("CI failed at abc1234 on `t.py --self-test`").
-Nothing else demotes a command line: not a Find clause, not a code span, not quotes ("find the test by
-running `t.py --self-test`" and "quote `git log --oneline` for the last commits" refuse).
+DEMOTIONS. A command line is INFO (printed, never refusing) only in one of two CLOSED SHAPES. Each is a whole
+sentence, once markup (a list marker, emphasis) is skipped, with nothing after the command line but the stop:
+  PROHIBITED          "Do not run <command line>." or "Never run <command line>."
+  PAST REPORT         "CI failed on <command line>.", "The check failed on <command line>." or "The job failed
+                      on <command line>."
+The command line is one code span, or a prose command line followed only by argument tokens (an option, a
+token holding /, :, =, ., @, ~, ^ or <, or a number): "Never run git show abc1234:t.py." is INFO, and "Never
+run git log and report it." and "Do not run `./x.sh` even if it passes." refuse. A sentence split off at a
+semicolon has no stop, so "CI failed on `make test`; please confirm it passes now." refuses. Another sentence
+of the same VOID GROUP that asks for anything voids the demotion and the command line is HARD: a sentence that
+holds, outside a code span, a listed request word (VOID_WORD_RE: confirm, check, verify, see, try, report,
+show, run, rerun, perform, do, execute, invoke, launch, call, use, repeat, reproduce, ignore, disregard,
+override and their forms), or ends as a question, or has an R1, R5, R6 or R7 hit. A closed-shape sentence asks
+nothing (its words are fixed), and neither does a heading. A void group is a numbered item with every block that
+belongs to it (its continuation lines, nested list items, indented paragraphs and fences); outside the numbered
+items, the blocks from one heading (or the brief's start, or the end of a numbered item) to the next heading or
+numbered item. Nothing else demotes a command line (the S1 not-to-be-run introduction demotes only a fence):
+not quoted source text ("Quote the README command `make test`" refuses), not a Find clause, not a code span,
+not quotes.
 
 ADVISORY RULES (each runs on one sentence; a sentence ends at `.`, `!` or `?` before a capital letter,
 or at `;`). A CLAUSE START is the start of a sentence, or the point just after a colon, a comma, a
@@ -152,25 +135,28 @@ when the table is valid, 2 when it is not.
 RESIDUALS (what it does not catch; examples, not a complete list). A request with no fence and no
 command line never refuses: "run the self-test and report its exit code", "which commit added the
 helper?" and "build the docs" are ADVISORY only, so a human must read the ADVISORY lines; for the same
-reason a demoted command line followed by a request in another sentence with no command line ("Quote the
-README command `make test`. Then run it.") refuses only through the R1 or R5 hit that cancels the
-demotion in the same block, and not when that request is in another block or phrased outside R1 and R5.
+reason a closed shape stays INFO when the request that follows it is in another numbered item ("1. Do not run
+`git log -p`." then "2. Run it.") or under another heading, or is phrased with no listed request word, no
+question and no advisory hit ("CI failed on `make test`. Make it pass.").
 A command outside the COMMAND LINE list does not refuse ("mktemp -d", "go test ./..." or "make test"
 outside a code span, "./x" with no `.sh` or `.py`, a git alias such as "git lg", a capitalised "Git log",
 git or python options outside the listed value-taking ones whose value is a separate word, such as
 "python3 --check-hash-based-pycs always t.py"), nor does a shell command in a fence tagged with another
 language without a run prompt, a fence whose first line is not a listed command, or a command line split
 by a line break inside a word. An indented code block with no fence is read as prose: a listed command
-line in it refuses (S2 inside a numbered item, S3 outside), and any other command in it does not. The
-demotions are heuristic (see DEMOTIONS): a request phrased as quoted source text, a bare prohibition or a
-past report by a named run, with none of the listed result, execution, reversal or exception words, is
-INFO. Some text refuses that a human would pass: a prose or code-span mention of a git subcommand or a
-command line outside the three contexts ("the git log shows the fix", "a `git diff` excerpt follows",
-"is `t.py --self-test` listed in CI?", a heading "PR 9 adds a git log parser"), a quoted command behind a
-parenthesis or a colon ("Quote the row ('git show abc:t.py', 1)"), quoted source text in a sentence
-that holds a listed result or execution word anywhere ("the line where `git log` is called"), a
-prohibition with two execution verbs ("do not run or execute `x.sh`"), and a shell-tagged fence shown as
-an example; rewrite it ("the text that ...") or drop the command. The advisory rules are lexical over
+line in it refuses (S2 inside a numbered item, S3 outside), and any other command in it does not. Some
+text refuses that a human would pass; that is the accepted cost of closed shapes, and the sender rewrites the
+brief. A command line held as quoted source text refuses ("Quote the README command `make test`", "Quote the
+scope_rows entry for FOO=1 ./x.sh with its expected exit", "Quote the README command: `make test`."): name
+the row or entry by its id, or describe the line ("the README's test command"), instead of embedding the
+command line. So do a prose or code-span mention of a git subcommand or a command line outside the two
+closed shapes ("the git log shows the fix", "a `git diff` excerpt follows", "is `t.py --self-test` listed in
+CI?", "Does the docstring example `git show HEAD` match the usage line?", "Which line of t.py calls `git
+rev-parse HEAD`?", a heading "PR 9 adds a git log parser"); a closed shape with anything after the command
+line ("Never run git checkout main.", whose last word is not an argument token) or any other wording ("Don't
+run", "Never use"); a closed shape whose item or section also holds a listed request word in another sentence
+("See the notes."), a question, or an advisory hit, including an R5 hit on a reporting verb inside a code span
+("`git log, report stdout`"); and a shell-tagged fence shown as an example. The advisory rules are lexical over
 listed words and miss free English (an implicit request, an unlisted verb, a request split across
 sentences, a request in a heading or a Find, Quote or Cite clause, an `or`-closed word list of
 imperatives, a list led by a determiner before a bare plural object ("read the diff, compile or run
@@ -184,29 +170,38 @@ address is hidden. The lint reads only the bytes it is given: run it on the fina
 are sent, since a brief composed after the lint runs is not covered. Run alone, it is advisory; it blocks
 only where the sender refuses to send on exit 1 or 2.
 
-TIME. Every scan is one pass per sentence (or per paragraph or line), with bisection over positions found
-once: clause breaks, code spans, negations, noun uses, quote verbs, source nouns, and the last result and
-static-source positions for R5 (each search resumes one character after the previous match, so every
-offset is tried once). Markup runs and command-word option runs are walked once and remembered, so a run
-shared by many clause starts or command words ("1) 1) 1)", "git -c git -c ... show") is not read again;
-there is no bound on the number of git or python options. Per command line, a demotion reads only the
-DEMOTION_WINDOW characters before it; per opener, R6 measures its subject's length before reading it;
-the remaining bounds are the six lead-in words and token-start anchors on every word-run, command and
-file-name pattern. The self-test measures it: in a child process capped at 1 GiB of address space
-(RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative
-times, each of 16 shapes at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus
-LINEAR_SLACK seconds (the input is eight times larger; a pass whose time grows with the square of the
-input takes about 64 times as long). Measured on 2026-10-08 on one shared host, each in such a child under
-nice 10, with these 16 shapes: every shape took at most 0.23 s at 128 KiB and 1.88 s at 1 MiB, at most 9.0
-times its 128 KiB time. On the previous revision the same harness (with a 60-second timeout) showed ten of
-them quadratic: runs of "do not run `git status` and " took 13.1 s at 128 KiB, of "Do not run git show "
-19.2 s, of "never run git log " in one item 17.7 s, of "report, " 58.8 s and of "observe, " 21.5 s, and
-none of them finished 1 MiB within 60 s; runs of "report and ", of "1) " and of "Q1. " after a leg marker
-did not finish even 128 KiB within 60 s; an indented "(zeta leg)" tail-marker run took 2.9 s at 128 KiB
-and did not finish 1 MiB within 60 s; and "Alpha leg: x." lines took 0.17 s and 14.0 s. The other six (a single word, a noun
-run, a git option run, a python option run, an R6 subject run and a quote-context run) passed on the
-previous revision too, so they guard against regression and do not discriminate it (the R6 run took 3.77
-s at 1 MiB, just inside its 3.91 s limit).
+TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes.
+THE REGEX AUDIT (the self-test, regex_audit) parses every compiled pattern in this module's namespace and
+each of COMMAND_FORMS, enumerated and never listed by hand, and fails on a construct that can split one run
+of characters between two quantifiers in many ways: two quantifiers whose classes overlap, adjacent or
+separated only by atoms that can match empty (`\\s*,?\\s+`, `\\s*\\s+`, `\\w+\\w*`), or a repeated group whose tail
+and head quantifiers overlap or whose body can match empty (`(?:x+)+`), unless REGEX_AUDIT_EXEMPTIONS records
+why (it records none). Its limits: it walks only module-level compiled patterns and COMMAND_FORMS (a pattern
+compiled inside a function is not seen; the production code compiles none there); it does not flag a failed
+match retried at every offset of a long run by search() or finditer(), overlapping alternatives, a quantifier
+that backtracks against one fixed atom, or work that grows faster than the input in the Python code around the
+patterns; it compares classes over a sample of characters (ASCII and a few others), so an overlap only outside
+the sample is missed; and it reads the interpreter's private regular expression parser, so a Python release
+that changes it fails the audit closed. Those gaps are covered, as far as they are, by construction and by the
+shapes: every scan is one pass per sentence (or per paragraph or line), with bisection over positions found
+once (clause breaks, code spans, negations, noun uses, and the last result and static-source positions for R5,
+each search resuming one character after the previous match); markup runs and command-word option runs are
+walked once and remembered, so a run shared by many clause starts or command words ("1) 1) 1)", "git -c git -c
+... show") is not read again, and there is no bound on the number of git or python options; a closed shape is
+matched once per sentence at its start and reads the sentence's tail once; per opener, R6 measures its
+subject's length before reading it; and every word-run, command and file-name pattern is anchored at a token
+start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address space (RLIMIT_AS) with a
+LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times, each of 20 shapes at
+1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds (the input is
+eight times larger; a pass whose time grows with the square of the input takes about 64 times as long). A
+shape is evidence only for the text it repeats. Measured on 2026-10-08 on one shared host, each in such a
+child under nice 10, in two runs of these 20 shapes: every shape took at most 0.26 s at 128 KiB and 2.11 s at
+1 MiB, at most 8.6 times its 128 KiB time. On the previous revision, with the same harness and a 60-second timeout
+(measured to 60 s, not to completion), the two whitespace-run shapes, which the audit flags ("a, b" then
+spaces, in the list-tail patterns; "Gamma leg: answer items 1," then spaces, in ITEM_LIST), did not finish
+even 128 KiB within 60 s; the other 18 stayed within the bound there (at most 0.27 s and 2.09 s), so they
+guard against regression and do not discriminate the change. Ten of those 18 were added when an earlier
+revision exceeded the bound on them, also measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -264,7 +259,6 @@ TABLE_VOCABULARY["git-read"] = ("yes", "no", "undeclared")
 FAMILY_NAME_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 NEGATION_WINDOW = 60
 R6_SUBJECT_MAX = 200
-DEMOTION_WINDOW = 80
 EXCERPT_CHARS = 120
 
 
@@ -370,7 +364,7 @@ def decode_brief(data):
 
 # ---------- structure ----------
 
-FENCE_OPEN_RE = re.compile(r"([ \t]*)(`{3,}|~{3,})(.*)\Z")
+FENCE_OPEN_RE = re.compile(r"([ \t]*)(`{3,}+|~{3,}+)(.*)\Z")
 HEADING_RE = re.compile(r" {0,3}(#{1,6})(?:\s|\Z)")
 ITEM_RE = re.compile(r" {0,3}(?:[-*+]\s+)?(?:\*\*|__)?(?:Q|Item\s+|Question\s+)?(\d{1,3})(?:[.)]|:(?=\s))"
                      r"(?:\*\*|__)?(?=\s|\Z)", re.I)
@@ -467,13 +461,14 @@ NOUN_WORD_RE = re.compile(NOUN_WORD)
 # anchored at a token start: unanchored, a failed match restarts at every character of a long word, so
 # the scan grows with the square of the word's length
 WORD_RUN_RE = re.compile(r"(?<![\w-])" + NOUN_WORD + r"(?:\s*,\s*" + NOUN_WORD + r")++")
-NOUN_LIST_TAIL_RE = re.compile(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s*(?:[)\].;:!?]|\Z))", re.I)
+# the comma and the space before `or` are one separator, so no two whitespace quantifiers share a run
+LIST_OR = r"(?:\s*,\s+|\s+)or\s+"
+NOUN_LIST_TAIL_RE = re.compile(LIST_OR + NOUN_WORD + r"(?=\s*(?:[)\].;:!?]|\Z))", re.I)
 # a list led by a determiner is a noun list also before a word that is not an object ("each lint, gate,
 # build or self-test writes a log"; not "the diff, build or run the parser")
-LED_LIST_TAIL_RE = re.compile(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s+(?!(?:" + DETERMINER
+LED_LIST_TAIL_RE = re.compile(LIST_OR + NOUN_WORD + r"(?=\s+(?!(?:" + DETERMINER
                               + r"|it|them|all|both)\b)[A-Za-z])", re.I)
 LEADING_DETERMINER_RE = re.compile(r"(?<![\w-])" + DETERMINER + r"\s+\Z", re.I)
-OBJECT_CONTINUES_RE = re.compile(r"(?:and\s+)?(?:" + DETERMINER + r"|all|both)\b", re.I)
 
 
 class MarkupEnds:
@@ -565,10 +560,6 @@ class Sentence:
         # a break inside a noun use ("(execute)", "lint, gate, build or self-test") opens no clause
         found = [match for match in CLAUSE_BREAK_RE.finditer(text) if not noun_use(match.start())]
         self.breaks = [match.start() for match in found]
-        # the breaks that end a quoted object: all but a comma or `and` before another object ("the def line
-        # and the line in it that runs ...")
-        self.stops = [match.start() for match in found if not (match.group(0)[:1] == ","
-                      or match.group(0)[:3].lower() == "and") or not OBJECT_CONTINUES_RE.match(text, match.end())]
         self.markup = markup = MarkupEnds(text)
         starts = set()
         for position in [0] + [match.end() for match in found]:
@@ -621,8 +612,9 @@ class Sentence:
 
 # ---------- scope ----------
 
-ITEM_LIST = (r"Q?\d{1,3}(?:\s*(?:,\s*(?:and\s+|or\s+)?|\band\s+|\bor\s+|-|\bto\s+|\bthrough\s+)\s*"
-             r"Q?\d{1,3})*")
+# each whitespace run is read by one quantifier (a separator's trailing space is not read twice)
+ITEM_LIST = (r"Q?\d{1,3}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|-\s*|\b(?:and|or|to|through)\s+)Q?\d{1,3})*")
+ITEM_TOKEN_RE = re.compile(r"\d{1,3}|-|\bto\b|\bthrough\b", re.I)
 ONLY_RE = re.compile(r"answer\s+(?:only\s+)?(?:items?|questions?)\s+(" + ITEM_LIST + r")(\s+only)?", re.I)
 ANSWER_ONLY_RE = re.compile(r"answer\s+only\s+(?:items?|questions?)\s+(" + ITEM_LIST + ")", re.I)
 EXCLUDE_RE = re.compile(r"(?:(?:do\s+not|don't|never)\s+(?:attempt|answer)|skip)\s+(?:items?|questions?)\s+("
@@ -638,7 +630,7 @@ ADDRESS_RE = re.compile(r"(?:(?:all|every|each|both)\s+(?:legs?|famil(?:y|ies)|w
 def parse_item_list(spec):
     """The item numbers of "1, 2 and 4", "1-3", "Q1 to Q3"; a backwards range is CannotEvaluate."""
     numbers = set()
-    tokens = re.findall(r"\d{1,3}|-|\bto\b|\bthrough\b", spec, re.I)
+    tokens = ITEM_TOKEN_RE.findall(spec)
     index = 0
     while index < len(tokens):
         first = int(tokens[index])
@@ -830,16 +822,14 @@ SHELL_FIRST_LINE_RE = re.compile(r"\s*(?:\$\s|(?:sudo\s+)?(?:[A-Za-z_]\w*=\S*\s+
 REFERENCE_INTRO_RE = re.compile(r"\b(?:(?:do\s+not|don['’]t|never)\s+(?:run|execute)\s+(?:this|it|these|them|"
                                 r"the\s+following|(?:the\s+)?(?:block|fence|commands?|snippet)\s+below)\b"
                                 r"|not\s+to\s+be\s+(?:run|executed)\b)", re.I)
-# Wording that reverses or qualifies a request ("ignore the instruction", "and do it now", "but also on the
-# branch"): a sentence holding one outside a code span is never a data context, so it demotes nothing.
+# Wording that reverses or qualifies a request ("ignore the instruction", "but also on the branch"), or names an
+# exception or a condition: a not-to-be-run introduction holding one outside a code span introduces nothing.
 REVERSAL_WORDS = (r"ignore|disregard|override|instead|otherwise|rather|actually|anyway|regardless|but|then|now|"
                   r"also|again|afterwards?|later|yourself|manually|directly|live")
-REVERSAL_RE = re.compile(r"(?<![\w./-])(?:" + REVERSAL_WORDS + r")(?![\w-]|[./]\w)", re.I)
-# A prohibition or a not-to-be-run introduction is void when it also names an exception or a condition.
 EXCEPTION_RE = re.compile(r"(?<![\w./-])(?:" + REVERSAL_WORDS + r"|except|excepting|only|other\s+than|apart\s+from|"
                           r"unless|until|before|after|first|without|more\s+than|alone|once|twice|(?<!even\s)if|when|"
                           r"whenever|where)(?![\w-]|[./]\w)", re.I)
-# an execution verb anywhere in a sentence; a prohibition demotes only in a sentence that holds exactly one
+# an execution verb anywhere in a sentence; a not-to-be-run introduction holds at most one
 EXEC_WORD_RE = re.compile(r"(?<![\w./-])(?:re-?run|run|runs|running|ran|re-?execute|execute|executes|executing|"
                           r"invoke|invokes|invoking|call|calls|calling|use|uses|using|try|tries|trying|launch|"
                           r"launches|launching)(?![\w-]|[./]\w)", re.I)
@@ -873,40 +863,23 @@ COMMAND_FORMS = (
 COMMAND_RE = re.compile("|".join(COMMAND_FORMS))
 # a code span that opens with one of these tools and an argument (matched at the span's opening backticks)
 SPAN_COMMAND_RE = re.compile(r"`+\s*(?:\$\s+)?(?:make|pytest|tox|nox|npm|npx|cargo|go|uv|pip3?|docker)\s+[^`\s]")
-# The three data contexts that demote a command line to INFO. QUOTED: a Quote, Cite or Show-the-text-of
-# request whose object names source text that holds the command as text.
-QUOTE_VERB_RE = re.compile(r"(?:quote|cite|show\s+(?:me\s+)?the\s+(?:exact\s+|verbatim\s+|full\s+)?text\s+of)\b",
-                           re.I)
-SOURCE_NOUN_RE = re.compile(r"\b(?:rows?|entr(?:y|ies)|lines?|docstrings?|examples?|comments?|strings?|literals?|"
-                            r"sentences?|headings?|definitions?|snippets?|excerpts?|signatures?|usage|cells?|fields?|"
-                            r"tuples?|assignments?|declarations?|statements?|commands?|calls?|code|cases?|items?|"
-                            r"bullets?|text|README)\b", re.I)
-# a result or an execution word anywhere in the sentence voids the quoted context ("the output of", "what it
-# prints", "and run it"), unless it opens a relative clause on the source text ("the line that runs")
-QUOTE_VETO_RE = re.compile(r"(?<![\w./-])(?:outputs?|stdout|stderr|results?|prints|printed|printing|returns|returned|"
-                           r"returning|emits|emitted|produces|produced|yields|shows|showed|shown|exit\s+(?:codes?|"
-                           r"status)|return\s*codes?|returncodes?|logs?|logged|re-?runs?|run|runs|running|ran|"
-                           r"execut\w+|invok\w+|launch\w*|call|calls|called|calling|spawn\w*|use|uses|used|using|try|"
-                           r"tries|tried|trying|do|does|did|doing|perform\w*|reproduc\w+|repeat\w*)(?![\w-]|[./]\w)",
-                           re.I)
-RELATIVE_BEFORE_RE = re.compile(r"\b(?:that|which)\s+\Z", re.I)
-# after a determiner these are nouns ("the call that obtains the repository"), not requests
-NOUN_AFTER_DETERMINER = frozenset(("run", "runs", "call", "calls", "use", "uses", "try", "tries"))
-DETERMINER_BEFORE_RE = re.compile(r"\b" + DETERMINER + r"\s+\Z", re.I)
-# a preposition right before the command makes it the source of the text ("the first line of `git log`")
-SOURCE_OF_RE = re.compile(r"\b(?:of|from|in|by|via|using|through|on|after|when|while|during|against|at|under|into|"
-                          r"onto|per)\s*[`\"'“]*\Z", re.I)
-# PROHIBITED: the command is the object of a prohibition
-PROHIBITED_RE = re.compile(r"\b(?:do\s+not|don['’]t|never|must\s+not|may\s+not|should\s+not)\s+(?:run|execute|"
-                           r"invoke|call|use|try)\s*[`\"'“]*\Z", re.I)
-# PAST REPORT: a sentence opened by a named run (CI, the gate, the self-test) and a past verb, with the
-# command right after the past verb and at most two place phrases
-PAST_SUBJECT_RE = re.compile(r"(?:CI|(?:the|this|that|its|their|our)\s+(?:[\w./-]+\s+){0,2}?(?:gate|check|job|build|"
-                             r"run|test|self-test|suite|workflow|pipeline|lint|step))\s+(?:failed|passed|crashed|ran|"
-                             r"exited|succeeded|errored)\b", re.I)
-PAST_BEFORE_RE = re.compile(r"\b(?:failed|passed|crashed|ran|exited|succeeded|errored)"
-                            r"(?:\s+(?:at|on|in|under|with|against|for|from)\s+[^\s,;:()`]+){0,2}"
-                            r"(?:\s+(?:at|on|in|under|with|against|for|from))?\s*[`\"'“]*\Z", re.I)
+# The two closed shapes that demote a command line to INFO. Each is matched at the sentence's start once markup is
+# skipped and ends at the command line: PROHIBITED ("Do not run" or "Never run") and PAST REPORT ("CI failed on",
+# "The check failed on" or "The job failed on").
+CLOSED_PROHIBITION_RE = re.compile(r"(?:[Dd]o\s+not|[Nn]ever)\s+run\s+")
+CLOSED_PAST_RE = re.compile(r"(?:CI|[Tt]he\s+(?:check|job))\s+failed\s+on\s+")
+# after a code span that holds the command line: the stop and nothing else
+CLOSED_SPAN_END_RE = re.compile(r"\.\s*\Z")
+# after a prose command line: only argument tokens (an option, a token holding / : = . @ ~ ^ or <, or a number),
+# then the stop; "git log and report it" is not a command line followed by arguments
+CLOSED_ARGS_END_RE = re.compile(r"(?:\s+(?:-|[^\s/:=@~^<.]*[/:=@~^<.]|\d)\S*)*\.\s*\Z")
+# Another sentence of the same void group that asks for anything voids its closed shapes: a listed request word
+# outside a code span, a question, or a hit of one of these advisory rules.
+VOID_WORD_RE = re.compile(r"(?<![\w./-])(?:confirm\w*|check\w*|verif\w+|see|sees|seeing|try|tries|tried|trying|"
+                          r"report\w*|show\w*|re-?run\w*|run|runs|running|perform\w*|do|does|did|doing|execut\w+|"
+                          r"invok\w+|launch\w*|call|calls|calling|use|uses|using|repeat\w*|reproduc\w+|ignore\w*|"
+                          r"disregard\w*|override\w*)(?![\w-]|[./]\w)", re.I)
+ADVISORY_VOID_RULES = frozenset(("R1", "R5", "R6", "R7"))
 R5_VERB_RE = re.compile(r"(?:report|paste|give|record|capture|attach|print|state|show|share|post|count|"
                         r"tell\s+(?:me|us))\b(?!\s+(?:statements?|calls?|functions?|helpers?|methods?)\b)", re.I)
 R5_RESULT_RE = re.compile(r"\b(?:exit\s+(?:codes?|status(?:es)?)|return\s*codes?|returncodes?|"
@@ -1024,15 +997,9 @@ def rule_s1(block):
     return block.tag in PLAIN_TAGS and bool(SHELL_FIRST_LINE_RE.match(first))
 
 
-def _outside(sentence, ranges, position):
-    """Whether `position` is outside the sentence's code spans and outside the sorted, disjoint `ranges`."""
-    index = bisect.bisect_right(ranges, (position, len(sentence.text) + 1)) - 1
-    return not sentence.in_span(position) and not (index >= 0 and position < ranges[index][1])
-
-
-def _words(regex, sentence, ranges=()):
-    """The matches of `regex` in the sentence outside its code spans and `ranges`, in one pass."""
-    return [found for found in regex.finditer(sentence.text) if _outside(sentence, ranges, found.start())]
+def _words(regex, sentence):
+    """The matches of `regex` in the sentence outside its code spans, in one pass."""
+    return [found for found in regex.finditer(sentence.text) if not sentence.in_span(found.start())]
 
 
 def reference_intro(block):
@@ -1049,52 +1016,37 @@ def reference_intro(block):
 
 
 class Demotions:
-    """The data contexts of one sentence, each found in one pass over it, so that deciding a command line's
-    demotion costs a bisection and a read of the DEMOTION_WINDOW characters before it."""
+    """The closed shape of one sentence, found once: whether the whole sentence is a prohibition or a past report
+    of one command line, so that deciding a command line's demotion costs at most one read of the sentence's
+    tail."""
 
-    def __init__(self, sentence, ranges):
-        text = self.text = sentence.text
-        self.sentence = sentence
+    def __init__(self, sentence):
+        self.text, self.kind, self.span, self.prose = sentence.text, None, None, None
+        head = sentence.markup(0)
+        for kind, regex in (("prohibited", CLOSED_PROHIBITION_RE), ("past report", CLOSED_PAST_RE)):
+            found = regex.match(self.text, head)
+            if found:
+                break
+        else:
+            return
+        self.kind = kind
+        index = bisect.bisect_left(sentence.span_starts, found.end())
+        if index < len(sentence.spans) and sentence.span_starts[index] == found.end():
+            span = sentence.spans[index]
+            # the code span is the command line: only the stop may follow it
+            self.span = span if CLOSED_SPAN_END_RE.match(self.text, span[1]) else (-1, -1)
+        else:
+            self.prose = found.end()
 
-        def exempt(found):
-            """A veto word that opens a relative clause on the source text, or a verb-like noun."""
-            window = max(0, found.start() - 16)
-            return bool(RELATIVE_BEFORE_RE.search(text, window, found.start())
-                        or (found.group(0).lower() in NOUN_AFTER_DETERMINER
-                            and DETERMINER_BEFORE_RE.search(text, window, found.start())))
-
-        reversal = bool(_words(REVERSAL_RE, sentence, ranges))
-        self.quote_void = reversal or any(not exempt(found) for found in _words(QUOTE_VETO_RE, sentence, ranges))
-        verbs = (QUOTE_VERB_RE.match(text, start) for start in sentence.starts if not sentence.in_span(start))
-        self.quotes = sorted(found.end() for found in verbs
-                             if found and not sentence.negated(found.start(), found.end()))
-        self.nouns = [found.start() for found in SOURCE_NOUN_RE.finditer(text)]
-        self.prohibition_void = (bool(_words(EXCEPTION_RE, sentence, ranges))
-                                 or len(_words(EXEC_WORD_RE, sentence, ranges)) != 1)
-        self.past = not reversal and bool(PAST_SUBJECT_RE.match(text, sentence.markup(0)))
-
-    def quoted(self, start):
-        """Whether the command line at `start` is in the object of a Quote, Cite or Show-the-text-of request
-        that names source text before it, with no stop between the verb and the command."""
-        index = bisect.bisect_right(self.quotes, start) - 1
-        if self.quote_void or index < 0:
-            return False
-        verb_end, stops = self.quotes[index], self.sentence.stops
-        stop = bisect.bisect_left(stops, verb_end)
-        noun = bisect.bisect_left(self.nouns, verb_end)
-        return ((stop == len(stops) or stops[stop] >= start) and noun < len(self.nouns) and self.nouns[noun] < start
-                and not SOURCE_OF_RE.search(self.text, max(0, start - DEMOTION_WINDOW), start))
-
-    def __call__(self, start):
-        """The demotion of the command line at `start` ("quoted source text", "prohibited" or "past
-        report"), or None."""
-        window = max(0, start - DEMOTION_WINDOW)
-        if self.quoted(start):
-            return "quoted source text"
-        if not self.prohibition_void and PROHIBITED_RE.search(self.text, window, start):
-            return "prohibited"
-        if self.past and PAST_BEFORE_RE.search(self.text, window, start):
-            return "past report"
+    def __call__(self, start, end):
+        """The demotion of the command line at [start, end) ("prohibited" or "past report"), or None."""
+        if self.kind is None:
+            return None
+        if self.span is not None:
+            return self.kind if self.span[0] <= start < self.span[1] else None
+        # a prose command line opens right after the shape's words and only arguments and the stop follow it
+        if start == self.prose and CLOSED_ARGS_END_RE.match(self.text, end):
+            return self.kind
         return None
 
 
@@ -1143,14 +1095,8 @@ def rule_commands(sentence):
     if not found:
         return []
     found.sort()
-    ranges = []   # the command lines' own text, merged; no context word is read from it
-    for start, end in found:
-        if ranges and start <= ranges[-1][1]:
-            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
-        else:
-            ranges.append((start, end))
-    demotion = Demotions(sentence, ranges)
-    return [(start, text[start:min(end, start + EXCERPT_CHARS // 2)].strip("`").strip(), demotion(start))
+    demotion = Demotions(sentence)
+    return [(start, text[start:min(end, start + EXCERPT_CHARS // 2)].strip("`").strip(), demotion(start, end))
             for start, end in found]
 
 
@@ -1211,16 +1157,28 @@ def _excerpt(text):
     return text if len(text) <= EXCERPT_CHARS else text[:EXCERPT_CHARS - 3] + "..."
 
 
+def sentence_asks(sentence, findings, closed):
+    """Whether a sentence asks for anything, so that it voids the closed shapes of its void group: a listed request
+    word outside a code span (VOID_WORD_RE), a question, or an advisory hit (ADVISORY_VOID_RULES). A closed-shape
+    sentence (`closed`) asks nothing: its words are fixed."""
+    if closed:
+        return False
+    return (any(rule in ADVISORY_VOID_RULES for rule, _, _, _, _ in findings)
+            or bool(QUESTION_END_RE.search(sentence.text)) or bool(_words(VOID_WORD_RE, sentence)))
+
+
 def lint_sentence(raw, line, read_r1=True, structural="S3"):
-    """[(rule, severity, line, message, excerpt)] for one sentence: its command lines under the structural
-    rule `structural` (S2 in a numbered item, S3 outside; None reads none), HARD unless demoted, then the
-    ADVISORY rules; `read_r1` is false in a heading."""
+    """(findings, asks) for one sentence: findings [(rule, severity, line, message, excerpt)], its command lines
+    under the structural rule `structural` (S2 in a numbered item, S3 outside; None reads none), HARD unless a
+    closed shape demotes them, then the ADVISORY rules; `read_r1` is false in a heading. `asks`: whether the
+    sentence voids the closed shapes of its void group."""
     sentence = Sentence(raw)
     excerpt = _excerpt(raw)
-    findings = []
+    findings, demoted = [], []
     if structural is not None:
         where = "in a numbered item" if structural == "S2" else "outside the numbered items"
         for _, command, demotion in rule_commands(sentence):
+            demoted.append(demotion is not None)
             if demotion is None:
                 findings.append((structural, "HARD", line, "command line {!r} {}".format(command, where), excerpt))
             else:
@@ -1236,7 +1194,7 @@ def lint_sentence(raw, line, read_r1=True, structural="S3"):
     for _, named in rule_r6(sentence):
         findings.append(("R6", "ADVISORY", line,
                          "asks for a test outcome" + (" of a named tool" if named else ""), excerpt))
-    return findings
+    return findings, sentence_asks(sentence, findings, bool(demoted) and all(demoted))
 
 
 def _masked_text(block):
@@ -1259,17 +1217,41 @@ def command_rule(block):
 
 
 def asks_to_run(findings):
-    """Whether a block's findings hold an R1 or R5 hit: an execution request or a request for a result."""
+    """Whether a block's findings hold an R1 or R5 hit: an execution request or a request for a result. The block
+    before a fence that does is not a not-to-be-run introduction."""
     return any(rule in ("R1", "R5") for rule, _, _, _, _ in findings)
 
 
-def cancel_demotions(findings):
-    """A block's findings with every demoted command line HARD again: a block that also asks to run something
-    or to report a result (R1 or R5) is not a data context."""
-    return [(rule, "HARD", line, message.replace(": not a request", ", cancelled: the block also asks to run or "
-                                                 "report (R1 or R5)"), excerpt)
-            if severity == "INFO" else (rule, severity, line, message, excerpt)
-            for rule, severity, line, message, excerpt in findings]
+def asks_in(block):
+    """Whether a prose block's sentences can ask for something and so void a closed shape: a Markdown heading is
+    a title, not a request."""
+    return not block.heading
+
+
+def void_groups(blocks):
+    """[group number] per block: the blocks across which a sentence that asks voids the closed shapes. A numbered
+    item is one group with every block that belongs to it (continuation lines, nested list items, indented
+    paragraphs, fences); outside the numbered items, the blocks from one heading (or the brief's start, or the
+    end of a numbered item) to the next heading or numbered item are one group."""
+    groups, group, previous = [], -1, None
+    for block in blocks:
+        joins = previous is not None and (
+            (block.item is not None and block.item == previous.item)
+            or (block.item is None and previous.item is None and not block.heading))
+        if not joins:
+            group += 1
+        groups.append(group)
+        previous = block
+    return groups
+
+
+def cancel_demotion(finding):
+    """A demoted command line HARD again: its void group also asks for something."""
+    rule, severity, line, message, excerpt = finding
+    if severity != "INFO" or rule not in ("S2", "S3"):
+        return finding
+    return (rule, "HARD", line, message.replace(": not a request", ", voided: another sentence of the item or "
+                                                "section asks for something"), excerpt)
 
 
 def can_execute(row):
@@ -1289,14 +1271,15 @@ def evaluate(data, family, table, scoped=True):
     blocks = parse_blocks(text)
     if scoped:
         blocks = apply_scope(blocks, family, set(table))
-    findings, previous, previous_asks = [], None, False
-    for block in blocks:
+    findings, previous, previous_asks, voided = [], None, False, set()
+    for block, group in zip(blocks, void_groups(blocks)):
         if block.kind == "fence":
             if rule_s1(block):
                 first = next((line for _, line in block.lines if line.strip()), "")
                 intro = not previous_asks and reference_intro(previous)
-                findings.append(("S1", "INFO" if intro else "HARD", block.start, "executable fence ({}{})".format(
-                    block.tag or "untagged", ", introduced as not to be run" if intro else ""), _excerpt(first)))
+                finding = ("S1", "INFO" if intro else "HARD", block.start, "executable fence ({}{})".format(
+                    block.tag or "untagged", ", introduced as not to be run" if intro else ""), _excerpt(first))
+                findings.append((group, finding))
             previous, previous_asks = block, False
             continue
         previous = block
@@ -1308,9 +1291,13 @@ def evaluate(data, family, table, scoped=True):
         found = []
         for start, sentence in sentences(_masked_text(block).replace("\n", " ")):
             line = block.lines[bisect.bisect_right(line_starts, start) - 1][0]
-            found.extend(lint_sentence(sentence, line, r1_applies(block), structural))
+            hits, asks = lint_sentence(sentence, line, r1_applies(block), structural)
+            found.extend(hits)
+            if asks and asks_in(block):
+                voided.add(group)
         previous_asks = asks_to_run(found)
-        findings.extend(cancel_demotions(found) if previous_asks else found)
+        findings.extend((group, finding) for finding in found)
+    findings = [cancel_demotion(finding) if group in voided else finding for group, finding in findings]
     hard = any(severity == "HARD" for _, severity, _, _, _ in findings)
     return (EXIT_REFUSE if hard else EXIT_OK), findings
 
@@ -1482,8 +1469,8 @@ PLAIN_FENCE = "```\ncd repo\npython3 t.py\n```\n"
 REFERENCE_FENCE = "The README shows this; do not run it:\n\n```bash\npython3 t.py\n```\n"
 REFERENCE_UNTIL = "Do not run this until you read the notes:\n\n```bash\npython3 t.py\n```\n"
 QUOTE_SELF_TEST = "Quote the code that runs `t.py --self-test`.\n"
-MENTION = "CI failed at abc1234 on `t.py --self-test` at the parent.\n"
-PROHIBITION = "Do not run `t.py --self-test` even if it passes.\n"
+MENTION = "CI failed on `t.py --self-test`.\n"
+PROHIBITION = "Do not run `t.py --self-test`.\n"
 PROHIBITION_EXCEPT = "Do not run `t.py --self-test` without the flag.\n"
 GIT_SHOW_PREAMBLE = "Read only `git show abc1234:<path>` in the worktree.\n\n1. Quote the helper.\n"
 GIT_SHOW_PROSE = "Answer by reading files at commit abc1234 (git show abc1234:<path>).\n"
@@ -1499,7 +1486,7 @@ GIT_OPTIONS = "git -c a -c a -c a -c a -c a -c a -c a show"   # seven global opt
 PYTHON_C = "1. Run python3 -c \"print(1)\".\n"
 PYTHON_M = "1. Run python3 -m unittest.\n"
 PYTHON_OPTIONS_M = "1. Run python3 -I -B -m unittest.\n"
-# a Quote request whose object is source text that holds the command line as text
+# quoted source text is not a data context: a command line in it refuses (an accepted false positive)
 QUOTED_ENTRY = "1. Quote the scope_rows entry for FOO=1 ./x.sh with its expected exit.\n"
 QUOTED_ROW = "1. Quote the test row containing `t.py --self-test`.\n"
 QUOTED_EXAMPLE = "1. Quote the docstring example `git show HEAD`.\n"
@@ -1512,6 +1499,32 @@ QUOTE_LINE_OF = "1. Quote the first line of `git log --oneline`.\n"
 QUOTE_NO_NOUN = "1. Quote everything for `git show HEAD`.\n"
 QUOTE_AND_COMMAND = "1. Quote the README line and git show HEAD.\n"
 QUOTE_THEN_RUN = "1. Quote the README command `make test`.\n   Then run it.\n"
+QUOTE_NESTED_RUN = "1. Quote the README command `make test`.\n   - Run it.\n"
+QUOTE_GIT_SHOW_PREAMBLE = "Quote each docstring git show abc1234:t.py has.\n\n1. Is the helper exported?\n"
+# the two closed shapes, each the whole sentence, and what voids them
+PROHIBITION_PROSE = "1. Never run git show abc1234:t.py.\n"
+PAST_PROSE = "1. The job failed on python3 -I -B t.py.\n"
+TWO_PROHIBITIONS = "1. Do not run `git log`.\n   Never run `git push`.\n"
+CLOSED_ANSWER = "1. CI failed on `make test`.\n   Answer from the source.\n"
+PAST_CONFIRM = "CI failed on python3 x.py; please confirm.\n"
+PAST_AND_CHECK = "CI failed on `python3 x.py` and check whether it still fails.\n"
+PAST_SO_SEE = "1. CI failed on `python3 x.py`, so see if it fails for you.\n"
+PAST_TRY_AGAIN = "CI failed on `python3 x.py`; try it again.\n"
+PAST_CONFIRM_PRINTS = "CI failed on `git log -n 3`; confirm what it prints.\n"
+PAST_CONFIRM_PASSES = "CI failed on `make test`; please confirm it passes now.\n"
+PROHIBITION_PERFORM = "1. Do not run `git log -p`, perform it.\n"
+PROHIBITION_KIDDING = "1. Do not run `git log -p`. Just kidding, do.\n"
+PROHIBITION_EVEN_IF = "1. Do not run `git log -p` even if it passes.\n"
+PROHIBITION_AND_REPORT = "Never run git log and report it.\n"
+VOID_CONTINUATION = "1. CI failed on `make test`.\n   Please confirm it passes now.\n"
+VOID_QUESTION = "1. CI failed on `make test`.\n   Is it fixed?\n"
+VOID_ADVISORY = "1. Do not run `make test`.\n   Paste the exit code.\n"
+VOID_NESTED = "1. CI failed on `make test`.\n   - Confirm it passes now.\n"
+VOID_DASH = "CI failed on `make test`.\n- Confirm it passes now.\n"
+VOID_SUB_BLOCK = "1. CI failed on `make test`.\n\n   Confirm it passes now.\n"
+VOID_PARAGRAPH = "CI failed on `make test`.\n\nConfirm it passes now.\n"
+HEADING_TITLE = "# Check the run\n\nDo not run `git push`.\n"
+OTHER_ITEM = "1. Do not run `git log -p`.\n2. Run it.\n"
 INTRO_AFTER_BUILD = "Build the docs. Do not run this:\n\n```bash\npython3 t.py\n```\n"
 ONLY_BUT_ALSO = "1. Do not run `git show HEAD` only on main but also on the feature branch.\n"
 IGNORE_INSTRUCTION = "Ignore the instruction \"do not run this\":\n\n```sh\ngit show HEAD\n```\n"
@@ -1605,6 +1618,158 @@ def _linear(unit, prefix="", suffix=""):
                                                       done.stderr.strip()[-200:])
     return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "1 MiB took {:.3f} s, 128 KiB {:.3f} s".format(
         large, small)
+
+
+# THE REGEX AUDIT. Each compiled pattern in this module's namespace and each of COMMAND_FORMS is parsed and walked,
+# and a construct that can split one run of characters between two quantifiers in many ways is flagged: two
+# quantifiers (a variable count) whose classes overlap, adjacent or separated only by atoms that can match empty
+# (\s*\s+, \s*,?\s+, \w+\w*), and a repeated group whose tail quantifier overlaps its head quantifier or whose body
+# can match empty ((?:x+)+). A possessive quantifier or an atomic group gives nothing back, so it is never the
+# first of such a pair. Classes are compared over AUDIT_SAMPLE.
+REGEX_AUDIT_EXEMPTIONS = dict()   # pattern name -> why its flagged construct cannot split a run; none is needed
+REGEX_AUDIT_CANARIES = ("NOUN_LIST_TAIL_RE", "LED_LIST_TAIL_RE", "ONLY_RE", "FENCE_OPEN_RE", "COMMAND_RE",
+                        "CLOSED_ARGS_END_RE", "VOID_WORD_RE", "COMMAND_FORMS[0]")
+AUDIT_SAMPLE = frozenset([chr(code) for code in range(128)] + [chr(code) for code in (
+    0xA0, 0xE9, 0xDF, 0x416, 0x663, 0x2013, 0x2014, 0x2019, 0x201C, 0x2028, 0x3000)])
+AUDIT_FLAGGED = (r"\s*,?\s+or", r"\s*\s+", r"\w+\w*", r"(?:x+)+", r"(?:a*)*", r"(?:,\s*)?\s+")
+AUDIT_CLEAN = (r"(?:\s*,\s+|\s+)or\s+", r"[A-Za-z][\w-]*+(?:\s*,\s*[A-Za-z][\w-]*+)++", r"(?:\s+\S+)*\.")
+_OLD_ITEM_LIST = (r"Q?\d{1,3}(?:\s*(?:,\s*(?:and\s+|or\s+)?|\band\s+|\bor\s+|-|\bto\s+|\bthrough\s+)\s*"
+                  r"Q?\d{1,3})*")
+# the patterns of the previous revision that the audit flags (the revert flip puts them back)
+AUDIT_PREVIOUS = dict(
+    NOUN_LIST_TAIL_RE=(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s*(?:[)\].;:!?]|\Z))", re.I),
+    LED_LIST_TAIL_RE=(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s+(?!(?:" + DETERMINER + r"|it|them|all|both)\b)[A-Za-z])",
+                      re.I),
+    FENCE_OPEN_RE=(r"([ \t]*)(`{3,}|~{3,})(.*)\Z", 0),
+    ONLY_RE=(r"answer\s+(?:only\s+)?(?:items?|questions?)\s+(" + _OLD_ITEM_LIST + r")(\s+only)?", re.I),
+    ANSWER_ONLY_RE=(r"answer\s+only\s+(?:items?|questions?)\s+(" + _OLD_ITEM_LIST + ")", re.I),
+    EXCLUDE_RE=(r"(?:(?:do\s+not|don't|never)\s+(?:attempt|answer)|skip)\s+(?:items?|questions?)\s+(" + _OLD_ITEM_LIST
+                + ")", re.I),
+)
+
+
+def _audit_chars(op, value, flags, constants):
+    """The AUDIT_SAMPLE characters one atom matches, or None for an atom the audit does not know."""
+    folded = (lambda ch: set(c for c in (ch, ch.lower(), ch.upper()) if len(c) == 1)) if flags & re.I else (
+        lambda ch: set((ch,)))
+    escapes = {constants.CATEGORY_DIGIT: r"\d", constants.CATEGORY_NOT_DIGIT: r"\D", constants.CATEGORY_SPACE: r"\s",
+               constants.CATEGORY_NOT_SPACE: r"\S", constants.CATEGORY_WORD: r"\w", constants.CATEGORY_NOT_WORD: r"\W"}
+
+    def category(name):
+        probe = re.compile(escapes[name]) if name in escapes else None
+        return None if probe is None else set(ch for ch in AUDIT_SAMPLE if probe.fullmatch(ch))
+
+    if op is constants.LITERAL or op is constants.NOT_LITERAL:
+        chars = set(ch for ch in AUDIT_SAMPLE if chr(value) in folded(ch))
+        return chars if op is constants.LITERAL else set(AUDIT_SAMPLE) - chars
+    if op is constants.ANY:
+        return set(ch for ch in AUDIT_SAMPLE if flags & re.S or ch != "\n")
+    if op is constants.CATEGORY:
+        return category(value)
+    if op is not constants.IN:
+        return None
+    negate, chars = False, set()
+    for item, argument in value:
+        if item is constants.NEGATE:
+            negate = True
+        elif item is constants.LITERAL:
+            chars |= set(ch for ch in AUDIT_SAMPLE if chr(argument) in folded(ch))
+        elif item is constants.RANGE:
+            chars |= set(ch for ch in AUDIT_SAMPLE if any(argument[0] <= ord(c) <= argument[1] for c in folded(ch)))
+        elif item is constants.CATEGORY and category(argument) is not None:
+            chars |= category(argument)
+        else:
+            return None
+    return set(AUDIT_SAMPLE) - chars if negate else chars
+
+
+def _audit_walk(parsed, flags, flagged, constants):
+    """(nullable, first, last, heads, tails) of a parsed sequence, with every flagged construct appended to
+    `flagged`. heads: the classes of the quantifiers that can open a match; tails: of those that can close one
+    and give characters back."""
+    infos = []
+    for op, value in parsed:
+        if op in (constants.MAX_REPEAT, constants.MIN_REPEAT, constants.POSSESSIVE_REPEAT):
+            low, high, body = value
+            inner = _audit_walk(body, flags, flagged, constants)
+            if high > 1 and any(tail & head for tail in inner[4] for head in inner[3]):
+                flagged.append("a repeated group whose tail and head quantifiers overlap")
+            if high > 1 and inner[0]:
+                flagged.append("a repeated group whose body can match empty")
+            heads = ([inner[1]] if high != low else []) + inner[3]
+            tails = [] if op is constants.POSSESSIVE_REPEAT else ([inner[2]] if high != low else []) + inner[4]
+            infos.append((low == 0 or inner[0], inner[1], inner[2], heads, tails))
+        elif op is constants.SUBPATTERN:
+            infos.append(_audit_walk(value[3], (flags | value[1]) & ~value[2], flagged, constants))
+        elif op is constants.ATOMIC_GROUP:
+            inner = _audit_walk(value, flags, flagged, constants)
+            infos.append(inner[:4] + ([],))
+        elif op is constants.BRANCH:
+            branches = [_audit_walk(branch, flags, flagged, constants) for branch in value[1]]
+            infos.append((any(branch[0] for branch in branches), set().union(*(branch[1] for branch in branches)),
+                          set().union(*(branch[2] for branch in branches)),
+                          [head for branch in branches for head in branch[3]],
+                          [tail for branch in branches for tail in branch[4]]))
+        elif op in (constants.ASSERT, constants.ASSERT_NOT):
+            _audit_walk(value[1], flags, flagged, constants)
+            infos.append((True, set(), set(), [], []))
+        elif op is constants.AT:
+            infos.append((True, set(), set(), [], []))
+        else:
+            chars = _audit_chars(op, value, flags, constants)
+            if chars is None:
+                flagged.append("a construct the audit does not read ({})".format(op))
+                chars = set(AUDIT_SAMPLE)
+            infos.append((False, chars, chars, [], []))
+    for index, left in enumerate(infos):
+        for right in infos[index + 1:]:
+            if any(tail & head for tail in left[4] for head in right[3]):
+                flagged.append("two quantifiers over overlapping classes that can share one run")
+            if not right[0]:
+                break
+    first, last, heads, tails = set(), set(), [], []
+    for info in infos:
+        first |= info[1]
+        heads += info[3]
+        if not info[0]:
+            break
+    for info in reversed(infos):
+        last |= info[2]
+        tails += info[4]
+        if not info[0]:
+            break
+    return all(info[0] for info in infos), first, last, heads, tails
+
+
+def audit_pattern(pattern, flags=0):
+    """The sorted distinct constructs the audit flags in one pattern (empty when it passes)."""
+    try:
+        from re import _constants as constants, _parser as parser
+    except ImportError:   # the parser is private to the interpreter: a release without it fails the audit closed
+        return ["the interpreter's regular expression parser cannot be imported"]
+    flagged = []
+    _audit_walk(parser.parse(pattern, flags), flags, flagged, constants)
+    return sorted(set(flagged))
+
+
+def regex_audit():
+    """(walked, flagged): the names of every compiled pattern in this module's namespace and of COMMAND_FORMS, and
+    name -> flagged constructs for each one the audit flags that REGEX_AUDIT_EXEMPTIONS does not exempt (an
+    exemption whose pattern is absent or passes is reported as stale)."""
+    patterns = sorted((name, value.pattern, value.flags) for name, value in globals().items()
+                      if isinstance(value, re.Pattern))
+    patterns += [("COMMAND_FORMS[{}]".format(index), form, 0) for index, form in enumerate(COMMAND_FORMS)]
+    flagged = dict()
+    for name, pattern, flags in patterns:
+        found = audit_pattern(pattern, flags)
+        if found and name not in REGEX_AUDIT_EXEMPTIONS:
+            flagged[name] = found
+        elif name in REGEX_AUDIT_EXEMPTIONS and not found:
+            flagged[name] = ["a stale exemption: the pattern passes"]
+    walked = [name for name, _, _ in patterns]
+    for name in sorted(set(REGEX_AUDIT_EXEMPTIONS) - set(walked)):
+        flagged[name] = ["a stale exemption: no such pattern"]
+    return walked, flagged
 
 
 def _bounded_option_end(text, position, option_re, memo):
@@ -1729,9 +1894,11 @@ def self_test(report_path=None):
         "python3 -Ic pass")], [1, 1, 1, 1, 1])
     check("s2/git-forms-refused", [_outcome("1. Use " + command + ".\n")[0] for command in (
         "git -P log -1", "git --git-dir /r/.git log -1", "git show-branch", "git annotate t.py")], [1, 1, 1, 1])
-    check("s2/quoted-relative-info", _outcome(DESCRIBED_PROSE), (0, [("S2", "INFO")]))
-    check("s2/mentions-quoted-info", _outcome("1. Quote the sentence that mentions \"git branch --list\".\n"),
-          (0, [("S2", "INFO")]))
+    check("s2/quoted-relative-refused", _outcome(DESCRIBED_PROSE), (1, [("S2", "HARD")]))
+    check("s2/mentions-quoted-refused", _outcome("1. Quote the sentence that mentions \"git branch --list\".\n"),
+          (1, [("S2", "HARD")]))
+    check("s2/prohibited-prose-info", _outcome(PROHIBITION_PROSE), (0, [("S2", "INFO")]))
+    check("s2/past-report-prose-info", _outcome(PAST_PROSE), (0, [("S2", "INFO")]))
     check("s2/file-name-ok", _outcome("1. In `tools/t.py`, quote the parser.\n"), (0, []))
     check("s2/config-noun-ok", _outcome(CONFIG_NOUN), (0, []))
     check("s2/git-word-ok", _outcome("1. Quote the git history notes; Git shows them.\n"), (0, []))
@@ -1740,26 +1907,26 @@ def self_test(report_path=None):
     check("s3/git-show-prose-refused", _outcome(GIT_SHOW_PROSE), (1, [("S3", "HARD")]))
     check("s3/python-refused", _outcome(PYTHON_COMMAND), (1, [("S3", "HARD")]))
     check("s3/heading-refused", _outcome(HEADING_COMMAND), (1, [("S3", "HARD")]))
-    check("s3/quoted-relative-info", _outcome(QUOTE_SELF_TEST), (0, [("S3", "INFO")]))
+    check("s3/quoted-relative-refused", _outcome(QUOTE_SELF_TEST), (1, [("S3", "HARD")]))
     check("s3/past-report-info", _outcome(MENTION), (0, [("S3", "INFO")]))
     check("s3/prohibited-info", _outcome(PROHIBITION), (0, [("S3", "INFO")]))
-    check("s3/prohibited-git-info", _outcome("Never use `git show`; read the files you are given.\n"),
-          (0, [("S3", "INFO")]))
+    check("s3/prohibited-use-refused", _outcome("Never use `git show`; read the files you are given.\n"),
+          (1, [("S3", "HARD")]))
     check("s3/prohibition-exception-refused", _outcome(PROHIBITION_EXCEPT), (1, [("S3", "HARD")]))
     check("s3/described-other-clause-refused", _outcome("Quote the line that runs it, then git show abc1234.\n"),
           (1, [("S3", "HARD")]))
     check("s3/git-options-unbounded", (bool(option_commands("git -C x --no-pager show")),
                                        bool(option_commands(GIT_OPTIONS))), (True, True))
-    # ---------- quoted source text: a command line held as data ----------
-    check("quoted/scope-row-entry-ok", _outcome(QUOTED_ENTRY), (0, [("S2", "INFO")]))
-    check("quoted/test-row-ok", _outcome(QUOTED_ROW), (0, [("S2", "INFO")]))
-    check("quoted/docstring-example-ok", _outcome(QUOTED_EXAMPLE), (0, [("S2", "INFO")]))
-    check("quoted/readme-command-ok", _outcome(QUOTED_README), (0, [("S2", "INFO")]))
-    check("quoted/entry-that-names-ok", _outcome(QUOTED_NAMES), (0, [("S2", "INFO")]))
-    check("quoted/continued-object-ok", _outcome(QUOTED_CONTINUED), (0, [("S2", "INFO")]))
-    check("quoted/call-noun-ok", _outcome("1. In t.py, quote the line that runs git rev-parse --absolute-git-dir (or "
-                                          "the call that obtains the git dir).\n"), (0, [("S2", "INFO")]))
-    check("quoted/unnumbered-ok", _outcome(QUOTED_EXAMPLE[3:]), (0, [("S3", "INFO")]))
+    # ---------- quoted source text is not a data context: a command line in it refuses ----------
+    check("quoted/scope-row-entry-refused", _outcome(QUOTED_ENTRY), (1, [("S2", "HARD")]))
+    check("quoted/test-row-refused", _outcome(QUOTED_ROW), (1, [("S2", "HARD")]))
+    check("quoted/docstring-example-refused", _outcome(QUOTED_EXAMPLE), (1, [("S2", "HARD")]))
+    check("quoted/readme-command-refused", _outcome(QUOTED_README), (1, [("S2", "HARD")]))
+    check("quoted/entry-that-names-refused", _outcome(QUOTED_NAMES), (1, [("S2", "HARD")]))
+    check("quoted/continued-object-refused", _outcome(QUOTED_CONTINUED), (1, [("S2", "HARD")]))
+    check("quoted/unnumbered-refused", _outcome(QUOTED_EXAMPLE[3:]), (1, [("S3", "HARD")]))
+    check("quoted/git-show-preamble-refused", _outcome(QUOTE_GIT_SHOW_PREAMBLE), (1, [("S3", "HARD")]))
+    check("quoted/nested-run-refused", _outcome(QUOTE_NESTED_RUN), (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
     check("quoted/output-of-refused", _outcome("1. Quote the output of `make test`.\n"), (1, [("S2", "HARD")]))
     check("quoted/what-prints-refused", _outcome("1. Quote what `git log` prints.\n"), (1, [("S2", "HARD")]))
     check("quoted/line-prints-refused", _outcome(QUOTE_PRINTS), (1, [("S2", "HARD")]))
@@ -1769,10 +1936,23 @@ def self_test(report_path=None):
     check("quoted/and-command-refused", _outcome(QUOTE_AND_COMMAND), (1, [("S2", "HARD")]))
     check("quoted/and-run-refused", _outcome("1. Quote the docstring example `git show HEAD` and run it.\n"),
           (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
-    check("quoted/then-run-cancelled-refused", _outcome(QUOTE_THEN_RUN), (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
-    # ---------- a reversal, an exception or a request never demotes ----------
-    check("demote/do-it-now-refused", _outcome("1. Use the helper that runs `git show HEAD` and do it now.\n"),
-          (1, [("S2", "HARD")]))
+    check("quoted/then-run-refused", _outcome(QUOTE_THEN_RUN), (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
+    # ---------- closed shapes: anything after the command line, or a request in the item, voids them ----------
+    check("demote/two-prohibitions-info", _outcome(TWO_PROHIBITIONS), (0, [("S2", "INFO")]))
+    check("demote/closed-with-answer-info", _outcome(CLOSED_ANSWER), (0, [("S2", "INFO")]))
+    check("demote/past-report-requests-refused", [_outcome(text)[0] for text in (
+        PAST_CONFIRM, PAST_AND_CHECK, PAST_SO_SEE, PAST_TRY_AGAIN)], [1, 1, 1, 1])
+    check("demote/prohibition-requests-refused", [_outcome(text)[0] for text in (
+        PROHIBITION_PERFORM, PROHIBITION_KIDDING)], [1, 1])
+    check("demote/confirm-after-past-report-refused", [_outcome(text)[0] for text in (
+        PAST_CONFIRM_PRINTS, PAST_CONFIRM_PASSES)], [1, 1])
+    check("demote/text-after-command-refused", [_outcome(text)[0] for text in (
+        PROHIBITION_EVEN_IF, PROHIBITION_AND_REPORT)], [1, 1])
+    check("demote/void-forms-refused", [_outcome(text)[0] for text in (
+        VOID_CONTINUATION, VOID_QUESTION, VOID_ADVISORY, VOID_NESTED, VOID_DASH, VOID_SUB_BLOCK, VOID_PARAGRAPH)],
+          [1, 1, 1, 1, 1, 1, 1])
+    check("demote/heading-title-info", _outcome(HEADING_TITLE), (0, [("S3", "INFO")]))
+    check("demote/other-item-not-voided-residual", _outcome(OTHER_ITEM), (0, [("R1", "ADVISORY"), ("S2", "INFO")]))
     check("demote/only-but-also-refused", _outcome(ONLY_BUT_ALSO), (1, [("S2", "HARD")]))
     check("demote/ignore-instruction-refused", _outcome(IGNORE_INSTRUCTION), (1, [("S1", "HARD")]))
     check("demote/run-it-on-branch-refused", _outcome(RUN_ON_BRANCH), (1, [("S1", "HARD")]))
@@ -1787,8 +1967,15 @@ def self_test(report_path=None):
     check("demote/request-not-past-report-refused", [_outcome(text)[0] for text in (
         "1. Confirm the fix passed with `pytest -q tests/`.\n",
         "1. Paste the output from when you ran `pytest -q tests/`.\n")], [1, 1])
-    # ---------- time: every scan is one pass per sentence ----------
+    # ---------- time: the regex audit and the measured shapes ----------
     check("perf/word-run-token-start", WORD_RUN_RE.search("aaaa, b", 1), None)
+    walked, flagged = regex_audit()
+    check("perf/regex-audit-clean", flagged, dict())
+    check("perf/regex-audit-walks-module", (len(walked) == len(set(walked)) == len(COMMAND_FORMS) + sum(
+        1 for value in globals().values() if isinstance(value, re.Pattern)), set(REGEX_AUDIT_CANARIES) <= set(walked)),
+          (True, True))
+    check("perf/regex-audit-detects", [bool(audit_pattern(pattern)) for pattern in AUDIT_FLAGGED + AUDIT_CLEAN],
+          [True] * len(AUDIT_FLAGGED) + [False] * len(AUDIT_CLEAN))
     with _patched(LINEAR_CHILD="import sys\nprint(0.1)\nprint(0.2)\nsys.exit(9)\n"):
         failed_child = _linear("a")
     with _patched(LINEAR_CHILD="print('nan')\nprint('nan')\n"):
@@ -1810,7 +1997,11 @@ def self_test(report_path=None):
             ("perf/address-markup-linear", "Q1. ", "Alpha leg: x. ", ""),
             ("perf/observe-run-linear", "observe, ", "", ""),
             ("perf/outcome-subject-linear", "does, ", "", " the test pass?"),
-            ("perf/quote-context-linear", "Quote the line for `git show` and ", "", "")):
+            ("perf/quote-context-linear", "Quote the line for `git show` and ", "", ""),
+            ("perf/whitespace-run-linear", " ", "a, b", " x"),
+            ("perf/item-list-whitespace-linear", " ", "Gamma leg: answer items 1,", " x"),
+            ("perf/closed-args-linear", " a/b", "Do not run git log", " x"),
+            ("perf/void-word-linear", "confirm ", "1. CI failed on `make test`.\n   ", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -1949,8 +2140,8 @@ def self_test(report_path=None):
                                            SHELL_FIRST_LINE_RE=never))
     check("revert/s1-reference-intro-red", *flip([code(REFERENCE_FENCE)], [1], reference_intro=lambda block: False))
     check("revert/s1-reference-except-red", *flip([code(REFERENCE_UNTIL), code(IGNORE_INSTRUCTION)], [0, 0],
-                                                 EXCEPTION_RE=never, REVERSAL_RE=never))
-    check("revert/s2-red", *flip([code(RUN_ITEM), code(GIT_ITEM)], [0, 0],
+                                                 EXCEPTION_RE=never))
+    check("revert/s2-red", *flip([code(RUN_ITEM), code(GIT_ITEM), code(QUOTE_NESTED_RUN)], [0, 0, 0],
                                 command_rule=lambda block: None if block.item is not None else "S3"))
     check("revert/s3-red", *flip([code(GIT_SHOW_PREAMBLE), code(GIT_SHOW_PROSE)], [0, 0],
                                 command_rule=lambda block: "S2" if block.item is not None else None))
@@ -1971,20 +2162,37 @@ def self_test(report_path=None):
         GIT_SUBCOMMAND_RE.pattern.replace(GIT_CONFIG, "config"))))
     check("revert/git-options-unbounded-red", *flip([lambda: bool(option_commands(GIT_OPTIONS))], [False],
                                                    _option_end=_bounded_option_end))
-    check("revert/quoted-source-red", *flip([code(QUOTE_SELF_TEST), code(DESCRIBED_PROSE), code(QUOTED_ENTRY),
-                                            code(QUOTED_ROW), code(QUOTED_EXAMPLE), code(QUOTED_README)],
-                                           [1, 1, 1, 1, 1, 1], QUOTE_VERB_RE=never))
-    check("revert/quote-veto-red", *flip([code(QUOTE_PRINTS), code(QUOTE_AND_OUTPUT)], [0, 0], QUOTE_VETO_RE=never))
-    check("revert/source-of-red", *flip([code(QUOTE_LINE_OF)], [0], SOURCE_OF_RE=never))
-    check("revert/source-noun-red", *flip([code(QUOTE_NO_NOUN)], [0], SOURCE_NOUN_RE=re.compile(r"\b\w")))
-    check("revert/quote-stop-red", *flip([code(QUOTE_AND_COMMAND)], [0], OBJECT_CONTINUES_RE=re.compile("")))
-    check("revert/past-report-red", *flip([code(MENTION)], [1], PAST_SUBJECT_RE=never))
-    check("revert/prohibited-red", *flip([code(PROHIBITION)], [1], PROHIBITED_RE=never))
-    check("revert/prohibition-except-red", *flip([code(PROHIBITION_EXCEPT), code(ONLY_BUT_ALSO)], [0, 0],
-                                                EXCEPTION_RE=never))
-    check("revert/exec-count-red", *flip([code(RUN_ON_BRANCH), code(TWO_VERBS)], [0, 0], EXEC_WORD_RE=re.compile(r"\A")))
-    check("revert/demotion-cancel-red", *flip([code(QUOTE_THEN_RUN), code(INTRO_AFTER_BUILD)], [0, 0],
-                                             asks_to_run=lambda findings: False))
+    check("revert/past-report-red", *flip([code(MENTION), code(PAST_PROSE)], [1, 1], CLOSED_PAST_RE=never))
+    check("revert/prohibited-red", *flip([code(PROHIBITION), code(PROHIBITION_PROSE)], [1, 1],
+                                        CLOSED_PROHIBITION_RE=never))
+    anything = re.compile("")
+    check("revert/closed-span-end-red", *flip([code(PROHIBITION_EVEN_IF), code(PROHIBITION_PERFORM),
+                                              code(PAST_AND_CHECK), code(PAST_SO_SEE)], [0, 0, 0, 0],
+                                             CLOSED_SPAN_END_RE=anything))
+    check("revert/closed-args-end-red", *flip([code(PROHIBITION_AND_REPORT)], [0], CLOSED_ARGS_END_RE=anything))
+    check("revert/closed-stop-and-void-red", *flip([code(PAST_CONFIRM), code(PAST_TRY_AGAIN), code(PAST_CONFIRM_PRINTS),
+                                                   code(PAST_CONFIRM_PASSES)], [0, 0, 0, 0],
+                                                  CLOSED_SPAN_END_RE=anything, CLOSED_ARGS_END_RE=anything,
+                                                  VOID_WORD_RE=never))
+    check("revert/void-word-red", *flip([code(VOID_CONTINUATION), code(PROHIBITION_KIDDING)], [0, 0],
+                                       VOID_WORD_RE=never))
+    check("revert/void-question-red", *flip([code(VOID_QUESTION)], [0], QUESTION_END_RE=never))
+    check("revert/void-advisory-red", *flip([code(VOID_ADVISORY)], [0], ADVISORY_VOID_RULES=frozenset()))
+    check("revert/void-group-red", *flip([code(VOID_NESTED), code(VOID_DASH), code(VOID_SUB_BLOCK),
+                                         code(VOID_PARAGRAPH)], [0, 0, 0, 0],
+                                        void_groups=lambda blocks: list(range(len(blocks)))))
+    check("revert/void-cancel-red", *flip([code(VOID_CONTINUATION), code(VOID_NESTED)], [0, 0],
+                                         cancel_demotion=lambda finding: finding))
+    asks = sentence_asks
+    check("revert/closed-exempt-red", *flip([code(PROHIBITION), code(TWO_PROHIBITIONS)], [1, 1],
+                                           sentence_asks=lambda sentence, findings, _: asks(sentence, findings, False)))
+    check("revert/heading-title-red", *flip([code(HEADING_TITLE)], [1], asks_in=lambda block: True))
+    check("revert/exec-count-red", *flip([code(RUN_ON_BRANCH)], [0], EXEC_WORD_RE=re.compile(r"\A")))
+    check("revert/intro-after-request-red", *flip([code(INTRO_AFTER_BUILD)], [0], asks_to_run=lambda findings: False))
+    # the patterns of the previous revision that the audit flags, put back
+    check("revert/regex-audit-red", *flip([lambda: sorted(regex_audit()[1])], [sorted(AUDIT_PREVIOUS)],
+                                         **dict((name, re.compile(pattern, flags))
+                                                for name, (pattern, flags) in AUDIT_PREVIOUS.items())))
     check("revert/word-run-anchor-red", *flip(
         [lambda: bool(WORD_RUN_RE.search("aaaa, b", 1))], [True],
         WORD_RUN_RE=re.compile(NOUN_WORD + r"(?:\s*,\s*" + NOUN_WORD + r")++")))
@@ -2040,7 +2248,7 @@ def self_test(report_path=None):
     check("revert/r7-red", *flip([lambda: _outcome(GIT_PARENTS)], [(0, [])], rule_r7=nothing))
     check("revert/r7-request-red", *flip([lambda: _outcome(GIT_STATEMENT)], [(0, [("R7", "ADVISORY")])],
                                         _asks=lambda sentence: True))
-    check("revert/every-flip-ran", len(flipped), 57)
+    check("revert/every-flip-ran", len(flipped), 62)
 
     expected = _expected_check_ids()
     if expected is None:
@@ -2056,11 +2264,12 @@ def self_test(report_path=None):
         return 1
     print("PASS: check_brief_capability self-test: {} unique checks executed (the shipped table loads and a "
           "malformed table exits 2; S1, S2 and S3 refuse executable fences and command lines in numbered "
-          "items and outside them, a command line held as quoted source text, prohibited or past-reported is "
-          "INFO unless a reversal, an exception or a run request voids it, and every blocking rule, "
-          "command-line form and demotion patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY "
-          "lines and never refuse; 16 repeated shapes each evaluate in linear time at 1 MiB in a capped child "
-          "that must exit 0; scope keeps and drops numbered items, other families' legs, sections and "
+          "items and outside them, a command line is INFO only as a whole-sentence prohibition or past report "
+          "that no other sentence of its item or section voids, quoted source text is not a data context, and "
+          "every blocking rule, command-line form, closed-shape guard and void patched out flips its fixture; R1, "
+          "R5, R6 and R7 print ADVISORY lines and never refuse; the regex audit flags no compiled pattern and "
+          "detects the previous revision's; 20 repeated shapes each evaluate in linear time at 1 MiB in a capped "
+          "child that must exit 0; scope keeps and drops numbered items, other families' legs, sections and "
           "tail markers; undecodable, blank, oversized, missing, non-regular, backwards-range and "
           "unknown-family input exits 2); execution set reconciled against tools/selftest_checks.toml".format(
               len(EXECUTED)))
