@@ -110,10 +110,11 @@ THREAT MODEL
     seconds by time.monotonic (the clock is read again after every wait and every read, before an end of input
     is accepted, so input that ends after the deadline is refused however late the OS runs the hook; input that
     ends in time but is read late is refused too), one with bytes other than JSON blanks (space, tab, CR, LF)
-    after its JSON, one that is not JSON (invalid UTF-8 included), a JSON value that is not an object, and a Bash
-    call whose tool_input is not an object or whose command is not a string. A JSON prefix followed by an idle
-    interval is not taken as the whole payload: the hook reads on until the input ends, so a host that keeps
-    stdin open after the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
+    after its JSON, one that is not JSON in strict UTF-8 (bytes that are not valid UTF-8, encoded surrogates, a
+    byte order mark, UTF-16 and UTF-32 included), a JSON value that is not an object, and a Bash call whose
+    tool_input is not an object or whose command is not a string. A JSON prefix followed by an idle interval is
+    not taken as the whole payload: the hook reads on until the input ends, so a host that keeps stdin open after
+    the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
     at most, so that note comes about 2 seconds late, but the OS can return from a wait late, and nothing here
     bounds how much later. The one exception is an interpreter older than Python 3.14 that can start the hook: the guard
     at the top of this file reads no input, writes one line beginning
@@ -305,9 +306,10 @@ def _read_complete(fd=0, deadline=_READ_DEADLINE):
     each read, before an end of input is accepted: a reading taken after a read returns is never earlier than
     the read, however late the OS runs this process, so an end of input that comes after the deadline is refused.
     Each wait is for the time left at most, but the OS can return from a wait late, so refusing can take longer
-    than the deadline. The whole input must be one JSON value in UTF-8, so only JSON blanks (space, tab, CR and
-    LF) may follow it. Raises ValueError for more than _MAX_INPUT bytes, for no end read before the deadline, and
-    for input that is not one JSON value."""
+    than the deadline. The whole input must be one JSON value in strict UTF-8 with no byte order mark (BOM), so
+    only JSON blanks (space, tab, CR and LF) may follow it; UTF-16, UTF-32 and encoded surrogates are not
+    UTF-8. Raises ValueError for more than _MAX_INPUT bytes, for no end read before the deadline, and for input
+    that is not one JSON value in strict UTF-8 (UnicodeDecodeError is a ValueError)."""
     end = time.monotonic() + deadline
     data = bytearray()
     while True:
@@ -325,8 +327,8 @@ def _read_complete(fd=0, deadline=_READ_DEADLINE):
             continue
         if time.monotonic() >= end:  # after the read, before its end of input is accepted
             raise ValueError(_LATE)
-        if not chunk:
-            return json.loads(bytes(data))
+        if not chunk:  # strict UTF-8 first: json.loads on bytes would also take UTF-16, UTF-32 and surrogates
+            return json.loads(bytes(data).decode("utf-8", "strict"))
         data += chunk
         if len(data) > _MAX_INPUT:
             raise ValueError("hook payload over the read bound")
@@ -1021,6 +1023,20 @@ def _self_test():
         payload.update(extra)
         return json.dumps(payload).encode()
 
+    def not_strict_utf8():
+        """Payloads that json.loads parses from bytes but that are not strict UTF-8 without a BOM: encoded
+        surrogates (lone high and low, and a CESU-8 pair), UTF-8 after a BOM, and UTF-16 and UTF-32 in each byte
+        order with and without a BOM. Parsed, each Bash call would get the deny, silence or another note, not the
+        cannot-evaluate note."""
+        deny = payload_bytes("pkill -f qa-x/")
+        out = [payload_bytes("echo hi").replace(b"hi", b"h" + s + b"i")
+               for s in (b"\xed\xa0\x80", b"\xed\xbf\xbf", b"\xed\xa0\xbd\xed\xb8\x80")]
+        out.append(deny.replace(b"qa-x/", b"qa-x/\xed\xa0\x80"))
+        out.append(b"\xef\xbb\xbf" + deny)
+        for codec in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
+            out.append(deny.decode("ascii").encode(codec))
+        return out
+
     def vendor_blocks():
         """name -> (fence header fields, block bytes) read from this file's own fences."""
         lines = open(here, "rb").read().split(b"\n")
@@ -1408,6 +1424,7 @@ def _self_test():
             bad = (b"", b"not json", b"[1, 2]", b"7", b"\xff\xfe\x00garbage", b'{"tool_name": "Bash"',
                    payload_bytes("pkill -f qa-x/")[:-1], payload_bytes("echo hi").replace(b"hi", b"h\xffi"),
                    payload_bytes("pkill -f qa-x/ #" + "x" * (17 * 1024 * 1024)))  # over the 16 MiB read bound
+            bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM (QA round 5)
             for data in bad:
                 rc, out, err = run_hook(data)
                 self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), data[:30])
@@ -1972,6 +1989,12 @@ def _self_test():
             for bad in (b'{"a": "\xff"}', whole.replace(b"hi", b"h\xffi")):
                 out = self.feed([(0, bad)], 30)[0]
                 self.assertTrue(isinstance(out, str) and out.startswith("refused: "), (bad, out))
+            # the payload is decoded as strict UTF-8 before it is parsed: json.loads on the bytes takes each of these
+            # (encoded surrogates, a BOM, and the other encodings it detects), the reader refuses them (QA round 5)
+            for bad in not_strict_utf8():
+                json.loads(bad)  # parsed when the bytes go to json.loads undecoded
+                out = self.feed([(0, bad)], 30)[0]
+                self.assertTrue(isinstance(out, str) and out.startswith("refused: "), (bad[:12], out))
 
         def feed(self, parts, deadline, close_after=None):
             """_read_complete(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, and then
@@ -2007,13 +2030,16 @@ def _self_test():
             # a payload the input does not end after is refused at the deadline, not returned (QA round 3 mutant B);
             # the time left is taken again after each wait, so the refusal comes at the deadline, not at the end
             # of input 2 seconds later (a wait with a stale time left would run on to it). The last piece comes at
-            # 0.5 seconds of a 0.6-second deadline, so a wait for the whole deadline after it would refuse at about
-            # 1.1 seconds (QA round 4)
+            # 1.0 seconds of a 1.2-second deadline, so a wait for the whole deadline after it would refuse at 2.2
+            # seconds at the earliest (QA round 4). The 1.9-second bound keeps the ratio of round 4 (0.5, 0.6 and
+            # 0.95 seconds, doubled): the test passes a refusal up to 0.7 seconds late on a loaded host, the mutant
+            # is at least 0.3 seconds over the bound, and the input ends at 3.0 seconds, after the mutant's refusal
+            # (QA round 5)
             one = json.dumps(dict(a=1)).encode()
-            out, taken = self.feed([(0, one[:3]), (0.5, one[3:])], 0.6, close_after=2.0)
+            out, taken = self.feed([(0, one[:3]), (1.0, one[3:])], 1.2, close_after=2.0)
             self.assertEqual(out, "refused: " + _LATE)
-            self.assertGreaterEqual(taken, 0.6)
-            self.assertLess(taken, 0.95)
+            self.assertGreaterEqual(taken, 1.2)
+            self.assertLess(taken, 1.9)
             self.assertEqual(self.feed([(0, one)], 30, close_after=0.3)[0], dict(a=1))
             self.assertEqual(self.feed([(0, one[:5]), (0.3, one[5:])], 30)[0], dict(a=1))
 
