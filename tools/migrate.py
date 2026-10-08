@@ -7,7 +7,10 @@
   migrate.py status   --root DIR                          report journal / transaction state
   migrate.py --self-test                                  the MANDATORY crash-injection gate (9.3)
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything runs. One
+that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a compile
+failure, which reads as a finding, or 2 for an interpreter predating -I when run with it.
 
 The engine consumes two interfaces owed by the adopter-experience spec and refuses without their evidence
 (fail-closed, never a silent proceed): QUIESCENCE of the effective tree (a `quiescence.ok` marker the
@@ -24,23 +27,36 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
                                 with op one of write|create|remove|mkdir|rmdir
   <staged>/payload/<path>       the exact new bytes for every write and create op
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: migrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
 import subprocess
-import sys
 import time
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
+    if exc.name != "tomllib":
+        raise  # a dependency missing while tomllib loads keeps its own diagnostic
+    sys.stderr.write(
+        "error: migrate.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: migrate.py requires Python 3.11+ (tomllib).")
 
 JOURNAL_REL = ".aiqt/migration/journal"
 CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"
@@ -771,7 +787,84 @@ def _close_vectors(base):
             ("migrate site do_status: normal path", False, "BR", status(False), None))
 
 
+class FdCensusError(RuntimeError):
+    """A descriptor census that could not be read: the listing failed, or a listed descriptor failed
+    to read with anything other than EBADF. A leak check never passes on one."""
+
+
+class FdCensusUnavailable(FdCensusError):
+    """This host has no /proc/self/fd, so no census can be taken: a leak check built on one cannot
+    evaluate. It neither passes nor reports a leak; the self-test says it cannot evaluate."""
+
+
+def _fd_pair_census():
+    """The open descriptors as a frozenset of (number, identity) pairs, identity being (st_dev, st_ino,
+    the file type bits of st_mode, access mode). Each part stays fixed while a descriptor stays open:
+    the permission bits are left out because chmod or fchmod changes them under a kept descriptor, and
+    the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed and reopened on
+    another file, or on the same file with another access mode, changes its pair; a count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
+
+    Only EBADF reads as closed (the listing's own descriptor is gone by the time it is read); any other
+    listing, fstat or flag failure raises FdCensusError naming the listing or the descriptor. A listing
+    that does not exist (ENOENT, ENOTDIR) raises FdCensusUnavailable."""
+    import errno
+    import fcntl
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise FdCensusUnavailable("descriptor census: this host has no /proc/self/fd ({})".format(
+                exc)) from exc
+        raise FdCensusError("descriptor census: cannot list /proc/self/fd: {}".format(exc)) from exc
+    access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
+    pairs = set()
+    for name in names:
+        fd = int(name)
+        try:
+            st = os.fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise FdCensusError("descriptor census: cannot read descriptor {}: {}".format(fd, exc)) from exc
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
+    return frozenset(pairs)
+
+
+def _fd_leak_check(action):
+    """Run action() between two pair censuses and return (verdict, detail). The verdict is True when no
+    pair is present after that was absent before; False on a gained pair (a leak, including a number
+    reopened on another file or with another access mode) or on an unreadable census; None when the
+    host has no /proc/self/fd (cannot evaluate, never a pass). action() runs even when the first
+    census fails, so the caller still sees its outcome."""
+    try:
+        before = _fd_pair_census()
+    except FdCensusError as exc:
+        action()
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
+    action()
+    try:
+        after = _fd_pair_census()
+    except FdCensusError as exc:
+        return (None if isinstance(exc, FdCensusUnavailable) else False), str(exc)
+    gained = sorted(after - before)
+    return not gained, "gained {}".format(gained)
+
+
 def self_test():
+    import importlib.util
     import io
     import shutil
     import tempfile
@@ -789,24 +882,100 @@ def self_test():
         return 2
 
     failures = []
+    cannot_evaluate = []                    # checks this host cannot run (no /proc/self/fd)
     checked = 0
-    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
-    # RuntimeError, not a ValueError); load_crosswalk must still refuse with RefuseError. The recursion
-    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    # A 3.14 interpreter that cannot import tomllib is an incomplete install, not an old one; the module
+    # refuses at exit 2 with one error line naming tomllib (never a traceback, never the version refusal).
+    # It is loaded afresh from this file with tomllib blocked (None in sys.modules makes the import fail).
+    nt_err = io.StringIO()
+    nt_saved = sys.modules.get("tomllib"), list(sys.path)
+    sys.modules["tomllib"] = None
+    try:
+        nt_spec = importlib.util.spec_from_file_location("_migrate_no_tomllib", os.path.abspath(__file__))
+        with redirect_stderr(nt_err):
+            nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))
+        nt_outcome = "loaded"
+    except SystemExit as exc:
+        nt_outcome = exc.code
+    except ModuleNotFoundError as exc:
+        nt_outcome = "escaped " + type(exc).__name__
+    finally:
+        sys.modules["tomllib"] = nt_saved[0]
+        sys.path[:] = nt_saved[1]
+    nt_lines = nt_err.getvalue().splitlines()
+    if not (nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith(
+            "error: migrate.py cannot import tomllib, part of the Python standard library")
+            and "requires Python" not in nt_lines[0]):
+        failures.append("a missing tomllib on a 3.14 interpreter must be one exit-2 'cannot import' line, "
+                        "got {} with {!r}".format(nt_outcome, nt_lines))
+    checked += 1
+    # A ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported (a missing
+    # dependency of tomllib), is not a missing tomllib: it propagates unchanged (the same exception object, no
+    # error line, no exit). tomllib is taken out of sys.modules and a finder placed first on sys.meta_path
+    # fails its load with that error; both are put back afterwards.
+    nd_exc = ModuleNotFoundError("No module named '_aiqt_absent_dependency'", name="_aiqt_absent_dependency")
+
+    class _NestedMissingFinder:
+        def find_spec(self, name, path=None, target=None):
+            return importlib.util.spec_from_loader(name, self) if name == "tomllib" else None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            raise nd_exc
+
+    nd_err = io.StringIO()
+    nd_finder = _NestedMissingFinder()
+    nd_saved = sys.modules.pop("tomllib", None), list(sys.path)
+    sys.meta_path.insert(0, nd_finder)
+    try:
+        nd_spec = importlib.util.spec_from_file_location("_migrate_nested_missing", os.path.abspath(__file__))
+        with redirect_stderr(nd_err):
+            nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))
+        nd_outcome = "loaded"
+    except SystemExit as exc:
+        nd_outcome = "exit {}".format(exc.code)
+    except ModuleNotFoundError as exc:
+        nd_outcome = exc
+    finally:
+        sys.meta_path.remove(nd_finder)
+        sys.modules.pop("tomllib", None)
+        if nd_saved[0] is not None:
+            sys.modules["tomllib"] = nd_saved[0]
+        sys.path[:] = nd_saved[1]
+    if not (nd_outcome is nd_exc and nd_exc.name == "_aiqt_absent_dependency" and nd_err.getvalue() == ""):
+        failures.append("a missing dependency raised while tomllib loads must propagate unchanged, "
+                        "got {!r} with {!r}".format(nd_outcome, nd_err.getvalue()))
+    checked += 1
+    # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
+    # a ValueError); load_crosswalk must still refuse with RefuseError carrying the overflow.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     deep_root = tmp / "deep-crosswalk"
     (deep_root / CROSSWALK_REL).parent.mkdir(parents=True)
-    (deep_root / CROSSWALK_REL).write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
-    prev_reclimit = sys.getrecursionlimit()
-    sys.setrecursionlimit(1000)
+    (deep_root / CROSSWALK_REL).write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
         load_crosswalk(deep_root)
-        failures.append("a deeply nested TOML crosswalk must be refused")
-    except RefuseError:
-        pass
+        failures.append("a TOML crosswalk parser overflow must be refused")
+    except RefuseError as exc:
+        if "injected parser overflow" not in str(exc):
+            failures.append("a crosswalk parser overflow was refused without its finding ({})".format(exc))
     except RecursionError:
-        failures.append("a deeply nested TOML crosswalk let a bare RecursionError escape load_crosswalk")
+        failures.append("a TOML crosswalk parser overflow let a bare RecursionError escape load_crosswalk")
     finally:
-        sys.setrecursionlimit(prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
     checked += 1
     try:
         # Per-case pre/post baselines, derived from a real clean cutover (never hand-written).
@@ -1280,49 +1449,187 @@ def self_test():
         #     DEEP _open_parent walk (>=2 intermediate dirs => >=2 opened fds): post-fix _open_parent
         #     returns and the process fd count is unchanged; pre-fix the first raise aborts the loop, the
         #     second fd leaks, and the raw OSError escapes.
-        wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
-        (wroot / "a" / "b" / "dataA").write_bytes(b"x")
-        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
-        _w_real_close = os.close
-        _w_state = {"n": 0}
+        def _w_case(label, after_walk=None):
+            """Run the P3 check on a fresh tree and return (failure text or None, leak verdict, census
+            detail); after_walk, when given, runs inside the censused action after the walk."""
+            wroot = tmp / "walkclose" / label / "root"; (wroot / "a" / "b").mkdir(parents=True)
+            (wroot / "a" / "b" / "dataA").write_bytes(b"x")
+            wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+            _w_real_close = os.close
+            _w_state = {"n": 0}
 
-        def _w_boom_close(fd):
-            _w_state["n"] += 1
-            if _w_state["n"] == 1:
-                _w_real_close(fd)                                            # released first (close(2))
-                raise OSError(5, "EIO (self-test injected, after release)")
-            return _w_real_close(fd)
+            def _w_boom_close(fd):
+                _w_state["n"] += 1
+                if _w_state["n"] == 1:
+                    _w_real_close(fd)                                        # released first (close(2))
+                    raise OSError(5, "EIO (self-test injected, after release)")
+                return _w_real_close(fd)
 
-        def _fdcount():
+            _w = {"outcome": None}
+
+            def _w_walk():
+                _w_pfd = None
+                try:
+                    os.close = _w_boom_close
+                    try:
+                        _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
+                        _w["outcome"] = "returned"
+                    except OSError:
+                        _w["outcome"] = "raised"
+                finally:
+                    os.close = _w_real_close
+                if _w_pfd is not None:
+                    _w_real_close(_w_pfd)                    # real close so the test itself leaks nothing
+                if after_walk is not None:
+                    after_walk()
+
+            # A (number, identity) pair census: a leaked sibling fd is a pair gained, and an unreadable
+            # census FAILS this check (it once read as None and let the comparison be skipped).
             try:
-                return len(os.listdir("/proc/self/fd"))
-            except OSError:
-                return None
+                _w_leak_ok, _w_detail = _fd_leak_check(_w_walk)
+            finally:
+                os.close(wroot_fd)
+            if _w["outcome"] == "returned" and _w_leak_ok is not False:
+                return None, _w_leak_ok, _w_detail
+            return ("_open_parent contained-walk cleanup must GUARD each close so a raising close "
+                    "neither aborts the walk nor leaks a sibling fd (outcome={}, census {}; "
+                    "finding 8-2)".format(_w["outcome"], _w_detail)), _w_leak_ok, _w_detail
 
-        _w_before = _fdcount()
-        _w_outcome = None
-        _w_pfd = None
-        try:
-            os.close = _w_boom_close
-            try:
-                _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
-                _w_outcome = "returned"
-            except OSError:
-                _w_outcome = "raised"
-        finally:
-            os.close = _w_real_close
-        if _w_pfd is not None:
-            _w_real_close(_w_pfd)                            # real close so the test itself leaks nothing
-        os.close(wroot_fd)
-        _w_after = _fdcount()
-        _w_leak_ok = True
-        if _w_before is not None and _w_after is not None:
-            _w_leak_ok = (_w_after <= _w_before)            # a leaked sibling fd makes after > before
-        if not (_w_outcome == "returned" and _w_leak_ok):
-            failures.append("_open_parent contained-walk cleanup must GUARD each close so a raising close "
-                            "neither aborts the walk nor leaks a sibling fd (outcome={}, before={}, after={}; "
-                            "finding 8-2)".format(_w_outcome, _w_before, _w_after))
+        _w_failure, _w_verdict, _w_detail = _w_case("p3")
+        if _w_failure is not None:
+            failures.append(_w_failure)
+        elif _w_verdict is None:
+            cannot_evaluate.append("P3 walk-cleanup descriptor leak check (the walk itself returned): "
+                                   + _w_detail)
         checked += 1
+
+        # (P3b) THE LEAK CHECK ABOVE IS A PAIR CENSUS OF FIXED IDENTITIES THAT FAILS CLOSED: (i) a number
+        #     closed and reopened on a different file, or (ii) on the same file with another access mode,
+        #     between the censuses is a leak (a count is unchanged); (iii) a chmod of a kept descriptor is
+        #     not; (iv) an injected EIO on the listing, on one descriptor's fstat, or on its F_GETFL makes
+        #     the check fail naming the listing or the descriptor, never pass; (v) a missing listing
+        #     cannot evaluate, never passes; (vi) EBADF alone reads as closed. On a host with no
+        #     /proc/self/fd none of this can run: it is reported as cannot-evaluate, not as a failure.
+        import fcntl
+        if _fd_leak_check(lambda: None)[0] is None:
+            cannot_evaluate.append("P3b and P3c descriptor census checks: this host has no /proc/self/fd")
+        else:
+            _c_a = tmp / "fdcensus-a"; _c_a.write_bytes(b"a")
+            _c_b = tmp / "fdcensus-b"; _c_b.write_bytes(b"b")
+            for _c_label, _c_second, _c_mode in (("another file", _c_b, os.O_RDONLY),
+                                                 ("the same file with another access mode", _c_a, os.O_RDWR)):
+                _c_fd = os.open(str(_c_a), os.O_RDONLY)
+                _c_held = [_c_fd]
+
+                def _c_reuse():
+                    os.close(_c_held.pop())
+                    _c_held.append(os.open(str(_c_second), _c_mode))   # lowest free number: the one just closed
+
+                _c_ok, _c_detail = _fd_leak_check(_c_reuse)
+                _c_same = _c_held == [_c_fd]
+                for _c_value in _c_held:
+                    os.close(_c_value)
+                if not _c_same or _c_ok is not False:
+                    failures.append("the descriptor leak check must see a number closed and reopened on {} "
+                                    "(same number: {}, leak-free: {}, census {})".format(
+                                        _c_label, _c_same, _c_ok, _c_detail))
+                checked += 1
+
+            _c_kept = os.open(str(_c_a), os.O_RDONLY)
+            try:
+                os.fchmod(_c_kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                            # permission bits whatever umask created the file
+                _c_ok, _c_detail = _fd_leak_check(lambda: os.fchmod(_c_kept, 0o600))
+                _c_changed = stat.S_IMODE(os.fstat(_c_kept).st_mode) == 0o600
+            finally:
+                os.close(_c_kept)
+            if not _c_changed or _c_ok is not True:
+                failures.append("a chmod of a kept descriptor changes no identity and must not read as a leak "
+                                "(mode changed from 0644 to 0600: {}, leak-free: {}, census {})".format(
+                                    _c_changed, _c_ok, _c_detail))
+            checked += 1
+
+            _c_real_listdir, _c_real_fstat, _c_real_fcntl = os.listdir, os.fstat, fcntl.fcntl
+            _c_probe = os.open(str(_c_a), os.O_RDONLY)
+
+            def _c_errno_listdir(code):
+                def _listdir(path=".", *args):
+                    if str(path) == "/proc/self/fd":
+                        raise OSError(code, "self-test injected on the descriptor listing")
+                    return _c_real_listdir(path, *args)
+                return _listdir
+
+            def _c_errno_fstat(code):
+                def _fstat(fd, *args):
+                    if fd == _c_probe:
+                        raise OSError(code, "self-test injected on descriptor {}".format(fd))
+                    return _c_real_fstat(fd, *args)
+                return _fstat
+
+            def _c_eio_fcntl(fd, cmd, *args):
+                if fd == _c_probe and cmd == fcntl.F_GETFL:
+                    raise OSError(5, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+                return _c_real_fcntl(fd, cmd, *args)
+
+            _c_results = {}
+            for _c_label, _c_listdir, _c_fstat, _c_fcntl in (
+                    ("listing EIO", _c_errno_listdir(5), _c_real_fstat, _c_real_fcntl),
+                    ("listing ENOENT", _c_errno_listdir(2), _c_real_fstat, _c_real_fcntl),
+                    ("fstat EIO", _c_real_listdir, _c_errno_fstat(5), _c_real_fcntl),
+                    ("F_GETFL EIO", _c_real_listdir, _c_real_fstat, _c_eio_fcntl),
+                    ("fstat EBADF", _c_real_listdir, _c_errno_fstat(9), _c_real_fcntl)):
+                os.listdir, os.fstat, fcntl.fcntl = _c_listdir, _c_fstat, _c_fcntl
+                try:
+                    _c_results[_c_label] = _fd_leak_check(lambda: None)
+                finally:
+                    os.listdir, os.fstat, fcntl.fcntl = _c_real_listdir, _c_real_fstat, _c_real_fcntl
+            os.close(_c_probe)
+            _c_list_ok, _c_list_detail = _c_results["listing EIO"]
+            _c_gone_ok, _c_gone_detail = _c_results["listing ENOENT"]
+            _c_badf_ok, _c_badf_detail = _c_results["fstat EBADF"]
+            if _c_list_ok is not False or "/proc/self/fd" not in _c_list_detail:
+                failures.append("an unreadable descriptor listing must FAIL the leak check naming the listing, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_list_ok, _c_list_detail))
+            if _c_gone_ok is not None or "no /proc/self/fd" not in _c_gone_detail:
+                failures.append("a missing descriptor listing must leave the leak check unable to evaluate, "
+                                "never pass it (leak-free: {}, detail: {})".format(_c_gone_ok, _c_gone_detail))
+            for _c_label in ("fstat EIO", "F_GETFL EIO"):
+                _c_ok, _c_detail = _c_results[_c_label]
+                if _c_ok is not False or "descriptor {}:".format(_c_probe) not in _c_detail:
+                    failures.append("an injected {} must FAIL the leak check naming descriptor {} (leak-free: "
+                                    "{}, detail: {})".format(_c_label, _c_probe, _c_ok, _c_detail))
+            if _c_badf_ok is not True:
+                failures.append("an fstat EBADF reads as a closed descriptor and must not fail an unchanged "
+                                "census (detail: {})".format(_c_badf_detail))
+            checked += 1
+
+            # (P3c) THE P3 CHECK ITSELF FAILS CLOSED, not only the helper it calls: run P3's own code once
+            #     under an injected listing EIO and once with a number closed and reopened on another file
+            #     inside the censused walk; each must report P3's failure. Reverting P3 to a count that
+            #     skips an unreadable listing, or to any count, fails here.
+            os.listdir = _c_errno_listdir(5)
+            try:
+                _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-listing")
+            finally:
+                os.listdir = _c_real_listdir
+            if _c_p3_failure is None or "/proc/self/fd" not in _c_p3_failure:
+                failures.append("the P3 walk-cleanup check must FAIL under an unreadable descriptor listing, "
+                                "naming it (verdict: {}, detail: {})".format(_c_p3_verdict, _c_p3_detail))
+            checked += 1
+            _c_held = [os.open(str(_c_a), os.O_RDONLY)]
+
+            def _c_p3_reuse():
+                os.close(_c_held.pop())
+                _c_held.append(os.open(str(_c_b), os.O_RDONLY))
+
+            _c_p3_failure, _c_p3_verdict, _c_p3_detail = _w_case("p3c-reuse", _c_p3_reuse)
+            for _c_value in _c_held:
+                os.close(_c_value)
+            if _c_p3_failure is None:
+                failures.append("the P3 walk-cleanup check must FAIL when a number is closed and reopened on "
+                                "another file inside the walk (verdict: {}, detail: {})".format(
+                                    _c_p3_verdict, _c_p3_detail))
+            checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL
@@ -2279,6 +2586,12 @@ def self_test():
         for f in failures:
             print("  - " + f)
         return 1
+    if cannot_evaluate:
+        print("SELF-TEST CANNOT EVALUATE: these checks could not run on this host, so the self-test does not "
+              "pass (the rest passed; {} scenarios ran):".format(checked))
+        for c in cannot_evaluate:
+            print("  - " + c)
+        return 2
     print("SELF-TEST PASS: crash-injection recovery proven from the journal alone across {} scenarios "
           "over 4 synthetic off-path cases across 3 tree structures (flat files, nested create, nested "
           "remove, plus a umask-reduced-mode remove variant). Every cutover-"

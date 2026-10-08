@@ -16,6 +16,14 @@ exits 0 (advisory, never gating). stdlib only. `--self-test` proves PASS on a pr
 UNVERIFIABLE on an absent one (removing the missing-evidence guard fails it).
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: audit_reference.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 from pathlib import Path
 
 # Import the sibling _qa_adapter WITHOUT placing this script's own directory AHEAD of the stdlib on

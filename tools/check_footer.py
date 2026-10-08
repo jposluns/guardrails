@@ -33,6 +33,14 @@ an allowlisted page that is missing, or that starts carrying the link, is allowl
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_footer.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import stat
 from html.parser import HTMLParser
@@ -375,8 +383,13 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
-    with tempfile.TemporaryDirectory() as d5:
-        close_failures, close_runs = _close_vectors(Path(d5))
+    import _close_selftest
+    try:
+        with tempfile.TemporaryDirectory() as d5:
+            close_failures, close_runs = _close_vectors(Path(d5))
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     failures.extend(close_failures)
     if failures:
         print("FAIL: check_footer self-test")

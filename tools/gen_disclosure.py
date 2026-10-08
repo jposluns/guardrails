@@ -29,9 +29,17 @@ Byte-reproducible: no wall-clock timestamp is embedded, so --check is a stable d
   gen_disclosure.py --check    exit 1 if either is out of date; exit 2 on malformed input
   gen_disclosure.py --self-test  assert each fail-closed guard refuses its malformed fixture
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_disclosure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import html
 import re
-import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 

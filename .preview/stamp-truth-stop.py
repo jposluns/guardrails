@@ -225,7 +225,17 @@ at once with os._exit(0), so no exit-time flush can fail it. Skipped entirely: a
 detected as env AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), and a payload
 carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (round 24; never to
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
-skip is logged, not shown); that line is at most 100 characters.
+skip is logged, not shown); that line is at most 100 characters. The one exception to exit 0 is an
+interpreter older than Python 3.14 that can start the hook: the guard at the top of this file reads no input,
+writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr and exits 1,
+which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. It does not exit 2: on
+a Stop exit 2 blocks the stop, and the guard runs before the BLOCK CAP, so this hook's own block cap would
+never run (any limit the host itself applies is outside this hook). An older interpreter that cannot start
+the hook never reaches the guard and fails with Python's own error first: one that predates the -I option
+exits 2, which blocks the stop, and this hook's own block cap never runs; one that accepts -I but cannot
+compile this file (Python 3.4 and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so the stop
+goes ahead unchecked, as with the guard; .preview/README.md (Installing a hook, step 4) describes those
+cases.
 
 MESSAGES (round 33; round 34; round 35; round 36; round 37). Every message is ONE physical line: no newline
 and no carriage return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged
@@ -354,6 +364,15 @@ sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them ins
 sibling that is present but unreadable fails them either way.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: stamp-truth-stop.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(1)
+
 import bisect
 import datetime
 import hashlib
@@ -361,7 +380,6 @@ import json
 import os
 import re
 import stat
-import sys
 import time
 
 try:

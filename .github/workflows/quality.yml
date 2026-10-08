@@ -85,6 +85,13 @@ jobs:
       - name: Dashes
         run: python3 -I -B tools/check_no_dashes.py
 
+      - name: Dashes self-test
+        run: python3 -I -B tools/check_no_dashes.py --self-test
+
+      # This repository only: the gate's built-in default policy equals .aiqt/char-policy.json.
+      - name: Dashes default parity
+        run: python3 -I -B tools/check_no_dashes.py --default-parity
+
       - name: Internal links
         run: python3 -I -B tools/check_links.py
 
@@ -345,6 +352,11 @@ jobs:
       - name: Agents drift
         run: python3 -I -B tools/gen_agents.py --check
 
+      - name: First-pin demonstration self-test
+        run: python3 -I -B tools/gen_first_pin_demo.py --self-test
+      - name: First-pin demonstration drift
+        run: python3 -I -B tools/gen_first_pin_demo.py --check
+
       - name: Mappings page drift
         run: python3 -I -B tools/gen_mappings.py --check
 
@@ -421,6 +433,12 @@ jobs:
       - name: Hooks behaviour self-test
         run: python3 -I -B tools/selftest_aiqt_hooks.py
 
+      # The char-policy-write preview hook's policy validator is generated from tools/check_no_dashes.py.
+      - name: Char-policy validator generator self-test
+        run: python3 -I -B tools/gen_char_policy.py --self-test
+      - name: Char-policy validator drift
+        run: python3 -I -B tools/gen_char_policy.py --check
+
       # The .preview/ channel: each preview hook's own self-test passes, README.md and SHA256SUMS
       # agree with the files, and each table row links to its own file beside README.md.
       # NOT APPLICABLE when the directory is absent.
@@ -443,6 +461,11 @@ jobs:
 
       - name: Instruction-budget self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
+
+      - name: Entry-guard self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
+      - name: Entry-guard gate
+        run: python3 -I -B tools/check_entry_guard.py
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test

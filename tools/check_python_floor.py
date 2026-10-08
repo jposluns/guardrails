@@ -5,6 +5,9 @@ floor of the pack's executable tooling, and every other statement of that floor 
 Legs, in order:
   source         the single source parses, carries exactly its declared keys, and names the decided
                  floor (FLOOR below; a change to either is a reviewed change to both).
+  switch         the single source keeps documentation-check at its decided value (DOCUMENTATION_CHECK
+                 below, true since the declarations unit switched it on), so turning the documentation
+                 check off is a finding (exit 1) and a reviewed change to this gate, never a silent pass.
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
                  shipped adopter CI template and its inline copy) and in every local action file (each
                  action.yml or action.yaml under the tree outside SKIPPED_DIR_NAMES, and the target of
@@ -82,19 +85,39 @@ Legs, in order:
                  refused as missing. The line is judged as written, script text included, a
                  disclosed over-rejection.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
-                 against GUARD_TEMPLATE with the file's own basename and the floor; only a module
-                 docstring and `from __future__` imports may precede its `import sys`.
+                 against GUARD_TEMPLATE with the file's own basename, the floor and its refusal exit (1
+                 for an entry also listed in nonblocking-surfaces, otherwise 2); only a module
+                 docstring and `from __future__` imports may precede its `import sys`. A HOOK_SURFACES
+                 entry (a hook whose events differ in the direction an error must fail) carries the
+                 hook form instead, HOOK_GUARD_TEMPLATE: a FLOOR_FAIL_OPEN_MODES tuple literal of
+                 sorted, unique mode names between `import sys` and the version test, and under the
+                 floor a mode in that literal warns (a systemMessage on stdout, exit 0) while any other
+                 argv (a PreToolUse handler, an unknown mode, no mode) refuses with the canonical
+                 refusal and exit 2, fixed: exit 1 does not block a PreToolUse call, so a HOOK_SURFACES
+                 entry listed in nonblocking-surfaces is cannot-evaluate at the source leg. The hook's
+                 own self-test holds the literal equal to its fail-open handlers.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
-                 versions below the floor, exits 2 with empty stdout and the exact refusal on stderr, and
+                 versions below the floor, exits with its refusal exit (as for the guard leg) with
+                 empty stdout and the exact refusal on stderr, and
                  leaves the working directory empty; the guard prefix alone, run at the floor's .0
-                 release and at the real interpreter version, continues.
-  completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
-                 EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
-                 guarded-surfaces.
-  documentation  OFF until the source sets documentation-check = true (the declarations unit switches
-                 it on): each DECLARATION_FILES entry must contain "Python <floor> or newer".
+                 release and at the real interpreter version, continues. A HOOK_SURFACES entry is also
+                 run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
+                 must exit 0 with the exact warning on stdout and the refusal on stderr, and with
+                 DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
+  completeness   ON when the source sets completeness-check = true, as it does since the unit that
+                 guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
+                 an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
+                 and OPF enforcement deny-hook units and tools/check_entry_guard.py are listed. On,
+                 every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
+                 `if __name__ == "__main__":`, must be listed in guarded-surfaces.
+  documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
+                 must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
+                 (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,
+                 so changing or removing one of two copies is a finding.
+  claims         ON with the documentation leg: no DECLARATION_FILES entry may name a Python version
+                 below the floor (OLDER_CLAIM_RE below), so an older claim beside the floor statement
+                 is a finding, naming file and line.
 
   check_python_floor.py              run every leg over this repository
   check_python_floor.py --self-test  fixture trees for every leg, plus red-on-revert: for each leg, a
@@ -137,10 +160,34 @@ run as a fork or copy under a name that does not name setup-python, which is not
 setup-python step; and a remote action, a remote reusable workflow
 (owner/repo/.github/workflows/x.yml@ref) and a docker:// image, whose content is not in the tree
 and is not read, so a setup-python step inside one is not seen. The leg scans only the files named
-above. The documentation leg matches the exact phrase, not its meaning.
+above. The documentation leg matches the exact phrase, not its meaning: a sentence that negates it
+("do not require Python 3.14 or newer") passes, and the phrase reflowed across a line break is a
+finding. A floor statement worded another way ("Python 3.14+", "at least 3.14") is caught only
+through the copy count, so it passes when it is added beside the declared copies. The claims leg
+reads only the forms OLDER_CLAIM_RE names: the word Python, CPython or Py (Py not after a dot, slash
+or hyphen; each optionally followed by "version" or "versions" and by an operator such as >=, the
+sign U+2265 or their HTML forms) or the interpreter name pythonM.N, followed by a version M.N, or
+followed by at least one space and a major version alone ("Python 3", read as 3.0); an operator
+followed by 3.N; and a bare 3.N followed by a plus sign, by "or" or "and" and then "newer", "later",
+"above", "higher", "greater" or "up", or by "onward" or "onwards". It does not read a version spelled
+in words, one separated from the word by markup other than whitespace and a no-break space, a bare
+3.N with none of those after it ("runs on 3.12"), the name python3 with no minor version, a bare
+version with a major other than 3, or the later end of a range ("Python 3.11 to 3.13" is a finding
+for 3.11 only). It judges every older version it reads, whatever the sentence
+says about it, so a sentence that names an older version only to say it is refused is also a finding,
+a disclosed over-rejection: state the floor without naming older versions.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import importlib.util
 import json
@@ -148,7 +195,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -160,8 +206,11 @@ SUITE_ID = "python-floor-selftest"
 # The decided floor. The source leg asserts the single source names it; every other leg reads the
 # floor from the single source.
 FLOOR = (3, 14)
-SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completeness-check",
-               "documentation-check"}
+# The decided value of the documentation-check switch. The switch leg asserts the single source keeps
+# it, so turning the documentation check off is a finding and a reviewed change to this gate too.
+DOCUMENTATION_CHECK = True
+SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblocking-surfaces",
+               "completeness-check", "documentation-check"}
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
@@ -236,12 +285,43 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
+# How many times a declaration file states the floor phrase, where that is more than once: each copy is
+# counted, so changing or removing one of them is a finding.
+# .preview/README.md states it once and quotes it once in the hooks' refusal line.
+DECLARATION_COPIES = {".preview/README.md": 2, "opf/site/adopt.html": 2}
+# A separator the claims leg reads between words: whitespace, or a no-break space and its HTML forms.
+CLAIM_SEP = r"(?:\s|&nbsp;|&#160;)"
+# A version operator: >=, =>, ~=, ==, >, the sign U+2265, and their HTML forms.
+CLAIM_OP = r"(?:>=|=>|~=|==|>|\u2265|&gt;=|&gt;|&ge;|&#8805;|&#x2265;)"
+# The word before a version: Python or CPython, or Py when no dot, slash or hyphen precedes it (so a
+# file name such as x.py is not read), then optionally "version" or "versions" and an operator.
+CLAIM_WORD = (r"(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:{0}*versions?)?{0}*(?:{1}{0}*)?v?"
+              .format(CLAIM_SEP, CLAIM_OP))
+# A Python version a declaration file names (the claims leg): the word, then a version M.N (the
+# interpreter name pythonM.N included); the word, at least one separator, then a major version alone
+# ("Python 3"); an operator then 3.N; or a bare 3.N followed by a plus sign, an "or newer" style
+# phrase or "onward".
+OLDER_CLAIM_RE = re.compile(
+    r"(?i)" + CLAIM_WORD + r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"|(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:" + CLAIM_SEP + r"+versions?)?"
+    + CLAIM_SEP + r"+(?:" + CLAIM_OP + CLAIM_SEP + r"*)?v?(?P<only>[0-9]+)(?![0-9]|\.[0-9])"
+    r"|" + CLAIM_OP + CLAIM_SEP + r"*v?(?P<op>3)\.(?P<op_minor>[0-9]+)"
+    r"|(?<![0-9.])(?P<bare>3)\.(?P<bare_minor>[0-9]+)(?=\+|" + CLAIM_SEP + r"+(?:(?:or|and)" + CLAIM_SEP
+    + r"+(?:newer|later|above|higher|greater|up)|onwards?)\b)")
+# A repo-relative .py path. Each segment opens with at most one dot (a hidden directory such as .preview
+# or the .aiqt/ source tree) and then a letter, digit or underscore, so the pattern itself refuses an
+# empty, . or .. segment and a leading /. load_source also refuses a . or .. segment by splitting on /,
+# a second layer.
+SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
-# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate).
+# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate). A
+# nonblocking-surfaces entry exits 1 instead: it is a hook whose event reads exit 2 as a block (a Stop
+# hook's exit 2 blocks the stop, and the guard runs before the hook's own block cap).
+REFUSAL_EXIT = 2
+NONBLOCKING_EXIT = 1
 GUARD_TEMPLATE = '''import sys
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
@@ -249,15 +329,44 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
         "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit({code})
+'''
+# The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
+# a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
+# UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
+# PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
+# exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces.
+HOOK_GUARD_TEMPLATE = '''import sys
+
+FLOOR_FAIL_OPEN_MODES = {modes}
+
+if tuple(sys.version_info[:2]) < ({major}, {minor}):
+    _floor_refusal = (
+        "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    sys.stderr.write(_floor_refusal)
+    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+        import json
+        sys.stdout.write(json.dumps(dict(systemMessage=(
+            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+        raise SystemExit(0)
     raise SystemExit(2)
 '''
+HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
+MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
+DENY_PROBE_MODE = "floor_deny_probe"
 # Child programs. sys.version_info is replaced by a plain tuple before the entrypoint (or the guard
 # prefix) runs; the guard reads only sys.version_info, so the tuple stands in for an older interpreter.
 REFUSAL_CHILD = (
     "import runpy, sys\n"
     "path = sys.argv[1]\n"
     "version = tuple(int(part) for part in sys.argv[2].split('.'))\n"
-    "sys.argv = [path]\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
     "sys.version_info = version + ('final', 0)\n"
     "runpy.run_path(path, run_name='__main__')\n")
 BOUNDARY_CHILD = (
@@ -310,6 +419,17 @@ def load_source(root):
     surfaces = data["guarded-surfaces"]
     if not isinstance(surfaces, list) or not all(isinstance(item, str) for item in surfaces):
         raise CannotEvaluate("{}: guarded-surfaces must be a list of strings".format(SOURCE_REL))
+    nonblocking = data["nonblocking-surfaces"]
+    if not isinstance(nonblocking, list) or not all(isinstance(item, str) for item in nonblocking):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be a list of strings".format(SOURCE_REL))
+    if nonblocking != sorted(set(nonblocking)) or not set(nonblocking) <= set(surfaces):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be sorted, unique and each listed in "
+                             "guarded-surfaces".format(SOURCE_REL))
+    hooks = sorted(set(nonblocking) & set(HOOK_SURFACES))
+    if hooks:
+        raise CannotEvaluate("{}: nonblocking-surfaces lists the hook surface(s) {}, whose hook form "
+                             "refuses a PreToolUse, unknown or missing mode with exit 2, fixed (exit 1 "
+                             "does not block a PreToolUse call)".format(SOURCE_REL, ", ".join(hooks)))
     for item in surfaces:
         if not SURFACE_RE.fullmatch(item) or any(part in (".", "..") for part in item.split("/")):
             raise CannotEvaluate("{}: guarded-surfaces entry {!r} is not a repo-relative .py path"
@@ -319,13 +439,23 @@ def load_source(root):
     for item in surfaces:
         _read_text(root / item)
     return {"floor": (int(match.group(1)), int(match.group(2))), "surfaces": tuple(surfaces),
-            "completeness": data["completeness-check"], "documentation": data["documentation-check"]}
+            "nonblocking": frozenset(nonblocking), "completeness": data["completeness-check"],
+            "documentation": data["documentation-check"]}
 
 
 def source_findings(source):
     if source["floor"] != FLOOR:
         return ["{}: python-floor is {}.{}, but the decided floor is {}.{}".format(
             SOURCE_REL, *source["floor"], *FLOOR)]
+    return []
+
+
+def switch_findings(source):
+    if source["documentation"] != DOCUMENTATION_CHECK:
+        return ["{}: documentation-check is {}, but its decided value is {} (DOCUMENTATION_CHECK in "
+                "tools/check_python_floor.py); changing it is a reviewed change to this gate".format(
+                    SOURCE_REL, *("true" if value else "false"
+                                  for value in (source["documentation"], DOCUMENTATION_CHECK)))]
     return []
 
 
@@ -812,12 +942,43 @@ def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
-def guard_text(name, floor):
-    return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1])
+def guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
+    """The canonical guard with code as its refusal exit, or with modes (a tuple of mode names) its hook
+    form, whose deny exit is fixed at 2 (code is ignored there)."""
+    if modes is None:
+        return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], code=code)
+    return HOOK_GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1],
+                                      modes=repr(tuple(modes)))
 
 
-def _canonical(name, floor):
-    return [_dump(node) for node in ast.parse(guard_text(name, floor)).body]
+def refusal_exit(rel, nonblocking):
+    """The exit the guard and dynamic legs require of rel's refusal: 2, or 1 for a nonblocking-surfaces
+    entry; a HOOK_SURFACES entry is always 2 (load_source refuses one listed as nonblocking)."""
+    if rel in HOOK_SURFACES:
+        return REFUSAL_EXIT
+    return NONBLOCKING_EXIT if rel in nonblocking else REFUSAL_EXIT
+
+
+def _canonical(name, floor, modes=None, code=REFUSAL_EXIT):
+    return [_dump(node) for node in ast.parse(guard_text(name, floor, modes, code)).body]
+
+
+def hook_modes(tree):
+    """The FLOOR_FAIL_OPEN_MODES literal of a hook-form guard: the tuple of mode names the second
+    statement after the preamble assigns, or None when that statement is not one plain assignment of a
+    non-empty, sorted, unique tuple of lower-case identifier strings to that name."""
+    start = _preamble_end(tree)
+    node = tree.body[start + 1] if len(tree.body) > start + 1 else None
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == MODES_NAME
+            and isinstance(node.value, ast.Tuple) and node.value.elts):
+        return None
+    modes = []
+    for elt in node.value.elts:
+        if not (isinstance(elt, ast.Constant) and type(elt.value) is str and MODE_RE.fullmatch(elt.value)):
+            return None
+        modes.append(elt.value)
+    return tuple(modes) if modes == sorted(set(modes)) else None
 
 
 def _preamble_end(tree):
@@ -838,22 +999,33 @@ def _too_complex(rel, exc):
     return CannotEvaluate("{}: too complex to evaluate: {}: {}".format(rel, type(exc).__name__, exc))
 
 
-def guard_findings(root, surfaces, floor):
+def guard_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         tree = _parse(root, rel)
-        want = _canonical(Path(rel).name, floor)
+        code = refusal_exit(rel, nonblocking)
         start = _preamble_end(tree)
         try:
-            opens = [_dump(node) for node in tree.body[start:start + len(want)]] == want
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            want = None if rel in HOOK_SURFACES and modes is None \
+                else _canonical(Path(rel).name, floor, modes, code)
+            opens = want is not None \
+                and [_dump(node) for node in tree.body[start:start + len(want)]] == want
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
-        if not opens:
+        if not opens and rel in HOOK_SURFACES:
+            findings.append(
+                "{}: does not open with the canonical floor guard in its hook form (only a docstring "
+                "and `from __future__` imports may precede `import sys`, then a {} tuple of sorted, "
+                "unique mode names, then `if tuple(sys.version_info[:2]) < ({}, {}):` warning on exit 0 "
+                "for a listed mode and refusing as {} with exit {} otherwise; see HOOK_GUARD_TEMPLATE)"
+                .format(rel, MODES_NAME, floor[0], floor[1], Path(rel).name, code))
+        elif not opens:
             findings.append(
                 "{}: does not open with the canonical floor guard (only a docstring and `from "
                 "__future__` imports may precede `import sys` and `if tuple(sys.version_info[:2]) < "
-                "({}, {}):`, refusing as {} with exit 2; see GUARD_TEMPLATE)".format(
-                    rel, floor[0], floor[1], Path(rel).name))
+                "({}, {}):`, refusing as {} with exit {}; see GUARD_TEMPLATE)".format(
+                    rel, floor[0], floor[1], Path(rel).name, code))
     return findings
 
 
@@ -869,6 +1041,14 @@ def expected_refusal(name, floor, version, executable):
             % ((name,) + tuple(floor) + tuple(version) + (executable or "unknown interpreter",)))
 
 
+def expected_warning(name, floor, version, executable, mode):
+    """The hook form's stdout for a fail-open mode under the floor: one systemMessage JSON line."""
+    return json.dumps(dict(systemMessage=(
+        "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+        "(non-blocking by design on this event)."
+        % (mode, expected_refusal(name, floor, version, executable).strip())))) + "\n"
+
+
 def _child(code, args, flags, cwd):
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", *flags, "-c", code, *args], cwd=cwd,
@@ -880,11 +1060,12 @@ def _child(code, args, flags, cwd):
             proc.stderr.decode("utf-8", "backslashreplace"))
 
 
-def refusal_observed(path, version, flags):
-    """Run one entrypoint at a patched version; return (exit, stdout, stderr, working-dir entries)."""
+def refusal_observed(path, version, flags, args=()):
+    """Run one entrypoint at a patched version with the argv args; return (exit, stdout, stderr,
+    working-dir entries)."""
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-cwd-") as cwd:
-            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version], flags, cwd)
+            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version, *args], flags, cwd)
             return rc, out, err, sorted(os.listdir(cwd))
     except OSError as exc:
         raise CannotEvaluate("temporary working directory: {}".format(exc))
@@ -900,33 +1081,55 @@ def boundary_observed(prefix, version, flags):
         raise CannotEvaluate("temporary working directory: {}".format(exc))
 
 
-def guard_prefix(tree, name, floor):
-    """Source of the top-level statements up to and including the canonical guard, or None."""
-    want = _canonical(name, floor)[-1]
+def guard_prefix(tree, name, floor, modes=None, code=REFUSAL_EXIT):
+    """Source of the top-level statements up to and including the canonical guard (with modes, its hook
+    form), or None."""
+    want = _canonical(name, floor, modes, code)[-1]
     for index, node in enumerate(tree.body):
         if _dump(node) == want:
             return ast.unparse(ast.Module(body=tree.body[:index + 1], type_ignores=[]))
     return None
 
 
-def dynamic_findings(root, surfaces, floor):
+def dynamic_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         name = Path(rel).name
+        code = refusal_exit(rel, nonblocking)
         for version in below_floor(floor):
-            want = (2, "", expected_refusal(name, floor, version, sys.executable), [])
+            want = (code, "", expected_refusal(name, floor, version, sys.executable), [])
             for flags in FLAG_SETS:
                 got = refusal_observed(root / rel, version, flags)
                 if got != want:
                     findings.append(
                         "{} at patched {}.{}.{} under {}: got exit {}, stdout {!r}, stderr "
-                        "{!r}, working-dir entries {!r}; want exit 2, empty stdout, the exact refusal "
+                        "{!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
                         "and an untouched working directory".format(
-                            rel, *version, " ".join(flags) or "no flag", *got))
+                            rel, *version, " ".join(flags) or "no flag", *got, code))
         try:
-            prefix = guard_prefix(_parse(root, rel), name, floor)
+            tree = _parse(root, rel)
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            prefix = None if rel in HOOK_SURFACES and modes is None \
+                else guard_prefix(tree, name, floor, modes, code)
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
+        version = below_floor(floor)[0]
+        refusal = expected_refusal(name, floor, version, sys.executable)
+        for mode in modes or ():
+            got = refusal_observed(root / rel, version, (), [mode])
+            if got != (0, expected_warning(name, floor, version, sys.executable, mode), refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the fail-open mode {}: got exit {}, stdout {!r}, stderr "
+                    "{!r}, working-dir entries {!r}; want exit 0, the exact warning, the refusal on "
+                    "stderr and an untouched working directory".format(rel, *version, mode, *got))
+        if modes is not None:
+            got = refusal_observed(root / rel, version, (), [DENY_PROBE_MODE])
+            if got != (REFUSAL_EXIT, "", refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the mode {}, outside {}: got exit {}, stdout {!r}, "
+                    "stderr {!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
+                    "and an untouched working directory".format(
+                        rel, *version, DENY_PROBE_MODE, MODES_NAME, *got, REFUSAL_EXIT))
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -982,9 +1185,46 @@ def completeness_findings(root, surfaces):
 
 
 def documentation_findings(root, floor):
+    """Each declaration file must state the floor phrase as many times as DECLARATION_COPIES says (once
+    by default), and every statement of the floor in the form "Python <floor> or|and <word>" must be
+    exactly the phrase."""
     phrase = "Python %d.%d or newer" % floor
-    return ["{}: does not state {!r}".format(rel, phrase) for rel in DECLARATION_FILES
-            if phrase not in _read_text(root / rel)]
+    variant_re = re.compile(r"(?i)(?<![A-Za-z0-9_])c?python{0}+{1}(?![0-9]|\.[0-9]){0}+(?:or|and){0}+"
+                            r"[A-Za-z]+".format(CLAIM_SEP, re.escape("%d.%d" % floor)))
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        count, want = text.count(phrase), DECLARATION_COPIES.get(rel, 1)
+        if not count:
+            found.append("{}: does not state {!r}".format(rel, phrase))
+        elif count != want:
+            found.append("{}: states {!r} {} time(s), not the {} in DECLARATION_COPIES".format(
+                rel, phrase, count, want))
+        found.extend("{}:{}: states the floor as {!r}, not as {!r}".format(
+            rel, text.count("\n", 0, match.start()) + 1, match.group(0), phrase)
+            for match in variant_re.finditer(text) if match.group(0) != phrase)
+    return found
+
+
+def documentation_claim_findings(root, floor):
+    """Each Python version below the floor that a declaration file names, with its line."""
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        for match in OLDER_CLAIM_RE.finditer(text):
+            parts = next(match.group(*pair) for pair in (("major", "minor"), ("only", "only"),
+                                                         ("op", "op_minor"), ("bare", "bare_minor"))
+                         if match.group(pair[0]) is not None)
+            try:
+                version = (int(parts[0]), 0 if match.group("only") is not None else int(parts[1]))
+            except ValueError as exc:
+                raise CannotEvaluate("{}: a version too long to read: {}".format(rel, exc))
+            if version < floor:
+                named = parts[0] if match.group("only") is not None else "{}.{}".format(*parts)
+                found.append("{}:{}: names Python {}, below the floor {}.{}; a declaration may "
+                             "not state an older version".format(
+                                 rel, text.count("\n", 0, match.start()) + 1, named, *floor))
+    return found
 
 
 def evaluate(root):
@@ -994,19 +1234,21 @@ def evaluate(root):
         floor = source["floor"]
         findings = []
         findings.extend(source_findings(source))
+        findings.extend(switch_findings(source))
         findings.extend(pin_findings(root, floor))
-        findings.extend(guard_findings(root, source["surfaces"], floor))
-        findings.extend(dynamic_findings(root, source["surfaces"], floor))
+        findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
             findings.extend(documentation_findings(root, floor))
+            findings.extend(documentation_claim_findings(root, floor))
     except CannotEvaluate as exc:
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
     return 0, ["PASS: python floor {}.{} ({}): source, pins, guard and dynamic legs over {} "
-               "guarded surface(s); completeness check {}, documentation check {}".format(
+               "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
                    "ON" if source["documentation"] else "OFF (documentation-check = false)")]
@@ -1022,11 +1264,13 @@ _EXECUTED_SET = set()
 # Red-on-revert: each leg's call in evaluate(), removed in a copy of this gate.
 REVERT_CALLS = (
     ("source", "source_findings(source)"),
+    ("switch", "switch_findings(source)"),
     ("pins", "pin_findings(root, floor)"),
-    ("guard", "guard_findings(root, source[\"surfaces\"], floor)"),
-    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor)"),
+    ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
+    ("claims", "documentation_claim_findings(root, floor)"),
 )
 
 
@@ -1040,11 +1284,12 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=False, extra=""):
-    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\ncompleteness-check = {}\n"
-            "documentation-check = {}\n{}".format(
-                json.dumps(floor), json.dumps(list(surfaces)), "true" if completeness else "false",
-                "true" if documentation else "false", extra))
+def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=True, extra="",
+                 nonblocking=()):
+    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\nnonblocking-surfaces = {}\n"
+            "completeness-check = {}\ndocumentation-check = {}\n{}".format(
+                json.dumps(floor), json.dumps(list(surfaces)), json.dumps(list(nonblocking)),
+                "true" if completeness else "false", "true" if documentation else "false", extra))
 
 
 def _write(root, rel, text):
@@ -1053,10 +1298,20 @@ def _write(root, rel, text):
     path.write_text(text, encoding="utf-8")
 
 
-def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'"):
+def _declared(floor_text="3.14"):
+    """Every declaration file, stating the floor as many times as DECLARATION_COPIES says."""
+    return {rel: "Requires Python {} or newer.\n".format(floor_text) * DECLARATION_COPIES.get(rel, 1)
+            for rel in DECLARATION_FILES}
+
+
+def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
+             declarations=True):
     """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation."""
+    text after that line's indentation. Every declaration file states the floor unless declarations
+    is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
+    for rel, text in (_declared() if declarations else {}).items():
+        _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
@@ -1104,6 +1359,19 @@ def _self_test_cases(base):
           2)
     check("source/escaping-surface-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(surfaces=["../demo.py"])))[0], 2)
+    check("source/hidden-dir-surface-passes", evaluate(_fixture(
+        base, source=_source_text(surfaces=[".preview/demo.py"]),
+        files={".preview/demo.py": demo["tools/demo.py"]}))[0], 0)
+    # One leading dot per segment, in the first segment and a later one: each tree holds the file, so a
+    # pattern that allowed two dots would pass it (exit 0) instead of refusing the entry (exit 2).
+    check("source/two-leading-dots-cannot-evaluate", [evaluate(_fixture(
+        base, source=_source_text(surfaces=[rel]), files={rel: demo["tools/demo.py"]}))[0]
+        for rel in ("..preview/demo.py", "tools/..hidden/demo.py")], [2, 2])
+    check("source/nonblocking-not-guarded-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(nonblocking=["tools/demo.py"]), files=demo))[0], 2)
+    check("source/nonblocking-not-list-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(surfaces=["tools/demo.py"]).replace(
+            "nonblocking-surfaces = []", "nonblocking-surfaces = \"tools/demo.py\""), files=demo))[0], 2)
     check("source/unsorted-surfaces-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text(surfaces=["tools/demo.py", "tools/a.py"]),
         files={"tools/a.py": _entry(guard_text("a.py", floor)), **demo}))[0], 2)
@@ -1379,8 +1647,8 @@ def _self_test_cases(base):
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
         "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation check OFF "
-        "(documentation-check = false)".format(SOURCE_REL)]))
+        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
             ("guard/absent-finding", _entry("import sys\n")),
@@ -1392,21 +1660,74 @@ def _self_test_cases(base):
              _entry("import sys\n\nassert tuple(sys.version_info[:2]) >= (%d, %d)\n" % floor))):
         code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": text}))
         check(check_id, (code, _has(lines, guard_marker)), (1, True))
-    # 200000 unary minus signs overflow the parser's fixed stack at once (a MemoryError).
-    code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": "-" * 200000 + "1\n"}))
-    check("guard/parser-overflow-cannot-evaluate",
-          (code, _has(lines, "tools/demo.py: too complex to parse: MemoryError")), (2, True))
-    # A 10000-term sum parses, but ast.dump of it exceeds the recursion limit.
-    deep = {"tools/demo.py": "1+" * 10000 + "1\n"}
-    code, lines = evaluate(_fixture(base, source=listed, files=deep))
-    check("guard/deep-tree-cannot-evaluate",
-          (code, _has(lines, "tools/demo.py: too complex to evaluate: RecursionError")), (2, True))
+    # A nonblocking-surfaces entry refuses with exit 1 (guard and dynamic legs); exit 2 there, or exit 1
+    # on an entry not listed, is a guard finding.
+    nonblocking = _source_text(surfaces=["tools/demo.py"], nonblocking=["tools/demo.py"])
+    good_nonblocking = _entry(guard_text("demo.py", floor, code=NONBLOCKING_EXIT))
+    check("guard/nonblocking-exit-1-passes",
+          evaluate(_fixture(base, source=nonblocking, files={"tools/demo.py": good_nonblocking}))[0], 0)
+    for check_id, source, text in (
+            ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
+            ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):
+        code, lines = evaluate(_fixture(base, source=source, files={"tools/demo.py": text}))
+        check(check_id, (code, _has(lines, guard_marker)), (1, True))
+    # A parser or traversal overflow is INJECTED (ast.parse raising, ast.dump raising on a marked node)
+    # rather than provoked by a deeply nested body: the depth at which CPython's parser, its AST
+    # construction or ast.dump overflows, and the class it raises, are interpreter implementation limits
+    # that move between patch releases, so a real nesting body can parse cleanly (or raise another class)
+    # on a newer interpreter and the case would flip. Injected, each case is identical on every
+    # interpreter and turns red if its MemoryError/RecursionError mapping is removed.
+    real_parse, real_dump = ast.parse, ast.dump
+    deep_marker = "injected_deep_tree_marker"
+
+    def parse_overflow(exc_class):
+        def parse(source, *args, **kwargs):
+            if kwargs.get("filename") == "tools/demo.py":
+                raise exc_class("injected parser overflow")
+            return real_parse(source, *args, **kwargs)
+        return parse
+
+    def dump_overflow(exc_class):
+        def dump(node, *args, **kwargs):
+            text = real_dump(node, *args, **kwargs)
+            if deep_marker in text:
+                raise exc_class("injected ast.dump overflow")
+            return text
+        return dump
+
+    shallow = {"tools/demo.py": "VALUE = 1\n"}
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.parse = parse_overflow(exc_class)
+        try:
+            code, lines = evaluate(_fixture(base, source=listed, files=shallow))
+            got.append((code, _has(lines, "tools/demo.py: too complex to parse: " + exc_class.__name__)))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.parse = real_parse
+    check("guard/parser-overflow-cannot-evaluate", got, [(2, True), (2, True)])
+    deep = {"tools/demo.py": deep_marker + " = 1\n"}
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            code, lines = evaluate(_fixture(base, source=listed, files=deep))
+            got.append((code, _has(lines, "tools/demo.py: too complex to evaluate: " + exc_class.__name__)))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("guard/deep-tree-cannot-evaluate", got, [(2, True), (2, True)])
 
     path = _fixture(base, files=demo) / "tools" / "demo.py"
     version = below_floor(floor)[0]
     check("dynamic/refusal-exact-under-OO", refusal_observed(path, version, ("-OO",)),
           (2, "", expected_refusal("demo.py", floor, version, sys.executable), []))
     check("dynamic/below-floor-vectors", below_floor((3, 14)), ((3, 13, 9), (3, 12, 0)))
+    path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
+    check("dynamic/nonblocking-refusal-exact", refusal_observed(path, version, ()),
+          (1, "", expected_refusal("demo.py", floor, version, sys.executable), []))
     code, lines = evaluate(_fixture(base, source=listed, files={
         "tools/demo.py": _entry(good, after="return\n")}))
     check("dynamic/compile-failure-finding",
@@ -1415,12 +1736,85 @@ def _self_test_cases(base):
     check("dynamic/boundary-continues-at-floor", boundary_observed(prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))
     check("dynamic/boundary-refuses-below-floor", boundary_observed(prefix, version, ())[:2], (2, ""))
-    try:
-        dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
-        got = "no exception"
-    except CannotEvaluate as exc:
-        got = "too complex to evaluate: RecursionError" in str(exc)
-    check("dynamic/deep-tree-cannot-evaluate", got, True)
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
+            got.append("no exception")
+        except CannotEvaluate as exc:
+            got.append("too complex to evaluate: " + exc_class.__name__ in str(exc))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("dynamic/deep-tree-cannot-evaluate", got, [True, True])
+
+    # The hook form (HOOK_SURFACES): a fixture hook at the core hook's path with two demo modes.
+    hook_rel, demo_modes = HOOK_SURFACES[0], ("mode_a", "mode_b")
+    hook_good = guard_text("aiqt_hooks.py", floor, demo_modes)
+    hook = dict([(hook_rel, _entry(hook_good, before='"""Fixture hook."""\n'))])
+    hook_listed = _source_text(surfaces=[hook_rel])
+    check("guard/hook-form-passes", evaluate(_fixture(base, source=hook_listed, files=hook))[0], 0)
+    for check_id, text in (
+            ("guard/hook-cli-form-finding", _entry(guard_text("aiqt_hooks.py", floor))),
+            ("guard/hook-unsorted-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_b", "mode_a")))),
+            ("guard/hook-duplicate-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_a", "mode_a")))),
+            ("guard/hook-computed-modes-finding", _entry(hook_good.replace(
+                "FLOOR_FAIL_OPEN_MODES = ('mode_a', 'mode_b')", "FLOOR_FAIL_OPEN_MODES = tuple(['mode_a'])"))),
+            ("guard/hook-blocking-fail-open-finding",
+             _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))):
+        code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, text)])))
+        check(check_id, (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
+    code, lines = evaluate(_fixture(base, source=listed, files=dict(
+        [("tools/demo.py", _entry(guard_text("demo.py", floor, demo_modes)))])))
+    check("guard/hook-form-on-cli-surface-finding", (code, _has(lines, guard_marker)), (1, True))
+    hook_path = _fixture(base, files=hook) / hook_rel
+    hook_refusal = expected_refusal("aiqt_hooks.py", floor, version, sys.executable)
+    check("dynamic/hook-fail-open-mode-warns", refusal_observed(hook_path, version, (), ["mode_b"]),
+          (0, expected_warning("aiqt_hooks.py", floor, version, sys.executable, "mode_b"), hook_refusal, []))
+    check("dynamic/hook-other-mode-refuses",
+          refusal_observed(hook_path, version, (), [DENY_PROBE_MODE]), (2, "", hook_refusal, []))
+    check("dynamic/hook-no-mode-refuses", refusal_observed(hook_path, version, ()),
+          (2, "", hook_refusal, []))
+    blocking = dict([(hook_rel, _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))])
+    blocked = dynamic_findings(_fixture(base, files=blocking), [hook_rel], floor)
+    check("dynamic/hook-blocking-fail-open-finding",
+          sorted(set(line.split(": got")[0] for line in blocked if "fail-open mode" in line)),
+          ["{} at patched {}.{}.{} with the fail-open mode {}".format(hook_rel, *version, mode)
+           for mode in demo_modes])
+    hook_prefix = guard_prefix(ast.parse(hook[hook_rel]), "aiqt_hooks.py", floor, demo_modes)
+    check("dynamic/hook-boundary-continues-at-floor", boundary_observed(hook_prefix, floor + (0,), ()),
+          (0, CONTINUED + "\n", ""))
+    # The hook form's deny path (a PreToolUse, unknown or missing mode) exits 2, fixed: exit 1 does not
+    # block a PreToolUse call. A hook surface listed in nonblocking-surfaces is cannot-evaluate, the guard
+    # carrying exit 1 there (the fail-open the listing would otherwise demand) included; called directly
+    # with such a listing, the guard and dynamic legs still require exit 2.
+    hook_exit_1 = _entry(hook_good.replace("    raise SystemExit(2)\n", "    raise SystemExit(1)\n"),
+                         before='"""Fixture hook."""\n')
+    check("guard/hook-form-deny-exit-fixed-at-2",
+          (guard_text("aiqt_hooks.py", floor, demo_modes, code=NONBLOCKING_EXIT) == hook_good,
+           hook_good.endswith("    raise SystemExit(2)\n"), hook_exit_1 != hook[hook_rel]),
+          (True, True, True))
+    got = []
+    for rel, text in ((hook_rel, hook_exit_1), (hook_rel, hook[hook_rel]), (HOOK_SURFACES[1], hook_exit_1)):
+        code, lines = evaluate(_fixture(base, source=_source_text(surfaces=[rel], nonblocking=[rel]),
+                                        files=dict([(rel, text)])))
+        got.append((code, _has(lines, "nonblocking-surfaces lists the hook surface(s) " + rel)))
+    check("source/nonblocking-hook-surface-cannot-evaluate", got, [(2, True)] * 3)
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, hook_exit_1)])))
+    direct = guard_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                            frozenset([hook_rel]))
+    check("guard/hook-deny-exit-1-finding",
+          (code, _has(lines, "canonical floor guard in its hook form"),
+           _has(direct, "canonical floor guard in its hook form")), (1, True, True))
+    denied = dynamic_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                              frozenset([hook_rel]))
+    check("dynamic/hook-deny-exit-1-finding",
+          [_has(denied, "with the mode {}, outside {}: got exit 1".format(DENY_PROBE_MODE, MODES_NAME)),
+           _has(denied, "under no flag: got exit 1"), _has(denied, "fail-open mode")], [True, True, False])
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
@@ -1436,19 +1830,73 @@ def _self_test_cases(base):
             ".venv/lib/tool.py": _entry("import sys\n"),
             "tools/helper.py": "VALUE = 1\n"}))[0], 0)
 
-    declared = dict.fromkeys(DECLARATION_FILES, "Requires Python 3.14 or newer.\n")
-    check("documentation/off-ignores-missing", evaluate(_fixture(base))[0], 0)
-    code, lines = evaluate(_fixture(base, source=_source_text(documentation=True), files=dict(
-        declared, **{DECLARATION_FILES[0]: "Requires Python.\n"})))
+    code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
+    check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
+          (1, ["FAIL: {}: documentation-check is false, but its decided value is true "
+               "(DOCUMENTATION_CHECK in tools/check_python_floor.py); changing it is a reviewed change "
+               "to this gate".format(SOURCE_REL)]))
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: "Requires Python.\n"}))
     check("documentation/on-missing-phrase-finding",
           (code, [line for line in lines if "does not state" in line]),
           (1, ["FAIL: README.md: does not state 'Python 3.14 or newer'"]))
-    check("documentation/on-present-passes",
-          evaluate(_fixture(base, source=_source_text(documentation=True), files=declared))[0], 0)
+    check("documentation/on-present-passes", evaluate(_fixture(base, files=_declared()))[0], 0)
     check("documentation/on-absent-file-cannot-evaluate",
-          evaluate(_fixture(base, source=_source_text(documentation=True)))[0], 2)
+          evaluate(_fixture(base, declarations=False))[0], 2)
+    # An older claim beside the floor statement: the visible sentence names 3.11, a comment the floor.
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[3]: (
+        "<!-- Python 3.14 or newer -->\n<p>The hooks require Python 3.11 or newer.</p>\n")}))
+    check("claims/older-beside-phrase-finding",
+          (code, [line for line in lines if "names Python" in line]),
+          (1, ["FAIL: site/install.html:2: names Python 3.11, below the floor 3.14; a declaration may "
+               "not state an older version"]))
+    forms = ("Requires Python 3.14 or newer.\nCPython 3.13\npython3.12\nPython\n3.10\nPython&nbsp;3.9\n"
+             "Python versions 3.12\nruns on 3.11+\nor 3.13 or later\nPython 2.7\nPython\u00a03.8\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/older-forms-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.13,", "FAIL: README.md:3 3.12,", "FAIL: README.md:4 3.10,",
+               "FAIL: README.md:6 3.9,", "FAIL: README.md:7 3.12,", "FAIL: README.md:8 3.11,",
+               "FAIL: README.md:9 3.13,", "FAIL: README.md:10 2.7,", "FAIL: README.md:11 3.8,"]))
+    check("claims/floor-newer-and-other-versions-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3.14.4, Python 3.15, python3.14, "
+        "3.14+ and 3.20 or later.\nRun python3 tools/x.py; spec 1.2.0 or later; OPF 1.3.0 and up; "
+        "AIQT 2.7+; 13.1+.\n"}))[0], 0)
+    check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
+    # A file holding two copies of the phrase: one copy changed, or removed, is a finding.
+    adopt = "opf/site/adopt.html"
+    code, lines = evaluate(_fixture(base, files={
+        adopt: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
+    check("documentation/copies-one-changed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
+               "'Python 3.14 or newer'".format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={adopt: "<p>Requires Python 3.14 or newer.</p>\n"}))
+    check("documentation/copies-one-removed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nThe hooks need python 3.14 and later.\n"}))
+    check("documentation/variant-wording-finding", (code, lines),
+          (1, ["FAIL: README.md:2: states the floor as 'python 3.14 and later', not as "
+               "'Python 3.14 or newer'"]))
+    forms = ("Requires Python 3.14 or newer.\nSupports Python >= 3.10.\nNeeds Python \u2265 3.10.\n"
+             "Python &gt;= 3.9\nCPython &ge; 3.12\nRuns on 3.12 and above.\nRuns on 3.12 or greater.\n"
+             "Tested on Py 3.12.\nPython 3 or newer\nRequires >=3.11.\n3.11 onwards.\nPython 2\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/operator-major-and-phrase-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.10,", "FAIL: README.md:3 3.10,", "FAIL: README.md:4 3.9,",
+               "FAIL: README.md:5 3.12,", "FAIL: README.md:6 3.12,", "FAIL: README.md:7 3.12,",
+               "FAIL: README.md:8 3.12,", "FAIL: README.md:9 3,", "FAIL: README.md:10 3.11,",
+               "FAIL: README.md:11 3.11,", "FAIL: README.md:12 2,"]))
+    check("claims/operator-major-near-misses-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
+        "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
 
-    _red_on_revert(base, good, declared)
+    _red_on_revert(base, good)
     _rule_reverts(base)
 
 
@@ -1463,7 +1911,7 @@ def _gate_run(root, gate_source):
     return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace").splitlines()
 
 
-def _red_on_revert(base, good, declared):
+def _red_on_revert(base, good):
     """Each leg red on its fixture with the intact gate, which names that leg's own finding, and green
     on the same fixture with that leg's check removed from a copy of this gate."""
     gate_source = _read_text(Path(__file__).resolve())
@@ -1477,8 +1925,10 @@ def _red_on_revert(base, good, declared):
     listed = _source_text(surfaces=["tools/demo.py"])
     # Each case: the leg, its fixture, and the text of that leg's own finding.
     cases = (
-        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13"),
+        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13",
+                        files=_declared("3.13")),
          "decided floor"),
+        ("switch", dict(source=_source_text(documentation=False)), "documentation-check is false"),
         ("pins", dict(workflow_pin="3.12"), "quality.yml:6: python-version '3.12' differs"),
         ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")}),
          "canonical floor guard"),
@@ -1487,9 +1937,11 @@ def _red_on_revert(base, good, declared):
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
-        ("documentation", dict(source=_source_text(documentation=True), files=dict(
-            declared, **{DECLARATION_FILES[-1]: "Requires Python.\n"})),
+        ("documentation", dict(files={DECLARATION_FILES[-1]: "Requires Python.\n"}),
          DECLARATION_FILES[-1] + ": does not state"),
+        ("claims", dict(files={DECLARATION_FILES[-1]: "Requires Python 3.14 or newer; 3.12+ works.\n" + (
+            "Requires Python 3.14 or newer.\n" * (DECLARATION_COPIES.get(DECLARATION_FILES[-1], 1) - 1))}),
+         DECLARATION_FILES[-1] + ":1: names Python 3.12"),
     )
     results = {}
     for leg, kwargs, marker in cases:
@@ -1497,11 +1949,13 @@ def _red_on_revert(base, good, declared):
         named = any(line.startswith("FAIL: ") and marker in line for line in intact_lines)
         results[leg] = (intact_rc, named, _gate_run(_fixture(base, **kwargs), mutants[leg])[0])
     check("revert/source-leg", results["source"], (1, True, 0))
+    check("revert/switch-leg", results["switch"], (1, True, 0))
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
+    check("revert/claims-leg", results["claims"], (1, True, 0))
 
 
 def _rule_reverts(base):
@@ -1615,28 +2069,19 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=EXECUTED), handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the
+        # red-on-revert legs run a copy of this gate in a fixture root that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-selftest-") as raw:
             _self_test_cases(Path(raw))
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
-        return 2
-    if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
     if expected is None:
@@ -1674,4 +2119,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    _code = main(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

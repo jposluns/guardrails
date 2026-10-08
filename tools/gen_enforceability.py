@@ -2,12 +2,18 @@
 """Generate .aiqt/enforceability.json, the machine-readable enforceability ledger (EN-5 PR-E).
 
 For every rule in the corpus the ledger records which shipped mechanical controls cite it: the runtime
-hooks from .aiqt/core/hooks/manifest.toml and the deterministic repository gates from
-.aiqt/core/gates/manifest.toml. Each control carries its own residue verbatim (what it does NOT catch),
-so linkage and its honest gap travel together. The manifests are the single edit points; this ledger is
-generated and drift-gated, so the two can never fork. It reuses the sibling generators' validated
-loaders (gen_rules.load_corpus, gen_hooks.load_manifest) so the hooks-manifest validation is never
-forked, and _gen_common.reconcile for the drift/write step.
+hooks from .aiqt/core/hooks/manifest.toml, the preview-channel hooks from .aiqt/core/hooks/preview.toml
+(standalone .preview/ files, not plugin hooks; each row carries "channel": "preview" and its "file"), and
+the deterministic repository gates from .aiqt/core/gates/manifest.toml. Each control carries its own
+residue verbatim (what it does NOT catch), so linkage and its honest gap travel together. The manifests
+are the single edit points; this ledger is generated and drift-gated, so the two can never fork. It
+reuses the sibling generators' validated loaders (gen_rules.load_corpus, gen_hooks.load_manifest) so the
+plugin hooks-manifest validation is never forked, and _gen_common.reconcile for the drift/write step. The
+preview manifest has its own loader (load_preview_manifest, a different key set: a file, no stage), which
+reuses gen_hooks' event sets for the same matcher, warn, and cannot-block rules, adds PostToolUseFailure
+and PreCompact (held to a warn default by this pack's own choice, not by a claim about the platform),
+requires each file to be a readable regular file, and reads the manifest itself only as a regular file
+(an absent one is an empty channel; a symlink, dangling or not, or another type fails closed).
 
 HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledger.
 
@@ -58,20 +64,43 @@ lexical scan of trusted, controlled roster files; a `python3 -I -B tools/*.py` t
 argument, a heredoc, or an eval string may be miscounted. The authoritative single-source of the roster
 (generating both runners from this manifest) is deferred.
 """
-import json
-import re
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_enforceability.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import json
+import os
+import re
+import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
-from gen_hooks import load_manifest, ID_RE, CID_RE  # noqa: E402  reuse the hooks-manifest loader and shapes
+from gen_hooks import (load_manifest, ID_RE, CID_RE, KNOWN_EVENTS,  # noqa: E402  reuse the hooks loader and shapes
+                       WARN_EVENTS, NONBLOCK_EVENTS)
 
 LEDGER_REL = ".aiqt/enforceability.json"
 GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
 HOOKS_MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
+PREVIEW_MANIFEST_REL = ".aiqt/core/hooks/preview.toml"
+PREVIEW_KEYS = {"id", "file", "rules", "platform", "event", "matcher", "default", "class", "residue"}
+PREVIEW_EVENTS = set(KNOWN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
+PREVIEW_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+# gen_hooks' warn rule (warn is legal on every event but PreToolUse; a preview hook has no bake stage) and
+# its cannot-block rule (NONBLOCK_EVENTS), extended to the two preview-only events: PostToolUseFailure
+# follows PostToolUse, and a PreCompact control is held to a warn default by this pack's own choice (a
+# preview hook does not refuse a compaction). That choice is the pack's rule; it states nothing about
+# whether the platform lets a PreCompact hook block.
+PREVIEW_WARN_EVENTS = set(WARN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
+PREVIEW_WARN_ONLY_EVENTS = set(NONBLOCK_EVENTS) | {"PreCompact"}
+PREVIEW_FILE_RE = re.compile(r"^\.preview/[a-z0-9][a-z0-9-]*\.py$")
 RULES_DIR_REL = ".aiqt/core/rules"
 # The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
 # VALIDATION-ONLY read that never changes the ledger bytes, so they are deliberately NOT GENSRC_OUTPUTS
@@ -107,11 +136,11 @@ BOUNDARY = (
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. Sources are the content-bearing inputs the
-# ledger DERIVES from (the corpus and the two manifests); the roster files are excluded (see ROSTER_FILES).
+# ledger DERIVES from (the corpus and the three manifests); the roster files are excluded (see ROSTER_FILES).
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
-                 ".aiqt/core/gates/manifest.toml"),
+                 ".aiqt/core/hooks/preview.toml", ".aiqt/core/gates/manifest.toml"),
      "regenerate": "python3 tools/gen_enforceability.py"},
 )
 
@@ -123,6 +152,19 @@ def _exists(path):
     try:
         path.stat()
     except FileNotFoundError:
+        return False
+    return True
+
+
+def _readable_regular(path):
+    """True when `path` is a regular file (not a symlink, directory, or FIFO) that opens and reads; an
+    absent, unreadable, or other-typed path is False, so a preview row never names a file it cannot use."""
+    try:
+        if not stat.S_ISREG(os.lstat(str(path)).st_mode):
+            return False
+        with open(str(path), "rb") as fh:
+            fh.read(1)
+    except OSError:
         return False
     return True
 
@@ -189,6 +231,78 @@ def load_gates_manifest(path, root):
                              "control)".format(where, "/".join(sorted(CLASSES))))
         _req_str(gate, "residue", where)  # required, never empty: the gate's honest residue gap
     return gates
+
+
+def load_preview_manifest(path, root, plugin_ids):
+    """Parse and validate the preview-channel hooks manifest; return its [[hook]] tables. Only a GENUINELY
+    ABSENT file is an empty list (retiring the channel needs no edit here): the path is examined with lstat,
+    which does not follow a link, so a symlink (dangling or not), a directory, or another non-regular file
+    raises ValueError, and an unreadable or malformed one raises (ValueError/OSError -> exit 2). Each id must
+    be unique here and absent from the plugin hooks manifest, and each file must be a readable regular
+    .preview/<name>.py."""
+    try:
+        st = os.lstat(str(path))
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("{}: the preview manifest must be a regular file, not a symlink or another file "
+                         "type".format(path.name))
+    data = load_toml(path)
+    extra = set(data) - {"hook"}
+    if extra:
+        raise ValueError("{}: unknown top-level key(s): {}".format(path.name, ", ".join(sorted(extra))))
+    hooks = data.get("hook")
+    if not isinstance(hooks, list):
+        raise ValueError("{}: [[hook]] entries are required".format(path.name))
+    seen = set()
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            raise ValueError("{}: every [[hook]] must be a table".format(path.name))
+        unknown = set(hook) - PREVIEW_KEYS
+        if unknown:
+            raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(unknown))))
+        hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
+        where = "{}: [[hook]] {}".format(path.name, hid)
+        if not ID_RE.match(hid):
+            raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
+        if hid in seen or hid in plugin_ids:
+            raise ValueError("{}: duplicate hook id (unique across both hooks manifests)".format(where))
+        seen.add(hid)
+        rel = _req_str(hook, "file", where)
+        if not PREVIEW_FILE_RE.match(rel) or not _readable_regular(root / rel):
+            raise ValueError("{}: file must name a readable regular .preview/<name>.py".format(where))
+        rules = hook.get("rules")
+        if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and CID_RE.match(r)
+                                                                for r in rules):
+            raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
+        if _req_str(hook, "platform", where) != "claude-code":
+            raise ValueError("{}: platform must be claude-code".format(where))
+        event = _req_str(hook, "event", where)
+        if event not in PREVIEW_EVENTS:
+            raise ValueError("{}: event '{}' is not a known hook event".format(where, event))
+        if event in PREVIEW_TOOL_EVENTS:
+            matcher = _req_str(hook, "matcher", where)
+            try:
+                re.compile(matcher)
+            except re.error as exc:
+                raise ValueError("{}: matcher is not a valid regex: {}".format(where, exc))
+        elif "matcher" in hook:
+            raise ValueError("{}: matcher is forbidden on the non-tool event {}".format(where, event))
+        default = _req_str(hook, "default", where)
+        if default not in ("block", "warn"):
+            raise ValueError("{}: default must be block or warn".format(where))
+        if default == "warn" and event not in PREVIEW_WARN_EVENTS:
+            raise ValueError("{}: default 'warn' is not legal on {} (a preview hook has no bake stage)".format(
+                where, event))
+        if event in PREVIEW_WARN_ONLY_EVENTS and default != "warn":
+            why = ("cannot block at the platform" if event in NONBLOCK_EVENTS else
+                   "is held to a warn default by this pack's own choice (a preview hook does not refuse a "
+                   "compaction)")
+            raise ValueError("{}: event {} {}, so default must be 'warn'".format(where, event, why))
+        if _req_str(hook, "class", where) not in ("b", "c"):
+            raise ValueError("{}: class must be b or c (a is the gate axis; d is never authored)".format(where))
+        _req_str(hook, "residue", where)  # required, never empty
+    return hooks
 
 
 def roster_scripts(root):
@@ -270,6 +384,9 @@ def _hook_row(hook):
     residue, carried verbatim from the manifest so the ledger cannot fork from its single edit point."""
     row = {"id": hook["id"], "event": hook["event"], "platform": hook["platform"],
            "default": hook["default"], "class": hook["class"], "residue": hook["residue"]}
+    if "file" in hook:  # a preview-channel hook (preview.toml): name the channel and its shipped file
+        row["channel"] = "preview"
+        row["file"] = hook["file"]
     if "matcher" in hook:
         row["matcher"] = hook["matcher"]
     return row
@@ -293,6 +410,7 @@ def build_ledger(root):
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
     _plugin, hooks = load_manifest(root / HOOKS_MANIFEST_REL)
+    hooks = list(hooks) + load_preview_manifest(root / PREVIEW_MANIFEST_REL, root, {h["id"] for h in hooks})
     gates = load_gates_manifest(root / GATES_MANIFEST_REL, root)
     roster_union, per_file = roster_scripts(root)
     cross_checks(gates, hooks, corpus_ids, roster_union, per_file)
@@ -529,6 +647,7 @@ def self_test_main():
     failures = []
     skipped = []
     unread_manifest = None
+    unread_previews = []
 
     # (opf) OPF-SELF-CONTAIN grammar-widening (change-carries-check): SCRIPT_RE and ROSTER_RE now
     # accept an opf/tools/*.py path as well as the current tools/*.py, while staying anchored so a
@@ -724,9 +843,101 @@ def self_test_main():
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
                             "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+
+        # (q) The preview-channel manifest: a conformant preview hook links its rule as a hook row that
+        #     carries "channel": "preview" and its file (rule dd turns hook-linked), and a SessionStart warn
+        #     row is accepted; a preview file that is absent, a directory, a FIFO, a symlink, or unreadable,
+        #     an id that duplicates a plugin hook id, an unknown corpus-id, a class a or d, an unknown entry
+        #     key, an unknown platform, event, or default, a tool event without a matcher or with an invalid
+        #     one, a matcher on a non-tool event, a block default on SessionStart or PreCompact, and a warn
+        #     default on PreToolUse each fail closed (exit 2).
+        def preview_tree(name, hid="pv-hook", rule="ruledd", cls="b", extra="", make_file="file",
+                         event="Stop", default="block", platform="claude-code"):
+            t = _build(tmp / name)
+            (t / ".preview").mkdir()
+            target = t / ".preview" / "pv-hook.py"
+            if make_file in ("file", "unreadable"):
+                target.write_text("# self-test preview hook\n", encoding="utf-8")
+                if make_file == "unreadable":
+                    target.chmod(0)
+                    unread_previews.append(target)
+            elif make_file == "dir":
+                target.mkdir()
+            elif make_file == "fifo":
+                os.mkfifo(str(target))
+            elif make_file == "symlink":
+                (t / ".preview" / "real.py").write_text("# self-test preview hook\n", encoding="utf-8")
+                target.symlink_to("real.py")
+            (t / PREVIEW_MANIFEST_REL).write_text(
+                '[[hook]]\nid = "{}"\nfile = ".preview/pv-hook.py"\nrules = ["{}"]\nplatform = "{}"\n'
+                'event = "{}"\ndefault = "{}"\nclass = "{}"\n{}residue = "A self-test preview hook."\n'
+                .format(hid, rule, platform, event, default, cls, extra), encoding="utf-8")
+            return t
+        qgood = preview_tree("preview-good")
+        if run_quiet(qgood, check=False) != 0:
+            failures.append("preview: a conformant preview manifest expected exit 0")
+        else:
+            entry = {e["corpus-id"]: e for e in json.loads((qgood / LEDGER_REL).read_text(
+                encoding="utf-8"))["rules"]}.get("ruledd", {})
+            rows = entry.get("hooks", [])
+            if entry.get("status") != "hook-linked" or len(rows) != 1 or rows[0].get("channel") != "preview" \
+                    or rows[0].get("file") != ".preview/pv-hook.py":
+                failures.append("preview: the preview hook must link ruledd as a preview-channel hook row")
+        if run_quiet(preview_tree("preview-sessionstart-warn", event="SessionStart", default="warn"),
+                     check=False) != 0:
+            failures.append("preview: a SessionStart warn preview hook expected exit 0")
+        bash = 'matcher = "Bash"\n'
+        cases = [("preview-no-file", dict(make_file=None)), ("preview-dir-file", dict(make_file="dir")),
+                 ("preview-fifo-file", dict(make_file="fifo")), ("preview-symlink", dict(make_file="symlink")),
+                 ("preview-dup-id", dict(hid="hook-rule1")), ("preview-orphan", dict(rule="nosuch9")),
+                 ("preview-class-d", dict(cls="d")), ("preview-class-a", dict(cls="a")),
+                 ("preview-unknown-key", dict(extra="bogus = 1\n")), ("preview-platform", dict(platform="cursor")),
+                 ("preview-event", dict(event="NoSuchEvent")), ("preview-default", dict(default="ask")),
+                 ("preview-no-matcher", dict(event="PostToolUse")),
+                 ("preview-bad-matcher", dict(event="PostToolUse", extra='matcher = "("\n')),
+                 ("preview-stray-matcher", dict(extra=bash)),
+                 ("preview-sessionstart-block", dict(event="SessionStart")),
+                 ("preview-precompact-block", dict(event="PreCompact")),
+                 ("preview-pretooluse-warn", dict(event="PreToolUse", default="warn", extra=bash))]
+        if os.geteuid() != 0:  # a privileged process reads a mode-000 file, so the case cannot fail there
+            cases.append(("preview-unreadable-file", dict(make_file="unreadable")))
+        else:
+            skipped.append("preview-unreadable-file")
+        for name, kwargs in cases:
+            if run_quiet(preview_tree(name, **kwargs), check=False) != 2:
+                failures.append("preview: case {} expected exit 2 (fail-closed)".format(name))
+        # (q2) Only a genuinely absent preview manifest is an empty channel (exit 0); a manifest that is a
+        #      dangling symlink, a symlink to a conformant manifest, or a directory fails closed (exit 2).
+        if run_quiet(_build(tmp / "preview-manifest-absent"), check=False) != 0:
+            failures.append("preview: an absent preview manifest expected exit 0 (an empty channel)")
+        for name in ("preview-manifest-dangling", "preview-manifest-symlink", "preview-manifest-dir"):
+            t = preview_tree(name)
+            m = t / PREVIEW_MANIFEST_REL
+            if name.endswith("dangling"):
+                m.unlink()
+                m.symlink_to("missing-preview.toml")
+            elif name.endswith("symlink"):
+                m.rename(m.with_name("real-preview.toml"))
+                m.symlink_to("real-preview.toml")
+            else:
+                m.unlink()
+                m.mkdir()
+            if run_quiet(t, check=False) != 2:
+                failures.append("preview: case {} expected exit 2 (fail-closed)".format(name))
+        # (q3) The PreCompact warn rule is the pack's own choice: its refusal must not claim a platform limit.
+        pc = preview_tree("preview-precompact-reason", event="PreCompact")
+        try:
+            load_preview_manifest(pc / PREVIEW_MANIFEST_REL, pc, set())
+            failures.append("preview: a PreCompact block default must be refused")
+        except ValueError as exc:
+            if "cannot block at the platform" in str(exc) or "own choice" not in str(exc):
+                failures.append("preview: the PreCompact refusal must state the pack's own choice, not a "
+                                "platform limit")
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
+        for path in unread_previews:
+            os.chmod(str(path), 0o644)
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -745,7 +956,14 @@ def self_test_main():
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
           "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
           "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
-          "named only inside a roster inline comment all fail closed (exit 2)" + note)
+          "named only inside a roster inline comment all fail closed (exit 2); a preview-channel hook links "
+          "its rule as a preview row and a SessionStart warn preview row is accepted, and a preview hook "
+          "whose file is absent, a directory, a FIFO, a symlink, or unreadable, or with a duplicate id, an "
+          "unknown corpus-id, class a or d, an unknown key, platform, event, or default, a missing, invalid, "
+          "or stray matcher, a block default on SessionStart or PreCompact (the latter refused as the pack's "
+          "own choice, not as a platform limit), or a warn default on PreToolUse fails closed (exit 2); an "
+          "absent preview manifest is an empty channel, and one that is a dangling symlink, a symlink, or a "
+          "directory fails closed (exit 2)" + note)
     return 0
 
 

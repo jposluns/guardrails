@@ -240,13 +240,21 @@ mechanism claim and is deliberately NOT matched (no "works", no efficacy verb go
 
 Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required surface, fail-closed).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_overclaim.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import base64
 import binascii
 import json
 import os
 import re
 import stat
-import sys
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
@@ -2557,7 +2565,12 @@ def _self_test():
     failures.extend(_page_bound_source_self_test())
     failures.extend(_asset_closure_self_test())
     failures.extend(_block_boundary_negation_self_test())
-    close_failures, close_runs = _close_vector_self_test()
+    import _close_selftest
+    try:
+        close_failures, close_runs = _close_vector_self_test()
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     failures.extend(close_failures)
 
     if failures:
