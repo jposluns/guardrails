@@ -52,9 +52,13 @@ over recording children, what is launched and what each child saw (_check_member
 _check_launches), and that run() exits 1 listing as FAILED a member that exits 1 and one killed
 by SIGKILL. Those runs set GIT_ and PYTHON variables in os.environ (_ambient_sentinels), so
 the environment checks do not depend on the host; their diagnostics name environment variables,
-never their values (_check_env_canaries). Not checked: that the process exits with main()'s
-return (the last line of this file; _check_entry_points calls main() directly), and that run()
-removes its scratch directory afterwards (a run that leaves its copy behind still verifies).
+never the value of a variable, except paths under the host's temporary directory (TMPDIR) and the
+paths of the repository and of the interpreter, which a variable such as HOME or PATH can share,
+and never a value a child reported (_check_env_canaries); a recorded launch passing a keyword
+that could hand a child a descriptor is refused before the child runs (_launch_recorder). Not
+checked: that the process exits with main()'s return (the last line of this file;
+_check_entry_points calls main() directly), and that run() removes its scratch directory afterwards (a
+run that leaves its copy behind still verifies).
 When any preflight case was refuted
 the self-test exits 1; when none was refuted but one could not be evaluated, it exits 2. In both of
 those outcomes the closure legs never run.
@@ -771,26 +775,59 @@ _RECORDER = (
     "                                        if key.startswith('GIT_') or key in ('PYTHONPATH', 'PYTHONHOME')),\n"
     "                      env_no_bytecode=os.environ.get('PYTHONDONTWRITEBYTECODE') == '1')))\n")
 
-# The fields of a _RECORDER report, the only ones a diagnostic prints.
+# The fields of a _RECORDER report. A wrong report's diagnostic names the fields that failed and
+# the checks they failed, from fixed text, never a field's value (_report_mismatches).
 _REPORT_FIELDS = ("argv", "isolated", "no_bytecode", "cwd", "entries", "env_leaked", "env_no_bytecode")
+
+# The only keyword arguments a launch through _launch_recorder may pass (_run_one's), sorted.
+_LAUNCH_KEYWORDS = ("cwd", "env", "stderr", "stdout", "timeout")
+
+
+def _report_mismatches(report, argv, where):
+    """The _REPORT_FIELDS of the _RECORDER report `report` (a dict) that fail their check, in that
+    order, each as "<field> (<the check it failed>)" from fixed text: argv must equal `argv`,
+    isolated and no_bytecode 1, cwd a string naming the directory `where`, entries exactly ["opf"],
+    env_leaked an empty list and env_no_bytecode true (together, what _env_names_fault passes). A
+    field that is absent fails its check. Never carries a value of the report."""
+    cwd = report.get("cwd")
+    leaked = report.get("env_leaked")
+    checks = (
+        ("argv", report.get("argv") == argv, "not the script path and its args"),
+        ("isolated", report.get("isolated") == 1, "not 1"),
+        ("no_bytecode", report.get("no_bytecode") == 1, "not 1"),
+        ("cwd", type(cwd) is str and "\0" not in cwd and Path(cwd).resolve() == where,
+         "not the directory holding the copy"),
+        ("entries", report.get("entries") == ["opf"], "not exactly the copy"),
+        ("env_leaked", type(leaked) is list and not leaked, "not an empty list of names"),
+        ("env_no_bytecode", report.get("env_no_bytecode") is True, "not true"),
+    )
+    return ["{} ({})".format(field, check) for field, held, check in checks if not held]
 
 
 def _launch_recorder(launches, label):
     """A stand-in for the subprocess module bound now: run delegates to its run and records each
     launch as (the argument list, the keyword arguments, the child's stdout decoded); every other
     attribute reads through. Built once the watch is bound, so a launch the host refuses is observed.
-    The streams are checked BEFORE the child is launched: a launch whose stdout is not PIPE, or whose
-    stderr is neither PIPE nor STDOUT (an inherited or redirected stream), is refused without running
-    the child (AssertionError `label`-streams), so no child output reaches an inherited descriptor;
-    _check_launches then requires the exact stderr mode."""
+    The keywords and the streams are checked BEFORE the child is launched, and a launch failing
+    either is refused without running the child: one passing any keyword argument but
+    _LAUNCH_KEYWORDS (for example pass_fds, close_fds, preexec_fn or stdin, which can hand a
+    descriptor to the child and its descendants) raises AssertionError `label`-kwargs naming the
+    keywords (never their values); one whose stdout is not PIPE, or whose stderr is neither PIPE nor
+    STDOUT (an inherited or redirected stream), raises `label`-streams. The child it runs takes its
+    stdin from DEVNULL (a keyword the recorder adds and does not record) and close_fds keeps its
+    default, so the child and its descendants inherit no descriptor of this process and no child
+    output reaches an inherited descriptor. _check_launches then requires the exact stderr mode."""
     inner = subprocess.run
 
     def launch(cmd, **kwargs):
-        if (kwargs.get("stdout") != subprocess.PIPE
-                or kwargs.get("stderr") not in (subprocess.PIPE, subprocess.STDOUT)):
+        if sorted(kwargs) != list(_LAUNCH_KEYWORDS):
+            raise AssertionError("{}-kwargs: a launch with the keywords {!r} was refused before the child ran "
+                                 "(only {!r} are permitted)".format(label, sorted(kwargs), list(_LAUNCH_KEYWORDS)))
+        if (kwargs["stdout"] != subprocess.PIPE
+                or kwargs["stderr"] not in (subprocess.PIPE, subprocess.STDOUT)):
             raise AssertionError("{}-streams: a launch with stdout={!r}, stderr={!r} was refused before the "
-                                 "child ran".format(label, kwargs.get("stdout"), kwargs.get("stderr")))
-        proc = inner(cmd, **kwargs)
+                                 "child ran".format(label, kwargs["stdout"], kwargs["stderr"]))
+        proc = inner(cmd, stdin=subprocess.DEVNULL, **kwargs)
         launches.append((list(cmd), dict(kwargs), (proc.stdout or b"").decode("utf-8", "replace")))
         return proc
     return _Overlay(subprocess, run=launch)
@@ -807,9 +844,12 @@ def _check_launches(label, launches, made, source, root, roster, stderr):
     its argv as the script path and args, sys.flags.isolated and dont_write_bytecode set, a working
     directory that is the directory holding the copy and holds only "opf", and an environment that
     passes _env_fault (judged from the report's names and Boolean; the report carries no value).
-    No diagnostic prints a value of the environment or the child's raw output: a child that gave
-    no report is named with the byte count of its output, and a wrong report with its
-    _REPORT_FIELDS only."""
+    No diagnostic prints the value of a variable, except paths under the host's temporary directory
+    (TMPDIR) and the paths of the repository and of the interpreter (sys.executable), which a
+    variable such as HOME or PATH can share; and none prints anything the child supplied: a child
+    that gave no report is named with the byte count of its output, and a wrong report with that
+    byte count and the fixed identifiers of the fields that failed and of the checks they failed
+    (_report_mismatches), never a field's value."""
     copy = _check_copy(label, made, source, root)
     if len(launches) != len(roster):
         raise AssertionError("{}-launches: {} launches, expected {}".format(label, len(launches), len(roster)))
@@ -832,21 +872,17 @@ def _check_launches(label, launches, made, source, root, roster, stderr):
             raise AssertionError("{}-timeout: {} launched with timeout={!r}, not {}".format(
                 label, name, kwargs["timeout"], bound))
         lines = out.strip().splitlines()
+        size = len(out.encode("utf-8", "replace"))
         try:
             report = json.loads(lines[-1])
         except (IndexError, ValueError):
             report = None
         if not isinstance(report, dict):
-            raise AssertionError("{}-child: {} gave no report ({} bytes of output)".format(
-                label, name, len(out.encode("utf-8", "replace"))))
-        fault = _env_names_fault(report.get("env_leaked"), report.get("env_no_bytecode"))
-        if (report.get("argv") != [cmd[3], *args] or report.get("isolated") != 1
-                or report.get("no_bytecode") != 1
-                or Path(str(report.get("cwd"))).resolve() != copy.parent or report.get("entries") != ["opf"]
-                or fault is not None):
-            raise AssertionError("{}-child: {} reported {!r}, environment {}".format(
-                label, name, {key: report.get(key) for key in _REPORT_FIELDS if key in report},
-                fault or "isolated"))
+            raise AssertionError("{}-child: {} gave no report ({} bytes of output)".format(label, name, size))
+        wrong = _report_mismatches(report, [cmd[3], *args], copy.parent)
+        if wrong:
+            raise AssertionError("{}-child: {} reported a wrong {} ({} bytes of output; no field value is "
+                                 "printed)".format(label, name, "; ".join(wrong), size))
 
 
 class _CannotEvaluate(Exception):
@@ -890,7 +926,9 @@ def _harness_watch(broke):
     scratch directories (errors ignored), the path resolution and the file and directory reads of
     _check_copy, _check_member_calls, _check_launches, _stub_member_runner (_digest, _entries) and
     gettempdir, where an unreadable payload file reads as missing (a refutation, never a pass),
-    and the is_dir and is_file probes in run(), _run_one and
+    the opening and reading of _check_env_canaries's sink and the marker probes there (an OSError
+    from the sink is cannot-evaluate through _preflight_exit), and the is_dir and is_file probes in
+    run(), _run_one and
     _require_subtree, where an unreadable path reads as absent. _require_subtree then makes the case
     cannot-evaluate, but a probe that reads a path as absent after the case found or wrote it (a path
     that became unreadable in between) is a refutation where the case judges that probe's outcome:
@@ -917,7 +955,8 @@ def _harness_watch(broke):
         _not_utf8=watched("store read", _not_utf8),
         subprocess=types.SimpleNamespace(
             run=watched("child process", subprocess.run, (OSError, subprocess.TimeoutExpired)),
-            PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT, TimeoutExpired=subprocess.TimeoutExpired))
+            PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired))
 
 
 def _observed(label, call, injected=None):
@@ -1410,10 +1449,11 @@ def _check_member_boundary(root):
     one launch reconciles with _DECLARED_NEGATIVE, stderr captured apart. closure/boundary-failed:
     the real run() over a second scratch root, where opf-drift-selftest's script exits 1 and
     opf-doctor-selftest's kills itself with SIGKILL (every other member a recorder), exits 1 and
-    lists both as FAILED (rc=1 and rc=-9, on stdout and under BROKEN on stderr), every other member
-    OK and nothing cannot-evaluate: so a _run_one or run() that reads a failed or killed member as
-    passed fails here. Needs a scratch directory but no opf/ subtree; `root` is the repository the
-    copies must lie outside. A host failure building the fixture, or one the watch sees, is
+    lists both as FAILED (rc=1 and rc=-9, on stdout and on stderr in lines after its first line
+    starting "STANDALONE CLOSURE: BROKEN "), every other member OK and nothing cannot-evaluate: so
+    a _run_one or run() that reads a failed or killed member as passed fails here. Needs a scratch
+    directory but no opf/ subtree; `root` is the repository the copies must lie outside. A host failure
+    building the fixture, or one the watch sees, is
     cannot-evaluate. Not covered: the members' own scripts (the children here are recorders), and
     what run() prints of a real member's output beyond its exit code."""
     failed = {"opf-drift-selftest": ("check_opf_drift.py", b"import sys\nsys.exit(1)\n", 1),
@@ -1465,8 +1505,10 @@ def _check_member_boundary(root):
             codes = dict((name, code) for name, (_script, _body, code) in failed.items())
             wrong = [name for name, _script, _args, _bound in _DECLARED_ROSTER if "  {:32s} {}".format(
                 name, "FAILED rc={}".format(codes[name]) if name in codes else "OK") not in lines]
+            heads = [index for index, line in enumerate(errs) if line.startswith("STANDALONE CLOSURE: BROKEN ")]
+            under = errs[heads[0] + 1:] if heads else []
             wrong += [name for name, code in codes.items()
-                      if not any(line.startswith("  {} (rc={}): ".format(name, code)) for line in errs)]
+                      if not any(line.startswith("  {} (rc={}): ".format(name, code)) for line in under)]
             if rc != 1 or wrong or "CANNOT EVALUATE" in err:
                 raise AssertionError("closure/boundary-failed: run() exited {} over a member that exits 1 and "
                                      "one killed by SIGKILL, with wrong or missing lines for {!r}".format(rc, wrong))
@@ -1477,30 +1519,60 @@ def _check_member_boundary(root):
 
 
 def _check_env_canaries(root):
-    """No diagnostic carries a value of the environment, and no recorded launch writes to an inherited
-    descriptor, while _ENV_CANARY is set in os.environ (beside _AMBIENT_SENTINELS). Each sub-check's
-    refutation text, and everything it printed, must not contain the canary's value:
+    """No diagnostic carries a value of the environment (none prints the value of a variable, except
+    paths under the host's temporary directory (TMPDIR) and the paths of the repository and of the
+    interpreter), and no recorded launch writes to an inherited descriptor, while _ENV_CANARY is
+    set in os.environ (beside _AMBIENT_SENTINELS). Each sub-check's refutation text, and everything it
+    printed, must not contain the canary's value:
     closure/env-canary-m17: _check_member_boundary with _isolated_env returning os.environ itself
       is refuted at closure/boundary-run-env (an environment of the wrong type, named by its type);
-    closure/env-canary-streams: a launch through _launch_recorder with stdout=None, or with
-      stderr=None, is refused (closure/env-canary-streams) before the child runs: the child, which
-      would create a marker file, created nothing and nothing was recorded;
-    closure/env-canary-report: _check_launches over a launch whose output ends in a line that is
-      not a report (the canary on the line before) names the byte count only, and over a wrong
-      report carrying the canary in a field of its own prints _REPORT_FIELDS only.
+    closure/env-canary-streams: a launch through _launch_recorder whose stdout is None, DEVNULL or
+      the integer descriptor 1 (stderr STDOUT), or whose stderr is None, DEVNULL or the integer
+      descriptor 2 (stdout PIPE), is refused (closure/env-canary-streams) before the child runs: the
+      child, which would create a marker file, created nothing and nothing was recorded;
+    closure/env-canary-descriptors: a launch through _launch_recorder with the permitted keywords
+      plus one of pass_fds, close_fds=False, stdin or preexec_fn, each handing the child a
+      descriptor of a sink file in the scratch directory (made inheritable, for close_fds=False;
+      dup'd onto the child's stdin, for preexec_fn), is refused (closure/env-canary-descriptors-
+      kwargs) before the child runs: the child, which would create a marker file and start a
+      grandchild that writes the canary's value to that descriptor, created nothing, nothing was
+      recorded, and the sink stays empty; and a permitted launch, while the sink's descriptor is
+      inheritable, starts a probe child that holds no such descriptor and whose stdin is the null
+      device (a recorder that dropped its stdin=DEVNULL is seen only when this process's own stdin
+      is not the null device);
+    closure/env-canary-report: _check_launches passes a valid report (the control); over a launch
+      whose output ends in a line that is not a report (the canary on the line before) it names the
+      byte count only; over each report that is valid but for one of _REPORT_FIELDS, which holds
+      the canary's value or a list holding it, it is refuted naming that field and its check, and
+      no value; so it is over a report wrong in isolated carrying the canary in a field of its own.
     Needs a scratch directory but no opf/ subtree; a host failure building the fixture, or one a
     watch sees, is cannot-evaluate, and so is a sub-check that observed nothing it could judge (a
     _CannotEvaluate, for example TMPDIR inside the repository), once its text is found free of the
-    canary. Inherited descriptors are judged from the child's own marker
-    (a refused launch never ran) and from _launch_recorder, which launches only with stdout piped;
-    output this process writes itself is captured (_captured) and scanned."""
+    canary (an AssertionError or _CannotEvaluate that _attributed raises is likewise scanned before
+    it is raised). Opening and reading the sink is this case's own host I/O, unwatched: an OSError there
+    is cannot-evaluate through _preflight_exit. Inherited descriptors are judged from the child's
+    marker and the sink (a refused launch never ran) and from _launch_recorder, which launches only
+    with _LAUNCH_KEYWORDS, stdout piped and stdin from DEVNULL; output this process writes itself
+    is captured (_captured) and scanned."""
     name, value = _ENV_CANARY
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-canary-"))
-            child = tmp / "child.py"
-            _write_fixture(tmp, [("child.py", b"import sys\nopen(sys.argv[1], 'wb').close()\n")])
+            child, descendant, sink = tmp / "child.py", tmp / "descendant.py", tmp / "sink"
+            _write_fixture(tmp, [
+                ("child.py", b"import sys\nopen(sys.argv[1], 'wb').close()\n"),
+                ("descendant.py", (
+                    "import os, subprocess, sys\n"
+                    "open(sys.argv[1], 'wb').close()\n"
+                    "fd = int(sys.argv[2])\n"
+                    "grandchild = 'import os, sys\\nos.write(int(sys.argv[1]), os.environ[{!r}].encode())\\n'\n"
+                    "subprocess.run([sys.executable, '-I', '-c', grandchild, str(fd)],\n"
+                    "               pass_fds=(fd,) if fd > 2 else (), timeout=60)\n").format(name).encode("utf-8")),
+                ("probe.py", b"import json, os, sys\ntry:\n    os.fstat(int(sys.argv[1]))\n    held = True\n"
+                             b"except OSError:\n    held = False\nprint(json.dumps(dict(held=held, "
+                             b"stdin_null=os.path.samestat(os.fstat(0), os.stat(os.devnull)))))\n"),
+                ("sink", b"")])
         except OSError as exc:
             raise _CannotEvaluate("closure/env-canary-scratch: could not build the fixture: {}".format(exc))
 
@@ -1510,49 +1582,98 @@ def _check_env_canaries(root):
                 raise AssertionError("{}: a diagnostic carries the value of {}".format(label, name))
             if isinstance(got, _CannotEvaluate):
                 raise got
-            if not isinstance(got, AssertionError) or not str(got).startswith(start):
+            if start is None:
+                if got is not None:
+                    raise AssertionError("{}: expected no refutation, got {!r}".format(label, str(got)))
+            elif not isinstance(got, AssertionError) or not str(got).startswith(start):
                 raise AssertionError("{}: expected a refutation starting {!r}, got {!r}".format(label, start, str(got)))
+
+        def attempt(label, fn):
+            try:
+                return _captured(_attributed, label, fn)
+            except (AssertionError, _CannotEvaluate) as exc:
+                if value in str(exc):
+                    raise AssertionError("{}: a diagnostic carries the value of {}".format(label, name)) from None
+                raise
+
+        def permitted(launches, fd):
+            _launch_recorder(launches, "closure/env-canary-descriptors").run(
+                [sys.executable, "-I", "-B", str(tmp / "probe.py"), str(fd)], cwd=str(tmp), env=dict(os.environ),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+            try:
+                return json.loads(launches[-1][2].strip().splitlines()[-1])
+            except (IndexError, ValueError):
+                raise AssertionError("closure/env-canary-descriptors: the permitted probe gave no report")
+
+        def refused(label, launches, script, args, **kwargs):
+            try:
+                _launch_recorder(launches, label).run([sys.executable, "-I", "-B", str(script), *args], **kwargs)
+            except AssertionError as exc:
+                return exc
+            return None
 
         with _ambient_sentinels(_AMBIENT_SENTINELS + (_ENV_CANARY,)):
             result, out, err = _captured(lambda: _observed("closure/env-canary-m17", lambda: _check_member_boundary(
                 root), injected=dict(_isolated_env=lambda: os.environ)))
             judged("closure/env-canary-m17", (result[1], out, err), "closure/boundary-run-env: ")
 
-            for stdout, stderr in ((None, subprocess.STDOUT), (subprocess.PIPE, None)):
+            pipe, merged, null = subprocess.PIPE, subprocess.STDOUT, subprocess.DEVNULL
+            for stdout, stderr in ((None, merged), (null, merged), (1, merged), (pipe, None), (pipe, null), (pipe, 2)):
                 launches, marker = [], tmp / "ran-{}-{}".format(stdout, stderr)
-
-                def refused(stdout=stdout, stderr=stderr, launches=launches, marker=marker):
-                    try:
-                        _launch_recorder(launches, "closure/env-canary").run(
-                            [sys.executable, "-I", "-B", str(child), str(marker)], cwd=str(tmp),
-                            env=dict(os.environ), stdout=stdout, stderr=stderr, timeout=120)
-                    except AssertionError as exc:
-                        return exc
-                    return None
-                got, out, err = _captured(_attributed, "closure/env-canary-streams", refused)
+                got, out, err = attempt("closure/env-canary-streams", functools.partial(
+                    refused, "closure/env-canary", launches, child, [str(marker)], cwd=str(tmp),
+                    env=dict(os.environ), stdout=stdout, stderr=stderr, timeout=120))
                 judged("closure/env-canary-streams", (got, out, err), "closure/env-canary-streams: ")
                 if launches or marker.exists():
                     raise AssertionError("closure/env-canary-streams: the child ran with stdout={!r}, "
                                          "stderr={!r}".format(stdout, stderr))
+
+            with open(sink, "r+b") as held:
+                fd = held.fileno()
+                os.set_inheritable(fd, True)
+                for extra, passed in ((dict(pass_fds=(fd,)), fd), (dict(close_fds=False), fd),
+                                      (dict(stdin=fd), 0), (dict(preexec_fn=functools.partial(os.dup2, fd, 0)), 0)):
+                    keyword = sorted(extra)[0]
+                    launches, marker = [], tmp / "ran-{}".format(keyword)
+                    got, out, err = attempt("closure/env-canary-descriptors", functools.partial(
+                        refused, "closure/env-canary-descriptors", launches, descendant, [str(marker), str(passed)],
+                        cwd=str(tmp), env=dict(os.environ), stdout=pipe, stderr=merged, timeout=120, **extra))
+                    judged("closure/env-canary-descriptors", (got, out, err),
+                           "closure/env-canary-descriptors-kwargs: ")
+                    if launches or marker.exists():
+                        raise AssertionError("closure/env-canary-descriptors: the child ran with {}".format(keyword))
+                launches = []
+                got, out, err = attempt("closure/env-canary-descriptors", functools.partial(permitted, launches, fd))
+                if value in out or value in err or got != dict(held=False, stdin_null=True):
+                    raise AssertionError("closure/env-canary-descriptors: a permitted launch's child held the sink's "
+                                         "inheritable descriptor or a stdin other than the null device")
+            if sink.read_bytes():
+                raise AssertionError("closure/env-canary-descriptors: a descendant wrote to the sink's descriptor")
 
             dest = tmp / "run"
             made = [(tmp / "root" / "opf", dest, dest / "opf")]
             cmd = [sys.executable, "-I", "-B", str(dest / "opf" / "tools" / "opf.py"), "--self-test"]
             kwargs = dict(cwd=str(dest), env={"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=_DECLARED_NEGATIVE[0][3])
-            for out_text, start in (
-                    ("{} {}\nTraceback: not a report\n".format(name, value), "gave no report ("),
-                    (json.dumps(dict(argv=cmd[3:], isolated=0, canary=value)) + "\n", "reported ")):
-                def report(out_text=out_text):
-                    try:
-                        _check_launches("closure/env-canary-report", [(cmd, kwargs, out_text)], made, tmp / "root",
-                                        root, _DECLARED_NEGATIVE, subprocess.PIPE)
-                    except AssertionError as exc:
-                        return exc
-                    return None
-                got, out, err = _captured(_attributed, "closure/env-canary-report", report)
-                judged("closure/env-canary-report", (got, out, err),
-                       "closure/env-canary-report-child: opf-tooling-selftest " + start)
+            valid = dict(argv=cmd[3:], isolated=1, no_bytecode=1, cwd=str(dest), entries=["opf"], env_leaked=[],
+                         env_no_bytecode=True)
+            start = "closure/env-canary-report-child: opf-tooling-selftest "
+            cases = [(json.dumps(valid) + "\n", None),
+                     ("{} {}\nTraceback: not a report\n".format(name, value), start + "gave no report ("),
+                     (json.dumps(dict(valid, isolated=0, canary=value)) + "\n", start + "reported a wrong isolated (")]
+            cases += [(json.dumps(dict(valid, **{field: wrong})) + "\n", start + "reported a wrong {} (".format(field))
+                      for field in _REPORT_FIELDS for wrong in (value, [value])]
+
+            def report(out_text):
+                try:
+                    _check_launches("closure/env-canary-report", [(cmd, kwargs, out_text)], made, tmp / "root",
+                                    root, _DECLARED_NEGATIVE, subprocess.PIPE)
+                except (AssertionError, _CannotEvaluate) as exc:
+                    return exc
+                return None
+            for out_text, want in cases:
+                got, out, err = attempt("closure/env-canary-report", functools.partial(report, out_text))
+                judged("closure/env-canary-report", (got, out, err), want)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2194,9 +2315,11 @@ def _holds_code(value, depth=0):
 def _check_holder_rules():
     """Pins _holds_code where its shortcut could skip a holder: an instance of a str or int subclass
     whose class is this module's, holding this module's function as an instance attribute, holds
-    code; so does an instance of a str subclass of another module (here a class whose __module__ is
-    set to another name) holding one; the exact str and int values do not. Raises
-    AssertionError (closure/holds-code) naming the first value judged wrongly."""
+    code; so does an instance of a str subclass, and an empty instance of a list or dict subclass,
+    of another module (here a class whose __module__ is set to another name) holding one as an
+    instance attribute (a container's instance attributes are read beside its items); the exact
+    str, int, list and dict values do not. Raises AssertionError (closure/holds-code) naming the
+    first value judged wrongly."""
     class _StrHolder(str):
         pass
 
@@ -2205,11 +2328,19 @@ def _check_holder_rules():
 
     class _ForeignStrHolder(str):
         pass
-    _ForeignStrHolder.__module__ = "opf_closure_foreign_module (stubbed)"
-    holders = [_StrHolder("x"), _IntHolder(1), _ForeignStrHolder("y")]
+
+    class _ForeignListHolder(list):
+        pass
+
+    class _ForeignDictHolder(dict):
+        pass
+    for foreign in (_ForeignStrHolder, _ForeignListHolder, _ForeignDictHolder):
+        foreign.__module__ = "opf_closure_foreign_module (stubbed)"
+    holders = [_StrHolder("x"), _IntHolder(1), _ForeignStrHolder("y"), _ForeignListHolder(), _ForeignDictHolder()]
     for holder in holders:
         holder.fn = _check_holder_rules
-    for value, want in [(holder, True) for holder in holders] + [("x", False), (1, False)]:
+    for value, want in [(holder, True) for holder in holders] + [("x", False), (1, False), ([], False),
+                                                                 ({}, False)]:
         if _holds_code(value) is not want:
             raise AssertionError("closure/holds-code: a {} gave {}, expected {}".format(
                 type(value).__name__, not want, want))
@@ -2237,7 +2368,9 @@ def _derived_sites():
     Its key is "<co_qualname> <token>#<k>".
     Returns (spans, reach, flagged): spans maps every site key in any top-level definition to
     (qualname, dispatch); reach maps each case's function name to the set of site keys it reaches;
-    flagged is the set of indirection keys any case reaches. Not seen by the walk: a load of a
+    flagged maps each indirection key any case reaches to the text of the source line holding it
+    (stripped of surrounding whitespace), so a record names the load it describes and not only its
+    count (_check_attribution_inventory). Not seen by the walk: a load of a
     name it does not list here (for example an imported API such as importlib.import_module given
     this module's name as a literal string, or an object whose class is not this module's reached
     through another module); code reached through an argument supplied from outside the code a case
@@ -2275,6 +2408,7 @@ def _derived_sites():
                 label, function.__name__))
         cases.append(function.__name__)
     targets = frozenset(production | set(cases))
+    lines = source.splitlines()
     spans, keys, flag_keys, follows = {}, {}, {}, {}
     for name in defs:
         found = walk(name, targets)
@@ -2288,8 +2422,9 @@ def _derived_sites():
         count = {}
         for qualname, token, line, column in sorted(found["flags"], key=lambda flag: (flag[2], flag[3])):
             count[qualname, token] = count.get((qualname, token), 0) + 1
-            flag_keys[name].append("{} {}#{}".format(qualname, token, count[qualname, token]))
-    reach, flagged = {}, set()
+            flag_keys[name].append(("{} {}#{}".format(qualname, token, count[qualname, token]),
+                                    lines[line - 1].strip()))
+    reach, flagged = {}, {}
     for case in cases:
         seen, queue = set(), [case]
         while queue:
@@ -2298,7 +2433,7 @@ def _derived_sites():
                 seen.add(name)
                 queue.extend(follows[name])
         reach[case] = set(key for name in seen for key in keys[name])
-        flagged.update(key for name in seen for key in flag_keys[name])
+        flagged.update(pair for name in seen for pair in flag_keys[name])
     return spans, reach, flagged
 
 
@@ -2309,10 +2444,13 @@ def _check_attribution_inventory(root):
     the code under test in the code a case reaches fails until it is pinned or excluded with a
     reason); a pin naming a site the walk does not find in what its case reaches; an exclusion
     naming a site the walk does not find, one also pinned or excluded twice, or one with no reason;
-    an _ATTRIBUTION_INDIRECTIONS record naming an indirection the walk does not find, recorded twice,
-    or with no reason. Then every pin entry is fired (see _pin): its patched call must fire while a
-    frame of its site's code is executing the site's own call instruction (exact source position,
-    columns included), and give the attribution its mode requires; and each pinned site needs one
+    an _ATTRIBUTION_INDIRECTIONS record naming an indirection the walk does not find, one whose
+    source line is not the text it records, one recorded twice, or one with no reason (so a load
+    that replaces a recorded one at the same key, the earlier load removed, is stale unless its
+    line reads exactly as the recorded one's). Then every pin entry is fired (see _pin): its
+    patched call must fire while a frame of its site's code is executing the site's own call
+    instruction (exact source position, columns included), and give the attribution its mode requires;
+    and each pinned site needs one
     entry whose call is the first call of its patched target made at that site (closure/attribution-
     first-call), so a site reached bare on a loop's first pass and attributed later is refuted. So
     reverting a pinned site's attribution (calling it bare, or interpreting its result outside
@@ -2345,15 +2483,16 @@ def _check_attribution_inventory(root):
                                  "one also pinned or excluded, or no reason)".format(site))
         excluded.add(site)
     recorded = set()
-    for key, reason in _ATTRIBUTION_INDIRECTIONS:
-        if key not in flagged or key in recorded or not reason.strip():
-            raise AssertionError("closure/attribution-stale-indirection: {!r} (an indirection the walk does not "
-                                 "find, one recorded twice, or no reason)".format(key))
+    for key, line, reason in _ATTRIBUTION_INDIRECTIONS:
+        if flagged.get(key) != line or key in recorded or not reason.strip():
+            raise AssertionError("closure/attribution-stale-indirection: {!r} recorded at {!r} (an indirection the "
+                                 "walk does not find, one on another source line, one recorded twice, or no "
+                                 "reason)".format(key, line))
         recorded.add(key)
     unpinned = sorted(derived - pinned - excluded)
     if unpinned:
         raise AssertionError("closure/attribution-unpinned: {}".format("; ".join(unpinned)))
-    unevaluated, unrecorded = [], sorted(flagged - recorded)
+    unevaluated, unrecorded = [], sorted(set(flagged) - recorded)
     if unrecorded:
         unevaluated.append("closure/attribution-indirection: the walk cannot follow {} (code reached through "
                            "a string, a namespace, a value, a wrapper or an annotation is no site; record each "
@@ -2598,70 +2737,103 @@ _ATTRIBUTION_PINS = (
      "missing-input", _check_missing_input, False, "run", None, 3, "crash", "closure/missing-input-no-opf-py"),
 )
 
-# The indirections (see _derived_sites) the cases reach on purpose, each with the recorded reason.
-# A wrapper's load (a top-level def holding an _ATTRIBUTION_EXCLUSIONS site) is recorded here only
-# where the wrapper is bound for, or injected into, an attributed or pinned call, so that what it
-# delegates runs inside that call; a new load of a wrapper (calling through it bare) is unrecorded.
+# The indirections (see _derived_sites) the cases reach on purpose, as (the key, the text of the
+# source line holding it, stripped, the recorded reason). A wrapper's load (a top-level def holding
+# an _ATTRIBUTION_EXCLUSIONS site) is recorded here only where the wrapper is bound for, or injected
+# into, an attributed or pinned call, so that what it delegates runs inside that call; a new load of
+# a wrapper (calling through it bare) is unrecorded, and one that replaces a recorded load in the same
+# co_qualname (the keys are numbered by order there) is stale, since its line is not the recorded
+# one. Not seen: a replacement whose source line reads exactly as the recorded load's line.
 _ATTRIBUTION_INDIRECTIONS = (
     ("_observed _harness_watch#1",
+     "with _patched(**_harness_watch(broke)):",
      "binds the watch around the case's call(); each watched primitive runs inside that attributed call"),
     ("_pin _harness_watch#1",
+     "with _patched(**_harness_watch(host)):",
      "binds the pin's own watch around the case it fires; the case's calls are made at its own sites"),
     ("_stubbed_run.<locals>.stubs _copy_recorder#1",
+     "return dict(_run_one=_stub_member_runner(calls, outcomes), _materialize=_copy_recorder(made))",
      "injected into the closure/stubbed-run _attributed call; run() makes the copy inside it (pinned "
      "by the _materialize crash entry at _stubbed_run's run#1)"),
     ("_check_leg_wiring.<locals>.<lambda> _copy_recorder#1",
+     "_materialize=_copy_recorder(made))))",
      "injected into the closure/self-test-exit _attributed call; _closure_legs makes the copy inside it "
      "(pinned by the _materialize crash entry at wired's _closure_legs#1)"),
     ("_check_member_boundary.<locals>.<lambda> _copy_recorder#1",
+     "subprocess=_launch_recorder(launches, \"closure/boundary-run\"), _materialize=_copy_recorder(made)))",
      "injected into the closure/boundary-run _attributed call; run() makes the copy inside it"),
     ("_check_member_boundary.<locals>.<lambda> _copy_recorder#2",
+     "_materialize=_copy_recorder(neg_made)))",
      "injected into the closure/boundary-negative _attributed call; _closure_legs makes the copy inside it"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#1",
+     "(\"scratch_at=1\", lambda: _failing_harness(scratch_at=1), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#2",
+     "(\"write_at=1\", lambda: _failing_harness(write_at=1), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#3",
+     "(\"scratch_at=2\", lambda: _failing_harness(scratch_at=2), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#4",
+     "(\"copy_at=1\", lambda: _failing_harness(copy_at=1), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#5",
+     "(\"scratch_at=3\", lambda: _failing_harness(scratch_at=3), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_undecodable_attribution.<locals>.<lambda> _failing_harness#6",
+     "(\"copy_at=2\", lambda: _failing_harness(copy_at=2), _CannotEvaluate, \"injected\"),",
      "injected through _observed as this case's selective failure; it delegates inside the observed call"),
     ("_check_attribution_inventory _check_pin_rules#1",
+     "_check_pin_rules(spans)",
      "runs _pin's rule probes, whose bare calls are excluded on purpose: they judge _pin, not the code"),
     ("_check_preflight_failure_first _check_preflight_failure_first#1",
+     "if case[1] not in (_check_preflight_failure_first, _check_attribution_inventory)]))",
      "the identity test that leaves this case out of the cases it runs; never called"),
     ("_Overlay.__getattr__ getattr#1",
+     "return getattr(self._target, key)",
      "reads an attribute of the wrapped target by the name Python asked for; calls nothing itself"),
     ("_Overlay.__init__ .__dict__#1",
+     "self.__dict__.update(attrs)",
      "stores the replacement attributes the caller passed; their code is the caller's, walked there"),
     ("_check_attribution_inventory _ATTRIBUTION_PINS#1",
+     "for site, label, check, *_entry in _ATTRIBUTION_PINS:",
      "reads the pin table to check each entry's site key against the walk; calls nothing from it"),
     ("_check_attribution_inventory _ATTRIBUTION_PINS#2",
+     "for site, *entry in _ATTRIBUTION_PINS:",
      "fires each pin entry through _pin, which runs the entry's case raw on purpose to judge its outcome"),
     ("_check_attribution_inventory getattr#1",
+     "case = getattr(check, \"__wrapped__\", check).__name__",
      "reads __wrapped__ to name the case function of a pin entry; calls nothing"),
     ("_check_preflight_failure_first _PREFLIGHT_CASES#1",
+     "cases = tuple(reversed([case for case in _PREFLIGHT_CASES",
      "runs the other preflight cases through _preflight_exit, under _attributed; each case is walked as a case"),
     ("_derived_sites _PREFLIGHT_CASES#1",
+     "for label, check in _PREFLIGHT_CASES:",
      "reads the case table to find each case's function; calls nothing from it"),
     ("_derived_sites getattr#1",
+     "function = getattr(check, \"__wrapped__\", check)",
      "reads __wrapped__ to find a case's function; calls nothing"),
     ("_derived_sites globals#1",
+     "held = frozenset(name for name, value in globals().items()",
      "reads this module's values to find which hold code (_holds_code); calls nothing"),
     ("_holds_code getattr#1",
+     "return any(_holds_code(item, depth + 1) for item in held + list(getattr(value,"
+     " \"__dict__\", dict()).values()))",
      "reads an object's instance attributes to inspect them; calls nothing"),
     ("_nth_call getattr#1",
+     "inner = getattr(target, attr) if attr else target",
      "reads the attribute a pin entry names, to patch it; the call is made at the case's site, pinned there"),
     ("_nth_call getattr#2",
+     "call.__name__ = getattr(inner, \"__name__\", name)",
      "reads the patched callable's __name__ for diagnostics; calls nothing"),
     ("_nth_call globals#1",
+     "target = globals()[name]",
      "reads the global a pin entry names, to patch it; the call is made at the case's site, pinned there"),
     ("_patched globals#1",
+     "g = globals()",
      "rebinds the globals a case names; the replacement values are the case's own code, walked where defined"),
     ("_site_walk getattr#1",
+     "outer = list(getattr(node, \"decorator_list\", ()))",
      "reads an AST node's decorator list; calls nothing"),
 )
 
