@@ -459,6 +459,7 @@
 .preview/clock-inject.py text eol=lf
 .preview/constraint-reread.py text eol=lf
 .preview/future-stamp-write.py text eol=lf
+.preview/pattern-self-match.py text eol=lf
 .preview/record-remove-check.py text eol=lf
 .preview/rerun-pass-check.py text eol=lf
 .preview/stamp-truth-stop.py text eol=lf

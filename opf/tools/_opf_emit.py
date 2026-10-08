@@ -3319,7 +3319,9 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
     one) releases the ones already opened and is this check's own named failure, never an escaping
     exception. The stack's release closes a number only while fstat still returns the identity recorded at
     its open, so a number this check expected released, and another lane reopened onto any other file, is
-    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    never closed by this check's cleanup either (#378 P1). Only EBADF reads as released there: any other
+    fstat error is a failure naming the number, which is left open (its file is unknown), never read as
+    released. `reuse`, when a leg passes one, is called with
     the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
     Returns the failures."""
     import contextlib
@@ -3348,8 +3350,11 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         """Close fd only while it still names the file recorded at its open, this check's own."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return                                        # released already: never closed again
+        except OSError as exc:
+            if exc.errno != errno.EBADF:                  # unreadable, never read as released: named, left open
+                failures.append("guardian-close-reuse setup failure: cleanup cannot evaluate descriptor {}: "
+                                "{!r}".format(fd, exc))
+            return                                        # EBADF: released already, never closed again
         if (st.st_dev, st.st_ino) != ident:
             return                                        # another file holds the number now: not ours
         try:
@@ -3410,8 +3415,9 @@ def _st_guardian_close_reuse():
     private directory, so a number it expected released is closed only while fstat shows that file's
     identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
     lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
-    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
-    is still reported and closed.
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, a genuine leak
+    is still reported and closed, and a cleanup leg shows an fstat EIO in the setup check's own release is
+    its failure naming that number, left open, never read as released.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3523,15 +3529,27 @@ def _st_guardian_close_reuse():
         ident, a file this leg created in its private directory, which no other lane opens and whose inode
         stays taken while the directory exists. The number may since belong to another thread's open, so a
         number naming any other file (another lane's /dev/null included) is never closed (#378 P1). Returns
-        whether it closed fd."""
+        True when it closed fd, False when fd is released (EBADF, the only error read as released) or names
+        another file, and for any other fstat error a cannot-evaluate string naming fd: that number is never
+        closed (its file is unknown) and never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return False
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         if (st.st_dev, st.st_ino) != ident:
             return False
         os.close(fd)
         return True
+
+    def left_open(fd, ident, what):
+        """The leak verdict on a number this leg expected released: [] when it is released or names another
+        file, else the named failure: `what` left open (and closed here), or a number fstat cannot read."""
+        closed = close_if_left_open(fd, ident)
+        if closed is True:
+            return [what + " was left open"]
+        return [what + ": " + closed] if closed else []
 
     def own_file(name):
         """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
@@ -3544,10 +3562,14 @@ def _st_guardian_close_reuse():
         return fd, (st.st_dev, st.st_ino)
 
     def identity(fd):
+        """fd's (st_dev, st_ino); None once fd is closed (EBADF only); any other fstat error returns a
+        cannot-evaluate string naming fd, which matches no identity and is never read as released."""
         try:
             st = os.fstat(fd)
-        except OSError:
-            return None
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                return None
+            return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
         return st.st_dev, st.st_ino
     with tempfile.TemporaryDirectory(prefix="opf-emit-setup-") as private:   # kept until every number is checked
         got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails, private)
@@ -3555,9 +3577,29 @@ def _st_guardian_close_reuse():
             failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
                             "named failure alone, got {}".format(got or "green"))
         for fd, ident in opened:
-            if close_if_left_open(fd, ident):
-                failures.append("guardian-close-reuse setup failure with its second open failing: the "
-                                "descriptor opened first was left open")
+            failures += left_open(fd, ident, "guardian-close-reuse setup failure with its second open failing: "
+                                             "the descriptor opened first")
+        # The leak verdict fails closed: a number left open on this leg's own file whose fstat fails EIO is
+        # reported naming it, never read as released. An independent fstat must still see it open, else the
+        # case proves nothing; the leg then closes it, its own file.
+        held, ident = own_file("unreadable")
+        import os as _os_census                   # patched through an alias: `os` itself is never rebound here
+        real_fstat = _os_census.fstat
+
+        def unreadable(number, *args, **kwargs):
+            if number == held:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = unreadable
+        try:
+            got = left_open(held, ident, "held")
+        finally:
+            _os_census.fstat = real_fstat
+        if len(got) != 1 or "cannot evaluate descriptor {}:".format(held) not in got[0] or identity(held) != ident:
+            failures.append("guardian-close-reuse leak verdict under a census EIO: expected the held descriptor "
+                            "named cannot-evaluate and left open, got {}".format(got or "released"))
+        if identity(held) == ident:
+            os.close(held)
         # Another lane opening a file onto the released number: dup2 puts a descriptor on this leg's own
         # "other-lane" file onto a number this leg still owns, so the number is never free for a real lane to
         # take meanwhile. It must not be closed and must not be reported; the leg then closes it only while
@@ -3570,9 +3612,12 @@ def _st_guardian_close_reuse():
             except BaseException:
                 os.close(reused)                          # dup2 failed: still this leg's own file
                 raise
-            if close_if_left_open(reused, ident):
+            closed = close_if_left_open(reused, ident)
+            if closed is True:
                 failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
                                 "onto another file")
+            elif closed:
+                failures.append("guardian-close-reuse identity check: " + closed)
             elif identity(reused) != other_ident:
                 failures.append("guardian-close-reuse identity check: the number another lane reopened no "
                                 "longer names that lane's file")
@@ -3599,11 +3644,42 @@ def _st_guardian_close_reuse():
             os.close(other)
         # A genuine leak: a number still naming this leg's own file is reported and closed.
         leaked, ident = own_file("leaked")
-        if not close_if_left_open(leaked, ident) or identity(leaked) == ident:
+        after = identity(leaked) if close_if_left_open(leaked, ident) is True else ident
+        if after == ident or isinstance(after, str):
             failures.append("guardian-close-reuse identity check: a descriptor left open on this leg's own "
                             "file was not reported and closed")
             if identity(leaked) == ident:
                 os.close(leaked)
+        # The setup check's cleanup fails closed: fstat of the second descriptor it opened fails EIO in its
+        # ExitStack release alone (the check's own reads before it succeed), so that descriptor must be named
+        # cannot-evaluate and left open, never read as released; every other one is released. The check's
+        # own private directory is removed on return, but the open descriptor keeps its inode, so its
+        # identity stays unique; the leg then closes it while it still names the check's file.
+        seen = []
+
+        def capture(fresh):
+            seen.extend((fd, identity(fd)) for fd in fresh)
+        real_fstat = _os_census.fstat
+
+        def cleanup_unreadable(number, *args, **kwargs):
+            if len(seen) == 4 and number == seen[1][0] and sys._getframe(1).f_code.co_name == "release":
+                raise OSError(errno.EIO, "injected cleanup read failure")
+            return real_fstat(number, *args, **kwargs)
+        _os_census.fstat = cleanup_unreadable
+        try:
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=capture)
+        finally:
+            _os_census.fstat = real_fstat
+        if len(seen) != 4 or len(got) != 1 or "cleanup cannot evaluate descriptor {}:".format(seen[1][0]) \
+                not in got[0] or identity(seen[1][0]) != seen[1][1]:
+            failures.append("guardian-close-reuse setup failure with its cleanup fstat failing EIO: expected "
+                            "the unreadable descriptor named cannot-evaluate and left open, got "
+                            "{}".format(got or "green"))
+        for number, recorded_ident in seen[:1] + seen[2:]:
+            failures += left_open(number, recorded_ident, "guardian-close-reuse setup failure with its cleanup "
+                                                          "fstat failing EIO: descriptor {}".format(number))
+        if len(seen) == 4 and identity(seen[1][0]) == seen[1][1]:
+            os.close(seen[1][0])                          # the check's own file, left open by design
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
@@ -3891,6 +3967,7 @@ def self_test():
 
     # ===== ROUND-6 codex: run_bounded watchdog hardening (this is the shared implementation imported by
     # _opf_check and _opf_release, so proving it here holds for all three self-tests) ====================
+    import errno
     import os as _os6
     import signal as _sig6
     import resource as _res6
@@ -3995,10 +4072,14 @@ def self_test():
         _close_real6 = _os6.close
 
         def _st_ident6(fd):
+            """fd's (st_dev, st_ino); None once fd is closed (EBADF, the only error read as closed). Any other
+            fstat error returns a cannot-evaluate string naming fd, never None that a caller reads as released."""
             try:
                 _st = _os6.fstat(fd)
-            except OSError:
-                return None
+            except OSError as _exc:
+                if _exc.errno == errno.EBADF:
+                    return None
+                return "cannot evaluate descriptor {}: {!r}".format(fd, _exc)
             return _st.st_dev, _st.st_ino
 
         def _cap_pipe_into(cap):
@@ -4028,13 +4109,18 @@ def self_test():
             return True
 
         def _cap_left_open6(cap):
-            """Whether the captured rfd is left open: no close released it and fstat still shows its identity."""
-            return cap.get("released") is False and _st_ident6(cap["rfd"]) == cap["ident"]
+            """True when the captured rfd is left open (no close released it and fstat still shows its identity),
+            False when released, and the cannot-evaluate string naming it when its fstat fails other than
+            EBADF: never read as released, and never closed (its file is unknown)."""
+            if cap.get("released") is not False:
+                return False
+            _got = _st_ident6(cap["rfd"])
+            return _got if isinstance(_got, str) else _got == cap["ident"]
 
         def _cap_reuse_kept6(cap, label, key="rfd"):
             """After a reuse run the captured number (cap[key]) must still name the other-lane pipe; the leg then
             closes it, its own descriptor. Returns the failures."""
-            if cap.get(key) is None or _st_ident6(cap[key]) != _oth6:
+            if cap.get(key) is None or isinstance(_oth6, str) or _st_ident6(cap[key]) != _oth6:
                 return ["run_bounded/{}-reused-number: a number another lane reused was closed or replaced "
                         "({})".format(label, cap.get(key))]
             _close_real6(cap[key])
@@ -4042,6 +4128,29 @@ def self_test():
         _oth_r6, _oth_w6 = _pipe_real6()                   # the other-lane file: this leg's own pipe
         _oth6 = _st_ident6(_oth_r6)
         _cap6 = dict()
+
+        # The left-open check fails closed: a captured, unreleased rfd still open whose fstat fails EIO is the
+        # cannot-evaluate string naming it, never read as released. An independent fstat must still see it
+        # open, else the case proves nothing.
+        _eio_r6, _eio_w6 = _pipe_real6()
+        _eio_cap6 = dict(rfd=_eio_r6, ident=_st_ident6(_eio_r6), released=False)
+        _eio_real6 = _os6.fstat
+
+        def _eio_fstat6(fd, *args, **kwargs):
+            if fd == _eio_r6:
+                raise OSError(errno.EIO, "injected census read failure")
+            return _eio_real6(fd, *args, **kwargs)
+        _os6.fstat = _eio_fstat6
+        try:
+            _eio_got6 = _cap_left_open6(_eio_cap6)
+        finally:
+            _os6.fstat = _eio_real6
+        if not (isinstance(_eio_got6, str) and "descriptor {}:".format(_eio_r6) in _eio_got6) \
+                or _st_ident6(_eio_r6) != _eio_cap6["ident"]:
+            failures.append("run_bounded/left-open-census-eio: an EIO fstat of a held captured rfd read as "
+                            "{!r}, not cannot-evaluate naming it".format(_eio_got6))
+        _close_real6(_eio_r6)
+        _close_real6(_eio_w6)
 
         def _cap_close6(fd):
             if not _cap_release6(_cap6, fd, _close_real6):
@@ -4058,14 +4167,16 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.close = _close_real6
             _leaked6 = _cap_left_open6(_cap6)
-            if _leaked6:
+            if _leaked6 is True:
                 _close_real6(_cap6["rfd"])                 # still this leg's own pipe: close the leak it detected
             if _leak_res != "LEAKCHK":
                 failures.append("run_bounded/leak-check-setup{}: the capture run did not return its "
                                 "token".format(_tag6))
-            if _leaked6:
+            if _leaked6 is True:
                 failures.append("run_bounded/parent-rfd-leak{}: the parent did not close the pipe read fd "
                                 "(a descriptor leaks per call)".format(_tag6))
+            elif _leaked6:
+                failures.append("run_bounded/parent-rfd-census{}: {}".format(_tag6, _leaked6))
             elif _reuse6:
                 failures += _cap_reuse_kept6(_cap6, "parent-rfd")
 
@@ -4118,10 +4229,13 @@ def self_test():
                 _os6.pipe = _pipe_real6
                 _os6.fork = _fork_real7
                 _os6.close = _close_real7
-            if _cap7.get("rfd") is not None and _cap_left_open6(_cap7):
+            _left7 = _cap7.get("rfd") is not None and _cap_left_open6(_cap7)
+            if _left7 is True:
                 _close_real7(_cap7["rfd"])                 # still this leg's own pipe: close the leak it detected
                 failures.append("run_bounded/wfd-close-raise-rfd-leak{}: a raising parent wfd close skipped the "
                                 "rfd cleanup (read fd leaked; finding 7)".format(_tag7))
+            elif _left7:
+                failures.append("run_bounded/wfd-close-raise-rfd-census{}: {}".format(_tag7, _left7))
             elif _reuse7:
                 failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-rfd")
             if _reuse7:

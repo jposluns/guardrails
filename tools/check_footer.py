@@ -383,8 +383,13 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
-    with tempfile.TemporaryDirectory() as d5:
-        close_failures, close_runs = _close_vectors(Path(d5))
+    import _close_selftest
+    try:
+        with tempfile.TemporaryDirectory() as d5:
+            close_failures, close_runs = _close_vectors(Path(d5))
+    except _close_selftest._StCensusError as exc:     # the descriptor census cannot read one: cannot-evaluate
+        print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+        return 2
     failures.extend(close_failures)
     if failures:
         print("FAIL: check_footer self-test")

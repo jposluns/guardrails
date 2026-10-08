@@ -1296,6 +1296,7 @@ def _self_test_main_isolated():
     saved_now = _now
     saved_mkdtemp = _mkdtemp
     cleanup_error = None
+    census_error = None
     close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
@@ -1561,8 +1562,12 @@ def _self_test_main_isolated():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            census_error = exc
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1575,6 +1580,9 @@ def _self_test_main_isolated():
     if cleanup_error is not None:
         print("SELF-TEST ERROR: could not remove the self-test tempdir ({}); fail-closed"
               .format(cleanup_error), file=sys.stderr)
+        return 2
+    if census_error is not None:
+        print("SELF-TEST ERROR: {}".format(census_error), file=sys.stderr)
         return 2
     if failures:
         print("SELF-TEST FAIL:")
