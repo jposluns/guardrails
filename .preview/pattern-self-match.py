@@ -1034,18 +1034,19 @@ def _self_test():
         "sys.stdout.write(json.dumps(out) + '\\n')"))
 
     # The child that T.run_hook runs: this file loaded as a module, its main called with this file's path and the
-    # arguments after it, its _read_complete given 30 seconds whatever arguments main passes, the child's default
-    # bound (T.child), so a verdict there depends on how fast the host runs the child only when the host stalls it
-    # (or this test) for about that long (QA rounds 11 and 12). The arguments main passes, stdin at the production
-    # deadline, are pinned in process (T.scheduled with via_main); the script's own entry point runs on the
-    # actual command line in T.hook.
+    # arguments after it, its _read_complete given 20 seconds whatever arguments main passes, 10 seconds below the
+    # child's default parent-observed bound of 30 (T.child), so a reader that waits its whole deadline still exits
+    # before the kill, and a verdict there depends on how fast the host runs the child only when the host stalls
+    # it (or this test) for about 20 seconds (QA rounds 11 to 13). The arguments main passes, stdin at the
+    # production deadline, are pinned in process (T.scheduled with via_main); the script's own entry point runs
+    # on the actual command line in T.hook and T.child with [here].
     MAIN = "\n".join((
         "import importlib.util, sys",
         "spec = importlib.util.spec_from_file_location('hook', sys.argv[1])",
         "hook = importlib.util.module_from_spec(spec)",
         "spec.loader.exec_module(hook)",
         "read = hook._read_complete",
-        "hook._read_complete = lambda *a, **k: read(0, 30.0)",
+        "hook._read_complete = lambda *a, **k: read(0, 20.0)",
         "sys.exit(hook.main(sys.argv[1:]))"))
 
     def decide(command, env=None, **extra):
@@ -1468,16 +1469,22 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
 
         def test_09_process_fail_open(self):
-            # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently
+            # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently; each one on
+            # the actual command line, through the script's own entry point (QA round 13): those that fit in the
+            # pipe's buffer written before the child starts (hook), the one over the 16 MiB read bound written
+            # while it reads (child with [here]), where the note is the verdict whether the hook stops at the bound
+            # or at its production deadline. That one also runs through main (run_hook), whose reader's 20-second
+            # deadline leaves the read bound the only way to the note on any host that writes it in time.
+            huge = payload_bytes("pkill -f qa-x/ #" + "x" * (17 * 1024 * 1024))  # over the 16 MiB read bound
             bad = (b"", b"not json", b"[1, 2]", b"7", b"\xff\xfe\x00garbage", b'{"tool_name": "Bash"',
-                   payload_bytes("pkill -f qa-x/")[:-1], payload_bytes("echo hi").replace(b"hi", b"h\xffi"),
-                   payload_bytes("pkill -f qa-x/ #" + "x" * (17 * 1024 * 1024)))  # over the 16 MiB read bound
+                   payload_bytes("pkill -f qa-x/")[:-1], payload_bytes("echo hi").replace(b"hi", b"h\xffi"), huge)
             bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM (QA round 5)
             bad += tuple(non_json_constants())  # NaN, Infinity and -Infinity are not JSON (QA round 6)
             for data in bad:
-                rc, out, err = self.run_hook(data)
-                self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), data[:30])
-                self.assertEqual(json.loads(out), dict(systemMessage=_NOTE_PAYLOAD), data[:30])
+                for rc, out, err in ((self.hook(data),) if data is not huge else
+                                     (self.child([here], [(0, data)]), self.run_hook(data))):
+                    self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), data[:30])
+                    self.assertEqual(json.loads(out), dict(systemMessage=_NOTE_PAYLOAD), data[:30])
             for data in (payload_bytes("pkill -f qa-x/", tool_name="Read"),
                          payload_bytes("pkill -f qa-x/", hook_event_name="PostToolUse")):
                 self.assertEqual(self.hook(data), (0, b"", b""), data[:30])
@@ -1531,9 +1538,25 @@ def _self_test():
                 self.assertEqual(sys.stdout.getvalue(), "")
             finally:
                 sys.stdout = old
-            # on the actual command line (hook): an unsupported argument returns before stdin is read (QA round 12)
+            # on the actual command line: an unsupported argument returns 0 silently before stdin is read. The
+            # payload and its end of input are in the pipe before the child starts, and a duplicate of the pipe's
+            # read end kept here still holds the whole payload after the child exits (QA rounds 12 and 13)
+            data = payload_bytes("pkill -f qa-x/")
             for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""]):
-                self.assertEqual(self.hook(payload_bytes("pkill -f qa-x/"), argv=argv), (0, b"", b""), argv)
+                r, w = os.pipe()
+                try:
+                    self.assertEqual(os.write(w, data), len(data))
+                    os.close(w)
+                    w = None
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here] + argv, stdin=r,
+                                       capture_output=True, env=dict(LC_ALL="C"), timeout=30)
+                    os.set_blocking(r, False)
+                    self.assertEqual((p.returncode, p.stdout, p.stderr, os.read(r, len(data) + 1)),
+                                     (0, b"", b"", data), argv)
+                finally:
+                    for fd in (r, w):
+                        if fd is not None:
+                            os.close(fd)
 
         def test_10_directory_stdin_guard(self):
             if not os.path.exists("/bin/sh"):
@@ -2115,9 +2138,10 @@ def _self_test():
         def run_hook(self, data, env=None, argv=()):
             """The hook's main run in a child process (child, MAIN) on data and then the end of input, with argv
             after this file's path and env the whole environment: (status, stdout, stderr). Its reader is given
-            30 seconds whatever arguments main passes, the child's bound, so these verdicts depend on how fast the
-            host runs the child only when the host stalls it (or this test) for about that long (QA rounds 11 and
-            12); scheduled with via_main pins that main reads stdin at the production deadline."""
+            20 seconds whatever arguments main passes, 10 seconds below the child's parent-observed 30-second
+            bound, so a reader that waits its whole deadline exits before the kill, and these verdicts depend on
+            how fast the host runs the child only when the host stalls it (or this test) for about 20 seconds (QA
+            rounds 11 to 13); scheduled with via_main pins that main reads stdin at the production deadline."""
             return self.child(["-c", MAIN, here] + list(argv), [(0, data)], env=env)
 
         def hook(self, data, env=None, argv=()):
@@ -2130,14 +2154,16 @@ def _self_test():
             (QA round 12). data must fit in the pipe's buffer. Returns (status, stdout, stderr)."""
             return self.child([here] + list(argv), [(0, data)], env=env, before=True)
 
-        def child_read(self, parts, deadline=30.0, end=True, reader="_read_complete", max_input=None,
+        def child_read(self, parts, deadline=20.0, end=True, reader="_read_complete", max_input=None,
                        bound=30):
             """reader (this file's _read_complete, or the vendored _read_payload) called in a child process (child,
             DRIVER) on its stdin, given deadline seconds (None: the reader's default, the production
             _READ_DEADLINE of 2.0) and, when max_input is given, a _MAX_INPUT of max_input: the payload, or
             "refused: <message>" for the ValueError it raised. The child must exit 0 with one line on stdout and
-            nothing on stderr within bound seconds (child). The default deadline of 30 seconds equals the default
-            bound, so an input that ends is refused for lateness only when the child ran past its bound anyway."""
+            nothing on stderr within bound seconds (child). The default deadline of 20 seconds is 10 seconds below
+            the default parent-observed bound of 30, so a reader that waits its whole deadline exits, and is
+            reported, before the kill (QA round 13); every caller that passes a deadline of None (the production
+            2.0 seconds) passes a bound of 12, the same 10-second margin."""
             rc, out, err = self.child(["-c", DRIVER, here, reader, "-" if deadline is None else repr(deadline),
                                        "-" if max_input is None else str(max_input)], parts, end, bound)
             self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), out)
@@ -2412,7 +2438,7 @@ def _self_test():
 
         def test_m46_input_still_open(self):
             """End to end, in child processes (child): the reader on a real pipe, clock and select, and the hook's
-            own main. Input that ends is taken (the reader given a 30-second deadline). Input that never ends (its
+            own main. Input that ends is taken (the reader given a 20-second deadline). Input that never ends (its
             write end kept open until the child exits) is refused with the deadline's message by the reader at its
             production deadline, although a whole JSON value has been written; through main it gets the
             cannot-evaluate note, not the deny that payload gets once read. A reader with no deadline never

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "385170b110050bcb76d2b5004d8649ff30ac1ade2a990a077135f093c5cf8095"
+tree-sha256 = "ada79feabb0eb2e10fdbe8505eb823fa9c5d443c333cf6a4fa477232df810c6f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2262,12 +2262,12 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 [[sources]]
 path = ".preview/README.md"
 bytes = 50534
-sha256 = "b67f04a66ac49df44da876c80806562e35857def908d0e79462d393f9c1be5c4"
+sha256 = "e0728cb0b9848cabc54fcca0b955d2b1fe7afbf82ea6031fc07a4b0cf71b3ab5"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 897
-sha256 = "e776b8f990ba1e647c3e704a350e8a8864313af33a0cf315d80659075a22aa0a"
+sha256 = "60fba029074a61670aa506fdb9d1c092e30eaf974ec02800f325d7d4de39998f"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2286,8 +2286,8 @@ sha256 = "0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c"
 
 [[sources]]
 path = ".preview/pattern-self-match.py"
-bytes = 154938
-sha256 = "3e0c09042cce69af7cb59aefe8c8ed8bc0be813e1f9e37f303c98d90f87492f6"
+bytes = 156983
+sha256 = "9f641cc9b6a1d31805b53ae49e2ef8d2b9deb9214baa4d59d20222647df483ca"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
