@@ -643,14 +643,16 @@ id = "git-fixture-env-selftest"
 runner = "tools/selftest_git_fixture_env.py"
 expected-check-ids = [
   "config/member-bound-table",
-  "config/member-cleanup-mask-restored",
+  "config/member-close-on-interrupt",
+  "config/member-closing-refuses-start",
   "config/member-failure-diagnostic-stdout",
+  "config/member-grandchild-after-normal-exit",
+  "config/member-off-main-thread",
   "config/member-timeout-cannot-evaluate",
   "config/member-timeout-cleanup-failure",
   "config/member-timeout-cleanup-on-raise",
   "config/member-timeout-diagnostic-guarded",
   "config/member-timeout-interrupt-cleanup",
-  "config/member-timeout-interrupt-points",
   "config/member-timeout-kills-group",
   "config/member-timeout-main-verdict",
   "config/member-timeout-main-verdict-mixed",
