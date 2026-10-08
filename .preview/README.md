@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Eight hooks are published here, each listed with its checksum and link in the integrity table below.
+Nine hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -23,7 +23,8 @@ rule that a standing constraint persists across context loss
 backs the rule that a rerun pass does not erase an earlier failure
 ([the rule text](../.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)); both are linked in the
 [enforcement register](../ENFORCEMENT.md). The other hooks guard completion
-records, background polling loops, and existing working-record files. Each one is a discipline
+records, background polling loops, existing working-record files, and commands that select processes by a
+pattern. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
 error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
 exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
@@ -66,6 +67,18 @@ the authority, and the summary further down this page only points to it.
   before the command runs and names the file and its size. It covers `rm` (including recursive
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
+  Event: `PreToolUse`, matcher `Bash`.
+- **`pattern-self-match.py`** denies a shell command that would stop or wait on processes chosen by
+  `pgrep -f` or `pkill -f` when the pattern is plain text in the command itself. The shell that runs the
+  command carries that text in its own command line, so `pkill -f worker/` signals that shell, and
+  `while pgrep -f worker/ >/dev/null; do sleep 2; done` never finishes by itself. It backs the rule that an
+  action binds to its explicit target, not to ambient context
+  ([the rule text](../.claude/rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md)); its reason
+  points to stopping work by the process id or group recorded at launch. It denies only a closed set of
+  shapes, listed in its docstring. A command outside that set that names a process matcher (`pgrep`,
+  `pkill`, `killall`, `pidof`, or `grep` beside `ps`) whose pattern is text the command holds is allowed
+  with a note (a `systemMessage`, with no permission decision); it never asks. It also checks
+  helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
 - **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
   refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
@@ -145,6 +158,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `3da9d99bfb51d130afba1d4ffe4af0c639ccab60c47ce9b4ccaecb943838d591` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -211,7 +225,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the eight hooks:
+   Use this launch line for each of the nine hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -221,8 +235,9 @@ fails and report it; do not work around a failed check.
      loads it; `-S` skips site packages, which these hooks do not use; `-B` writes no bytecode cache.
    - The `[ -d ... ]` tests are a launch guard: if any standard stream is a directory, Python would fail
      before the hook's own code could fail open, so the guard skips the hook instead.
-   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
-     of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
+   - For `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `pattern-self-match.py`,
+     use this guard in place of their docstrings' `REGISTRATION` line, which tests only stdin. This guard
+     has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
      `constraint-reread.py`, and `rerun-pass-check.py` do not define a `REGISTRATION` constant; use this
@@ -236,7 +251,7 @@ fails and report it; do not work around a failed check.
      `error: <file> requires Python 3.14 or newer` to standard error, and exits.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
+     assistant and nothing is blocked; for the five `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
      `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
@@ -252,10 +267,10 @@ fails and report it; do not work around a failed check.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the eight hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the nine hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
+   `future-stamp-write.py` matches file writes and shell commands, and the other four match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
    `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
@@ -290,29 +305,32 @@ fails and report it; do not work around a failed check.
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] }
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/pattern-self-match.py\"'" } ] }
        ]
      }
    }
    ```
 
-   The self-tests for `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` include
-   byte-identity checks against `block-bare-detach.py` and `inplace-edit-verify.py`, two reference hooks
-   not yet published here. Those checks report `SKIPPED` until the reference files are available;
-   skipped is not a pass. The `record-remove-check.py` differential check also reports
-   `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
+   The self-tests for `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and
+   `pattern-self-match.py` include byte-identity checks against `block-bare-detach.py` and (all but
+   `pattern-self-match.py`) `inplace-edit-verify.py`, two reference hooks not yet published here. Those
+   checks report `SKIPPED` until the reference files are available; skipped is not a pass. The
+   `record-remove-check.py` differential check and the `pattern-self-match.py` check that bash accepts
+   its deny examples also report `SKIPPED, no trusted bash` when they cannot find a trusted root-owned
+   `/usr/bin/bash` or `/bin/bash`.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other seven, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other eight, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the eight above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the nine above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -346,9 +364,13 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   calls. For an intended destruction, put `# record-rm-ok: <reason>` after the last command token on the
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
+- **`pattern-self-match.py`** needs no store or lease setting. It skips the worker processes described
+  above, but still checks helper-session calls. When selecting the shell that runs the command is
+  intended, end the command with a real, unquoted shell comment such as
+  `# self-match-ok: the shell is meant to stop too`.
 
-The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
-command. Their reasons are optional; text inside quotes does not opt out.
+The `record-ok`, `wait-ok`, and `self-match-ok` comments must begin a word and be the last non-blank
+content of the command. Their reasons are optional; text inside quotes does not opt out.
 
 | Variable | What it does |
 |---|---|
@@ -357,7 +379,7 @@ command. Their reasons are optional; text inside quotes does not opt out.
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
-| `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
+| `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `pattern-self-match.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
 
@@ -504,10 +526,23 @@ section of its opening docstring. Read that section before relying on a hook; in
   and files beyond its scan budgets are not fully checked. Moving a record out of the store is allowed.
   A file created or filled after the check can be lost without a warning. It can deny unreachable
   commands and files that have a good backup; it does not check for a restore path.
+- **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
+  observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
+  the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps
+  matches. A shell function or alias named `kill`, `pkill` or `pgrep` can change what a denied command
+  runs. Everything else, including compound commands, `&&` lists, `ps | grep` pipelines, `sudo` or
+  `exec` prefixes, `killall`, `pidof` and nested shell strings, gets a note at most, and a pattern built
+  when the command runs (holding `$` or a backtick) gets nothing. Its notes come from an approximate
+  reading of the words, so some are missed or given wrongly, and a matcher word counts even as an
+  argument. Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to you,
+  has not been checked.
 
 `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` also allow commands over 64 KiB or
 input they cannot follow. Their docstrings describe further parsing limits and work budgets. All three skip
 verification worker processes; `ungated-record.py` and `unbounded-wait.py` also skip helper-session calls.
+`pattern-self-match.py` instead adds a note for a command over 64 KiB, or one it cannot read, that names
+a process matcher, and for its own internal error; it skips verification worker processes and checks
+helper-session calls.
 
 ## Status and retirement
 
