@@ -55,7 +55,13 @@ the environment checks do not depend on the host; every diagnostic this module r
 prints is formatted through ONE scrubber (_scrub), which replaces any substring equal to the value
 of a variable now in os.environ (length at least 4) with a placeholder naming the variable, keeping
 only paths under the host's temporary directory (TMPDIR) and the paths of the repository and of
-the interpreter, which a variable such as HOME or PATH can share; closure/scrub-sites pins that
+the interpreter, which a variable such as HOME or PATH can share; a whole path token of the text
+that is, or lies under, one of those paths is kept even where a SHORTER value (a user name whose
+value appears in TMPDIR's path) is a substring of it, and every self-test comparison of expected
+text against a diagnostic scrubs the expected side, so no comparison depends on the host's
+environment values (closure/host-independence re-runs the affected cases in a child whose USER,
+LOGNAME and HOME value appears in its TMPDIR path, and requires that value never disclosed
+outside such a path); closure/scrub-sites pins the scrubbing
 rule in this file's AST, so a new raise or print cannot bypass _scrub, and _check_env_canaries
 drives the refusal, wrong-report and launch paths with a canary, scanning each sub-check's
 diagnostics and every captured stream on the return and the exception path alike; a captured
@@ -109,7 +115,9 @@ from _gen_common import repo_root  # noqa: E402
 # Captured child and callback streams are parsed and scanned RAW (scrubbing a report or an
 # evidence line whose text an environment value happens to share would corrupt what is judged)
 # and are scrubbed wherever a diagnostic embeds them, because every diagnostic is formatted
-# through _scrub. The shortest value _scrub replaces:
+# through _scrub. Where the self-test compares expected text against a scrubbed diagnostic or
+# stream, the expected side goes through _scrub at the comparison, so both sides carry the same
+# replacements on any host. The shortest value _scrub replaces:
 _SCRUB_MIN_LEN = 4
 
 # The paths diagnostics may carry even where an environment variable shares them: the host's
@@ -121,18 +129,51 @@ _SCRUB_EXEMPT_PATHS = tuple(Path(part) for part in dict.fromkeys(
     str(path) for path in (gettempdir(), Path(gettempdir()).resolve(), repo_root(),
                            Path(repo_root()).resolve(), sys.executable or "") if str(path)))
 
+# The rest of one path token, after an anchor already matched: whole /-separated components of the
+# characters mkdtemp, this repository and the interpreter use in path names, with no backtracking
+# ambiguity (the separator is not in the component class). The lookahead rejects an anchor glued to
+# another path character (<anchor>x is a sibling path, not a path under the anchor).
+_SCRUB_PATH_TOKEN = r"(?:/[A-Za-z0-9._+-]+)*/?(?![A-Za-z0-9._+-])"
+
+
+def _path_spans_pattern(anchors):
+    """A compiled pattern matching every whole path token of a text that is, or lies under, one of
+    `anchors` (each an absolute path; at least one must be non-empty). Longer anchors are tried
+    first, so a nested anchor never truncates an outer anchor's match. A token is the anchor
+    followed by whole /-separated components of [A-Za-z0-9._+-]; a component holding any other
+    character ends the token there (the remainder is matched on its own where it lies under the
+    anchor, and is scrubbed like any other text where it does not)."""
+    parts = sorted(set(str(anchor) for anchor in anchors if str(anchor)), key=len, reverse=True)
+    return re.compile("|".join(re.escape(part) + _SCRUB_PATH_TOKEN for part in parts))
+
+
+# The spans _scrub never rewrites: every whole path token that is, or lies under, one of
+# _SCRUB_EXEMPT_PATHS. Frozen at import beside _SCRUB_EXEMPT_PATHS.
+_SCRUB_EXEMPT_SPANS = _path_spans_pattern(_SCRUB_EXEMPT_PATHS)
+
 
 def _scrub(text):
     """`text` with every substring equal to the value of a variable now in os.environ replaced by
     the fixed placeholder "<value of NAME>" naming the variable (the alphabetically first name,
     where several variables share the value). Replaced in one pass over `text` (a placeholder is
-    never rescanned). Exempt, and so kept: a value shorter than _SCRUB_MIN_LEN characters, and a
-    value that is one of _SCRUB_EXEMPT_PATHS, lies under one, or is an ancestor of one.
+    never rescanned). Exempt, and so kept: a value shorter than _SCRUB_MIN_LEN characters; a
+    value that is one of _SCRUB_EXEMPT_PATHS, lies under one, or is an ancestor of one; and every
+    whole path token of `text` that is, or lies under, one of _SCRUB_EXEMPT_PATHS
+    (_SCRUB_EXEMPT_SPANS), so a shorter value that is a substring of such a path (a user name
+    inside the host's temporary directory's path) never rewrites it: the stated exception covers
+    the whole token, never part of it. Outside those spans a value is replaced wherever it
+    appears, inside a longer word included: replacing only at token boundaries would keep such a
+    word readable, but would keep a value embedded in a token a diagnostic carries (a file or
+    host name built from the value), so the substring match stays and what it can rewrite is
+    confined to text that is not an exempt path.
     Diagnostics may name variables, keys and checks; this is how they avoid carrying a value.
     Residuals: a value no longer in os.environ when a diagnostic is formatted is not recognized
-    (every canary diagnostic is formatted while its variable is still set), and a value that is a
+    (every canary diagnostic is formatted while its variable is still set); a value that is a
     substring of fixed diagnostic text is replaced there too (the placeholder then stands where
-    that text read)."""
+    that text read, on both sides of a comparison whose expected text is scrubbed); and a value
+    that is a substring of an exempt path token is kept there even where that value is also
+    something else of the environment (the whole token is, by the stated exception,
+    disclosable)."""
     values = {}
     for key in sorted(os.environ):
         value = os.environ[key]
@@ -149,8 +190,11 @@ def _scrub(text):
         values[value] = key
     if not values:
         return text
-    pattern = re.compile("|".join(re.escape(value) for value in sorted(values, key=len, reverse=True)))
-    return pattern.sub(lambda match: "<value of {}>".format(values[match.group(0)]), text)
+    pattern = re.compile("(?:{})|({})".format(
+        _SCRUB_EXEMPT_SPANS.pattern,
+        "|".join(re.escape(value) for value in sorted(values, key=len, reverse=True))))
+    return pattern.sub(lambda match: match.group(0) if match.group(1) is None
+                       else "<value of {}>".format(values[match.group(1)]), text)
 
 # The OPF gate subset, relative to the copied opf/tools/ directory. Each entry is (name, [args...]); the
 # self-test legs are deterministic and git-independent (they build their own throwaway fixtures), so they
@@ -1116,9 +1160,9 @@ def _check_timeout_mapping(root):
     if rc != 2:
         raise AssertionError(_scrub("closure/timeout-exit: run() returned {} for a timed-out member".format(rc)))
     lines = out.splitlines()
-    if "  {:32s} {}".format("opf-tooling-selftest", "TIMEOUT (cannot evaluate)") not in lines:
+    if _scrub("  {:32s} {}".format("opf-tooling-selftest", "TIMEOUT (cannot evaluate)")) not in lines:
         raise AssertionError("closure/timeout-line: no TIMEOUT (cannot evaluate) line")
-    if "CANNOT EVALUATE" not in err or "BROKEN" in err:
+    if _scrub("CANNOT EVALUATE") not in err or _scrub("BROKEN") in err:
         raise AssertionError("closure/timeout-attribution: a timeout was not reported as cannot-evaluate")
 
 
@@ -1200,9 +1244,9 @@ def _check_harness_mapping(root):
             shutil.rmtree(tmp, ignore_errors=True)
     outcomes = {"opf-drift-selftest": (2, "could not launch the interpreter: stubbed", _HARNESS)}
     rc, out, err, _calls = _stubbed_run(root, outcomes)
-    if rc != 2 or "BROKEN" in err:
+    if rc != 2 or _scrub("BROKEN") in err:
         raise AssertionError(_scrub("closure/harness-exit: run() returned {} for a harness error".format(rc)))
-    if "  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)") not in out.splitlines():
+    if _scrub("  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)")) not in out.splitlines():
         raise AssertionError("closure/harness-line: no HARNESS ERROR (cannot evaluate) line")
 
 
@@ -1216,10 +1260,10 @@ def _check_failure_first(root):
         raise AssertionError(_scrub("closure/failure-first: run() returned {} for a failed member beside a "
                              "timed-out one".format(rc)))
     lines = err.splitlines()
-    if ("  opf-drift-selftest (rc=1): ImportError: check_versions" not in lines
-            or "  opf-tooling-selftest [TIMEOUT]: timed out after 1800s" not in lines
-            or not any(line.startswith("STANDALONE CLOSURE: BROKEN") for line in lines)
-            or not any(line.startswith("STANDALONE CLOSURE: CANNOT EVALUATE") for line in lines)):
+    if (_scrub("  opf-drift-selftest (rc=1): ImportError: check_versions") not in lines
+            or _scrub("  opf-tooling-selftest [TIMEOUT]: timed out after 1800s") not in lines
+            or not any(line.startswith(_scrub("STANDALONE CLOSURE: BROKEN")) for line in lines)
+            or not any(line.startswith(_scrub("STANDALONE CLOSURE: CANNOT EVALUATE")) for line in lines)):
         raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
 
 
@@ -1352,7 +1396,7 @@ def _expect_negative_cannot(label, legs, calls, prefix):
     cannot-evaluate message, starting with `prefix`, no member run, and a self-test exit of 2 over
     it. Anything else, a malformed `legs` included, refutes `label`."""
     failures, cannot = legs
-    if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
+    if failures or calls or len(cannot) != 1 or not cannot[0].startswith(_scrub(prefix)):
         raise AssertionError(_scrub("{}: {!r} with {} member call(s)".format(label, (failures, cannot), len(calls))))
     if _captured(_self_test_exit, failures, cannot)[0] != 2:
         raise AssertionError(_scrub("{}-exit: {!r}".format(label, cannot)))
@@ -1402,7 +1446,7 @@ def _check_scratch_and_copy_errors(root):
 
         def refused(label=label, cause=cause, calls=calls):
             rc, _out, err = _captured(run, root)
-            if rc != 2 or calls or cause not in err:
+            if rc != 2 or calls or _scrub(cause) not in err:
                 raise AssertionError(_scrub("{}: run() gave {} with {} member call(s)".format(label, rc, len(calls))))
         _attributed(label, refused, injected=dict(refusal, _run_one=_stub_member_runner(calls, {})))
 
@@ -1427,7 +1471,7 @@ def _expect_cannot(check, root, cause, label, injected=None):
     if got is None:
         raise AssertionError(_scrub("{}: {} passed with nothing to evaluate".format(label, check.__name__)))
     if isinstance(got, _CannotEvaluate):
-        if cause not in str(got):
+        if _scrub(cause) not in str(got):
             raise AssertionError(_scrub("{}: {} did not name the cause {!r}: {}".format(
                 label, check.__name__, cause, got)))
         return
@@ -1473,7 +1517,7 @@ def _check_absent_subtree(root):
             ("closure/members-never-copied", dict(run=lambda _root: 0),
              "closure/stubbed-run: run() exited 0 before any subset member ran, without building its copy")):
         _result, got = _observed(label, lambda: _check_timeout_mapping(root), stub)
-        if type(got) is not AssertionError or not str(got).startswith(want):
+        if type(got) is not AssertionError or not str(got).startswith(_scrub(want)):
             raise AssertionError(_scrub("{}: a run() that ran no member gave {!r}, expected a refutation "
                                  "starting {!r}".format(label, got, want)))
 
@@ -1578,13 +1622,14 @@ def _check_member_boundary(root):
             rc, out, err = _captured(run, failing)
             lines, errs = out.splitlines(), err.splitlines()
             codes = dict((name, code) for name, (_script, _body, code) in failed.items())
-            wrong = [name for name, _script, _args, _bound in _DECLARED_ROSTER if "  {:32s} {}".format(
-                name, "FAILED rc={}".format(codes[name]) if name in codes else "OK") not in lines]
-            heads = [index for index, line in enumerate(errs) if line.startswith("STANDALONE CLOSURE: BROKEN ")]
+            wrong = [name for name, _script, _args, _bound in _DECLARED_ROSTER if _scrub("  {:32s} {}".format(
+                name, "FAILED rc={}".format(codes[name]) if name in codes else "OK")) not in lines]
+            heads = [index for index, line in enumerate(errs)
+                     if line.startswith(_scrub("STANDALONE CLOSURE: BROKEN "))]
             under = errs[heads[0] + 1:] if heads else []
             wrong += [name for name, code in codes.items()
-                      if not any(line.startswith("  {} (rc={}): ".format(name, code)) for line in under)]
-            if rc != 1 or wrong or "CANNOT EVALUATE" in err:
+                      if not any(line.startswith(_scrub("  {} (rc={}): ".format(name, code))) for line in under)]
+            if rc != 1 or wrong or _scrub("CANNOT EVALUATE") in err:
                 raise AssertionError(_scrub("closure/boundary-failed: run() exited {} over a member that exits 1 and "
                                      "one killed by SIGKILL, with wrong or missing lines for {!r}".format(rc, wrong)))
         _attributed("closure/boundary-failed", boundary_failed)
@@ -1684,7 +1729,7 @@ def _check_env_canaries(root):
             if start is None:
                 if got is not None:
                     raise AssertionError(_scrub("{}: expected no refutation, got {!r}".format(label, str(got))))
-            elif not isinstance(got, AssertionError) or not str(got).startswith(start):
+            elif not isinstance(got, AssertionError) or not str(got).startswith(_scrub(start)):
                 raise AssertionError(_scrub("{}: expected a refutation starting {!r}, got {!r}".format(
                     label, start, str(got))))
 
@@ -1820,7 +1865,7 @@ def _check_env_canaries(root):
                 try:
                     attempt("closure/env-canary-noise", noisy(exc_type))
                 except AssertionError as alarm:
-                    if value in str(alarm) or not str(alarm).startswith("closure/env-canary-noise: "):
+                    if value in str(alarm) or not str(alarm).startswith(_scrub("closure/env-canary-noise: ")):
                         raise AssertionError(_scrub("closure/env-canary-noise: a wrong alarm: {!r}".format(
                             str(alarm))))
                 else:
@@ -2065,7 +2110,7 @@ def _check_undecodable_attribution(_root):
     for name, patches, want_type, want_text in runs:
         _result, got = _observed("closure/undecodable-attribution", lambda: _check_undecodable_fixture(None),
                                  patches)
-        if not isinstance(got, want_type) or want_text not in str(got):
+        if not isinstance(got, want_type) or _scrub(want_text) not in str(got):
             raise AssertionError(_scrub("closure/undecodable-attribution: {} gave {!r}, expected {} naming {!r}".format(
                 name, got, want_type.__name__, want_text)))
 
@@ -2079,7 +2124,7 @@ def _check_undecodable_attribution(_root):
                 exc)))
         _result, got = _observed("closure/undecodable-attribution", lambda: _check_leg_wiring(tmp),
                                  dict(_closure_legs=wrong_result))
-        if type(got) is not AssertionError or not str(got).startswith("closure/negative-bound-lookup"):
+        if type(got) is not AssertionError or not str(got).startswith(_scrub("closure/negative-bound-lookup")):
             raise AssertionError(_scrub("closure/undecodable-attribution: wiring wrong-result gave {!r}, expected the "
                                  "closure/negative-bound-lookup refutation".format(got)))
     finally:
@@ -2127,12 +2172,12 @@ def _check_preflight_collection():
         rc, _out, err = _attributed("closure/preflight-collection", lambda: _captured(_preflight_exit, None),
                                     injected=dict(_PREFLIGHT_CASES=cases))
         lines = err.splitlines()
-        unevaluated = [line[len("SELF-TEST CANNOT EVALUATE: "):] for line in lines
-                       if line.startswith("SELF-TEST CANNOT EVALUATE: ")]
-        refuted = [line for line in lines if line.startswith("SELF-TEST FAIL: ")]
+        cannot_head = _scrub("SELF-TEST CANNOT EVALUATE: ")
+        unevaluated = [line[len(cannot_head):] for line in lines if line.startswith(cannot_head)]
+        refuted = [line for line in lines if line.startswith(_scrub("SELF-TEST FAIL: "))]
         if (rc != want_rc or ran != want_ran or len(unevaluated) != len(want_cannot)
-                or not all(got.startswith(want) for got, want in zip(unevaluated, want_cannot))
-                or refuted != (["SELF-TEST FAIL: closure/stubbed-refutation"] if want_rc == 1 else [])):
+                or not all(got.startswith(_scrub(want)) for got, want in zip(unevaluated, want_cannot))
+                or refuted != ([_scrub("SELF-TEST FAIL: closure/stubbed-refutation")] if want_rc == 1 else [])):
             raise AssertionError(_scrub("closure/preflight-collection: gave {} after {!r}: {!r}".format(rc, ran, lines)))
     for stop in (KeyboardInterrupt, SystemExit):
         def _stop_case(_root, stop=stop):
@@ -2158,8 +2203,10 @@ def _check_preflight_failure_first(root):
     the fixture cases, must exit 1 with both the refutation and the cannot-evaluate cases listed;
     without the mutant the same scratch failure exits 2. Over a root with no opf/ subtree (scratch
     available), the same cases exit 2 with nothing refuted: a missing subtree is never a refutation.
-    "The other cases" leaves out this case and _check_attribution_inventory, which runs this case
-    (running either here would recurse). Each _preflight_exit call goes through _attributed."""
+    "The other cases" leaves out this case, _check_attribution_inventory, which runs this case
+    (running either here would recurse), and _check_host_value_independence, whose child runs this
+    case (running it here would recurse through a child of a child). Each _preflight_exit call
+    goes through _attributed."""
     no_scratch = types.SimpleNamespace(mkdtemp=_no_scratch)
 
     def substring_verdict(rc, output, cannot):
@@ -2168,14 +2215,15 @@ def _check_preflight_failure_first(root):
         text = output if isinstance(output, str) else "".join(output)
         return ("caught", None) if rc != 0 and _FLIP_EVIDENCE in text else ("fail", "stubbed")
     cases = tuple(reversed([case for case in _PREFLIGHT_CASES
-                            if case[1] not in (_check_preflight_failure_first, _check_attribution_inventory)]))
+                            if case[1] not in (_check_preflight_failure_first, _check_attribution_inventory,
+                                               _check_host_value_independence)]))
     for patches, want in ((dict(_negative_leg_verdict=substring_verdict), 1), (dict(), 2)):
         rc, _out, err = _attributed("closure/preflight-failure-first", lambda: _captured(_preflight_exit, root),
                                     injected=dict(tempfile=no_scratch, _PREFLIGHT_CASES=cases, **patches))
         lines = err.splitlines()
-        refuted = [line for line in lines if line.startswith("SELF-TEST FAIL: ")]
-        unevaluated = [line for line in lines if line.startswith("SELF-TEST CANNOT EVALUATE: ")]
-        wrong_refutation = any(not line.startswith("SELF-TEST FAIL: closure/negative-verdict")
+        refuted = [line for line in lines if line.startswith(_scrub("SELF-TEST FAIL: "))]
+        unevaluated = [line for line in lines if line.startswith(_scrub("SELF-TEST CANNOT EVALUATE: "))]
+        wrong_refutation = any(not line.startswith(_scrub("SELF-TEST FAIL: closure/negative-verdict"))
                                for line in refuted)
         if rc != want or not unevaluated or bool(refuted) != (want == 1) or wrong_refutation:
             raise AssertionError(_scrub("closure/preflight-failure-first: {} gave {}, expected {}: {!r}".format(
@@ -2194,10 +2242,98 @@ def _check_preflight_failure_first(root):
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     lines = err.splitlines()
-    if (rc != 2 or any(line.startswith("SELF-TEST FAIL: ") for line in lines)
-            or not any(line.startswith("SELF-TEST CANNOT EVALUATE: ") for line in lines)):
+    if (rc != 2 or any(line.startswith(_scrub("SELF-TEST FAIL: ")) for line in lines)
+            or not any(line.startswith(_scrub("SELF-TEST CANNOT EVALUATE: ")) for line in lines)):
         raise AssertionError(_scrub("closure/preflight-absent-subtree: a root with no opf/ gave {}: {!r}".format(
             rc, lines)))
+
+
+# The value the host-independence child's USER, LOGNAME and HOME carry, chosen so that it appears
+# in the child's TMPDIR path (closure/host-independence). A fixed literal of this file: it never
+# carries anything of the host this process runs on.
+_HOSTIND_CANARY = "canaryuser"
+
+# The host-independence child: runs the cases the scrubber's whole-path exemption protects, with
+# _preflight_exit's attribution (an AssertionError is that case's refutation, a _CannotEvaluate is
+# its cannot-evaluate) and _self_test_exit's verdict. Written into the scratch fixture and run
+# with the manipulated environment; what it prints, this module's cases print scrubbed there.
+_HOSTIND_RUNNER = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import check_opf_standalone_closure as closure\n"
+    "failures, cannot = [], []\n"
+    "cases = ((\"closure/absent-subtree-cannot-evaluate\", closure._check_absent_subtree),\n"
+    "         (\"closure/preflight-failure-first\", closure._check_preflight_failure_first),\n"
+    "         (\"closure/env-canaries\", closure._check_env_canaries))\n"
+    "for label, case in cases:\n"
+    "    try:\n"
+    "        case(sys.argv[2])\n"
+    "    except closure._CannotEvaluate as exc:\n"
+    "        cannot.append(\"{}: {}\".format(label, exc))\n"
+    "    except AssertionError as exc:\n"
+    "        failures.append(\"{}: {}\".format(label, exc))\n"
+    "sys.exit(closure._self_test_exit(failures, cannot))\n")
+
+
+def _check_host_value_independence(root):
+    """The cases the scrubber's whole-path exemption protects pass on a host whose user name
+    appears in its temporary directory's path, and that user name is still never disclosed
+    outside such a path. A child interpreter runs _check_absent_subtree (closure/absent-subtree),
+    _check_preflight_failure_first (closure/preflight-absent-subtree) and _check_env_canaries
+    over this module, with USER, LOGNAME and HOME set to _HOSTIND_CANARY and TMPDIR a fresh
+    directory whose path carries that value (<scratch>/canaryuser/tmp): the shape whose paths the
+    scrubber's substring replacement rewrote before the whole-path exemption, failing
+    closure/absent-subtree on such a host. The child must exit 0. Its output, with every whole
+    path token that is, or lies under, the child's TMPDIR removed (_path_spans_pattern, the token
+    rule _scrub exempts), must not carry the value: inside such a path the value is the stated
+    TMPDIR exception, anywhere else it is a disclosure (refuted by count, the output not
+    printed). A child exit of 2 is cannot-evaluate (the child's cases observed nothing to judge);
+    any other non-zero exit is a refutation naming the exit and the output's last lines. Needs a
+    scratch directory and the opf/ subtree (the child's absent-subtree case needs the real
+    subtree for its later sub-checks). _check_preflight_failure_first leaves this case out of the
+    cases it runs: the child runs that case, so running this one there would recurse through a
+    child of a child. A host failure building the fixture, or one the watch sees at the launch
+    (an OSError, or a child that did not finish within its bound), is cannot-evaluate."""
+    _require_subtree(root)
+    tmp = None
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-hostind-"))
+            child_tmp = tmp / _HOSTIND_CANARY / "tmp"
+            _write_fixture(tmp, [("runner.py", _HOSTIND_RUNNER.encode("utf-8")),
+                                 (_HOSTIND_CANARY + "/tmp/.keep", b"")])
+        except OSError as exc:
+            raise _CannotEvaluate(_scrub("closure/host-independence-scratch: could not build the fixture: "
+                                         "{}".format(exc)))
+        env = dict(os.environ)
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            env.pop(key, None)
+        env.update(TMPDIR=str(child_tmp), USER=_HOSTIND_CANARY, LOGNAME=_HOSTIND_CANARY,
+                   HOME=_HOSTIND_CANARY)
+
+        def independent():
+            proc = subprocess.run([sys.executable, "-I", "-B", str(tmp / "runner.py"),
+                                   str(Path(_THIS_FILE).resolve().parent), str(root)],
+                                  cwd=str(tmp), env=env, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+            text = (proc.stdout or b"").decode("utf-8", "replace")
+            outside = _path_spans_pattern((child_tmp, child_tmp.resolve())).sub("", text)
+            if _HOSTIND_CANARY in outside:
+                raise AssertionError(_scrub("closure/host-independence-disclosure: the child's output carries "
+                                            "the canary user name outside a path under its TMPDIR ({} "
+                                            "occurrence(s); the output is not printed)".format(
+                                                outside.count(_HOSTIND_CANARY))))
+            tail = " | ".join(text.splitlines()[-3:])
+            if proc.returncode == 2:
+                raise _CannotEvaluate(_scrub("closure/host-independence: the child could not evaluate its "
+                                             "cases: {}".format(tail)))
+            if proc.returncode != 0:
+                raise AssertionError(_scrub("closure/host-independence: the cases gave {} under a user name "
+                                            "that appears in TMPDIR's path: {}".format(proc.returncode, tail)))
+        _attributed("closure/host-independence", independent)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _red_bound_lookup(root):
@@ -2214,7 +2350,7 @@ def _red_one(root, check, label):
     try:
         _attributed("closure/red-bound-lookup", lambda: check(root), injected=dict(_MEMBER_TIMEOUT_S=dict()))
     except AssertionError as exc:
-        if not str(exc).startswith(label):
+        if not str(exc).startswith(_scrub(label)):
             raise
     else:
         raise AssertionError(_scrub(label + "-not-red"))
@@ -2342,11 +2478,13 @@ def _pin(entry, root, absent_root, where=None):
     text = str(got)
     if fired:
         if mode in ("oserror", "timeout"):
-            held = isinstance(got, _CannotEvaluate) and "harness failure" in text and _PIN_MARKER in text
+            held = (isinstance(got, _CannotEvaluate) and _scrub("harness failure") in text
+                    and _scrub(_PIN_MARKER) in text)
             expected = "cannot-evaluate naming the host failure"
         else:
-            held = (type(got) is AssertionError and want in text and "the code under test raised" in text
-                    and (mode != "crash" or _PIN_MARKER in text))
+            held = (type(got) is AssertionError and _scrub(want) in text
+                    and _scrub("the code under test raised") in text
+                    and (mode != "crash" or _scrub(_PIN_MARKER) in text))
             expected = "a refutation naming {!r}".format(want)
         if not held:
             raise AssertionError(_scrub("closure/attribution-pin: {} gave {!r}, expected {}".format(site, got, expected)))
@@ -3049,7 +3187,7 @@ _ATTRIBUTION_INDIRECTIONS = (
      "_check_pin_rules(spans)",
      "runs _pin's rule probes, whose bare calls are excluded on purpose: they judge _pin, not the code"),
     ("_check_preflight_failure_first _check_preflight_failure_first#1",
-     "if case[1] not in (_check_preflight_failure_first, _check_attribution_inventory)]))",
+     "if case[1] not in (_check_preflight_failure_first, _check_attribution_inventory,",
      "the identity test that leaves this case out of the cases it runs; never called"),
     ("_Overlay.__getattr__ getattr#1",
      "return getattr(self._target, key)",
@@ -3127,6 +3265,9 @@ _ATTRIBUTION_EXCLUSIONS = (
      "an identity test that leaves this case out of the cases it runs (running it would recurse); never called"),
     ("_check_preflight_failure_first _check_attribution_inventory#1",
      "an identity test that leaves the inventory out of the cases it runs (it runs this case); never called"),
+    ("_check_preflight_failure_first _check_host_value_independence#1",
+     "an identity test that leaves the host-independence case out of the cases it runs (its child runs "
+     "this case; running it here would recurse through a child of a child); never called"),
 )
 
 
@@ -3157,6 +3298,7 @@ _PREFLIGHT_CASES = (
     ("closure/undecodable-fixture-cannot-evaluate", _check_undecodable_fixture),
     ("closure/undecodable-attribution", _check_undecodable_attribution),
     ("closure/preflight-failure-first", _check_preflight_failure_first),
+    ("closure/host-independence", _check_host_value_independence),
     (None, _red_bound_lookup),
     ("closure/attribution-inventory", _check_attribution_inventory),
 )
@@ -3192,7 +3334,8 @@ def _preflight_exit(root):
     run, so a refutation they would give stays unobserved until that case can be set up. Hence the
     cases are split and ordered by setup: the pure cases need none; _check_negative_copy_error,
     _check_missing_input, _check_member_boundary and _check_env_canaries need a scratch directory
-    but no opf/ subtree, so each is its own case; in
+    but no opf/ subtree, so each is its own case; _check_host_value_independence needs a scratch
+    directory and the opf/ subtree (its child runs cases over the real root); in
     _check_scratch_and_copy_errors and _check_absent_subtree the sub-checks that need no opf/
     subtree run before it is required (the inventory's entries over a root with no opf/ pin that
     order). Within a case whose fixture
