@@ -19,12 +19,17 @@ nested one fails closed rather than being copied), or a marker line whose text i
 marker ("a marker line is not the expected text").
 
 Byte equality covers the region only. Whether a statement outside the region, in either file, rebinds a name
-the region binds or reads, or stores to an attribute or item of one, is checked by the hook's own self-test
-(H12), a static walk of both files' module-level statements. That walk catches accidental drift. It does not
-model a deliberate edit through a function body run later, an alias made by assignment, setattr, globals(),
-vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another module patching
-the file, or a module named json that shadows the standard library's (the gate keeps a tools/json.py out
-only under python3 -I, as CI runs it). Diff review is the control for a deliberate edit; the hashes recorded
+the region binds or reads, or makes an attribute or item store whose target chain starts from such a name,
+json, builtins or sys.modules, is checked by the hook's own self-test (H12), a static walk of both files'
+module-level statements; conservatively, whatever the stored value, it also fails on a store whose chain
+starts from anything but a name (a call such as __import__("json") or globals(), a conditional expression) or
+has a link (an attribute or a constant string key) named sys, json, builtins or modules. That walk catches
+accidental drift. It does not model a deliberate edit through a function or lambda body, an alias made by
+assignment and a store through it whose chain has no such link, an item key that is not a constant string, a
+call such as setattr, exec or an in-place method call such as globals().update, sys.modules.update or
+json.__dict__.update, reflective access through any other object the walk cannot name, another module
+patching the file, or a module named json that shadows the standard library's (the gate keeps a tools/json.py
+out only under python3 -I, as CI runs it). Diff review is the control for a deliberate edit; the hashes recorded
 in .preview/SHA256SUMS and .aiqt/manifest.toml let an installer or a release check detect a shipped copy that
 differs from the reviewed one, and whoever makes an edit can record new hashes in the same change. After
 regenerating, the hook's SHA-256 in .preview/SHA256SUMS and the .preview/README.md table changes too;

@@ -79,7 +79,8 @@ the authority, and the summary further down this page only points to it.
   reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
   A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
   ahead; the CI gate still checks the file. Once its root is set, every other call it cannot evaluate (a
-  payload it cannot read in full within 2 seconds as strict UTF-8 JSON without `NaN` or `Infinity`, a field
+  payload it cannot read in full within 2 seconds as strict UTF-8 JSON without `NaN`, `Infinity` or a key
+  repeated in one object, a field
   of the wrong type, a path it cannot resolve, such as one through a symbolic link loop, a root that is not
   an absolute path, does not exist or is not a directory, a launch with an unknown command-line argument,
   or an internal error) also goes ahead with a note naming the reason. It checks the form of a call's
@@ -165,7 +166,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `699ce1747772f158334097275f470f6cbf9209e32ac8f03f0b63be765ad683bd` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `82e588bfa2bab7923d328f091ddd36aff84320055de762ba36a0efe68b67c932` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -330,13 +331,20 @@ fails and report it; do not work around a failed check.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
    for byte with the gate's; checks, by a static walk of both files' module-level statements, that none
-   outside the region rebinds a name the region binds or reads (or `__builtins__`), or stores to an
-   attribute or item of such a name, `json`, `builtins` or `sys.modules`; and compares a sample of policies
-   and its scope test with the gate. That walk catches accidental drift between the two copies. It does not
-   catch a deliberate edit that replaces behaviour through a path it does not model (a function body run
-   later, an alias made by assignment, `setattr`, `globals()`, `vars()`, `exec`, an in-place call such as
-   `sys.modules.update(...)` or `json.__dict__.update(...)`, another module patching the file, or a module
-   named `json` that shadows the standard library's: the gate imports `json` before it puts `tools/` on
+   outside the region rebinds a name the region binds or reads (or `__builtins__`), or makes an attribute
+   or item store whose target chain starts from such a name, `json`, `builtins` or `sys.modules`; and
+   compares a sample of policies and its scope test with the gate. Conservatively, whatever the stored
+   value, the walk also fails on a store whose chain starts from anything but a name (a call such as
+   `__import__("json")` or `globals()`, a conditional expression) or has a link (an attribute or a constant
+   string key) named `sys`, `json`, `builtins` or `modules`; ordinary stores such as `sys.path[0] = ...`,
+   `os.environ[...] = ...` or an item of a module-level dict are not flagged. That walk catches accidental
+   drift between the two copies. It does not catch a deliberate edit that replaces behaviour through a path
+   it does not model (a function or lambda body, an alias made by assignment and a store through it whose
+   chain has no such link, an item key that is not a constant string, a call such as `setattr(...)`,
+   `exec(...)` or an in-place method call such as `globals().update(...)`, `sys.modules.update(...)` or
+   `json.__dict__.update(...)`, reflective access through any other object the walk cannot name, another
+   module patching the file, or a module named `json` that shadows the standard library's: the gate imports
+   `json` before it puts `tools/` on
    `sys.path`, which keeps out a `tools/json.py` under `python3 -I`, as CI runs it, but not in a run without
    `-I`). Diff review is the control for a deliberate edit; the hashes recorded in `SHA256SUMS` and the
    release manifest `.aiqt/manifest.toml` let an installer or a release check detect a shipped copy that
@@ -562,7 +570,9 @@ section of its opening docstring. Read that section before relying on a hook; in
   ASCII character, such as `U` or a digit, still sees it in the reason. Not verified here: if Claude Code's
   `Edit` rewrites straight quotes in the new text to the curly quotes the file uses, the file gains
   characters the hook never saw, so a policy that forbids curly quotes can miss them until the CI gate
-  runs.
+  runs. Also not verified: if Claude Code writes a lone surrogate (an escaped `\ud800` in the new text)
+  through a UTF-8 encoder that replaces it with U+FFFD, the file gains a U+FFFD the hook did not count, so a
+  policy that forbids U+FFFD can miss it until the CI gate runs.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

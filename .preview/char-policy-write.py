@@ -39,23 +39,35 @@ POLICY FILE
     never the copy. The region holds the validator and every module-level name it reads. H12 compares the
     bytes; walks both files' module scope (conditional and compound statements included, function and class
     bodies not) to check that no name the region binds or reads is bound outside it, and that no function
-    declares one of them global; and compares the policy path, a sample of policies through both
-    validators, and this hook's scope test with the gate's walk. The walk treats __builtins__ as a region
-    name, and also fails on a module-level statement outside the region that stores to an attribute or item of
-    a region name, json, builtins or sys.modules (a name that an import anywhere in the file binds to one of
-    those modules counts as that module and as itself). H12 exists to catch accidental drift between the two
-    copies. It is not a defence against a deliberate edit that replaces behaviour through a path the static
-    walk does not model: a function body run later, an alias made by assignment, setattr, globals(), vars(),
-    exec, an in-place call such as sys.modules.update(...) or json.__dict__.update(...), another module
-    patching this one, or a module named json that shadows the standard library's. The gate imports json
-    before it puts tools/ on sys.path, so under python3 -I, as CI runs it, a tools/json.py is never imported
-    (the gate's self-test pins this); run without -I, Python puts a script's own directory first on sys.path,
-    and a module there named like a standard library module shadows that module, for the gate and for this
-    hook alike. The behaviour sample runs both validators in one process, so it shares one json module and
-    cannot see a change made to json. Diff review is the control for a deliberate edit. The recorded hashes
-    (.preview/SHA256SUMS for this hook, the release manifest .aiqt/manifest.toml for both files) let an
-    installer or a release check detect a shipped copy that differs from the reviewed one; whoever makes an
-    edit can record the new hashes in the same change.
+    declares one of them global; and compares the policy path, a sample of policies through both validators,
+    and this hook's scope test with the gate's walk. The walk treats __builtins__ as a region name. It also
+    follows the target chain of each attribute or item store or deletion that a module-level statement outside
+    the region makes (an assignment, an augmented or annotated assignment, a del, or a for, with or
+    comprehension target, in a class body or a def's or lambda's decorators and defaults too; a walrus or
+    import-as target is always a plain name, which the binding check covers), and fails when the chain starts
+    from a region name, json, builtins or sys.modules (a name that an import anywhere in the file binds to one
+    of those modules counts as that module and as itself). Conservatively, whatever the stored value, it also
+    fails on a chain that starts from anything but a name (a call such as __import__("json"), getattr(sys,
+    "modules"), globals() or vars(json), a conditional expression, a list, a walrus) and on a chain with a
+    link, the stored one included, that is an attribute or a constant string key named sys, json, builtins or
+    modules (os.sys.modules[...], m.__dict__["modules"][...], m.json = ...). Ordinary stores such as
+    sys.path[0] = ..., os.environ[...] = ... or an item of a module-level dict are not flagged; H12 pins both
+    sides. H12 exists to catch accidental drift between the two copies. It is not a defence against a
+    deliberate edit that replaces behaviour through a path the static walk does not model: a function or lambda
+    body, whenever it runs; an alias made by assignment and a store through it whose chain has no link named
+    sys, json, builtins or modules (m = sys.modules[__name__], then m.validate_policy = ...); an item key that
+    is not a constant string; a call, such as setattr(...), exec(...) or an in-place method call such as
+    globals().update(...), sys.modules.update(...) or json.__dict__.update(...); reflective access through any
+    other object the walk cannot name; another module patching this one; or a module named json that shadows
+    the standard library's. The gate imports json before it puts tools/ on sys.path, so under python3 -I, as CI
+    runs it, a tools/json.py is never imported (the gate's self-test pins this); run without -I, Python puts a
+    script's own directory first on sys.path, and a module there named like a standard library module that is
+    neither built into the interpreter nor already imported at startup (json is one; sys, os and time are not)
+    shadows that module, for the gate and for this hook alike. The behaviour sample runs both validators in one
+    process, so it shares one json module and cannot see a change made to json. Diff review is the control for
+    a deliberate edit. The recorded hashes (.preview/SHA256SUMS for this hook, the release manifest
+    .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+    from the reviewed one; whoever makes an edit can record the new hashes in the same change.
 
 DECISION
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
@@ -65,20 +77,21 @@ DECISION
       payload.
     - A tool_name string naming a tool other than Write, Edit or MultiEdit: allow, silently.
     - Fail-open, made visible: the preview channel allows what it cannot evaluate (the hook is opt-in and the
-      CI gate is the backstop), but always with a note naming the reason, never silently and never with an
-      ask. That covers a payload that is not read through its end of input within 2 seconds, is over 64 MiB,
-      is not strict UTF-8 (UTF-16, UTF-32, an encoded surrogate, a byte order mark), is not one JSON value,
-      holds NaN, Infinity or -Infinity, or is not a JSON object; a missing tool_name, a tool_input that is
-      not an object, a file_path that is not a non-empty string without control characters, a relative
-      file_path with no absolute cwd, a field the tool needs (old_string, new_string, edits, content) of the
-      wrong type, a path that cannot be resolved (a symbolic link loop, a component that is not a directory, a
-      permission fault: every fault but a missing component) or encoded as a file name (a lone surrogate,
-      say), and an internal error. An escaped lone surrogate (\\ud800) in a string is standard JSON and is
-      read as sent: it is not a policy character, so it neither adds one nor hides one. A call is well-formed
-      when none of these faults applies to it. The order: the file_path's form (and the cwd a relative one is
-      joined onto), then the fields, then the path is resolved and compared with the root, and only then is
-      the policy file read, so a malformed call gets a note wherever it points and whether or not the root
-      holds a policy file.
+      CI gate is the backstop), but always with a note naming the reason, never silently and never with an ask.
+      That covers a payload that is not read through its end of input within 2 seconds, is over 64 MiB, is not
+      strict UTF-8 (UTF-16, UTF-32, an encoded surrogate, a byte order mark), is not one JSON value, holds NaN,
+      Infinity or -Infinity, holds a key twice in one JSON object, or is not a JSON object; a missing
+      tool_name, a tool_input that is not an object, a file_path that is not a non-empty string without control
+      characters, a relative file_path with no absolute cwd, a field the tool needs (old_string, new_string,
+      edits, content) of the wrong type, a path that cannot be resolved (a symbolic link loop, a component that
+      is not a directory, a permission fault: every fault but a missing component) or encoded as a file name (a
+      lone surrogate, say), and an internal error. An escaped lone surrogate (\\ud800) in a string is standard
+      JSON and is read as sent and counted as itself: the validator refuses it as a policy character, so as
+      sent it neither adds one nor hides one (see RESIDUAL COVERAGE for a harness that writes it as U+FFFD). A
+      call is well-formed when none of these faults applies to it. The order: the file_path's form (and the cwd
+      a relative one is joined onto), then the fields, then the path is resolved and compared with the root,
+      and only then is the policy file read, so a malformed call gets a note wherever it points and whether or
+      not the root holds a policy file.
     - A relative file_path is joined onto the payload's cwd. The target's and the root's real paths are
       compared whole component by component; a well-formed call whose target is outside the root, or not in
       the policy's scope, is allowed silently.
@@ -117,6 +130,11 @@ RESIDUAL COVERAGE
       not hold, and this hook, which judges new_string as sent, misses that increase for a policy that
       forbids curly quotes. Whether and when the harness does this is not verified here; the gate scans the
       written file.
+    - Unverified harness behaviour: if the harness writes a string through a UTF-8 encoder that replaces a
+      lone surrogate with U+FFFD, a call whose new text holds an escaped lone surrogate (\\ud800) puts U+FFFD
+      in the file, and this hook, which counts the surrogate as itself, misses that increase for a policy
+      that forbids U+FFFD. Whether the harness does this is not verified here; the gate scans the written
+      file.
     - Path aliases: a hard link, a case-insensitive or Unicode-normalizing filesystem, or a symbolic link
       inside the root (the gate's walk does not follow linked directories; this hook resolves real paths)
       can make the hook's scope test differ from the gate's walk.
@@ -125,8 +143,8 @@ RESIDUAL COVERAGE
       control over it.
     - The repository's other character checks with their own fixed sets and scopes are not read.
     - The file can change between this hook's decision and the write (a race).
-    - A payload over 64 MiB, one that does not end within 2 seconds, one that is not strict UTF-8 JSON, and one
-      that is not a JSON object are allowed with a note.
+    - A payload over 64 MiB, one that does not end within 2 seconds, one that is not strict UTF-8 JSON, one
+      with a key twice in one JSON object, and one that is not a JSON object are allowed with a note.
     - It does not read AIQT_HOOKS_WORKER: worker processes are checked like any other session.
     - An armed hook whose root holds no policy file allows every well-formed call silently (a malformed one
       gets a note); the gate then applies its built-in default, which this hook does not copy.
@@ -163,14 +181,18 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 
 # --- BEGIN COPY: generated from tools/check_no_dashes.py by tools/gen_char_policy.py; do not edit ---
 # The policy validator. Every module-level name it reads is bound in this region or is a builtin. The hook's H12
-# walks both files' module-level statements and fails when one outside this region binds a name the region
-# binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
-# sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
-# through a path the static walk does not model (a function body run later, an alias made by assignment,
-# setattr, globals(), vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another
-# module patching this one, a module named json that shadows the standard library's) is not caught there. Diff
-# review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the hook,
-# .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+# walks both files' module-level statements and fails when one outside this region binds a name the region binds or
+# reads (or __builtins__), or makes an attribute or item store whose target chain starts from such a name, json,
+# builtins or sys.modules; conservatively, whatever the stored value, it also fails on a store whose chain starts
+# from anything but a name (a call such as __import__("json") or globals(), a conditional expression) or has a link
+# (an attribute or a constant string key) named sys, json, builtins or modules. That catches accidental drift
+# between the two copies. A deliberate edit that replaces behaviour through a path the static walk does not model
+# (a function or lambda body, an alias made by assignment and a store through it whose chain has no such link, an
+# item key that is not a constant string, a call such as setattr, exec or an in-place method call such as
+# globals().update, sys.modules.update or json.__dict__.update, reflective access through any other object the walk
+# cannot name, another module patching this one, a module named json that shadows the standard library's) is not
+# caught there. Diff review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the
+# hook, .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
 # from the reviewed one.
 import json  # noqa: E402
 
@@ -534,6 +556,17 @@ def _no_payload_constant(name):
     raise ValueError(f"non-standard JSON constant {name} in the hook payload")
 
 
+def _no_payload_duplicates(pairs):
+    """A JSON object of the hook payload as a dict; a key that appears twice in one object raises ValueError,
+    so the call gets the cannot-evaluate note instead of being judged on one of the two values."""
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {ascii(key)[:80]} in a JSON object of the hook payload")
+        seen.add(key)
+    return dict(pairs)
+
+
 def _read_payload(fd=0, deadline=None):
     """The payload, parsed once the input has ended (EOF) and that end was read before the deadline (by default
     _READ_DEADLINE seconds, read at call time). Every byte read through the end counts toward one _MAX_INPUT
@@ -542,8 +575,8 @@ def _read_payload(fd=0, deadline=None):
     so an end of input that comes after the deadline is refused. Each wait is for the time left at most, but
     the OS can return from a wait late, so refusing can take longer than the deadline. The bytes must be strict
     UTF-8 (no UTF-16 or UTF-32, no encoded surrogate, and no byte order mark, which json.loads refuses in a
-    str) holding one JSON value without NaN, Infinity or -Infinity. Raises ValueError for any of these faults
-    and for no end read before the deadline."""
+    str) holding one JSON value without NaN, Infinity or -Infinity and without a key that appears twice in one
+    object. Raises ValueError for any of these faults and for no end read before the deadline."""
     end = time.monotonic() + (_READ_DEADLINE if deadline is None else deadline)
     data = bytearray()
     while True:
@@ -562,7 +595,8 @@ def _read_payload(fd=0, deadline=None):
         if time.monotonic() >= end:  # after the read, before its end of input is accepted
             raise ValueError(_LATE)
         if not chunk:
-            return json.loads(bytes(data).decode("utf-8"), parse_constant=_no_payload_constant)
+            return json.loads(bytes(data).decode("utf-8"), object_pairs_hook=_no_payload_duplicates,
+                              parse_constant=_no_payload_constant)
         data += chunk
         if len(data) > _MAX_INPUT:
             raise ValueError("hook payload over the read bound")
@@ -686,37 +720,60 @@ def _self_test():
         for child in ast.iter_child_nodes(node):
             bindings(child, out)
 
+    # The two conservative findings of stores(), whatever the stored value: a target chain that starts from
+    # anything but a name, and a chain with a link named sys, json, builtins or modules.
+    from_expression = "<a store whose target chain starts from an expression>"
+    through_watched = "<a store whose target chain has a link named sys, json, builtins or modules>"
+    watched = frozenset(("sys", "json", "builtins", "modules"))
+
     def stores(node, out, aliases):
-        """Add to out the bases of each attribute or item store or deletion node makes at module scope: the name
-        its target chain starts from, and, when an import anywhere in the file (any scope) binds that name to
-        json, builtins or sys, each such module too (conservative: an import in another scope can neither hide
-        the name nor a module it may stand for), with "sys.modules" for a chain that starts there. A def or
-        lambda body, which runs only when called, is not walked, though its decorators and defaults are; a
-        class body, which runs at once, is."""
+        """Add to out, for each attribute or item store or deletion node makes at module scope (an assignment,
+        an augmented or annotated assignment, a del, or a for, with or comprehension target; a walrus or
+        import-as target is always a plain name), the name its target chain starts from, and, when an import
+        anywhere in the file (any scope) binds that name to json, builtins or sys, each such module too
+        (conservative: an import in another scope can neither hide the name nor a module it may stand for),
+        with "sys.modules" for a chain that starts there. It also adds, conservatively and whatever the value,
+        from_expression for a chain that starts from anything but a name (a call such as __import__("json"),
+        getattr(sys, "modules"), globals() or vars(json), a conditional expression, a list, a walrus), and
+        through_watched for a chain with a link, the stored one included, that is an attribute or a constant
+        string key named sys, json, builtins or modules (os.sys.modules[...], m.__dict__["modules"][...]). A
+        def or lambda body, which runs only when called, is not walked, though its decorators and defaults
+        are; a class body, which runs at once, is."""
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             inner = list(getattr(node, "decorator_list", [])) + node.args.defaults
             for child in inner + [d for d in node.args.kw_defaults if d is not None]:
                 stores(child, out, aliases)
             return
         if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            first = node
-            while isinstance(first.value, (ast.Attribute, ast.Subscript)):
+            first, links = node, []
+            while True:
+                if isinstance(first, ast.Attribute):
+                    links.append(first.attr)
+                elif isinstance(first.slice, ast.Constant) and isinstance(first.slice.value, str):
+                    links.append(first.slice.value)
+                if not isinstance(first.value, (ast.Attribute, ast.Subscript)):
+                    break
                 first = first.value
+            if watched.intersection(links):
+                out.add(through_watched)
             if isinstance(first.value, ast.Name):
                 for base in {first.value.id} | aliases.get(first.value.id, set()):
                     if base == "sys" and isinstance(first, ast.Attribute) and first.attr == "modules":
                         base = "sys.modules"
                     out.add(base)
+            else:
+                out.add(from_expression)
         for child in ast.iter_child_nodes(node):
             stores(child, out, aliases)
 
     def rebound(text):
         """The names the marked region binds or reads (every name in it, function bodies included), with
         __builtins__, that the rest of the module binds at module scope or that a function outside the region
-        declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item
-        store outside the region, at module scope, whose base is one of those names, builtins or sys.modules.
-        The alias map records, for each name an import of json, builtins or sys binds anywhere in the file, every
-        module it is bound to. Each module-level statement must lie wholly on one side."""
+        declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item store
+        outside the region, at module scope, whose base is one of those names, builtins or sys.modules, plus the
+        conservative findings of stores() (from_expression and through_watched). The alias map records, for each
+        name an import of json, builtins or sys binds anywhere in the file, every module it is bound to. Each
+        module-level statement must lie wholly on one side."""
         first, last, _ = marked(text)
         inside, outside, stored, aliases = {"*", "__builtins__"}, set(), set(), {}
         tree = ast.parse(text)
@@ -741,7 +798,8 @@ def _self_test():
                 stores(stmt, stored, aliases)
             else:
                 raise AssertionError(f"the statement at line {start} straddles a copy marker")
-        return (inside & outside) | (stored & (inside | {"builtins", "sys.modules"}))
+        return (inside & outside) | (stored & (inside | {"builtins", "sys.modules", from_expression,
+                                                          through_watched}))
 
     def beside(text, code, marker):
         """text with code inserted on the line after its END COPY marker, or before its BEGIN COPY marker."""
@@ -757,8 +815,12 @@ def _self_test():
     # and C) and their variants, one vector or more for each branch of stores() (a def's decorators, defaults
     # and keyword-only defaults, a lambda's defaults, a class body, a deletion, a chain through sys.modules)
     # and for each import form the alias map reads (import X, import X as Y, import X.Y as Z, from X import Y,
-    # from X import Y as Z); the last ones are QA round 4's shadowed aliases, where an import of another
-    # module under the same name in a function body must not hide a module-level store.
+    # from X import Y as Z); then QA round 4's shadowed aliases, where an import of another module under the
+    # same name in a function body must not hide a module-level store; the last ones are QA round 6's stores
+    # through a chain that does not start from a name or that passes through sys, json, builtins or modules,
+    # each reproduction both reviewers listed, and one vector for each kind of store whose target can be such
+    # a chain (an assignment, an augmented and an annotated assignment, a del, a for, with and comprehension
+    # target). A vector's first item is the one finding it must give, or a tuple of every finding it must give.
     rebindings = (
         ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
         ("_TOP_KEYS", 'if True:\n    _TOP_KEYS = _TOP_KEYS | {"metadata"}'),
@@ -797,12 +859,13 @@ def _self_test():
                             "def _shim(data):\n"
                             "    return _vp_copy(dict((k, v) for k, v in data.items() if k != 'metadata'))\n"
                             "validate_policy.__code__ = _shim.__code__"),
-        ("sys.modules", "import json as _real_json\nclass _J:\n    def loads(self, *args, **kwargs):\n"
-                        "        data = _real_json.loads(*args, **kwargs)\n"
-                        '        data.pop("metadata", None)\n        return data\n'
-                        'sys.modules["json"] = _J()'),
-        ("sys.modules", 'import sys as _s\n_s.modules["json"] = None'),
-        ("sys.modules", 'from sys import modules as _mods\n_mods["json"] = None'),
+        (("sys.modules", through_watched), "import json as _real_json\nclass _J:\n"
+                                           "    def loads(self, *args, **kwargs):\n"
+                                           "        data = _real_json.loads(*args, **kwargs)\n"
+                                           '        data.pop("metadata", None)\n        return data\n'
+                                           'sys.modules["json"] = _J()'),
+        (("sys.modules", through_watched), 'import sys as _s\n_s.modules["json"] = None'),
+        (("sys.modules", through_watched), 'from sys import modules as _mods\n_mods["json"] = None'),
         ("json", "import json as _j\n_j.loads = None"),
         ("json", "from json import decoder as _d\n_d.scanstring = None"),
         ("json", "class _Patch:\n    json.loads = None"),
@@ -824,6 +887,36 @@ def _self_test():
                             "def _shim(data):\n"
                             "    return _vp_copy(dict((k, v) for k, v in data.items() if k != 'metadata'))\n"
                             "validate_policy.__code__ = _shim.__code__"),
+        (from_expression, "(json if True else json).loads = json.loads"),
+        (through_watched, 'import sys as _s\n_s.__dict__["modules"]["json"] = json'),
+        (through_watched, 'os.sys.modules["json"] = None'),
+        (from_expression, '__import__("json").loads = None'),
+        (from_expression, 'import importlib\nimportlib.import_module("json").loads = None'),
+        ((from_expression, through_watched), 'getattr(sys, "modules")["json"] = None'),
+        (from_expression, "[json][0].loads = None"),
+        (from_expression, "(json if True else None).loads = None"),
+        (from_expression, "(_j := json).loads = None"),
+        (through_watched, "import types as _ty\n_fake_json = _ty.ModuleType('json')\n"
+                          "_fake_json.loads = lambda *args, **kwargs: {}\nos.sys.modules['json'] = _fake_json"),
+        (from_expression, 'globals()["_TOP_KEYS"] = None'),
+        (from_expression, 'vars(json)["loads"] = None'),
+        ((from_expression, through_watched), '__import__("sys").modules["builtins"].sorted = None'),
+        (through_watched, "_self = sys.modules[__name__]\n_self.json = None"),
+        (from_expression, "(json if True else None).loads += None"),
+        (from_expression, "(json if True else None).loads: object = None"),
+        (from_expression, "del (json if True else None).loads"),
+        (from_expression, "for (json if True else None).loads in ():\n    pass"),
+        (from_expression, "with open(__file__) as (json if True else None).loads:\n    pass"),
+        (from_expression, "[0 for (json if True else None).loads in ()]"),
+    )
+    # Ordinary module-level code that H12 must not flag, in either file, before the region and after it: a
+    # store to an item of sys.path or os.environ, to an item of a module-level dict, and to a class attribute.
+    ordinary = (
+        "sys.path[0] = os.path.dirname(os.path.abspath(__file__))",
+        'os.environ["AIQT_CHAR_POLICY_EXAMPLE"] = "1"',
+        '_settings = {"mode": "strict", "level": 0}\n_settings["mode"] = "lenient"\n_settings["level"] += 1\n'
+        'del _settings["mode"]',
+        "class _Options:\n    pass\n_Options.verbose = True",
     )
 
     class T(unittest.TestCase):
@@ -1055,15 +1148,20 @@ def _self_test():
                              "the validator region drifted; run tools/gen_char_policy.py")
             # Both files alike: no name the region binds or reads (or __builtins__) is bound outside it at module
             # scope, no module-level statement outside it stores to an attribute or item of one of those names,
-            # of builtins or of sys.modules, and each vector is found before either BEGIN marker and after either
-            # END marker. This catches accidental drift. It is not a defence against a deliberate edit that
-            # replaces behaviour through a path this static walk does not model (see the module docstring); diff
-            # review is the control for that.
+            # of builtins or of sys.modules, or (conservatively) through a target chain that starts from an
+            # expression or has a link named sys, json, builtins or modules; each vector gives exactly its
+            # findings, and each ordinary statement none, before either BEGIN marker and after either END marker.
+            # This catches accidental drift. It is not a defence against a deliberate edit that replaces
+            # behaviour through a path this static walk does not model (see the module docstring); diff review
+            # is the control for that.
             for path, text in texts.items():
                 self.assertEqual(rebound(text), set(), (path, "a name of the copied region is bound outside it"))
-                for name, code in rebindings:
-                    for marker in ("BEGIN", "END"):
-                        self.assertEqual(rebound(beside(text, code, marker)), {name}, (path, marker, code))
+                for marker in ("BEGIN", "END"):
+                    for name, code in rebindings:
+                        want = {name} if isinstance(name, str) else set(name)
+                        self.assertEqual(rebound(beside(text, code, marker)), want, (path, marker, code))
+                    for code in ordinary:
+                        self.assertEqual(rebound(beside(text, code, marker)), set(), (path, marker, code))
             self.assertEqual(POLICY_PATH, gate.POLICY_PATH)
             # The behaviour, on a sample: each rejected fixture is otherwise valid, so its rejection is the named
             # fault's, and both validators must give the stated verdict, not merely the same one.
@@ -1181,7 +1279,9 @@ def _self_test():
 
         def test_h22_payload_reader(self):
             # QA round 4: each payload in bad was allowed silently; each now gets the cannot-evaluate note, in
-            # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated
+            # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated. QA round
+            # 6: a payload with a key twice in one object was judged on the last value (allowed silently or
+            # denied); it now gets the same note, whichever value comes last
             def call(content):
                 return {"tool_name": "Write", "tool_input": {"file_path": self.at("docs/qa-probe.md"),
                                                              "content": content}}
@@ -1193,7 +1293,13 @@ def _self_test():
                    "UTF-8 with a byte order mark": b"\xef\xbb\xbf" + good,
                    "encoded surrogate bytes": good.replace(b'"safe"', b'"\xed\xa0\x80"'),
                    "NaN": good[:-1] + b', "extra": NaN}', "Infinity": good[:-1] + b', "extra": Infinity}',
-                   "-Infinity": good[:-1] + b', "extra": -Infinity}', "trailing junk": good + b"x"}
+                   "-Infinity": good[:-1] + b', "extra": -Infinity}', "trailing junk": good + b"x",
+                   "duplicate key, the last value clean": good.replace(
+                       b'"content": "safe"', b'"content": "\\u2014", "content": "safe"'),
+                   "duplicate key, the last value a policy character": good.replace(
+                       b'"content": "safe"', b'"content": "safe", "content": "\\u2014"'),
+                   "duplicate top-level key": good[:-1] + b', "tool_name": "Write"}'}
+            self.assertTrue(all(raw != good for raw in bad.values()))
 
             def piped(parts, deadline=2.0, within=None):
                 """_read_payload(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, with
@@ -1268,7 +1374,9 @@ def _self_test():
             for label, raw in bad.items():
                 p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)
                 self.assertEqual((p.returncode, p.stderr), (0, b""), label)
-                self.is_unchecked(json.loads(p.stdout), "cannot be read as JSON in UTF-8")
+                note = self.is_unchecked(json.loads(p.stdout), "cannot be read as JSON in UTF-8")
+                if label.startswith("duplicate"):
+                    self.assertIn("duplicate key", note, label)
             for raw, want in ((good, None), (good.replace(b'"safe"', b'"\\ud800safe"'), None),
                               (good.replace(b'"safe"', b'"\\ud800\\u2014"'), "deny")):
                 p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)

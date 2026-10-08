@@ -47,7 +47,8 @@ from pathlib import Path
 # The standard library's json, imported before this folder goes on sys.path below, so the copied region's own
 # `import json` finds it in sys.modules and a json.py in this folder cannot replace it (self-test G15). That holds
 # under python3 -I, as CI runs this gate; without -I, Python puts a script's own folder first on sys.path at
-# startup, so there a module in this folder named like a standard library module shadows that module.
+# startup, so there a module in this folder named like a standard library module that is neither built into the
+# interpreter nor already imported at startup (json is one; sys, os and time are not) shadows that module.
 import json as _stdlib_json  # noqa: E402,F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -73,14 +74,18 @@ DEFAULT_POLICY = {
 }
 # --- BEGIN COPY SOURCE: tools/gen_char_policy.py writes this region into .preview/char-policy-write.py ---
 # The policy validator. Every module-level name it reads is bound in this region or is a builtin. The hook's H12
-# walks both files' module-level statements and fails when one outside this region binds a name the region
-# binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
-# sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
-# through a path the static walk does not model (a function body run later, an alias made by assignment,
-# setattr, globals(), vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another
-# module patching this one, a module named json that shadows the standard library's) is not caught there. Diff
-# review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the hook,
-# .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+# walks both files' module-level statements and fails when one outside this region binds a name the region binds or
+# reads (or __builtins__), or makes an attribute or item store whose target chain starts from such a name, json,
+# builtins or sys.modules; conservatively, whatever the stored value, it also fails on a store whose chain starts
+# from anything but a name (a call such as __import__("json") or globals(), a conditional expression) or has a link
+# (an attribute or a constant string key) named sys, json, builtins or modules. That catches accidental drift
+# between the two copies. A deliberate edit that replaces behaviour through a path the static walk does not model
+# (a function or lambda body, an alias made by assignment and a store through it whose chain has no such link, an
+# item key that is not a constant string, a call such as setattr, exec or an in-place method call such as
+# globals().update, sys.modules.update or json.__dict__.update, reflective access through any other object the walk
+# cannot name, another module patching this one, a module named json that shadows the standard library's) is not
+# caught there. Diff review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the
+# hook, .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
 # from the reviewed one.
 import json  # noqa: E402
 
