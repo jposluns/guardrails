@@ -2025,13 +2025,19 @@ def _self_test():
                 out = self.feed([(0, bad)], 30)[0]
                 self.assertEqual(out, "refused: hook payload has " + name + ", which is not JSON", bad)
 
-        def feed(self, parts, deadline, close_after=None, log=None):
+        def feed(self, parts, deadline, close_after=None, log=None, hold=None):
             """_read_complete(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, and then
-            closes, after close_after seconds when given: (the payload or "refused: <message>", seconds taken). The
-            read end is closed before the thread is joined, so a writer the reader has stopped reading gets EPIPE.
-            A log dict, when given, records the schedule the run actually kept, by time.monotonic: "start" (the
-            reader's), "writes" ((before, after) for each part written) and "closed" (just before the close)."""
+            closes, after close_after seconds when given: (the payload or "refused: <message>", seconds taken). With
+            hold, a threading.Event that the caller sets when the reader first enters a wait or a read, the thread
+            instead keeps the input open until the reader returns, or until 10 seconds after hold is set if the
+            reader has not returned by then (a reader with no deadline then reads the end of input, and fails the
+            test rather than hanging it). The read end is closed before the thread is joined, so a writer the
+            reader has stopped reading gets EPIPE; the join is bounded, and a writer still running 30 seconds after
+            the reader returned fails the test (QA round 9). A log dict, when given, records the schedule the run
+            actually kept, by time.monotonic: "start" (the reader's), "writes" ((before, after) for each part
+            written) and "closed" (just before the close)."""
             r, w = os.pipe()
+            returned = threading.Event()
             if log is not None:
                 log["writes"] = []
 
@@ -2045,6 +2051,9 @@ def _self_test():
                             log["writes"].append((before, time.monotonic()))
                     if close_after is not None:
                         time.sleep(close_after)
+                    if hold is not None:  # open until the reader returns, or 10 seconds after it first waits or reads
+                        hold.wait()
+                        returned.wait(10)
                 except OSError:
                     pass  # the reader stopped reading
                 finally:
@@ -2062,37 +2071,47 @@ def _self_test():
                 out = "refused: " + str(e)
             finally:
                 taken = time.monotonic() - start
+                returned.set()
+                if hold is not None:
+                    hold.set()  # a reader that returned without a wait or a read
                 os.close(r)
-                t.join()
+                t.join(30)
+            self.assertFalse(t.is_alive(), "the writer was still running 30 seconds after the reader returned")
             return out, taken
 
         def wait_for_time_left(self, mutant=None):
             """The deterministic check of the time each wait is given, under an injected clock and select: the
             clock stands still but for the waits (and the reads, when read_takes is given), so the timeout each
-            wait is given is known exactly. mutant, when given, wraps the injected select (the reader as a mutant
-            changes it). Fails the test when, in one of the fixed schedules below, a wait is given a timeout other
-            than the time left by the clock (compared to 9 decimal places) or an end of input read at or after the
-            deadline is accepted. Only these schedules are checked: steps from 0.05 to 0.5 seconds, some of them
-            off the 0.125-second grid, up to five waits, a last time left down to 0.08 seconds, and an end of input
-            read at the deadline and 2 ** -10 seconds either side of it. A timeout that is wrong only on other
-            schedules is not caught here (QA round 8)."""
+            wait is given is known. mutant, when given, wraps the injected select (the reader as a mutant changes
+            it). Fails the test when, in one of the fixed schedules below, a wait is given a timeout other than the
+            time left by the clock or an end of input read at or after the deadline is accepted. The timeouts are
+            compared exactly on the schedules whose steps are exact in binary, and to 9 decimal places on the two
+            with steps of 0.1, 0.3, 0.2, 0.05 and 0.01 seconds, where the clock's sums are not exact (QA round 9).
+            Only these schedules are checked: steps from 0.05 to 0.5 seconds, some of them off the 0.125-second
+            grid, up to five waits, a last time left down to 0.08 seconds, and an end of input read at the deadline
+            and 2 ** -10 seconds either side of it. A timeout that is wrong only on other schedules is not caught
+            here (QA round 8)."""
             one, case, real_os = json.dumps(dict(a=1)).encode(), self, os
 
             class Clock(object):
-                now = 100.0
+                now, readings = 100.0, 0
 
                 def monotonic(self):
+                    self.readings += 1
+                    case.assertLessEqual(self.readings, 100, "the clock read over 100 times")
                     return self.now
 
             def waits(steps, read_takes=0.0):
                 """_read_complete(r, 1.0) with wait number i given steps[i], (seconds, part): the wait records its
                 timeout, moves the clock on that many seconds, then writes part and reports the pipe ready (closes
                 the pipe for b"" and reports it ready; reports it not ready for None); each read moves the clock on
-                read_takes seconds. More waits than steps fail the test. Returns (the payload or "refused:
-                <message>", the timeouts in order)."""
+                read_takes seconds. More waits than steps fail the test, and so do more reads than steps (a read
+                follows a wait) and over 100 clock readings, so a reader that loops without waiting fails the test
+                rather than hanging it (QA round 9). Returns (the payload or "refused: <message>", the timeouts in
+                order)."""
                 r, w = real_os.pipe()
                 real_os.set_blocking(r, False)  # a read with nothing to read raises BlockingIOError, it never blocks
-                clock, timeouts, ends = Clock(), [], [w]
+                clock, timeouts, ends, reads = Clock(), [], [w], []
 
                 class Select(object):
                     def select(self, rlist, wlist, xlist, timeout):
@@ -2110,6 +2129,8 @@ def _self_test():
 
                 class Os(object):
                     def read(self, fd, size):
+                        case.assertLess(len(reads), len(steps), "more reads than the schedule")
+                        reads.append(fd)
                         clock.now += read_takes
                         return real_os.read(fd, size)
                 try:
@@ -2121,7 +2142,11 @@ def _self_test():
                     real_os.close(r)
                     for fd in ends:
                         real_os.close(fd)
-                return out, [round(timeout, 9) for timeout in timeouts]
+                return out, timeouts
+
+            def near(run):
+                """A run's timeouts to 9 decimal places, for the schedules whose steps are not exact in binary."""
+                return run[0], [round(timeout, 9) for timeout in run[1]]
             # the end of input does not come: the waits are for 1.0, 0.75 and 0.25 seconds, and the clock reaches
             # the deadline at the third (a wait for the whole deadline would be given 1.0 each time, and a time
             # left not taken again after a wait that found nothing would give the third 0.75)
@@ -2135,13 +2160,16 @@ def _self_test():
             # (that would give 0.75 and 0.375) (QA round 7)
             self.assertEqual(waits([(0.25, one[:3]), (0.25, one[3:]), (0.0625, b"")], read_takes=0.125),
                              (dict(a=1), [1.0, 0.625, 0.25]))
-            # steps off the 0.125-second grid (0.1, 0.3 and 0.2 seconds), five waits, and a last time left under
-            # 0.25 seconds: a timeout rounded up to that grid, held at a floor, or for the whole deadline from the
-            # fourth wait on is caught here, not by the schedules above (QA round 8)
-            self.assertEqual(waits([(0.1, one[:3]), (0.3, None), (0.2, one[3:]), (0.3, None), (0.25, None)]),
+            # steps off the 0.125-second grid (0.1, 0.3 and 0.2 seconds), five waits, and a last time left down to
+            # 0.08 seconds (QA round 8): on these schedules a timeout rounded to a grid coarser than 0.01 seconds,
+            # held at a floor above 0.08 seconds, or for the whole deadline from the fourth wait on is caught; of
+            # these, the 0.125-second grid, a floor above 0.08 and up to 0.25 seconds, and the whole deadline from
+            # the fourth wait on are caught only here. Rounding to 0.01 seconds or finer and a floor of 0.08
+            # seconds or less are not caught reliably (QA round 9)
+            self.assertEqual(near(waits([(0.1, one[:3]), (0.3, None), (0.2, one[3:]), (0.3, None), (0.25, None)])),
                              ("refused: " + _LATE, [1.0, 0.9, 0.6, 0.4, 0.1]))
-            self.assertEqual(waits([(0.1, one[:3]), (0.3, None), (0.3, one[3:]), (0.2, None), (0.05, b"")],
-                                   read_takes=0.01), (dict(a=1), [1.0, 0.89, 0.59, 0.28, 0.08]))
+            self.assertEqual(near(waits([(0.1, one[:3]), (0.3, None), (0.3, one[3:]), (0.2, None), (0.05, b"")],
+                                        read_takes=0.01)), (dict(a=1), [1.0, 0.89, 0.59, 0.28, 0.08]))
             # the read of the end of input takes the clock exactly to the deadline, 2 ** -10 seconds past it, and
             # 2 ** -10 seconds short of it (each value exact in binary): the end is refused at and past the
             # deadline, by the check after the read (without that check, or with > for >=, the end read at the
@@ -2152,9 +2180,10 @@ def _self_test():
                                  (out, [1.0, 0.625, 0.25]), last)
 
         def test_m46_wait_for_time_left(self):
-            # the deterministic check of the remaining-time logic (QA rounds 6 to 8), on the schedules that
+            # the deterministic check of the remaining-time logic (QA rounds 6 to 9), on the schedules that
             # wait_for_time_left names: each wait is for the time left by the clock, not for the whole deadline
-            # (from the first wait or a later one), not rounded up to a grid or held at a floor, not for a time
+            # (from the first wait or a later one), not rounded to a grid coarser than 0.01 seconds or held at a
+            # floor above 0.08 seconds (finer rounding and lower floors are not caught reliably), not for a time
             # left kept from before a wait that found nothing (not taken again after it), not for a time left
             # from a clock reading taken before the read, and not for a deadline started again at each read or
             # after a wait that found nothing; and an end of input read at or after the deadline is refused
@@ -2179,25 +2208,35 @@ def _self_test():
 
         def open_pipe(self, mutant=None, inner=None):
             """The end to end run of test_m46_input_still_open: _read_complete(r, 1.2) on a pipe that gets part of a
-            payload at once and the rest 1.0 seconds later, and ends 2.0 seconds after that. The select the reader
-            uses is a pass-through wrapper on inner (the select module when None) that records each wait's timeout
-            and the clock on entry and on return, and the reader's os.read records how many bytes each read gave
-            and the clock after it; mutant, when given, wraps that select (the reader as a mutant changes it). The
-            refusal must carry the deadline's message and come no sooner than the deadline. The bound is on the
-            reader's own record, not on the time the run took: the distinguishing wait, the first one the reader
-            entered after it read the second piece, entered E seconds after the start with a timeout of T seconds,
-            must have E + T under 1.9. A wait for the whole deadline entered at 0.7 seconds or later fails that
-            however late the OS ends the wait or runs the reader after it. The reader as written takes T from a
-            clock reading between that read and the wait, so its E + T is at most 1.2 plus the time from the start
-            to its first wait plus the time from that read to the distinguishing wait. The bound is therefore
-            asserted only when the record shows the distinguishing wait, entered from 0.7 to 1.2 seconds after the
-            start, with those two times under 0.6 seconds in all, and the input stayed open until 1.9 seconds;
-            otherwise the run is skipped as INCONCLUSIVE, with the reason, and not passed."""
+            payload at once and the rest 1.0 seconds later, and stays open until the reader returns (feed's hold).
+            The reader as written never reads an end of input, so the refusal is asserted whatever the OS delays,
+            before the reader sets its deadline (test_m46_delayed_start) or after it (QA round 9). A reader still
+            running 10 seconds after its first wait or read reads the end of input then: the reader as written
+            refuses it (its deadline has passed), and a reader with no deadline takes the payload and fails. The
+            select the reader uses is a pass-through wrapper on inner (the select module when None) that records
+            each wait's timeout and the clock on entry and on return, and the reader's os.read records how many
+            bytes each read gave and the clock after it; mutant, when given, wraps that select (the reader as a
+            mutant changes it). The refusal must carry the deadline's message and come no sooner than the
+            deadline. The bound is on the reader's own record of its waits, not on the time the run took or the
+            time the refusal came: each wait the reader entered after it read the second piece, entered E seconds
+            after the start with a timeout of T seconds, must have E + T under 1.9. The first of them, the
+            distinguishing wait, tells a wait for the time left from a wait for the whole deadline: a wait for the
+            whole deadline entered at 0.7 seconds or later fails the bound however late the OS ends the wait or
+            runs the reader after it. The reader as written takes each T from a clock reading taken after the
+            event the record shows just before that wait (the read of the second piece, or the wait before), so
+            its E + T is at most 1.2 plus the time from the start to its first wait plus the time from that event
+            to the wait. The bound is therefore asserted only when the record shows the distinguishing wait,
+            entered from 0.7 to 1.2 seconds after the start, and for each wait after the second piece those two
+            times are under 0.6 seconds in all; otherwise the run is skipped as INCONCLUSIVE, with the reason, and
+            not passed. The time the reader takes outside its waits, such as from its last wait to the refusal,
+            is not bounded: the OS can run the reader as written late there."""
             one, real_os, real = json.dumps(dict(a=1)).encode(), os, inner or select
             events = []  # in the reader's order: ("wait", timeout, entered, returned) and ("read", bytes, at)
+            reading = threading.Event()  # set when the reader first enters a wait or a read
 
             class Select(object):
                 def select(self, rlist, wlist, xlist, timeout):
+                    reading.set()
                     entered = time.monotonic()
                     found = real.select(rlist, wlist, xlist, timeout)
                     events.append(("wait", timeout, entered, time.monotonic()))
@@ -2208,56 +2247,75 @@ def _self_test():
                     return getattr(real_os, name)
 
                 def read(self, fd, size):
+                    reading.set()
                     chunk = real_os.read(fd, size)
                     events.append(("read", len(chunk), time.monotonic()))
                     return chunk
             log = {}
             with patched(select=mutant(Select()) if mutant else Select(), os=Os()):
-                out, taken = self.feed([(0, one[:3]), (1.0, one[3:])], 1.2, close_after=2.0, log=log)
+                out, taken = self.feed([(0, one[:3]), (1.0, one[3:])], 1.2, log=log, hold=reading)
             self.assertEqual(out, "refused: " + _LATE)
             self.assertGreaterEqual(taken, 1.2)
-            start, got, wait, first, read_at = log["start"], 0, None, None, None
+            start, got, after, first, before = log["start"], 0, [], None, None
             for event in events:
                 if event[0] == "wait" and first is None:
                     first = event[2] - start  # when the reader entered its first wait
                 if got == len(one) and event[0] == "wait":
-                    wait = event  # the first wait entered after the second piece was read
-                    break
+                    after.append((event, before))  # a wait entered after the second piece was read
                 if event[0] == "read":
-                    got, read_at = got + event[1], event[2]
-            closed = log["closed"] - start
+                    got += event[1]
+                before = event[-1]  # the clock at the end of the last event recorded
             if got < len(one):
                 reason = "second piece not read", "the reader read %d of the %d bytes, never the second piece" % (
                     got, len(one))
-            elif wait is None:
+            elif not after:
                 reason = "no wait after the second piece", "the reader entered no wait after it read that piece"
-            elif not 0.7 <= wait[2] - start < 1.2:
+            elif not 0.7 <= after[0][0][2] - start < 1.2:
                 reason = "wait outside the window", "the wait after the second piece was entered at %.3f " \
-                    "seconds, not from 0.7 to 1.2" % (wait[2] - start)
-            elif closed < 1.9:
-                reason = "input ended early", "the input ended at %.3f seconds, before 1.9" % closed
-            elif first + wait[2] - read_at >= 0.6:
-                reason = "reader ran late", "the reader entered its first wait at %.3f seconds and the wait after " \
-                    "the second piece %.3f seconds after it read that piece, 0.6 or more in all" % (
-                        first, wait[2] - read_at)
+                    "seconds, not from 0.7 to 1.2" % (after[0][0][2] - start)
+            elif first + max(wait[2] - before for wait, before in after) >= 0.6:
+                reason = "reader ran late", "the reader entered its first wait at %.3f seconds and a wait after " \
+                    "the second piece %.3f seconds after the event before it, 0.6 or more in all" % (
+                        first, max(wait[2] - before for wait, before in after))
             else:
                 reason = None
             if reason:
                 self.skipTest("INCONCLUSIVE, %s: %s" % reason)
-            self.assertLess(wait[2] - start + wait[1], 1.9, events)
+            for wait, before in after:
+                self.assertTrue(wait[1] is not None and wait[2] - start + wait[1] < 1.9, events)
 
         def test_m46_input_still_open(self):
             """End to end only: test_m46_wait_for_time_left is the verdict on the timeout arithmetic.
 
             On a real pipe and clock either side can be descheduled, so this run cannot by itself tell a wait for
             the time left from a wait for the whole deadline. It checks that the reader refuses an input that stays
-            open (QA round 3 mutant B) with the deadline's message and within a bound, the bound only when its
-            record shows the distinguishing wait, and skips as INCONCLUSIVE otherwise (open_pipe, QA round 7). The
-            bound is on the reader's record of that wait, not on the time the run took (QA round 8)."""
+            open until the reader returns (QA round 3 mutant B), with the deadline's message and no sooner than
+            the deadline, whatever the OS delays (QA round 9). It bounds the reader's waits, not the time its
+            refusal comes: when the record shows the distinguishing wait, each wait the reader entered after it
+            read the second piece must end, by its entry time plus its timeout, under 1.9 seconds after the start,
+            and the run skips as INCONCLUSIVE otherwise (open_pipe, QA rounds 7 to 9). How long the reader takes
+            from its last wait to the refusal is not bounded here (QA round 9)."""
             one = json.dumps(dict(a=1)).encode()
             self.assertEqual(self.feed([(0, one)], 30, close_after=0.3)[0], dict(a=1))
             self.assertEqual(self.feed([(0, one[:5]), (0.3, one[5:])], 30)[0], dict(a=1))
             self.open_pipe()
+
+        def test_m46_delayed_start(self):
+            # the reader stalled 3.2 seconds before it sets its deadline (QA round 9): both pieces are in the pipe
+            # when it starts. When the input ended 2.0 seconds after the second piece, it had ended by then and the
+            # reader as written took the payload; the input now stays open until the reader returns, so it
+            # refuses whatever the stall, and the run passes or (its distinguishing wait outside the window) is
+            # skipped as inconclusive; it is never failed
+            real_read, real_time = _read_complete, time
+
+            def stalled(fd, deadline):
+                real_time.sleep(3.2)
+                return real_read(fd, deadline)
+            with patched(_read_complete=stalled):
+                try:
+                    self.open_pipe()
+                except unittest.SkipTest:
+                    pass
 
         def test_m46_delayed_reader(self):
             # the run that passed the round 6 end to end check (QA round 7): a reader whose waits are for the whole
@@ -2294,8 +2352,9 @@ def _self_test():
             # the schedule that failed the reader as written in round 7 (QA round 8): the OS ends each wait that
             # finds nothing 0.4 seconds late, and the reader runs another 0.4 seconds late after it, so the run
             # takes about 2.0 seconds. On the record the distinguishing wait is entered at about 1.0 seconds for
-            # the 0.2 seconds left, so the reader as written passes or is skipped; a reader whose waits are for the
-            # whole deadline is failed or skipped under the same delays, not passed
+            # the 0.2 seconds left, so the reader as written passes or is skipped. A reader whose waits are for the
+            # whole deadline cannot pass open_pipe under any delays (its window needs E of 0.7 seconds or more and
+            # T is 1.2): that arm guards against a later loosening of open_pipe and adds no coverage (QA round 9)
             class OsLate(object):
                 """select, with the OS ending each wait that finds nothing 0.4 seconds late (below the recorder)."""
                 def select(self, rlist, wlist, xlist, timeout):
