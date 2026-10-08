@@ -1001,13 +1001,13 @@ def main(argv):
 def _self_test():
     import ast
     import hashlib
+    import inspect
     import io
     import shutil
     import signal
     import stat
     import subprocess
     import tempfile
-    import threading
     import tokenize
     import unittest
 
@@ -1033,16 +1033,23 @@ def _self_test():
         "    out = ['refused', str(e)]",
         "sys.stdout.write(json.dumps(out) + '\\n')"))
 
+    # The child that T.run_hook runs: this file loaded as a module, its main called with this file's path and the
+    # arguments after it, its _read_complete given 30 seconds, the child's own bound (T.child), so a verdict there
+    # never depends on how fast the host runs the child (QA round 11). The production deadline main passes is
+    # pinned in process (T.scheduled with via_main).
+    MAIN = "\n".join((
+        "import importlib.util, sys",
+        "spec = importlib.util.spec_from_file_location('hook', sys.argv[1])",
+        "hook = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(hook)",
+        "read = hook._read_complete",
+        "hook._read_complete = lambda: read(0, 30.0)",
+        "sys.exit(hook.main(sys.argv[1:]))"))
+
     def decide(command, env=None, **extra):
         payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
         payload.update(extra)
         return _decide(payload, {} if env is None else env)
-
-    def run_hook(data, env=None, argv=(), timeout=30):
-        """The hook run as a process: (status, stdout, stderr); env is the whole environment."""
-        p = subprocess.run([sys.executable, "-I", "-S", "-B", here] + list(argv), input=data, capture_output=True,
-                           env={"LC_ALL": "C"} if env is None else env, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
 
     def payload_bytes(command, **extra):
         payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
@@ -1440,17 +1447,17 @@ def _self_test():
                 self.assertIsNotNone(decide("pkill -f qa-x/", env=env), env)
 
         def test_09_process_outputs(self):
-            rc, out, err = run_hook(payload_bytes("pkill -f qa-x/"))
+            rc, out, err = self.run_hook(payload_bytes("pkill -f qa-x/"))
             self.assertEqual((rc, err), (0, b""))
             self.assertTrue(out.endswith(b"\n") and out.count(b"\n") == 1, out)
             h = json.loads(out)["hookSpecificOutput"]
             self.assertEqual(h["permissionDecision"], "deny")
-            rc, out, err = run_hook(payload_bytes("pkill sleep"))
+            rc, out, err = self.run_hook(payload_bytes("pkill sleep"))
             self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1))
             self.assertEqual(json.loads(out), {"systemMessage": _NOTE})
-            self.assertEqual(run_hook(payload_bytes("echo hi")), (0, b"", b""))
-            self.assertEqual(run_hook(payload_bytes("pkill -f qa-x/", agent_id="a1"))[1].count(b"deny"), 1)
-            out = run_hook(payload_bytes("pkill -f " + chr(233) + "x"))[1]
+            self.assertEqual(self.run_hook(payload_bytes("echo hi")), (0, b"", b""))
+            self.assertEqual(self.run_hook(payload_bytes("pkill -f qa-x/", agent_id="a1"))[1].count(b"deny"), 1)
+            out = self.run_hook(payload_bytes("pkill -f " + chr(233) + "x"))[1]
             out.decode("ascii")  # json.dumps writes ASCII escapes
 
         def test_09_process_fail_open(self):
@@ -1461,12 +1468,12 @@ def _self_test():
             bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM (QA round 5)
             bad += tuple(non_json_constants())  # NaN, Infinity and -Infinity are not JSON (QA round 6)
             for data in bad:
-                rc, out, err = run_hook(data)
+                rc, out, err = self.run_hook(data)
                 self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), data[:30])
                 self.assertEqual(json.loads(out), dict(systemMessage=_NOTE_PAYLOAD), data[:30])
             for data in (payload_bytes("pkill -f qa-x/", tool_name="Read"),
                          payload_bytes("pkill -f qa-x/", hook_event_name="PostToolUse")):
-                self.assertEqual(run_hook(data), (0, b"", b""), data[:30])
+                self.assertEqual(self.run_hook(data), (0, b"", b""), data[:30])
             if os.path.exists("/bin/sh"):  # a closed stdin
                 p = subprocess.run(["/bin/sh", "-c", 'exec "$0" -I -S -B "$1" <&-', sys.executable, here],
                                    capture_output=True, env=dict(LC_ALL="C"), timeout=30)
@@ -1474,7 +1481,7 @@ def _self_test():
                 self.assertEqual(json.loads(p.stdout), dict(systemMessage=_NOTE_PAYLOAD))
             for extra in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}, {"ORCH_VERIFY_OWNER": ""}):
                 env = dict({"LC_ALL": "C"}, **extra)
-                rc, out, err = run_hook(payload_bytes("pkill -f qa-x/"), env)
+                rc, out, err = self.run_hook(payload_bytes("pkill -f qa-x/"), env)
                 self.assertEqual((rc, out, err), (0, b"", _WORKER_LINE.encode() + b"\n"), extra)
 
         def test_09_read_error_note(self):
@@ -1491,27 +1498,22 @@ def _self_test():
             self.assertEqual(json.loads(text), dict(systemMessage=_NOTE_PAYLOAD))
 
         def test_09_fragmented_payload(self):
-            # a whole JSON payload, an idle interval, then more bytes: the input as a whole is not one JSON object,
-            # so it gets the cannot-evaluate note, never silence; the same interval before the end of input (or
-            # before blanks) leaves the payload read as sent
-            whole, note = payload_bytes("echo hi"), json.dumps(dict(systemMessage=_NOTE_PAYLOAD)).encode() + b"\n"
+            """A whole JSON payload, an idle interval, then more bytes: the input as a whole is not one JSON object,
+            so it gets the cannot-evaluate note, never silence; the same interval before the end of input (or
+            before blanks) leaves the payload read as sent. Through main on injected schedules (scheduled with
+            via_main, at the production deadline), the idle wait taking 0.2 seconds, so no verdict depends on how
+            fast the host runs the test (QA round 11). The cases that get the note are also run as the hook's own
+            process (child), where the note is the verdict whenever the bytes arrive."""
+            whole, note = payload_bytes("echo hi"), json.dumps(dict(systemMessage=_NOTE_PAYLOAD)) + "\n"
             for chunks, want in (((whole, b"garbage"), note), ((payload_bytes("pkill -f qa-x/"), b"x"), note),
-                                 ((whole, b""), b""), ((whole, b"\n "), b""), ((whole[:20], whole[20:]), b""),
-                                 ((whole, b" \t\r\n"), b""), ((whole, b"\x0b"), note), ((whole, b"\x0c"), note),
+                                 ((whole, b""), ""), ((whole, b"\n "), ""), ((whole[:20], whole[20:]), ""),
+                                 ((whole, b" \t\r\n"), ""), ((whole, b"\x0b"), note), ((whole, b"\x0c"), note),
                                  ((whole, b"\xc2\xa0"), note)):
-                p = subprocess.Popen([sys.executable, "-I", "-S", "-B", here], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
-                try:
-                    p.stdin.write(chunks[0])
-                    p.stdin.flush()
-                    time.sleep(0.2)
-                    p.stdin.write(chunks[1])  # the hook still reads: a BrokenPipeError here fails the test
-                    out, err = p.communicate(timeout=30)
-                finally:
-                    if p.poll() is None:
-                        p.kill()
-                        p.communicate()
-                self.assertEqual((p.returncode, out, err), (0, want, b""), chunks)
+                steps = [(0.0, chunks[0]), (0.2, None)] + ([(0.0, chunks[1])] if chunks[1] else []) + [(0.0, b"")]
+                self.assertEqual(self.scheduled(steps, via_main=True)[0], want, chunks)
+                if want:
+                    self.assertEqual(self.child([here], [(0, chunks[0]), (0.2, chunks[1])]),
+                                     (0, want.encode(), b""), chunks)
 
         def test_10_argv(self):
             old = sys.stdout
@@ -1523,7 +1525,7 @@ def _self_test():
             finally:
                 sys.stdout = old
             for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""]):
-                self.assertEqual(run_hook(payload_bytes("pkill -f qa-x/"), argv=argv), (0, b"", b""), argv)
+                self.assertEqual(self.run_hook(payload_bytes("pkill -f qa-x/"), argv=argv), (0, b"", b""), argv)
 
         def test_10_directory_stdin_guard(self):
             if not os.path.exists("/bin/sh"):
@@ -1647,7 +1649,7 @@ def _self_test():
                       "pkill -f x/ # self-match-ok " * 2000, "for p in $(pgrep -f x/); do " * 6000,
                       "bash -c '" * 7000 + "pkill x", "a " * 30000 + "| grep ps")
             for c in shapes:
-                rc, out, err = run_hook(payload_bytes(c))
+                rc, out, err = self.run_hook(payload_bytes(c))
                 self.assertEqual((rc, err), (0, b""), c[:40])
 
         def test_14_bash_accepts_deny_vectors(self):
@@ -2038,8 +2040,9 @@ def _self_test():
                 out = whole_input(bad)
                 self.assertEqual(out, "refused: hook payload has " + name + ", which is not JSON", bad)
 
-        def child(self, argv, parts, end=True, bound=30):
-            """python3 -I -S -B argv run as a child process, its stdin a pipe that this test writes with no thread:
+        def child(self, argv, parts, end=True, bound=30, env=None):
+            """python3 -I -S -B argv run as a child process (env its whole environment, LC_ALL=C alone when None),
+            its stdin a pipe that this test writes with no thread:
             parts are (pause, bytes) each, each written after sleeping pause seconds through a non-blocking write
             end, so a child that stops reading cannot block the test. The write end is then closed when end is
             true, and kept open until the child exits when it is false (an input that never ends). A child that
@@ -2051,7 +2054,7 @@ def _self_test():
             p, late = None, False
             try:
                 p = subprocess.Popen([sys.executable, "-I", "-S", "-B"] + argv, stdin=r, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
+                                     stderr=subprocess.PIPE, env=dict(LC_ALL="C") if env is None else env)
                 stop = wall_clock() + bound
                 os.close(r)
                 r = None
@@ -2089,78 +2092,165 @@ def _self_test():
                         p.kill()
                     p.communicate()  # reaps it and closes its stdout and stderr
 
-        def child_read(self, parts, deadline=30.0, end=True, reader="_read_complete", max_input=None):
+        def run_hook(self, data, env=None, argv=()):
+            """The hook's main run in a child process (child, MAIN) on data and then the end of input, with argv
+            after this file's path and env the whole environment: (status, stdout, stderr). Its reader is given
+            30 seconds, the child's bound, so these verdicts do not depend on how fast the host runs the child (QA
+            round 11); scheduled with via_main pins that main reads stdin at the production deadline."""
+            return self.child(["-c", MAIN, here] + list(argv), [(0, data)], env=env)
+
+        def child_read(self, parts, deadline=30.0, end=True, reader="_read_complete", max_input=None,
+                       bound=30):
             """reader (this file's _read_complete, or the vendored _read_payload) called in a child process (child,
             DRIVER) on its stdin, given deadline seconds (None: the reader's default, the production
             _READ_DEADLINE of 2.0) and, when max_input is given, a _MAX_INPUT of max_input: the payload, or
             "refused: <message>" for the ValueError it raised. The child must exit 0 with one line on stdout and
-            nothing on stderr. The default deadline of 30 seconds equals the child's bound, so an input that ends
-            is refused for lateness only when the test's own writes took about as long as the bound."""
+            nothing on stderr within bound seconds (child). The default deadline of 30 seconds equals the default
+            bound, so an input that ends is refused for lateness only when the child ran past its bound anyway."""
             rc, out, err = self.child(["-c", DRIVER, here, reader, "-" if deadline is None else repr(deadline),
-                                       "-" if max_input is None else str(max_input)], parts, end)
+                                       "-" if max_input is None else str(max_input)], parts, end, bound)
             self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), out)
             kind, value = json.loads(out.decode("ascii"))
             return value if kind == "payload" else "refused: " + value
 
-        def scheduled(self, steps, read_takes=0.0, deadline=1.0, reader=None, mutant=None):
+        def scheduled(self, steps, read_takes=0.0, deadline=1.0, reader=None, mutant=None, held=None,
+                      via_main=False):
             """reader(r, deadline) (_read_complete when None) under an injected clock, select and os.read, with no
-            thread and nothing timed: the clock stands still but for the waits and the reads. Wait number i is
-            given steps[i], (seconds, part): the wait records its timeout, moves the clock on that many seconds,
-            then writes part (which fits the pipe's buffer) and reports the pipe ready (closes the pipe for b""
-            and reports it ready; reports it not ready for None); each read moves the clock on read_takes
-            seconds. mutant, when given, wraps the injected select (the reader as a mutant changes it). More
-            waits than steps fail the test, and so do more reads than steps (a read follows a wait) and over 100
-            clock readings, so a reader that loops without waiting fails the test rather than hanging it (QA
-            round 9). Both pipe ends are closed on every path. Returns (the payload or "refused: <message>", the
-            timeouts in order)."""
-            case, real_os = self, os
-
-            class Clock(object):
-                now, readings = 100.0, 0
-
-                def monotonic(self):
-                    self.readings += 1
-                    case.assertLessEqual(self.readings, 100, "the clock read over 100 times")
-                    return self.now
+            thread and nothing timed: the clock stands still but for the waits, the reads, a held reading and a
+            sleep. Wait number i is given steps[i], (seconds, part): the wait records its timeout, moves the clock
+            on that many seconds, then writes part (which fits the pipe's buffer) and reports the pipe ready
+            (closes the pipe for b"" and reports it ready; reports it not ready for None); each read moves the
+            clock on read_takes seconds (a list: each read in turn its own entry). held, when given, is (k,
+            seconds): clock reading number k is taken and the clock then moves on that many seconds before the
+            reader uses it, as when the OS runs the reader late (QA round 4). mutant, when given, wraps the
+            injected select (the reader as a mutant changes it). via_main: the reader is main's own call of
+            _read_complete (the worker check off, stdout captured), which must be one call on stdin (descriptor
+            0) at the production _READ_DEADLINE, its arguments recorded and the defaults filled in (QA round 11);
+            the result is then main's output. The injected time has monotonic and sleep, the injected select has
+            select, the injected os has read, and any other name the reader reaches through time, select or os
+            fails the test, so a blocking call there cannot go unseen; sleep moves the clock on and is recorded.
+            The deadline assertions cover the total injected time (QA round 11): once the reader has read a time
+            at or past the deadline, it must return without another wait, read or sleep; and when it returns, the
+            clock must have moved by the waits, the reads and a held reading alone. So a reader that sleeps,
+            before a refusal or anywhere else, fails the test by assertion. Not seen here: a delay through a name
+            the harness does not patch (__import__("time").sleep, threading, another module's clock, a busy
+            loop). More waits than steps fail the test, and so do more reads than steps (a read follows a wait)
+            and over 100 clock readings, so a reader that loops without waiting fails the test rather than
+            hanging it (QA round 9). Both pipe ends are closed on every path from the moment os.pipe returns them
+            (QA round 11). Returns (the payload, "refused: <message>" or main's output; the timeouts in order; the
+            number of reads)."""
+            case, real_os, real_read = self, os, _read_complete
             r, w = real_os.pipe()
-            real_os.set_blocking(r, False)  # a read with nothing to read raises BlockingIOError, it never blocks
-            clock, timeouts, ends, reads = Clock(), [], [w], []
-
-            class Select(object):
-                def select(self, rlist, wlist, xlist, timeout):
-                    case.assertLess(len(timeouts), len(steps), "more waits than the schedule")
-                    seconds, part = steps[len(timeouts)]
-                    timeouts.append(timeout)
-                    clock.now += seconds
-                    if part is None:
-                        return [], [], []
-                    if part:
-                        real_os.write(w, part)
-                    else:
-                        real_os.close(ends.pop())
-                    return list(rlist), [], []
-
-            class Os(object):
-                def read(self, fd, size):
-                    case.assertLess(len(reads), len(steps), "more reads than the schedule")
-                    reads.append(fd)
-                    clock.now += read_takes
-                    return real_os.read(fd, size)
+            ends = [r, w]
             try:
-                with patched(time=clock, select=mutant(Select()) if mutant else Select(), os=Os()):
-                    out = (reader or _read_complete)(r, deadline)
-            except ValueError as e:
-                out = "refused: " + str(e)
+                real_os.set_blocking(r, False)  # a read with nothing to read raises BlockingIOError, it never blocks
+                timeouts, reads, slept, failed, moved = [], [], [], [], [100.0]
+
+                def prompt(what):
+                    case.assertFalse(clock.late, "the reader %s after it read a time at or past the deadline" % what)
+
+                def move(seconds):
+                    """The clock moved on by a wait, a read or a held reading (moved: those alone)."""
+                    clock.now += seconds
+                    moved[0] += seconds
+
+                class Clock(object):
+                    now, readings, end, late = 100.0, 0, None, False
+
+                    def monotonic(self):
+                        self.readings += 1
+                        case.assertLessEqual(self.readings, 100, "the clock read over 100 times")
+                        value = self.now
+                        if held and self.readings == held[0]:
+                            move(held[1])
+                        self.late = self.late or value >= self.end
+                        return value
+
+                    def sleep(self, seconds):
+                        prompt("slept")
+                        slept.append(seconds)
+                        self.now += seconds
+
+                    def __getattr__(self, name):
+                        case.fail("the reader used time.%s, which the injected time does not give" % name)
+                clock = Clock()
+
+                class Select(object):
+                    def select(self, rlist, wlist, xlist, timeout):
+                        prompt("waited")
+                        case.assertLess(len(timeouts), len(steps), "more waits than the schedule")
+                        seconds, part = steps[len(timeouts)]
+                        timeouts.append(timeout)
+                        move(seconds)
+                        if part is None:
+                            return [], [], []
+                        if part:
+                            real_os.write(w, part)
+                        else:
+                            case.assertIn(w, ends, "the schedule ends the input twice")
+                            ends.remove(w)
+                            real_os.close(w)
+                        return list(rlist), [], []
+
+                    def __getattr__(self, name):
+                        case.fail("the reader used select.%s, which the injected select does not give" % name)
+
+                class Os(object):
+                    def read(self, fd, size):
+                        prompt("read")
+                        case.assertLess(len(reads), len(steps), "more reads than the schedule")
+                        move(read_takes[len(reads)] if isinstance(read_takes, list) else read_takes)
+                        reads.append(fd)
+                        return real_os.read(fd, size)
+
+                    def __getattr__(self, name):
+                        case.fail("the reader used os.%s, which the injected os does not give" % name)
+
+                def run(seconds):
+                    clock.end = clock.now + seconds  # the reader's first clock reading is clock.now
+                    with patched(time=clock, select=mutant(Select()) if mutant else Select(), os=Os()):
+                        return (reader or real_read)(r, seconds)
+                if via_main:
+                    given, signature = [], inspect.signature(real_read)
+
+                    def stand_in(*args, **kw):
+                        call = signature.bind(*args, **kw)
+                        given.append(tuple(call.arguments.get(name, value.default)
+                                           for name, value in signature.parameters.items()))
+                        try:
+                            return run(given[-1][1])
+                        except case.failureException as e:  # main takes any exception as an unreadable payload
+                            failed.append(e)
+                            raise
+                    old = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        with patched(_read_complete=stand_in, _is_worker=lambda env: False):
+                            status = main(["hook"])
+                        out = sys.stdout.getvalue()
+                    finally:
+                        sys.stdout = old
+                    if failed:
+                        raise failed[0]
+                    self.assertEqual((status, given), (0, [(0, _READ_DEADLINE)]),
+                                     "main reads stdin once, at the production deadline")
+                else:
+                    try:
+                        out = run(deadline)
+                    except ValueError as e:
+                        out = "refused: " + str(e)
+                self.assertEqual(clock.now, moved[0], "the clock moved on outside the waits and reads: slept %r" % (
+                    slept,))
+                return out, timeouts, len(reads)
             finally:
-                real_os.close(r)
                 for fd in ends:
                     real_os.close(fd)
-            return out, timeouts
 
-        def wait_for_time_left(self, mutant=None):
-            """The deterministic check, and the only verdict, on the time each wait is given (QA rounds 6 to 10):
-            the reader on fixed injected schedules (scheduled), where the timeout each wait is given is known.
-            mutant, when given, wraps the injected select (the reader as a mutant changes it). Fails the test
+        def wait_for_time_left(self, mutant=None, reader=None):
+            """The deterministic check, and the only verdict on the timeouts, the time each wait is given (QA rounds
+            6 to 11): the reader on fixed injected schedules (scheduled), where the timeout each wait is given is
+            known. mutant, when given, wraps the injected select (the reader as a mutant changes it); reader, when
+            given, replaces _read_complete. Fails the test
             when, on one of the schedules below, a wait is given a timeout other than the time left by the clock,
             an end of input read at or after the deadline is accepted, or the reader waits, reads or reads the
             clock more often than the schedule allows. Every timeout is compared exactly, with no tolerance: on
@@ -2179,7 +2269,7 @@ def _self_test():
             one = json.dumps(dict(a=1)).encode()
 
             def waits(steps, read_takes=0.0, deadline=1.0):
-                return self.scheduled(steps, read_takes, deadline, mutant=mutant)
+                return self.scheduled(steps, read_takes, deadline, reader, mutant)[:2]
             # the end of input does not come: the waits are for 1.0, 0.75 and 0.25 seconds, and the clock reaches
             # the deadline at the third (a wait for the whole deadline would be given 1.0 each time, and a time
             # left not taken again after a wait that found nothing would give the third 0.75)
@@ -2223,9 +2313,9 @@ def _self_test():
                                    deadline=_READ_DEADLINE), (dict(a=1), [2.0, 1.625, 1.0, 0.75]))
 
         def test_m46_wait_for_time_left(self):
-            """The deterministic check of the remaining-time logic, and the only verdict on it (wait_for_time_left,
-            QA rounds 6 to 10): on its schedules each wait is for the time left by the clock, compared exactly,
-            and an end of input read at or after the deadline is refused."""
+            """The deterministic check of the remaining-time logic, and the only verdict on the timeouts
+            (wait_for_time_left, QA rounds 6 to 11): on its schedules each wait is for the time left by the clock,
+            compared exactly, and an end of input read at or after the deadline is refused."""
             self.wait_for_time_left()
 
         def test_m46_timeout_mutants(self):
@@ -2263,31 +2353,60 @@ def _self_test():
                            lambda n, t, first: first if t > 2 - 2 ** -10 else t):
                 self.wait_for_time_left(lambda inner: Changed(inner, change))
 
+        def test_m46_delay_mutants(self):
+            """Readers that delay through the names the injected harness patches fail the deterministic check by
+            assertion, not by an error (QA round 11): one that sleeps 1 second before each refusal for lateness,
+            one that sleeps 2 ** -10 seconds before it first reads the clock, and one that waits through
+            select.poll. A delay through a name the harness does not patch is not seen there (scheduled); the
+            bound on the production-deadline runs in test_m46_input_still_open catches one of about 10 seconds or
+            more."""
+            def late_sleep(fd, deadline):
+                try:
+                    return _read_complete(fd, deadline)
+                except ValueError as e:
+                    if str(e) == _LATE:
+                        time.sleep(1)  # the module's time: the injected one while the reader runs
+                    raise
+
+            def early_sleep(fd, deadline):
+                time.sleep(2 ** -10)
+                return _read_complete(fd, deadline)
+
+            def polled(fd, deadline):
+                select.poll()
+                return _read_complete(fd, deadline)
+            for reader in (late_sleep, early_sleep, polled):
+                with self.assertRaises(self.failureException, msg=reader.__name__):
+                    self.wait_for_time_left(reader=reader)
+
         def test_m46_input_still_open(self):
             """End to end, in child processes (child): the reader on a real pipe, clock and select, and the hook's
-            own main. No assertion here depends on when anything happened beyond each child's 30-second bound;
-            test_m46_wait_for_time_left is the only verdict on the timeouts. Input that ends is taken (the reader
-            given a 30-second deadline). Input that never ends (its write end kept open until the child exits)
-            is refused with the deadline's message by the reader at its production deadline, although a whole
-            JSON value has been written; through main it gets the cannot-evaluate note, not the deny that payload
-            gets once read. A reader with no deadline never returns on that input, and one that takes a whole
-            JSON value without its end of input (QA round 3 mutant B) returns it: each fails here. This replaces
-            the in-process run with a writer thread and the bound on the reader's recorded waits (QA rounds 6 to
-            10)."""
-            one = json.dumps(dict(a=1)).encode()
+            own main. Input that ends is taken (the reader given a 30-second deadline). Input that never ends (its
+            write end kept open until the child exits) is refused with the deadline's message by the reader at its
+            production deadline, although a whole JSON value has been written; through main it gets the
+            cannot-evaluate note, not the deny that payload gets once read. A reader with no deadline never
+            returns on that input, and one that takes a whole JSON value without its end of input (QA round 3
+            mutant B) returns it: each fails here. Each child has a bound of 30 seconds, and the two at the
+            production deadline one of 12 seconds, 10 seconds after that deadline, with their input open
+            throughout: the refusal must come by then, from the child's exit (QA round 11). So a reader that
+            delays its refusal by about 10 seconds or more fails here, and a correct one fails only if the host
+            stalls the child for about that long; no other assertion here depends on when anything happened, and
+            test_m46_wait_for_time_left is the only verdict on the timeouts."""
+            one, prompt = json.dumps(dict(a=1)).encode(), int(_READ_DEADLINE) + 10
             self.assertEqual(self.child_read([(0, one)]), dict(a=1))
             self.assertEqual(self.child_read([(0, one[:5]), (0.3, one[5:])]), dict(a=1))
-            self.assertEqual(self.child_read([(0, one[:3]), (0.3, one[3:])], deadline=None, end=False),
-                             "refused: " + _LATE)
+            self.assertEqual(self.child_read([(0, one[:3]), (0.3, one[3:])], deadline=None, end=False,
+                                             bound=prompt), "refused: " + _LATE)
             deny = payload_bytes("pkill -f qa-x/")
-            self.assertEqual(self.child([here], [(0, deny[:20]), (0.3, deny[20:])], end=False),
+            self.assertEqual(self.child([here], [(0, deny[:20]), (0.3, deny[20:])], end=False, bound=prompt),
                              (0, json.dumps(dict(systemMessage=_NOTE_PAYLOAD)).encode() + b"\n", b""))
 
         def test_m47_one_input_budget(self):
             """Every byte read through the end of input counts toward the one 16 MiB budget, whether the blanks
             after the payload are written with it or 0.15 seconds after it (QA round 3). The reader runs in a
-            child process (child_read) and the hook as one; neither verdict depends on when the reader saw the
-            bytes, and nothing is asserted on the time taken beyond each child's 30-second bound."""
+            child process (child_read) and the hook as one (child, with its non-blocking writes, QA round 11);
+            neither verdict depends on when the reader saw the bytes, and nothing is asserted on the time taken
+            beyond each child's 30-second bound."""
             whole, blanks = payload_bytes("echo hi"), b" " * 65536
             over = (_MAX_INPUT - len(whole)) // len(blanks) + 1
             bound = "refused: hook payload over the read bound"
@@ -2299,24 +2418,9 @@ def _self_test():
                 self.assertEqual(self.child_read([(0, whole), (pause, b" " * pad)], max_input=4096),
                                  json.loads(whole))
                 self.assertEqual(self.child_read([(0, whole), (pause, b" " * (pad + 1))], max_input=4096), bound)
-            p = subprocess.Popen([sys.executable, "-I", "-S", "-B", here], stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
-            try:
-                try:
-                    p.stdin.write(whole)
-                    p.stdin.flush()
-                    time.sleep(0.15)
-                    for _ in range(over):
-                        p.stdin.write(blanks)
-                    p.stdin.close()
-                except BrokenPipeError:
-                    pass  # the hook stopped reading at the bound
-                out, err = p.communicate(timeout=30)
-            finally:
-                if p.poll() is None:
-                    p.kill()
-                    p.communicate()
-            self.assertEqual((p.returncode, json.loads(out), err), (0, dict(systemMessage=_NOTE_PAYLOAD), b""))
+            note = json.dumps(dict(systemMessage=_NOTE_PAYLOAD)).encode() + b"\n"
+            self.assertEqual(self.child([here], [(0, whole), (0.15, blanks)] + [(0, blanks)] * (over - 1)),
+                             (0, note, b""))  # the hook stops reading at the bound: its note
 
         def test_m48_descriptor_number(self):
             # bash reads a bare word of digits alone directly before `>` as a descriptor number: `pkill -f
@@ -2365,104 +2469,51 @@ def _self_test():
         def test_m51_late_end_of_input(self):
             """An end of input that comes after the deadline is refused even when the OS runs the hook late (QA
             round 4): the clock is read again after each wait and after each read, before an end of input is
-            accepted. A wait that ends past the deadline is not followed by a read: that is asserted on the count
-            of reads, not on the time the run took (QA round 10). The thread that closes the pipe waits at most 10
-            seconds for the reader's first clock reading and then close_after seconds before it closes the pipe,
-            and it is joined before each run returns."""
-            real_time, real_select, real_read, real_os = time, select, _read_complete, os
-            late = "refused: " + _LATE
+            accepted. On injected schedules (scheduled), with no thread and nothing timed (QA round 11), at a
+            deadline of 0.05 seconds: each clock reading in turn held off 0.12 seconds between taking it and using
+            it, while the input ends 0.08 seconds after the first reading; a wait reported at once whose read
+            then takes the clock past the deadline; and a wait that ends 1.0 seconds past the deadline, which is
+            not followed by a read (asserted on the count of reads, QA round 10). Through main, at the production
+            deadline, waits that each take 1.1 seconds: the end of input is seen at 2.2 seconds and gets the
+            cannot-evaluate note."""
+            late, one = "refused: " + _LATE, b"{}"
+            # the reported regression: each of the six clock readings in turn is held off, refused after as many
+            # reads (without the check after a wait, a wait held off is followed by a read)
+            for held, reads in ((1, 0), (2, 0), (3, 1), (4, 1), (5, 1), (6, 1)):
+                out, _, n = self.scheduled([(0.0, one), (0.08, b"")], deadline=0.05, held=(held, 0.12))
+                self.assertEqual((out, n), (late, reads), held)
+            # a wait reported at once: the read of the end of input itself takes the clock past the deadline
+            out, _, n = self.scheduled([(0.0, one), (0.0, b"")], read_takes=[0.0, 0.08], deadline=0.05)
+            self.assertEqual((out, n), (late, 2))
+            # a wait that ends past the deadline is not followed by a read
+            out, _, n = self.scheduled([(1.0, b"")], deadline=0.05)
+            self.assertEqual((out, n), (late, 0))
+            # through main: each wait moves the clock on 1.1 seconds, so the end of input is seen at 2.2 seconds
+            out = self.scheduled([(1.1, payload_bytes("echo hi")), (1.1, b"")], via_main=True)[0]
+            self.assertEqual(json.loads(out), dict(systemMessage=_NOTE_PAYLOAD))
 
-            class Clock(object):
-                """time for _read_complete: call number `stale` takes a reading, is held off 0.12 seconds and then
-                returns that old reading; `started` is set at the first call; `offset` is added to each reading."""
-                sleep = staticmethod(real_time.sleep)
+        def test_m52_schedule_pipe_closed(self):
+            """scheduled closes both pipe ends on every path from the moment os.pipe returns them: an injected
+            failure of os.set_blocking, its first call after os.pipe, leaves neither end open (QA round 11)."""
+            real_os, made = os, []
 
-                def __init__(self, stale=None):
-                    self.calls, self.stale, self.offset, self.started = 0, stale, 0.0, threading.Event()
-
-                def monotonic(self):
-                    self.calls += 1
-                    self.started.set()
-                    now = real_time.monotonic() + self.offset
-                    if self.calls == self.stale:
-                        real_time.sleep(0.12)
-                    return now
-
-            class Select(object):
-                """select for _read_complete: wait(rlist, timeout) gives the ready list."""
-                def __init__(self, wait):
-                    self.wait = wait
-
-                def select(self, rlist, wlist, xlist, timeout):
-                    return self.wait(rlist, timeout), [], []
-
-            class Reads(object):
-                """os for _read_complete: the real os, with the calls to os.read counted."""
-                calls = 0
-
+            class Failing(object):
                 def __getattr__(self, name):
                     return getattr(real_os, name)
 
-                def read(self, fd, size):
-                    self.calls += 1
-                    return real_os.read(fd, size)
+                def pipe(self):
+                    made.extend(real_os.pipe())
+                    return made[0], made[1]
 
-            def late_end(clock, waiter=None, data=b"{}", close_after=0.08):
-                """_read_complete(r, 0.05) under clock (and waiter) on a pipe that holds data and ends close_after
-                seconds after the reader's first clock reading: (the result or "refused: <message>", the number of
-                reads)."""
-                r, w = real_os.pipe()
-                real_os.write(w, data)
-                reads = Reads()
-
-                def close():
-                    clock.started.wait(10)
-                    real_time.sleep(close_after)
-                    real_os.close(w)
-                t = threading.Thread(target=close)
-                t.start()
-                try:
-                    with patched(time=clock, select=waiter or real_select, os=reads):
-                        out = _read_complete(r, 0.05)
-                except ValueError as e:
-                    out = "refused: " + str(e)
-                finally:
-                    t.join()
-                    real_os.close(r)
-                return out, reads.calls
-            # the reported regression: each clock reading in turn is held off between taking it and using it
-            for stale in range(1, 8):
-                self.assertEqual(late_end(Clock(stale))[0], late, stale)
-            # a wait reported at once while the input is not ready: the read itself blocks past the deadline
-            self.assertEqual(late_end(Clock(), Select(lambda rlist, timeout: list(rlist)))[0], late)
-            # a wait that ends past the deadline is not followed by a read (that read would block 1.5 seconds)
-            clock = Clock()
-
-            def overrun(rlist, timeout):
-                clock.offset += 1.0
-                return list(rlist)
-            self.assertEqual(late_end(clock, Select(overrun), data=b"", close_after=1.5), (late, 0))
-            # through main: each wait moves the clock on 1.1 seconds, so the end of input is seen at 2.2 seconds
-            r, w = os.pipe()
-            os.write(w, payload_bytes("echo hi"))
-            os.close(w)
-            clock = Clock()
-
-            def slow(rlist, timeout):
-                found = real_select.select(rlist, [], [], timeout)[0]
-                clock.offset += 1.1
-                return found
-            old = sys.stdout
-            sys.stdout = io.StringIO()
-            try:
-                with patched(time=clock, select=Select(slow), _read_complete=lambda: real_read(r),
-                             _is_worker=lambda env: False):
-                    self.assertEqual(main(["hook"]), 0)
-                text = sys.stdout.getvalue()
-            finally:
-                sys.stdout = old
-                os.close(r)
-            self.assertEqual(json.loads(text), dict(systemMessage=_NOTE_PAYLOAD))
+                def set_blocking(self, fd, flag):
+                    raise OSError("injected set_blocking failure")
+            with patched(os=Failing()):
+                with self.assertRaises(OSError):
+                    self.scheduled([(0.0, b"{}"), (0.0, b"")])
+            self.assertEqual(len(made), 2)
+            for fd in made:
+                with self.assertRaises(OSError, msg=fd):  # EBADF: that end was closed
+                    os.fstat(fd)
 
         def test_15_adjacent_redirection_probe(self):
             # non-signalling: pgrep -c in the wrapper form (a command after the eval), in its own process group,
