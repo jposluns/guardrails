@@ -42,14 +42,20 @@ POLICY FILE
     declares one of them global; and compares the policy path, a sample of policies through both
     validators, and this hook's scope test with the gate's walk. The walk treats __builtins__ as a region
     name, and also fails on a module-level statement outside the region that stores to an attribute or item of
-    a region name, json, builtins or sys.modules (an alias made by importing one of those modules counts). H12
-    exists to catch accidental drift between the two copies. It is not a defence against a deliberate edit
-    that replaces behaviour through a path the static walk does not model: a function body run later, an
-    alias made by assignment, setattr, globals(), vars(), exec, or another module patching this one. The
-    behaviour sample runs both validators in one process, so it shares one json module and cannot see a
-    change made to json. The control for a deliberate edit is the hash check: .preview/SHA256SUMS records
-    this hook's SHA-256 and the release manifest .aiqt/manifest.toml records both files', so any such edit
-    changes a recorded hash.
+    a region name, json, builtins or sys.modules (a name that an import anywhere in the file binds to one of
+    those modules counts as that module and as itself). H12 exists to catch accidental drift between the two
+    copies. It is not a defence against a deliberate edit that replaces behaviour through a path the static
+    walk does not model: a function body run later, an alias made by assignment, setattr, globals(), vars(),
+    exec, an in-place call such as sys.modules.update(...) or json.__dict__.update(...), another module
+    patching this one, or a module named json that shadows the standard library's. The gate imports json
+    before it puts tools/ on sys.path, so under python3 -I, as CI runs it, a tools/json.py is never imported
+    (the gate's self-test pins this); run without -I, Python puts a script's own directory first on sys.path,
+    and a module there named like a standard library module shadows that module, for the gate and for this
+    hook alike. The behaviour sample runs both validators in one process, so it shares one json module and
+    cannot see a change made to json. Diff review is the control for a deliberate edit. The recorded hashes
+    (.preview/SHA256SUMS for this hook, the release manifest .aiqt/manifest.toml for both files) let an
+    installer or a release check detect a shipped copy that differs from the reviewed one; whoever makes an
+    edit can record the new hashes in the same change.
 
 DECISION
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
@@ -60,13 +66,18 @@ DECISION
     - A tool_name string naming a tool other than Write, Edit or MultiEdit: allow, silently.
     - Fail-open, made visible: the preview channel allows what it cannot evaluate (the hook is opt-in and the
       CI gate is the backstop), but always with a note naming the reason, never silently and never with an
-      ask. That covers a payload that cannot be read as JSON of at most 64 MiB or is not a JSON object, a
-      missing tool_name, a tool_input that is not an object, a file_path that is not a non-empty string
-      without control characters, a relative file_path with no absolute cwd, a path that cannot be resolved
-      or encoded as a file name (a lone surrogate, say), a field the tool needs (old_string, new_string,
-      edits, content) of the wrong type, and an internal error. A call is well-formed when none of these
-      faults applies to it; its fields are checked before its path is compared with the root and before the
-      policy file is read, so a malformed call gets a note wherever it points and whether or not the root
+      ask. That covers a payload that is not read through its end of input within 2 seconds, is over 64 MiB,
+      is not strict UTF-8 (UTF-16, UTF-32, an encoded surrogate, a byte order mark), is not one JSON value,
+      holds NaN, Infinity or -Infinity, or is not a JSON object; a missing tool_name, a tool_input that is
+      not an object, a file_path that is not a non-empty string without control characters, a relative
+      file_path with no absolute cwd, a field the tool needs (old_string, new_string, edits, content) of the
+      wrong type, a path that cannot be resolved (a symbolic link loop, a component that is not a directory, a
+      permission fault: every fault but a missing component) or encoded as a file name (a lone surrogate,
+      say), and an internal error. An escaped lone surrogate (\\ud800) in a string is standard JSON and is
+      read as sent: it is not a policy character, so it neither adds one nor hides one. A call is well-formed
+      when none of these faults applies to it. The order: the file_path's form (and the cwd a relative one is
+      joined onto), then the fields, then the path is resolved and compared with the root, and only then is
+      the policy file read, so a malformed call gets a note wherever it points and whether or not the root
       holds a policy file.
     - A relative file_path is joined onto the payload's cwd. The target's and the root's real paths are
       compared whole component by component; a well-formed call whose target is outside the root, or not in
@@ -114,13 +125,14 @@ RESIDUAL COVERAGE
       control over it.
     - The repository's other character checks with their own fixed sets and scopes are not read.
     - The file can change between this hook's decision and the write (a race).
-    - A payload over 64 MiB, or one that is not a JSON object, is allowed with a note.
+    - A payload over 64 MiB, one that does not end within 2 seconds, one that is not strict UTF-8 JSON, and one
+      that is not a JSON object are allowed with a note.
     - It does not read AIQT_HOOKS_WORKER: worker processes are checked like any other session.
     - An armed hook whose root holds no policy file allows every well-formed call silently (a malformed one
       gets a note); the gate then applies its built-in default, which this hook does not copy.
 
 SELF-TEST
-    --self-test runs the vectors H1 to H21 below. The parity test H12 imports the sibling gate
+    --self-test runs the vectors H1 to H23 below. The parity test H12 imports the sibling gate
     ../tools/check_no_dashes.py; when it is absent the test reports skipped, unless the environment sets
     AIQT_HOOKS_REQUIRE_SIBLINGS=1, when its absence fails the test.
 """
@@ -134,7 +146,9 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import os
+import select
 import stat
+import time
 from pathlib import PurePosixPath
 
 HOOK_ID = "char-policy-write"
@@ -143,6 +157,7 @@ POLICY_PATH = ".aiqt/char-policy.json"
 GATE = "tools/check_no_dashes.py"
 EXISTING_CAP = 4 * 1024 * 1024  # bytes of an existing file a Write is compared with
 _MAX_INPUT = 64 * 1024 * 1024  # bytes of hook payload read
+_READ_DEADLINE = 2.0  # seconds for the whole payload to arrive, through its end of input
 TOOLS = ("Write", "Edit", "MultiEdit")
 
 
@@ -152,8 +167,11 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 # binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
 # sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
 # through a path the static walk does not model (a function body run later, an alias made by assignment,
-# setattr, globals(), exec) is not caught there; the recorded hashes (.preview/SHA256SUMS for the hook,
-# .aiqt/manifest.toml for both files) are the control for a deliberate edit.
+# setattr, globals(), vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another
+# module patching this one, a module named json that shadows the standard library's) is not caught there. Diff
+# review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the hook,
+# .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+# from the reviewed one.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -451,9 +469,12 @@ def _decide(payload, env):
     fields, why = _fields(tool, tool_input)
     if why is not None:
         return _unchecked(why, tool)
+    # ALLOW_MISSING: a missing component (the target, or a directory the write would create) resolves as
+    # written; every other fault (a symbolic link loop, a component that is not a directory, a permission fault)
+    # raises, so it gets a note before the out-of-scope and no-policy returns below.
     try:
-        root_real = os.path.realpath(root)
-        target = os.path.realpath(file_path)
+        root_real = os.path.realpath(root, strict=os.path.ALLOW_MISSING)
+        target = os.path.realpath(file_path, strict=os.path.ALLOW_MISSING)
         outside = target == root_real or os.path.commonpath([target, root_real]) != root_real
     except (OSError, ValueError) as exc:  # a lone surrogate cannot be encoded as a file name: UnicodeEncodeError
         return _unchecked(f"its file_path cannot be resolved or encoded as a file name ({type(exc).__name__})",
@@ -506,16 +527,45 @@ def _decide(payload, env):
     return None
 
 
-def _read_payload():
+_LATE = "the hook payload did not end within the read deadline"
+
+
+def _no_payload_constant(name):
+    raise ValueError(f"non-standard JSON constant {name} in the hook payload")
+
+
+def _read_payload(fd=0, deadline=None):
+    """The payload, parsed once the input has ended (EOF) and that end was read before the deadline (by default
+    _READ_DEADLINE seconds, read at call time). Every byte read through the end counts toward one _MAX_INPUT
+    budget. The clock is read again after each wait and after each read, before an end of input is accepted: a
+    reading taken after a read returns is never earlier than the read, however late the OS runs this process,
+    so an end of input that comes after the deadline is refused. Each wait is for the time left at most, but
+    the OS can return from a wait late, so refusing can take longer than the deadline. The bytes must be strict
+    UTF-8 (no UTF-16 or UTF-32, no encoded surrogate, and no byte order mark, which json.loads refuses in a
+    str) holding one JSON value without NaN, Infinity or -Infinity. Raises ValueError for any of these faults
+    and for no end read before the deadline."""
+    end = time.monotonic() + (_READ_DEADLINE if deadline is None else deadline)
     data = bytearray()
-    while len(data) <= _MAX_INPUT:
-        chunk = os.read(0, 1 << 20)
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            raise ValueError(_LATE)
+        ready = select.select([fd], [], [], left)[0]
+        if time.monotonic() >= end:  # after the wait: a wait the OS ended late is not followed by a read
+            raise ValueError(_LATE)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            continue
+        if time.monotonic() >= end:  # after the read, before its end of input is accepted
+            raise ValueError(_LATE)
         if not chunk:
-            break
+            return json.loads(bytes(data).decode("utf-8"), parse_constant=_no_payload_constant)
         data += chunk
-    if len(data) > _MAX_INPUT:
-        raise ValueError("hook payload over the read bound")
-    return json.loads(bytes(data))
+        if len(data) > _MAX_INPUT:
+            raise ValueError("hook payload over the read bound")
 
 
 def _emit_line(text):
@@ -551,8 +601,8 @@ def main(argv):
     try:
         payload = _read_payload()
     except Exception as exc:
-        out = _unchecked(f"the hook payload cannot be read as JSON of at most {_MAX_INPUT} bytes "
-                         f"({type(exc).__name__})")
+        out = _unchecked(f"the hook payload cannot be read as JSON in UTF-8 of at most {_MAX_INPUT} bytes, "
+                         f"ending within {_READ_DEADLINE:g} seconds ({type(exc).__name__}: {str(exc)[:200]})")
     else:
         try:
             out = _decide(payload, os.environ)
@@ -570,6 +620,7 @@ def _self_test():
     import shutil
     import subprocess
     import tempfile
+    import threading
     import unittest
     from contextlib import redirect_stdout
     from unittest import mock
@@ -636,10 +687,12 @@ def _self_test():
             bindings(child, out)
 
     def stores(node, out, aliases):
-        """Add to out the base of each attribute or item store or deletion node makes at module scope: the name
-        its target chain starts from (an alias bound by importing json, builtins or sys counts as that module),
-        or "sys.modules" for a chain that starts there. A def or lambda body, which runs only when called, is
-        not walked, though its decorators and defaults are; a class body, which runs at once, is."""
+        """Add to out the bases of each attribute or item store or deletion node makes at module scope: the name
+        its target chain starts from, and, when an import anywhere in the file (any scope) binds that name to
+        json, builtins or sys, each such module too (conservative: an import in another scope can neither hide
+        the name nor a module it may stand for), with "sys.modules" for a chain that starts there. A def or
+        lambda body, which runs only when called, is not walked, though its decorators and defaults are; a
+        class body, which runs at once, is."""
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             inner = list(getattr(node, "decorator_list", [])) + node.args.defaults
             for child in inner + [d for d in node.args.kw_defaults if d is not None]:
@@ -650,10 +703,10 @@ def _self_test():
             while isinstance(first.value, (ast.Attribute, ast.Subscript)):
                 first = first.value
             if isinstance(first.value, ast.Name):
-                base = aliases.get(first.value.id, first.value.id)
-                if base == "sys" and isinstance(first, ast.Attribute) and first.attr == "modules":
-                    base = "sys.modules"
-                out.add(base)
+                for base in {first.value.id} | aliases.get(first.value.id, set()):
+                    if base == "sys" and isinstance(first, ast.Attribute) and first.attr == "modules":
+                        base = "sys.modules"
+                    out.add(base)
         for child in ast.iter_child_nodes(node):
             stores(child, out, aliases)
 
@@ -662,7 +715,8 @@ def _self_test():
         __builtins__, that the rest of the module binds at module scope or that a function outside the region
         declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item
         store outside the region, at module scope, whose base is one of those names, builtins or sys.modules.
-        Each module-level statement must lie wholly on one side."""
+        The alias map records, for each name an import of json, builtins or sys binds anywhere in the file, every
+        module it is bound to. Each module-level statement must lie wholly on one side."""
         first, last, _ = marked(text)
         inside, outside, stored, aliases = {"*", "__builtins__"}, set(), set(), {}
         tree = ast.parse(text)
@@ -673,7 +727,8 @@ def _self_test():
                     whole = alias.name if module is None else f"{module}.{alias.name}"
                     if whole.partition(".")[0] in ("json", "builtins", "sys"):
                         bound = alias.asname or (alias.name if module is not None else whole.partition(".")[0])
-                        aliases[bound] = "sys.modules" if whole == "sys.modules" else whole.partition(".")[0]
+                        aliases.setdefault(bound, set()).add(
+                            "sys.modules" if whole == "sys.modules" else whole.partition(".")[0])
         for stmt in tree.body:
             start = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
             if first <= start and stmt.end_lineno <= last:
@@ -698,8 +753,12 @@ def _self_test():
     # Rebindings outside the region that H12 must find, in either file, before the region and after it. The
     # first four are the mutants that survived QA round 2 (a plain and a conditional rebinding of _TOP_KEYS, a
     # plain and a conditional redefinition of _rel_ok); the next ones are the other ways a statement can bind
-    # a name, one vector or more for each branch of bindings(); the last ones are the stores of QA round 3's
-    # mutants (A, B and C) and their variants, one vector or more for each branch of stores().
+    # a name, one vector or more for each branch of bindings(); then the stores of QA round 3's mutants (A, B
+    # and C) and their variants, one vector or more for each branch of stores() (a def's decorators, defaults
+    # and keyword-only defaults, a lambda's defaults, a class body, a deletion, a chain through sys.modules)
+    # and for each import form the alias map reads (import X, import X as Y, import X.Y as Z, from X import Y,
+    # from X import Y as Z); the last ones are QA round 4's shadowed aliases, where an import of another
+    # module under the same name in a function body must not hide a module-level store.
     rebindings = (
         ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
         ("_TOP_KEYS", 'if True:\n    _TOP_KEYS = _TOP_KEYS | {"metadata"}'),
@@ -752,6 +811,19 @@ def _self_test():
         ("json", "def _unrelated(value=[0 for json.loads in [None]]):\n    pass"),
         ("builtins", "import builtins\n@[staticmethod for builtins.sorted in [None]][0]\n"
                      "def _unrelated():\n    pass"),
+        ("json", "def _unrelated(*, value=[0 for json.loads in [None]]):\n    pass"),
+        ("json", "_unrelated = lambda value=[0 for json.loads in [None]]: value"),
+        ("json", "from json import decoder\ndecoder.scanstring = None"),
+        ("json", "import json.decoder as _d\n_d.scanstring = None"),
+        ("json", "import json as _backend\n"
+                 '_backend.loads.__kwdefaults__["parse_float"] = lambda text: int(float(text))\n'
+                 "def _helper():\n    import sys as _backend"),
+        ("validate_policy", "def _helper():\n    import sys as validate_policy\n"
+                            "import types as _ty\n"
+                            "_vp_copy = _ty.FunctionType(validate_policy.__code__, globals())\n"
+                            "def _shim(data):\n"
+                            "    return _vp_copy(dict((k, v) for k, v in data.items() if k != 'metadata'))\n"
+                            "validate_policy.__code__ = _shim.__code__"),
     )
 
     class T(unittest.TestCase):
@@ -985,9 +1057,8 @@ def _self_test():
             # scope, no module-level statement outside it stores to an attribute or item of one of those names,
             # of builtins or of sys.modules, and each vector is found before either BEGIN marker and after either
             # END marker. This catches accidental drift. It is not a defence against a deliberate edit that
-            # replaces behaviour through a path this static walk does not model (a function body run later, an
-            # alias made by assignment, setattr, globals(), exec); the hashes of the shipped files
-            # (.preview/SHA256SUMS and .aiqt/manifest.toml) are the control for a deliberate edit.
+            # replaces behaviour through a path this static walk does not model (see the module docstring); diff
+            # review is the control for that.
             for path, text in texts.items():
                 self.assertEqual(rebound(text), set(), (path, "a name of the copied region is bound outside it"))
                 for name, code in rebindings:
@@ -1108,6 +1179,177 @@ def _self_test():
                 self.assertEqual((p.returncode, p.stderr), (0, b""), tool)
                 self.is_unchecked(json.loads(p.stdout), needle)
 
+        def test_h22_payload_reader(self):
+            # QA round 4: each payload in bad was allowed silently; each now gets the cannot-evaluate note, in
+            # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated
+            def call(content):
+                return {"tool_name": "Write", "tool_input": {"file_path": self.at("docs/qa-probe.md"),
+                                                             "content": content}}
+
+            good = json.dumps(call("safe")).encode("ascii")
+            text = json.dumps(call("safe"))
+            bad = {"UTF-16": text.encode("utf-16-le"), "UTF-16 with a byte order mark": text.encode("utf-16"),
+                   "UTF-32": text.encode("utf-32-le"), "UTF-32 with a byte order mark": text.encode("utf-32"),
+                   "UTF-8 with a byte order mark": b"\xef\xbb\xbf" + good,
+                   "encoded surrogate bytes": good.replace(b'"safe"', b'"\xed\xa0\x80"'),
+                   "NaN": good[:-1] + b', "extra": NaN}', "Infinity": good[:-1] + b', "extra": Infinity}',
+                   "-Infinity": good[:-1] + b', "extra": -Infinity}', "trailing junk": good + b"x"}
+
+            def piped(parts, deadline=2.0, within=None):
+                """_read_payload(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, with
+                None as the bytes for the end of input; the parsed payload, or "refused" for a ValueError. When
+                within is given, the read must also return within that many seconds (the pauses that remain end
+                once it returns, so a reader that waits for the end of input fails here instead of hanging)."""
+                r, w = os.pipe()
+                open_w, done = [True], threading.Event()
+
+                def feed():
+                    for pause, chunk in parts:
+                        done.wait(pause)
+                        if chunk is None:
+                            os.close(w)
+                            open_w[0] = False
+                            return
+                        os.write(w, chunk)
+
+                feeder = threading.Thread(target=feed)
+                feeder.start()
+                start = time.monotonic()
+                try:
+                    try:
+                        got = _read_payload(r, deadline)
+                    except ValueError:
+                        got = "refused"
+                    if within is not None:
+                        self.assertLess(time.monotonic() - start, within)
+                    return got
+                finally:
+                    done.set()
+                    feeder.join()
+                    if open_w[0]:
+                        os.close(w)
+                    os.close(r)
+
+            self.assertEqual(piped([(0, good), (0, None)]), json.loads(good))
+            for label, raw in bad.items():
+                self.assertEqual(piped([(0, raw), (0, None)]), "refused", label)
+            # the deadline: an open pipe after a complete payload, and an end of input after the deadline
+            self.assertEqual(piped([(0, good), (10, None)], 0.3, within=5), "refused")
+            self.assertEqual(piped([(0, good), (0.6, None)], 0.3), "refused")
+            self.assertEqual(piped([(0, good), (0.05, None)]), json.loads(good))
+            # the clock is read again after every wait and every read: with the payload and its end of input
+            # already in the pipe, the reader takes 7 readings; whichever reading (from the second on) is the
+            # first past the deadline, the payload is refused, and with none past it, it is read
+            for late in range(2, 9):
+                readings = [0]
+
+                def monotonic():
+                    readings[0] += 1
+                    return 0.0 if readings[0] < late else 100.0
+
+                r, w = os.pipe()
+                os.write(w, good)
+                os.close(w)
+                try:
+                    with mock.patch.dict(globals(), {"time": mock.Mock(monotonic=monotonic)}):
+                        try:
+                            got = _read_payload(r, 1.0)
+                        except ValueError as exc:
+                            got = str(exc)
+                finally:
+                    os.close(r)
+                self.assertEqual(got, json.loads(good) if late == 8 else _LATE, late)
+            # an escaped lone surrogate is standard JSON, read as sent: it is not a policy character (the
+            # validator refuses one), so it neither adds one nor hides one; the rest of the text is judged
+            self.assertIsNone(_decide(call("\ud800safe"), self.env))
+            self.is_deny(_decide(call("\ud800" + em), self.env))
+            launch = [sys.executable, "-I", "-S", "-B", here]
+            env = {"LC_ALL": "C", ROOT_VAR: self.root}
+            for label, raw in bad.items():
+                p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)
+                self.assertEqual((p.returncode, p.stderr), (0, b""), label)
+                self.is_unchecked(json.loads(p.stdout), "cannot be read as JSON in UTF-8")
+            for raw, want in ((good, None), (good.replace(b'"safe"', b'"\\ud800safe"'), None),
+                              (good.replace(b'"safe"', b'"\\ud800\\u2014"'), "deny")):
+                p = subprocess.run(launch, input=raw, capture_output=True, env=env, timeout=60)
+                self.assertEqual((p.returncode, p.stderr), (0, b""), raw)
+                if want is None:
+                    self.assertEqual(p.stdout, b"", raw)
+                else:
+                    self.is_deny(json.loads(p.stdout))
+            # through the hook as launched: a complete payload on a pipe that stays open, and (with the deadline
+            # lowered to 0.5 seconds) an end of input sent 1.5 seconds after the hook says it is about to read
+            p = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=env)
+            try:
+                p.stdin.write(good)
+                p.stdin.flush()
+                rc = p.wait(timeout=60)
+                out, err = p.stdout.read(), p.stderr.read()
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+                for stream in (p.stdin, p.stdout, p.stderr):
+                    stream.close()
+            self.assertEqual((rc, err), (0, b""))
+            self.is_unchecked(json.loads(out), "did not end within the read deadline")
+            late = ("import importlib.util, sys\n"
+                    "spec = importlib.util.spec_from_file_location('late_hook', sys.argv[1])\n"
+                    "module = importlib.util.module_from_spec(spec)\n"
+                    "spec.loader.exec_module(module)\n"
+                    "module._READ_DEADLINE = 0.5\n"
+                    "sys.stderr.write('ready\\n')\n"
+                    "sys.stderr.flush()\n"
+                    "sys.exit(module.main(['char-policy-write.py']))\n")
+            p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", late, here], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            try:
+                p.stdin.write(good)
+                p.stdin.flush()
+                ready = p.stderr.readline()
+                time.sleep(1.5)
+                p.stdin.close()
+                rc = p.wait(timeout=60)
+                out, err = p.stdout.read(), p.stderr.read()
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+                for stream in (p.stdin, p.stdout, p.stderr):
+                    stream.close()
+            self.assertEqual((ready, rc, err), (b"ready\n", 0, b""))
+            self.is_unchecked(json.loads(out), "ending within 0.5 seconds (ValueError: the hook payload did not "
+                                               "end within the read deadline)")
+
+        def test_h23_unresolvable_path(self):
+            # QA round 4: a symbolic link loop resolved silently; now every resolution fault other than a missing
+            # component gets a note, before the out-of-scope and no-policy returns: under a root without a policy
+            # file, inside the root, outside it, and through a component that is not a directory
+            empty, outside = os.path.join(self.tmp, "empty"), os.path.join(self.tmp, "outside")
+            for folder in (empty, outside, self.root):
+                os.makedirs(folder, exist_ok=True)
+                os.symlink("loop", os.path.join(folder, "loop"))
+            self.put("NOTICE", "x\n")
+            for root, target, needle in ((empty, os.path.join(empty, "loop", "a.md"), "(OSError)"),
+                                         (self.root, self.at("loop/a.md"), "(OSError)"),
+                                         (self.root, self.at("loop"), "(OSError)"),
+                                         (self.root, os.path.join(outside, "loop", "a.txt"), "(OSError)"),
+                                         (self.root, self.at("NOTICE/a.md"), "(NotADirectoryError)")):
+                for content in ("safe", em):
+                    note = self.is_unchecked(_decide({"tool_name": "Write", "tool_input": {
+                        "file_path": target, "content": content}}, {ROOT_VAR: root}), "cannot be resolved")
+                    self.assertIn(needle, note)
+            # a missing target, and a missing directory above it that the write would create, still resolve
+            self.is_deny(self.write("docs/new/deeper/a.md", em))
+            self.assertIsNone(self.write("docs/new/deeper/a.md", "safe"))
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", here], capture_output=True, timeout=60,
+                               input=json.dumps({"tool_name": "Write", "tool_input": {
+                                   "file_path": os.path.join(empty, "loop", "a.md"), "content": "safe"}}).encode(
+                                   "ascii"), env={"LC_ALL": "C", ROOT_VAR: empty})
+            self.assertEqual((p.returncode, p.stderr), (0, b""))
+            self.is_unchecked(json.loads(p.stdout), "cannot be resolved or encoded as a file name (OSError)")
+
         def test_h15_existing_unreadable(self):
             os.makedirs(self.at("docs/dir.md"))
             self.assertIn("not a regular file", self.is_note(self.write("docs/dir.md", em)))
@@ -1172,7 +1414,8 @@ def _self_test():
                                input=json.dumps(payload).encode("ascii"), env={"LC_ALL": "C", ROOT_VAR: self.root},
                                timeout=60)
             self.assertEqual(p.returncode, 0)
-            self.is_unchecked(json.loads(p.stdout), "at most 64 bytes (ValueError)")
+            self.is_unchecked(json.loads(p.stdout), "at most 64 bytes, ending within 2 seconds (ValueError: hook "
+                                                    "payload over the read bound)")
 
         def test_h20_surrogates(self):
             # a lone surrogate in any policy string makes the policy malformed, as the gate exits 2 on it: a note

@@ -44,6 +44,12 @@ import os
 import stat
 from pathlib import Path
 
+# The standard library's json, imported before this folder goes on sys.path below, so the copied region's own
+# `import json` finds it in sys.modules and a json.py in this folder cannot replace it (self-test G15). That holds
+# under python3 -I, as CI runs this gate; without -I, Python puts a script's own folder first on sys.path at
+# startup, so there a module in this folder named like a standard library module shadows that module.
+import json as _stdlib_json  # noqa: E402,F401
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from _standards import dir_present  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
@@ -71,8 +77,11 @@ DEFAULT_POLICY = {
 # binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
 # sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
 # through a path the static walk does not model (a function body run later, an alias made by assignment,
-# setattr, globals(), exec) is not caught there; the recorded hashes (.preview/SHA256SUMS for the hook,
-# .aiqt/manifest.toml for both files) are the control for a deliberate edit.
+# setattr, globals(), vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another
+# module patching this one, a module named json that shadows the standard library's) is not caught there. Diff
+# review is the control for a deliberate edit; the recorded hashes (.preview/SHA256SUMS for the hook,
+# .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+# from the reviewed one.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -317,6 +326,7 @@ def _self_test():
     """Fixture trees for each scan and validation clause; each pair differs in one feature."""
     import io
     import shutil
+    import subprocess
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
 
@@ -539,6 +549,24 @@ def _self_test():
                check=default_parity)
         expect("G14E default parity, malformed", tree({}, raw_policy=b"{"), 2, "cannot be used",
                check=default_parity)
+        # G15 a json.py beside the gate does not replace the standard library's json for it: a copy of the gate,
+        # run as CI runs it (python3 -I), with a json.py beside it whose loads returns a valid policy whatever it
+        # reads, still rejects a policy with an unknown key (exit 2). Without the import of json before the
+        # sys.path insert, the shadow is imported and the copy exits 0.
+        shadowed = tree({"d/a.md": quote}, raw_policy=json.dumps(policy(metadata=1)).encode("ascii"))
+        copy = os.path.join(shadowed, "tools")
+        os.makedirs(copy)
+        here = Path(__file__).resolve().parent
+        for name in ("check_no_dashes.py", "_walk.py", "_standards.py"):
+            shutil.copyfile(here / name, os.path.join(copy, name))
+        with open(os.path.join(copy, "json.py"), "w", encoding="ascii") as handle:
+            handle.write("def loads(*args, **kwargs):\n"
+                         "    return {'version': 1, 'id': 'shadow', 'chars': {'x': 'x'}, 'scope': [{'file': 'N'}]}\n")
+        done = subprocess.run([sys.executable, "-I", "-B", os.path.join(copy, "check_no_dashes.py")],
+                              capture_output=True, text=True, timeout=120)
+        if done.returncode != 2 or "unknown key(s) ['metadata']" not in done.stderr:
+            failures.append(f"G15 shadowing json.py: want exit 2 and the unknown key, got {done.returncode}: "
+                            f"{(done.stdout + done.stderr).strip()[:200]!r}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:

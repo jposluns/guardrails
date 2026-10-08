@@ -79,10 +79,12 @@ the authority, and the summary further down this page only points to it.
   reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
   A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
   ahead; the CI gate still checks the file. Once its root is set, every other call it cannot evaluate (a
-  payload it cannot read, a field of the wrong type, a path it cannot resolve, a root that is not an
-  absolute path, does not exist or is not a directory, a launch with an unknown command-line argument, or
-  an internal error) also goes ahead with a note naming the reason; it checks a call's fields before its
-  path and the policy file, so a malformed call gets that note wherever it points and whether or not the
+  payload it cannot read in full within 2 seconds as strict UTF-8 JSON without `NaN` or `Infinity`, a field
+  of the wrong type, a path it cannot resolve, such as one through a symbolic link loop, a root that is not
+  an absolute path, does not exist or is not a directory, a launch with an unknown command-line argument,
+  or an internal error) also goes ahead with a note naming the reason. It checks the form of a call's
+  `file_path`, then the fields the tool needs, and only then resolves the path, compares it with the root
+  and reads the policy file, so a malformed call gets that note wherever it points and whether or not the
   root holds a policy file. Once its root is set, it stays silent only for a tool other than the three it
   checks, and for a well-formed call that it checked and found clean, that targets a file outside the root
   or outside the policy's scope, or whose root holds no policy file; while its root is unset or empty, it
@@ -163,7 +165,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `56a7981f1e6c13e4d60fd6dc36dcdc9b38ee6818ccf221b911fb3fe0f4dc4705` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `699ce1747772f158334097275f470f6cbf9209e32ac8f03f0b63be765ad683bd` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -332,8 +334,13 @@ fails and report it; do not work around a failed check.
    attribute or item of such a name, `json`, `builtins` or `sys.modules`; and compares a sample of policies
    and its scope test with the gate. That walk catches accidental drift between the two copies. It does not
    catch a deliberate edit that replaces behaviour through a path it does not model (a function body run
-   later, an alias made by assignment, `setattr`, `globals()`, `exec`); the hashes recorded in `SHA256SUMS`
-   and the release manifest `.aiqt/manifest.toml` are the control for that. It finds the gate at
+   later, an alias made by assignment, `setattr`, `globals()`, `vars()`, `exec`, an in-place call such as
+   `sys.modules.update(...)` or `json.__dict__.update(...)`, another module patching the file, or a module
+   named `json` that shadows the standard library's: the gate imports `json` before it puts `tools/` on
+   `sys.path`, which keeps out a `tools/json.py` under `python3 -I`, as CI runs it, but not in a run without
+   `-I`). Diff review is the control for a deliberate edit; the hashes recorded in `SHA256SUMS` and the
+   release manifest `.aiqt/manifest.toml` let an installer or a release check detect a shipped copy that
+   differs from the reviewed one. It finds the gate at
    `../tools/` from the hook's folder, as in a checkout of this repository; installed on its own, that
    comparison reports skipped.
 

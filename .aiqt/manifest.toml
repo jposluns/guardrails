@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "00aff17d279ee5b18c0c2a549eca476b18f0360c5564b280e719ed839ed87fda"
+tree-sha256 = "0890a799e6a85f80d9944a9280b1a032a6b905a01bd2da36e20bc8eb3c4fcdd3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 260847
-sha256 = "a679492b438e8e308fd27edf384f6c51db83e9bc590306b60a6baf03e8c4c006"
+bytes = 261389
+sha256 = "d2eb1aa30b95773510737a203e3d04b1b655ff3655969591dd20e25f1fd868b5"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2261,18 +2261,18 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 50416
-sha256 = "d01b9e0143f70a553036a4f6e9925f45d98abab668f012b6629167571a8b5e3c"
+bytes = 51120
+sha256 = "b9e628b8420c69cd67eea60bbbca0675137359d196abb5a2519a42a0c443e860"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 896
-sha256 = "887831565f09a8d7962950442dd1c2bde8e2f8aaf44e8ba59cdf3eb44830db2c"
+sha256 = "72a29885b97e757d4239268c21a824f6d6f79d296272decce341a45290ddf427"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
-bytes = 72267
-sha256 = "56a7981f1e6c13e4d60fd6dc36dcdc9b38ee6818ccf221b911fb3fe0f4dc4705"
+bytes = 88228
+sha256 = "699ce1747772f158334097275f470f6cbf9209e32ac8f03f0b63be765ad683bd"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -3351,8 +3351,8 @@ sha256 = "77630d67cd5c896131a29a57101a623b59921c71f4ee432c270a14728fd37c8c"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
-bytes = 32306
-sha256 = "36a8128fe3dfcc3b6f77e9c5675c78fb6a796769c895ceece089abeb35c1f843"
+bytes = 34570
+sha256 = "ef6dec6e98a65cb5f7defef576d036d1367b1a4e356a4692dd5c2f69e5daf40d"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
@@ -3491,8 +3491,8 @@ sha256 = "23504e08f124f7f240473fa1876c7739a156b36846d16cb2a31c4b0a13764cbc"
 
 [[sources]]
 path = "tools/gen_char_policy.py"
-bytes = 9498
-sha256 = "dea9faa4641ab130bb0273d24cbe711ffe2e482a33ab14f16c5bed117a17316a"
+bytes = 9950
+sha256 = "189470554f18bb2cdb728f685d9e82fe1a14687c43f36c1c3afa3745c74df806"
 
 [[sources]]
 path = "tools/gen_claude.py"

@@ -20,11 +20,15 @@ marker ("a marker line is not the expected text").
 
 Byte equality covers the region only. Whether a statement outside the region, in either file, rebinds a name
 the region binds or reads, or stores to an attribute or item of one, is checked by the hook's own self-test
-(H12), a static walk of both files' module-level statements. That walk catches accidental drift; a deliberate
-edit through a path it does not model (a function body, setattr, globals(), exec) is left to the recorded
-hashes in .preview/SHA256SUMS and .aiqt/manifest.toml, which any edit changes. After regenerating, the
-hook's SHA-256 in .preview/SHA256SUMS and the .preview/README.md table changes too; tools/check_hooks_preview.py
-fails until both are updated.
+(H12), a static walk of both files' module-level statements. That walk catches accidental drift. It does not
+model a deliberate edit through a function body run later, an alias made by assignment, setattr, globals(),
+vars(), exec, an in-place call such as sys.modules.update or json.__dict__.update, another module patching
+the file, or a module named json that shadows the standard library's (the gate keeps a tools/json.py out
+only under python3 -I, as CI runs it). Diff review is the control for a deliberate edit; the hashes recorded
+in .preview/SHA256SUMS and .aiqt/manifest.toml let an installer or a release check detect a shipped copy that
+differs from the reviewed one, and whoever makes an edit can record new hashes in the same change. After
+regenerating, the hook's SHA-256 in .preview/SHA256SUMS and the .preview/README.md table changes too;
+tools/check_hooks_preview.py fails until both are updated.
 """
 import sys
 
