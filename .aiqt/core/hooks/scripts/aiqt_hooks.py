@@ -228,7 +228,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 #
 # NOTE_CONSTRUCTORS is the declared set of note constructors and DENY_CONSTRUCTORS the declared set of
 # deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
-# deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
+# deny constructor's call). Only the single-return leaf constructors (_allow_note, _context_note, _stop_warn,
 # _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
 # constructor reaches a result only by returning another constructor's call. The hooks self-test
 # (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf builds its
@@ -249,7 +249,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # does not model (a note key assembled at run time, a lookup through getattr or globals(), or a patched
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
-    "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
+    "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
     "_orch_stop_family")
@@ -284,6 +284,14 @@ def _allow_note(message):
     discard is snapshotted then allowed with this note. There is no ask constructor: the module cannot emit
     permissionDecision "ask" from any path."""
     return (0, {"systemMessage": message}, None)
+
+
+def _context_note(event, context, message):
+    """A clean pass that adds model context (hookSpecificOutput.additionalContext, for an event such as
+    UserPromptSubmit) and ALSO surfaces an informational systemMessage to the operator, who does not see that
+    context. Like _allow_note it carries no permissionDecision and never blocks."""
+    return (0, {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context},
+                "systemMessage": message}, None)
 
 
 def _stop_warn(banner):
@@ -8661,14 +8669,18 @@ def _orch_turn_state(root):
 
 
 def _orch_save_turn_state(root, state):
-    sd = _orch_state_dir_for_root(root)
-    try:
-        os.makedirs(sd, exist_ok=True)
-        with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
-            json.dump(state, fh, sort_keys=True)
+    """Atomic turn-state save through _orch_write_json_atomic (a sibling temporary file, then os.replace), so a
+    save that fails at any step, mid-write included, leaves the previous turn-state.json (or its absence)
+    byte-identical rather than truncated; the temporary file is removed on a failure. Returns True on
+    success; the caller decides what a failure means."""
+    path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
+    if _orch_write_json_atomic(path, state):
         return True
-    except (OSError, ValueError):
-        return False
+    try:
+        os.remove(path + ".tmp")
+    except OSError:
+        pass
+    return False
 
 
 def _orch_mode_classify(value):
@@ -9340,9 +9352,12 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
     COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
-    preview makes no state change. Each guard-events append made here (a bound-forced drop, an unwritable
-    checkpoint, an unwritable init marker) that fails adds its recording-failure warning to the caller's
-    warnings list, which the hook surfaces in its output, so none of the three rows is lost silently.
+    preview makes no state change. A checkpoint or init marker that cannot be written adds a warning naming
+    that write to the caller's warnings list whether or not its guard-events row is written, and each
+    guard-events append made here (a bound-forced drop, an unwritable checkpoint, an unwritable init marker)
+    that fails adds its recording-failure warning too; the hook surfaces the list in its output (the deny
+    reason and banner, the block reason, or a note), so neither failed write nor any of the three rows is
+    lost silently.
 
     FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
@@ -9405,11 +9420,19 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
                        "{} id(s) past the {} bound: {}".format(
                            len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10]))))
     if record:
+        # the failed write itself is reported in the hook's output; its guard-events row is a second record
+        # that can succeed or fail on its own, so the warning never depends on that append failing too
+        failed = []
         if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
                                               "ids": union}):
             events.append(("checkpoint-unwritable", "recorded",
                            "the checkpoint could not be rewritten; the next window compares "
                            "against the prior state"))
+            failed.append("Additionally, the anti-shrinkage checkpoint backlog-checkpoint.json could not be "
+                          "written, so it does not record this window's items: an item that leaves the "
+                          "enumeration, or is demoted, before a later checkpoint write succeeds is not held "
+                          "as vanished or demoted unless an earlier checkpoint already records it; record "
+                          "this window's items manually (nocncl).")
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
@@ -9422,10 +9445,15 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
+                failed.append("Additionally, the checkpoint-init marker checkpoint-init.marker could not be "
+                              "written, so this window is held as cannot-evaluate and a later deletion of the "
+                              "checkpoint would go undetected; record it manually (nocncl).")
         for ev_kind, ev_decision, ev_detail in events:
             warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
             if warn and warnings is not None:
                 warnings.append(warn)
+        if warnings is not None:
+            warnings.extend(failed)
     return injected
 
 
@@ -9647,8 +9675,10 @@ def _orch_register_wake(root, ts, prompt):
     returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
     the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
     because nothing ever wrote wake_digests). Returns '' when the digest was written or there is no prompt
-    to register, else the warning the caller appends to its output (the ALLOW stands): an unwritten digest
-    makes the returning prompt read as genuine human input."""
+    to register, else the warning the caller appends to its output (the ALLOW stands). The save is atomic, so
+    a failed one leaves the previous turn-state unchanged; the warning still promises no classification of
+    the returning prompt, which reads as timer-originated where turn-state holds a matching digest (an
+    earlier identical wake's) when it arrives, and as genuine human input otherwise."""
     if not isinstance(prompt, str) or not prompt:
         return ""
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
@@ -9659,9 +9689,9 @@ def _orch_register_wake(root, ts, prompt):
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
     if _orch_save_turn_state(root, state):
         return ""
-    return ("Additionally, this wake's prompt digest could not be written to turn-state.json, so the prompt it "
-            "returns with will read as genuine human input (stamping a human-input time and resetting the "
-            "denial counters); record it manually (nocncl).")
+    return ("Additionally, this wake's prompt digest could not be written to turn-state.json, so how the "
+            "prompt it returns with is classified is uncertain: it may read as genuine human input or as "
+            "timer-originated; record the wake manually (nocncl).")
 
 
 def orch_yield_tool(data):
@@ -12984,9 +13014,13 @@ def orch_prompt_stamp(data):
     context = ("[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not human input. Measured "
                "gap since the last genuine human input: {}.".format(gap))
     if not consumed:
-        context += (" Additionally, turn-state.json could not be written, so this wake's digest was not "
-                    "consumed and a later prompt with the same text will also read as timer-originated; "
-                    "record it manually (nocncl).")
+        # the model reads the context line and the operator the systemMessage; neither promises how a later
+        # prompt with the same text is classified
+        warn = ("turn-state.json could not be written, so consuming this wake's digest failed and how a later "
+                "prompt with the same text is classified is uncertain: it may read as timer-originated or as "
+                "genuine human input; record it manually (nocncl).")
+        return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
+                             "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -13539,9 +13573,9 @@ def orch_resume_audit(data):
     or its absence is left byte-identical, and an audit with findings still returns its warning naming
     them, which then says the barrier was not persisted (this audit did not arm it) and asks for a manual
     record instead of saying a re-run clears the barrier; a clean audit's failed clear adds no warning,
-    since the PreToolUse barrier reads a barrier left armed as armed (noted once per arming: one whose
-    warned flag is already set stays armed and silent) and a directory in its place as armed, noted on
-    each mutation outside the record surfaces (where opening the forced-exit log fails other
+    since the PreToolUse barrier reads a barrier left armed as armed (noted once per arming where its warned
+    flag can be written, otherwise on each mutation outside the record surfaces: one whose warned flag is
+    already set stays armed and silent) and a directory in its place as armed, noted on each such mutation (where opening the forced-exit log fails other
     than as not-found, because the state directory cannot be searched or is not a directory, as with that
     regular file, the forced-exit probe adds its cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
     _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
@@ -13587,8 +13621,9 @@ def orch_resume_audit(data):
     except (OSError, ValueError) as exc:
         # never wedge SessionStart: the previous barrier file (or its absence) is left unchanged. A failed
         # ARM is named in the warning below; a clean audit's failed CLEAR stays silent here, because the
-        # PreToolUse barrier reads a barrier still armed as armed (noted once per arming, so one already
-        # warned about stays silent) and a directory in its place as armed (noted on each mutation)
+        # PreToolUse barrier reads a barrier still armed as armed (noted once per arming where its warned flag
+        # can be written, otherwise on each mutation; one already warned about stays silent) and a directory
+        # in its place as armed (noted on each mutation)
         unwritten = type(exc).__name__
     if findings:
         tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",

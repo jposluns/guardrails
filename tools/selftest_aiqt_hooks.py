@@ -119,6 +119,7 @@ import ast
 import collections
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -216,8 +217,9 @@ def _leaf_constructors(bodies, ctors):
     exactly one return statement, no node of a _LEAF_REFUSED type (a branch, conditional expression,
     loop, try, match, with, boolean operator, comprehension, lambda, nested definition, yield, await,
     global or nonlocal statement), and no reference to any declared constructor name. At
-    f0c549aa and after this round the leaves are exactly _allow_note, _stop_warn,
-    _dispatcher_fail_open_warn and _deny (pinned by the note-shape pin cases)."""
+    f0c549aa the leaves were exactly _allow_note, _stop_warn, _dispatcher_fail_open_warn and _deny; since
+    _context_note (a note that also carries model context) they are those and _context_note (pinned by
+    the note-shape pin cases)."""
     out = set()
     for name, func in bodies.items():
         nodes = [node for stmt in func.body for node in ast.walk(stmt)]
@@ -244,7 +246,7 @@ def _note_constructor_shape_failures(path=None):
     constructor's call to itself is not another constructor's call); a deny
     constructor (not also declared a note constructor) that returns a note constructor's call; the note
     key ("systemMessage" as a string, inside a non-docstring string, or as an attribute or name) anywhere
-    but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _stop_warn and
+    but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _context_note, _stop_warn and
     _dispatcher_fail_open_warn, and in _deny only its dict that also carries hookSpecificOutput), and the
     note key as a keyword anywhere (in a leaf constructor by the keyword rule next; a keyword never
     counts as building the note or the deny dict in the empty rules above); in a leaf constructor, a call
@@ -766,7 +768,9 @@ def _test_note_literal_sites(failures, tmp):
     site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
     (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
     review_dispatch_pin's;
-    the UserPromptSubmit stamp's unwritten-stamp note, the PostToolUse ledger returns, the Stop loop-bound
+    the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
+    shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
+    returns, the Stop loop-bound
     _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
     dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
@@ -851,6 +855,16 @@ def _test_note_literal_sites(failures, tmp):
              "saying the stamp was not written",
              aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
              "its time was not stamped")
+        y.set_turn_state(dict(wake_digests=[hashlib.sha256(b"wake NL").hexdigest()]))
+        code, obj, _err = aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="wake NL")))
+        hso = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+        if not (code == 0 and isinstance(obj, dict) and set(obj) == {"hookSpecificOutput", "systemMessage"}
+                and isinstance(hso, dict) and set(hso) == {"hookEventName", "additionalContext"}
+                and hso["hookEventName"] == "UserPromptSubmit" and "TIMER-ORIGINATED" in hso["additionalContext"]
+                and "consuming this wake's digest failed" in obj["systemMessage"]):
+            failures.append("(nl-stamp-timer-unconsumed) a timer-originated prompt whose digest cannot be consumed "
+                            "returns model context plus an operator note naming the failed save, got {!r}"
+                            .format((code, obj)))
     finally:
         aiqt_hooks._orch_save_turn_state = saved_save
     s = orch.Fixture(base, "stop")
@@ -1244,7 +1258,7 @@ def _test_note_shape_pins(failures, tmp):
         _declared_names(tree, "DENY_CONSTRUCTORS")[1] or ())
     top = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     leaves = _leaf_constructors({name: top[name] for name in ctors if name in top}, ctors)
-    want = {"_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_deny"}
+    want = {"_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_deny"}
     if leaves != want:
         failures.append("(ns-pin-leaves) the leaf constructors are {}, expected exactly {}"
                         .format(sorted(leaves), sorted(want)))

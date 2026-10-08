@@ -4925,6 +4925,15 @@ def _main_isolated(report_path=None):
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
         check("attest/failed-write-holds", _verdict(astop()), "block2")
+        # the failed snapshot write is itself a finding, so the resume audit's warning names it (the findings
+        # list is that warning's text), whatever happens to the audit's own guard-events row
+        try:
+            aiqt_hooks._orch_write_json_atomic = lambda p, o: False
+            _at_fail = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _o_wja
+        check("attest/failed-write-finding-names-it",
+              any(x.startswith("the attestation snapshot could not be written") for x in _at_fail), True)
         # a broken chain is held, never read as a smaller clean register
         at_reg.write_text('{"seq": 1, "id": "AT-1", "prev": "beef"}\n', encoding="utf-8")
         check("attest/broken-chain-finding",
@@ -5395,7 +5404,7 @@ def _main_isolated(report_path=None):
             aiqt_hooks._orch_save_turn_state = _rw_save
         _rw_timer_ctl = _rw_context(_rw_wake_prompt())
         check("recwrite/stamp-timer-digest-unconsumed-says-so",
-              ("TIMER-ORIGINATED" in _rw_timer, "this wake's digest was not consumed" in _rw_timer,
+              ("TIMER-ORIGINATED" in _rw_timer, "consuming this wake's digest failed" in _rw_timer,
                "TIMER-ORIGINATED" in _rw_timer_ctl, "Additionally" in _rw_timer_ctl,
                _rw.turn_state().get("wake_digests")),
               (True, True, True, False, []))
@@ -5478,6 +5487,199 @@ def _main_isolated(report_path=None):
                             json.loads(_rw_bar.read_text(encoding="utf-8")).get("active")))
         check("recwrite/failed-clear-armed-barrier-noted-once-per-arming", _rw_pin,
               [(True, (0, None, None), "allow", "allow", True), (False, (0, None, None), "warn", "allow", True)])
+
+        # ROUND 2 OF THE RECORD-WRITE AUDIT, EACH FAILED WRITE REACHES THE OUTPUT EVEN WHEN ITS GUARD-EVENTS ROW
+        # IS WRITTEN: (1) a checkpoint or init marker that cannot be written (only that path refused, so the
+        # guard-events append succeeds) is named in the deny reason and banner of a scheduling deny and in the
+        # block reason of a Stop, and under a persistent fault the clean schedule ALLOW left after the item
+        # vanishes carries the warning instead of returning silently; under a fault that clears after one
+        # window the vanished item is not held, which that window's warning says; (2) the wake-digest warning
+        # promises no classification: with a matching digest already registered the returning prompt reads as
+        # timer-originated, without one as genuine, and the warning fits both; (3) a turn-state save that
+        # fails after writing part of its bytes leaves turn-state.json byte-identical with no temporary file
+        # (the save is atomic), so the unconsumed digest still classifies the next identical prompt, and the
+        # timer path's warning promises no classification and reaches the operator in a systemMessage; (4) a
+        # clean audit's failed clear under a fault that also refuses the warned flag notes the armed barrier on
+        # each mutation; (5) the writers already reported in the output stay reported with their guard-events
+        # append succeeding: escape-spoof.json, forced-exit.jsonl and the ask guard's pending row.
+        _r2 = Fixture(tmp, "recwrite2")
+        _r2_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r2.root)))
+        _r2_ge = _r2_sd / "guard-events.jsonl"
+        _r2_sched = lambda ti: aiqt_hooks.orch_yield_tool(_r2.payload("PreToolUse", "ScheduleWakeup", ti))
+        _r2_stop = lambda: aiqt_hooks.orch_stop_guard(_r2.payload("Stop"))
+        _r2_prompt = lambda text: aiqt_hooks.orch_prompt_stamp(
+            _r2.payload("UserPromptSubmit", extra=dict(prompt=text)))
+        _r2_wja = aiqt_hooks._orch_write_json_atomic
+        _r2_aj = aiqt_hooks._orch_append_jsonl
+        _r2_wj = aiqt_hooks._orch_write_json
+        _r2_save = aiqt_hooks._orch_save_turn_state
+        _r2_ea = aiqt_hooks._orch_escape_active
+
+        def _r2_refuse(suffix):
+            return lambda p, o: False if str(p).endswith(suffix) else _r2_wja(p, o)
+
+        def _r2_out(result):
+            # (verdict, deny reason or Stop block reason, systemMessage)
+            code, obj, err = result
+            obj = obj if isinstance(obj, dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            return _verdict(result), str(reason or err or ""), str(obj.get("systemMessage", ""))
+
+        def _r2_context(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            return str(hso.get("additionalContext", "")) if isinstance(hso, dict) else ""
+
+        def _r2_events(kind):
+            return sum(1 for r in aiqt_hooks._orch_read_jsonl(str(_r2_ge))[0] or [] if r.get("kind") == kind)
+        _r2_ckpt = "the anti-shrinkage checkpoint backlog-checkpoint.json could not be written"
+        _r2_marker = "the checkpoint-init marker checkpoint-init.marker could not be written"
+        _r2.set_items([item("QA-1")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("backlog-checkpoint.json")
+            _r2_d = _r2_out(_r2_sched(dict(prompt="recheck QA-1 later")))
+            _r2_s = _r2_out(_r2_stop())
+            _r2_n1 = _r2_events("checkpoint-unwritable")
+            _r2.set_items([], keep_checkpoint=True)
+            _r2.set_turn_state(dict())
+            _r2_v = _r2_out(_r2_sched(dict(prompt="check back later")))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        check("recwrite2/checkpoint-unwritten-named-while-its-row-is-written",
+              (_r2_d[0], _r2_ckpt in _r2_d[1], _r2_ckpt in _r2_d[2],
+               "(checkpoint-unwritable)" in _r2_d[1] + _r2_d[2] + _r2_s[1], _r2_s[0], _r2_ckpt in _r2_s[1], _r2_n1),
+              ("deny", True, True, False, "block2", True, 2))
+        check("recwrite2/checkpoint-unwritten-vanished-item-not-silent",
+              (_r2_v[0], _r2_ckpt in _r2_v[2], _r2_events("checkpoint-unwritable")), ("warn", True, 3))
+        _r2.set_items([item("QA-2")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("backlog-checkpoint.json")
+            _r2_t = _r2_out(_r2_sched(dict(prompt="recheck QA-2 later")))
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        _r2.set_items([], keep_checkpoint=True)
+        _r2.set_turn_state(dict())
+        check("recwrite2/checkpoint-unwritten-once-warns-later-vanish-unheld",
+              (_r2_t[0], "is not held as vanished or demoted unless an earlier checkpoint already records it"
+               in _r2_t[2], _r2_sched(dict(prompt="check back later"))),
+              ("deny", True, (0, None, None)))
+        _r2.set_items([item("QA-3")])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_write_json_atomic = _r2_refuse("checkpoint-init.marker")
+            _r2_m1 = _r2_out(_r2_sched(dict(prompt="recheck QA-3 later")))
+            _r2_m2 = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _r2_wja
+        check("recwrite2/marker-unwritten-named-while-its-row-is-written",
+              (_r2_m1[0], _r2_marker in _r2_m1[1], _r2_marker in _r2_m1[2], _r2_m2[0], _r2_marker in _r2_m2[1],
+               "(checkpoint-marker-unwritable)" in _r2_m1[1] + _r2_m1[2] + _r2_m2[1],
+               _r2_events("checkpoint-marker-unwritable")),
+              ("deny", True, True, "block2", True, False, 2))
+        _r2_same = "same wake QA"
+        _r2_dig = hashlib.sha256(_r2_same.encode("utf-8")).hexdigest()
+        _r2.set_items([])
+        _r2_wk = []
+        for _r2_pre in ([_r2_dig], []):
+            _r2.set_turn_state(dict(wake_digests=list(_r2_pre)))
+            try:
+                aiqt_hooks._orch_save_turn_state = lambda root, state: False
+                _r2_w = _r2_out(_r2_sched(dict(prompt=_r2_same)))
+            finally:
+                aiqt_hooks._orch_save_turn_state = _r2_save
+            _r2_back = _r2_prompt(_r2_same)
+            _r2_wk.append((_r2_w[0], "may read as genuine human input or as timer-originated" in _r2_w[2],
+                           "will read" in _r2_w[2], "TIMER-ORIGINATED" in _r2_context(_r2_back),
+                           _r2_back == (0, None, None)))
+        check("recwrite2/wake-digest-unwritten-promises-no-classification", _r2_wk,
+              [("warn", True, False, True, False), ("warn", True, False, False, True)])
+        _r2.set_turn_state(dict(wake_digests=[_r2_dig]))
+        _r2_tsp = _r2_sd / "turn-state.json"
+        _r2_before = _r2_tsp.read_bytes()
+        _r2_dump = json.dump
+
+        def _r2_partial(obj, fh, **kw):
+            fh.write("{")
+            raise OSError("injected after a partial write")
+        try:
+            json.dump = _r2_partial
+            _r2_p = _r2_prompt(_r2_same)
+        finally:
+            json.dump = _r2_dump
+        _r2_after = _r2_tsp.read_bytes()
+        _r2_tmp_left = (_r2_sd / "turn-state.json.tmp").exists()
+        _r2_next = _r2_prompt(_r2_same)
+        check("recwrite2/turn-state-partial-write-leaves-previous-state",
+              (_r2_after == _r2_before, _r2_tmp_left, "TIMER-ORIGINATED" in _r2_context(_r2_next),
+               _r2.turn_state().get("wake_digests")),
+              (True, False, True, []))
+        _r2_pctx = _r2_context(_r2_p)
+        _r2_psys = _r2_p[1].get("systemMessage", "") if isinstance(_r2_p[1], dict) else ""
+        check("recwrite2/timer-unconsumed-uncertain-and-operator-sees-it",
+              ("TIMER-ORIGINATED" in _r2_pctx, "consuming this wake's digest failed" in _r2_pctx,
+               "may read as timer-originated or as genuine human input" in _r2_pctx, "will also read" in _r2_pctx,
+               _r2_psys.startswith("AIQT guardrail: this prompt was read as timer-originated, but turn-state.json "
+                                   "could not be written")),
+              (True, True, True, False, True))
+        _r2_b = Fixture(tmp, "recwrite2-barrier")
+        _r2_bsd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r2_b.root)))
+        _r2_bar = _r2_bsd / "resume-barrier.json"
+        _r2_bsd.mkdir(parents=True, exist_ok=True)
+        _r2_bar.write_text(json.dumps(dict(active=True, findings=["recwrite2-armed"], warned=False)),
+                           encoding="utf-8")
+        _r2_bw = aiqt_hooks._orch_barrier_write
+
+        def _r2_bfail(path, obj):
+            raise PermissionError("the state directory refuses every barrier write")
+        _r2_mut = lambda: _verdict(aiqt_hooks.orch_resume_barrier(_r2_b.payload(
+            "PreToolUse", "Write", dict(file_path=str(_r2_b.root / "src.py"), content="x"))))
+        try:
+            aiqt_hooks._orch_barrier_write = _r2_bfail
+            _r2_bc = aiqt_hooks.orch_resume_audit(_r2_b.payload("SessionStart"))
+            _r2_bm = [_r2_mut() for _ in range(3)]
+        finally:
+            aiqt_hooks._orch_barrier_write = _r2_bw
+        check("recwrite2/failed-clear-persistent-fault-noted-each-mutation",
+              (_r2_bc, _r2_bm, json.loads(_r2_bar.read_text(encoding="utf-8")).get("warned")),
+              ((0, None, None), ["warn"] * 3, False))
+        _r2.set_items([])
+        _r2.set_turn_state(dict())
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (False, "recwrite2 ignored sentinel")
+            aiqt_hooks._orch_write_json = lambda p, o: False if str(p).endswith("escape-spoof.json") else _r2_wj(p, o)
+            _r2_sp = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_escape_active = _r2_ea
+            aiqt_hooks._orch_write_json = _r2_wj
+        check("recwrite2/spoof-file-unwritten-named-while-its-row-is-written",
+              (_r2_sp[0], "(guard-events ok, escape-spoof.json FAILED)" in _r2_sp[2], _r2_events("escape-spoof")),
+              ("warn", True, 1))
+        _r2.set_items([item("QA-4")])
+        _r2.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda p, o: False if str(p).endswith("forced-exit.jsonl") else _r2_aj(p, o)
+            _r2_fx = _r2_out(_r2_stop())
+        finally:
+            aiqt_hooks._orch_append_jsonl = _r2_aj
+        check("recwrite2/forced-exit-log-unwritten-named-while-its-row-is-written",
+              (_r2_fx[0], "(guard-events ok, forced-exit.jsonl FAILED)" in _r2_fx[2],
+               _r2_events("forced_unresolved")),
+              ("warn", True, 1))
+        _r2.mode.write_text("Operating-mode: unattended" + chr(10), encoding="utf-8")
+        try:
+            aiqt_hooks._orch_append_jsonl = (
+                lambda p, o: False if str(p).endswith("pending-asks.jsonl") else _r2_aj(p, o))
+            _r2_ask = _r2_out(aiqt_hooks.orch_ask_guard(_r2.payload("PreToolUse", "AskUserQuestion",
+                                                                     dict(questions=[]))))
+        finally:
+            aiqt_hooks._orch_append_jsonl = _r2_aj
+            _r2.mode.write_text("", encoding="utf-8")
+        check("recwrite2/pending-ask-unwritten-named-while-its-row-is-written",
+              (_r2_ask[0], "the pending row could NOT be persisted" in _r2_ask[2], _r2_events("ask-guard")),
+              ("deny", True, 1))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
