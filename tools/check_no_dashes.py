@@ -12,8 +12,12 @@ dashes (hyphens, commas, colons, semicolons and parentheses are the sanctioned s
 standards crosswalk manifests, the shipped hook files, and the NOTICE pair. Deleting the file therefore never
 weakens the gate here, and an adopter who ships no policy file gets exactly that scan. A policy file that is
 present but malformed, unreadable, a symbolic link, or over POLICY_CAP bytes is a cannot-evaluate (exit 2),
-never a fallback to the default. This Python file is in no scope entry, so it may name the characters in its
-own source without flagging itself; it writes them only as escapes.
+never a fallback to the default. A policy character that str.splitlines() treats as a line boundary (U+2028 and
+U+2029; the others are control characters) makes the policy malformed, because the line scan would drop it
+before the check. The region between the BEGIN COPY SOURCE and END COPY SOURCE markers is copied byte for byte
+into the preview hook, whose self-test compares the two. The built-in default is the same policy as this
+repository's file, and the self-test checks that too. This Python file is in no scope entry, so it may name the
+characters in its own source without flagging itself; it writes them only as escapes.
 
   check_no_dashes.py              scan the repository under its policy
   check_no_dashes.py --self-test  fixture trees for the scan and the policy validator
@@ -57,9 +61,14 @@ DEFAULT_POLICY = {
         {"file": ".aiqt/attribution.toml"},
     ],
 }
+# --- BEGIN COPY SOURCE: .preview/char-policy-write.py holds a byte-identical copy of this region (its H12) ---
 _TOP_KEYS = frozenset(("version", "id", "chars", "advice", "scope"))
 _REQUIRED_KEYS = frozenset(("version", "id", "chars", "scope"))
 _TREE_KEYS = frozenset(("tree", "suffixes", "skip"))
+# Every code point str.splitlines() treats as a line boundary, from the table in the Python documentation for
+# str.splitlines: \n, \r, \v, \f, \x1c, \x1d, \x1e, \x85, U+2028 and U+2029 (\r\n is a pair of two of them). The
+# gate scans line by line, so such a policy character would vanish before the check; the validator rejects it.
+LINE_BOUNDARIES = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 class PolicyError(ValueError):
@@ -120,6 +129,9 @@ def validate_policy(data):
     for char, name in chars.items():
         if len(char) != 1 or not _plain(char):
             raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character")
+        if char in LINE_BOUNDARIES:
+            raise PolicyError(f"chars key U+{ord(char):04X} is a line boundary (str.splitlines splits on it), "
+                              "which a line-by-line scan cannot see")
         if not _plain(name):
             raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string")
     if "advice" in data and not _plain(data["advice"]):
@@ -170,6 +182,7 @@ def parse_policy(raw):
     except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         raise PolicyError(f"the policy file is not valid UTF-8 JSON ({exc})") from None
     return validate_policy(data)
+# --- END COPY SOURCE ---
 
 
 def load_policy(root):
@@ -293,11 +306,11 @@ def _self_test():
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             rc = run(root)
-        return rc, out.getvalue()
+        return rc, out.getvalue(), err.getvalue()
 
     def expect(label, root, want, needle=None):
-        rc, out = scan(root)
-        if rc != want or (needle is not None and needle not in out):
+        rc, out, err = scan(root)
+        if rc != want or (needle is not None and needle not in out + err):
             failures.append(f"{label}: want exit {want}" + (f" and {needle!r}" if needle else "")
                             + f", got {rc}: {out.strip()[:200]!r}")
 
@@ -312,10 +325,31 @@ def _self_test():
             validate_policy(DEFAULT_POLICY)
         except PolicyError as exc:
             failures.append(f"DEFAULT_POLICY is invalid: {exc}")
+        # G0 the built-in default is this repository's policy file, value for value.
+        shipped = os.path.join(Path(__file__).resolve().parents[1], *POLICY_PATH.split("/"))
+        try:
+            with open(shipped, "rb") as handle:
+                if parse_policy(handle.read()) != DEFAULT_POLICY:
+                    failures.append(f"G0 DEFAULT_POLICY differs from {POLICY_PATH}")
+        except (OSError, PolicyError) as exc:
+            failures.append(f"G0 {POLICY_PATH} cannot be compared with DEFAULT_POLICY ({exc})")
+        # G0 LINE_BOUNDARIES is exactly the set str.splitlines() splits on, and each one is rejected.
+        splitting = {chr(c) for c in range(0x110000) if len(f"a{chr(c)}b".splitlines()) == 2}
+        if splitting != LINE_BOUNDARIES:
+            failures.append(f"G0 LINE_BOUNDARIES {sorted(map(ord, LINE_BOUNDARIES))} differs from what "
+                            f"splitlines splits on {sorted(map(ord, splitting))}")
+        for boundary in sorted(LINE_BOUNDARIES):
+            try:
+                validate_policy(policy(chars={boundary: "line boundary"}))
+                failures.append(f"G0 line boundary U+{ord(boundary):04X} accepted as a policy character")
+            except PolicyError:
+                pass
         # G1 character: no policy file, so the default applies.
         expect("G1A em dash in Markdown", tree({"d/a.md": f"x{em}y\n"}), 1, "d/a.md:1:2: em dash")
         expect("G1B hyphen in Markdown", tree({"d/a.md": "x-y\n"}), 0)
         expect("G1C en dash in Markdown", tree({"d/a.md": f"x{en}y\n"}), 1, "d/a.md:1:2: en dash")
+        # G1D line numbers are str.splitlines() lines: a form feed or U+2028 in the file ends a line.
+        expect("G1D line numbering", tree({"d/a.md": f"x\x0cy\u2028z{em}\n"}), 1, "d/a.md:3:2: em dash")
         # G2 adopter set: the policy's characters replace the default ones.
         expect("G2A adopter character", tree({"d/a.md": f"{quote}x\n"}, policy()), 1,
                "d/a.md:1:1: left double quotation mark")
@@ -348,6 +382,9 @@ def _self_test():
             "empty id": policy(id=""),
             "empty chars": policy(chars={}),
             "control character": policy(chars={"\n": "newline"}),
+            "C1 character": policy(chars={"\x9f": "application program command"}),
+            "C1 character in the id": policy(id="a\x80b"),
+            "DEL character": policy(chars={"\x7f": "delete"}),
             "empty name": policy(chars={quote: ""}),
             "empty advice": policy(advice=""),
             "empty scope": policy(scope=[]),
@@ -356,6 +393,14 @@ def _self_test():
             "dot-dot path": policy(scope=[{"file": "../NOTICE"}]),
             "absolute path": policy(scope=[{"tree": "/etc", "suffixes": [".md"]}]),
             "backslash path": policy(scope=[{"file": "a\\b"}]),
+            "dot component": policy(scope=[{"file": "a/./b"}]),
+            "empty component": policy(scope=[{"file": "a//b"}]),
+            "trailing slash": policy(scope=[{"tree": "a/", "suffixes": [".md"]}]),
+            "dot-led tree": policy(scope=[{"tree": "./a", "suffixes": [".md"]}]),
+            "dot file entry": policy(scope=[{"file": "."}]),
+            "suffix with a slash": policy(scope=[{"tree": ".", "suffixes": [".m/d"]}]),
+            "dot skip": policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": ["."]}]),
+            "dot-dot skip": policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": [".."]}]),
             "missing suffixes": policy(scope=[{"tree": "."}]),
             "suffix without a dot": policy(scope=[{"tree": ".", "suffixes": ["md"]}]),
             "empty suffixes": policy(scope=[{"tree": ".", "suffixes": []}]),
@@ -368,8 +413,16 @@ def _self_test():
         expect("G7 duplicate key", tree({"d/a.md": quote}, raw_policy=(
             b'{"version": 1, "version": 1, "id": "x", "chars": {"a": "a"}, "scope": [{"file": "N"}]}')), 2)
         expect("G7 not JSON", tree({"d/a.md": quote}, raw_policy=b"{"), 2)
-        expect("G7 NaN constant", tree({"d/a.md": quote}, raw_policy=json.dumps(policy(id=1)).replace(
-            '"id": 1', '"id": NaN').encode("ascii")), 2)
+        # A non-standard constant in an otherwise-valid policy: the needle tells the constant check from the
+        # version check that would also reject the parsed float.
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            expect(f"G7 {constant} constant", tree({"d/a.md": quote}, raw_policy=json.dumps(policy()).replace(
+                '"version": 1', f'"version": {constant}').encode("ascii")), 2,
+                f"non-standard JSON constant {constant}")
+        # U+2028 and U+2029: str.splitlines() would drop them, so the policy is malformed (exit 2).
+        for boundary in ("\u2028", "\u2029"):
+            expect(f"G7 line boundary U+{ord(boundary):04X}", tree({"d/a.md": f"x{boundary}y\n"}, policy(
+                chars={boundary: "separator"})), 2, f"U+{ord(boundary):04X} is a line boundary")
         expect("G7 over the cap", tree({"d/a.md": quote}, raw_policy=json.dumps(policy()).encode("ascii")
                                          + b" " * POLICY_CAP), 2)
         linked = tree({"d/a.md": quote, "elsewhere.json": json.dumps(policy())})
@@ -384,7 +437,7 @@ def _self_test():
         expect("G8B not UTF-8", tree({"d/a.md": em.encode("utf-8") + b"\xff"}), 0, "SKIP (not utf-8): d/a.md")
         # G9 order and duplicates: overlapping entries report a file once, in its first entry's place.
         overlap = policy(scope=[{"tree": "b", "suffixes": [".md"]}, {"tree": ".", "suffixes": [".md"]}])
-        rc, out = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
+        rc, out, _ = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
         if (rc, out.splitlines()[1:]) != (1, ["  b/c.md:1:1: left double quotation mark",
                                               "  a.md:1:1: left double quotation mark"]):
             failures.append(f"G9 order or duplicates: {rc} {out!r}")
@@ -396,6 +449,24 @@ def _self_test():
                 expect("G10 unlistable tree", locked, 2)
             finally:
                 os.chmod(os.path.join(locked, "d"), 0o700)
+            # G11 a present policy file that cannot be read is exit 2, never the default.
+            unreadable = tree({"d/a.md": "x\n"}, policy())
+            os.chmod(os.path.join(unreadable, ".aiqt", "char-policy.json"), 0)
+            expect("G11 unreadable policy file", unreadable, 2, "cannot be used")
+            # G12 a file entry whose parent cannot be searched is exit 2, not skipped as absent.
+            hidden = tree({"d/NOTICE": em}, policy(chars={em: "em dash"}, scope=[{"file": "d/NOTICE"}]))
+            os.chmod(os.path.join(hidden, "d"), 0o600)
+            try:
+                expect("G12 unsearchable file entry", hidden, 2, "cannot scan the tree")
+            finally:
+                os.chmod(os.path.join(hidden, "d"), 0o700)
+        # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
+        for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"]):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = main(argv)
+            if rc != 2 or "usage:" not in err.getvalue() or out.getvalue():
+                failures.append(f"G13 {argv[1:]}: want exit 2 and usage, got {rc} {out.getvalue()[:120]!r}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:

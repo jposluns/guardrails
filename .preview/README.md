@@ -78,7 +78,10 @@ the authority, and the summary further down this page only points to it.
   already holds one can still be edited, and a whole-file write is compared with the file it replaces. The
   reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
   A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
-  ahead; the CI gate still checks the file. It does not skip worker processes.
+  ahead; the CI gate still checks the file. Once its root is set, every other call it cannot evaluate (a
+  payload it cannot read, a path it cannot resolve, a root that is not an absolute path, or an internal
+  error) also goes ahead with a note naming the reason, never silently; it is silent only while its root is
+  unset or empty. It does not skip worker processes.
   Event: `PreToolUse`, matcher `Write|Edit|MultiEdit`.
 - **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
   refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
@@ -155,7 +158,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `ec18dba46e63402ca4cc14328cf2ea8b944a35e0123ecaf89ec6a7a6f7ca779b` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `a5d7dc24db5ec8c33d3e72ffe73624d1002f0fd80435013e0bee2d3e05714cca` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -317,9 +320,10 @@ fails and report it; do not work around a failed check.
    not yet published here. Those checks report `SKIPPED` until the reference files are available;
    skipped is not a pass. The `record-remove-check.py` differential check also reports
    `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
-   The `char-policy-write.py` self-test compares its policy reader and scope test with the CI gate
-   `tools/check_no_dashes.py`, found at `../tools/` from the hook's folder as in a checkout of this
-   repository; installed on its own, that comparison reports skipped.
+   The `char-policy-write.py` self-test compares its copy of the policy validator byte for byte with the
+   marked region of the CI gate `tools/check_no_dashes.py`, and compares its policy size cap, a sample of
+   policies and its scope test with the gate. It finds the gate at `../tools/` from the hook's folder, as in
+   a checkout of this repository; installed on its own, that comparison reports skipped.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
@@ -366,9 +370,10 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
 - **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
-  unset, empty or relative, the hook does nothing, and with no policy file under that root it does nothing
-  either. It has no opt-out comment: to allow a character, write it in words, or narrow the policy's scope
-  in a reviewed change to the policy file.
+  unset or empty, the hook does nothing, and with no policy file under that root it does nothing either.
+  Set to a relative path, it checks nothing and says so in a note on every file write. It has no opt-out
+  comment: to allow a character, write it in words, or narrow the policy's scope in a reviewed change to
+  the policy file.
 
 The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
 command. Their reasons are optional; text inside quotes does not opt out.
@@ -380,7 +385,7 @@ command. Their reasons are optional; text inside quotes does not opt out.
 | `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
-| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
+| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks that read it out of that output; `char-policy-write.py` does not read it and checks worker processes too. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
@@ -531,8 +536,12 @@ section of its opening docstring. Read that section before relying on a hook; in
   its scope differ from the gate's. A malformed policy file lets every write through with a note, while the
   gate fails on it. A reviewed edit to the policy file narrows the hook and the gate together, and only
   review guards that edit. The repository's other character checks, with their own fixed lists, are not
-  read. The file can change between the check and the write, and a payload over 64 MiB is allowed
-  silently.
+  read. The file can change between the check and the write, and a payload over 64 MiB is allowed with
+  a note. The reason writes each policy character as `U+` and hex digits, so a policy that forbids an
+  ASCII character, such as `U` or a digit, still sees it in the reason. Not verified here: if Claude Code's
+  `Edit` rewrites straight quotes in the new text to the curly quotes the file uses, the file gains
+  characters the hook never saw, so a policy that forbids curly quotes can miss them until the CI gate
+  runs.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

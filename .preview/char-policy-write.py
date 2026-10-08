@@ -10,11 +10,14 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
     PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: always
-    0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks.
+    0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks. Once
+    armed, it never allows a call it could not evaluate silently: each such call gets a note naming why.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
-    default and no older spelling: unset, empty or relative, the hook does nothing. The policy file is
+    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently. Set but
+    relative or holding a control character, it checks nothing and says so in a note on every call. The
+    policy file is
     <root>/.aiqt/char-policy.json; absent, the hook does nothing (the gate then applies its built-in default
     policy, which this hook does not copy).
 
@@ -24,18 +27,29 @@ POLICY FILE
     Paths are repo-relative POSIX paths ("." alone is the root as a tree). A tree entry scopes a file under
     the tree whose suffix (the text from the final dot of its name, case-sensitive) is listed, unless a
     directory or the file below the tree has a name in that entry's skip list; a file entry scopes that one
-    file. Unknown keys and any other fault make the file malformed. The loader and validator here are a copy
-    of the gate's; the self-test checks they agree, and that this hook's scope test agrees with the gate's
-    walk (H12).
+    file. Unknown keys and any other fault make the file malformed, and so does a character that
+    str.splitlines() treats as a line boundary (U+2028 or U+2029; the rest are control characters), which
+    the gate's line scan could not see. The region between the BEGIN COPY and END COPY markers below is a
+    byte-for-byte copy of the gate's marked region; H12 compares the bytes, the policy cap and path, a sample
+    of policies through both validators, and this hook's scope test with the gate's walk.
 
 DECISION
-    - Not Write, Edit or MultiEdit, or the payload lacks tool_input or a string file_path, or the path holds a
-      control character: allow, silently (the channel's fail-open contract).
-    - A relative file_path is joined onto the payload's cwd (absent or relative cwd: allow). The target's and
-      the root's real paths are compared whole component by component; a target outside the root, or not in
-      the policy's scope, is allowed.
+    - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative or
+      holding a control character: allow with a note naming the variable.
+    - A tool_name string naming a tool other than Write, Edit or MultiEdit: allow, silently.
+    - Fail-open, made visible: the preview channel allows what it cannot evaluate (the hook is opt-in and the
+      CI gate is the backstop), but always with a note naming the reason, never silently and never with an
+      ask. That covers a payload that cannot be read as JSON of at most 64 MiB or is not a JSON object, a
+      missing tool_name, a tool_input that is not an object, a file_path that is not a non-empty string
+      without control characters, a relative file_path with no absolute cwd, a path that cannot be resolved
+      or encoded as a file name (a lone surrogate, say), a field the tool needs (old_string, new_string,
+      edits, content) of the wrong type, and an internal error.
+    - A relative file_path is joined onto the payload's cwd. The target's and the root's real paths are
+      compared whole component by component; a target outside the root, or not in the policy's scope, is
+      allowed silently.
     - A policy file that is malformed, unreadable, a symbolic link, not a regular file, or over 65536 bytes:
-      allow with a note naming the gate, which exits 2 on the same file, so CI still fails closed.
+      allow with a note naming the gate, which exits 2 on the same file, so CI still fails closed. No policy
+      file: allow, silently.
     - For each policy character c, a write ADDS c when:
         Edit       new_string holds more c than old_string (with replace_all both counts scale alike);
         MultiEdit  any one edit's new_string holds more c than its old_string;
@@ -44,8 +58,10 @@ DECISION
                    new UTF-8 content). The existing file is read only when it is a regular file of at most
                    4 MiB; otherwise the write is allowed with a note.
       Any added character: deny. The reason names each added character as U+XXXX with its policy name, the
-      first position in the new text, and the policy's advice; every policy character in the reason (in the
-      path, the policy id or the advice) is written as U+XXXX too, so the reason never carries one.
+      first position in the new text, and the policy's advice; every policy character in the path, the
+      policy id or the advice is written as U+XXXX too. The fixed wording and the U+XXXX notation are ASCII,
+      so the reason carries no policy character only when the policy forbids no ASCII character: a policy
+      that forbids "U", "+", a hex digit or a letter of the wording sees it in the reason (H09 pins this).
     Existing occurrences never block an unrelated edit: only an increase is denied.
 
 RESIDUAL COVERAGE
@@ -58,20 +74,27 @@ RESIDUAL COVERAGE
     - A net-zero move of an existing character (removed in one place, added in another in the same Edit or
       Write) is allowed; the gate still flags the character.
     - MultiEdit over-fires: a call where a later edit removes what an earlier edit added is denied, because
-      each edit is judged alone. It never misses a net increase: a code point cannot be formed by joining
-      strings that lack it, so the net change is the sum of each edit's own change times its match count.
+      each edit is judged alone. Over the strings as sent, it never misses a net increase: a code point
+      cannot be formed by joining strings that lack it, so the net change is the sum of each edit's own
+      change times its match count.
+    - Unverified harness behaviour: if Claude Code's Edit normalizes quotes (writing curly quotes where
+      new_string has straight ones, to match the file's text), the file gains characters new_string does
+      not hold, and this hook, which judges new_string as sent, misses that increase for a policy that
+      forbids curly quotes. Whether and when the harness does this is not verified here; the gate scans the
+      written file.
     - Path aliases: a hard link, a case-insensitive or Unicode-normalizing filesystem, or a symbolic link
       inside the root (the gate's walk does not follow linked directories; this hook resolves real paths)
       can make the hook's scope test differ from the gate's walk.
-    - A malformed policy fails open here and closed at the gate.
+    - A malformed policy fails open here (with a note) and closed at the gate.
     - A reviewed edit to the policy file narrows the gate and the hook together; diff review is the only
       control over it.
     - The repository's other character checks with their own fixed sets and scopes are not read.
     - The file can change between this hook's decision and the write (a race).
-    - A payload over 64 MiB, or one that is not a JSON object, is allowed silently.
+    - A payload over 64 MiB, or one that is not a JSON object, is allowed with a note.
+    - It does not read AIQT_HOOKS_WORKER: worker processes are checked like any other session.
 
 SELF-TEST
-    --self-test runs the vectors H1 to H16 below. The parity test H12 imports the sibling gate
+    --self-test runs the vectors H1 to H19 below. The parity test H12 imports the sibling gate
     ../tools/check_no_dashes.py; when it is absent the test reports skipped, unless the environment sets
     AIQT_HOOKS_REQUIRE_SIBLINGS=1, when its absence fails the test.
 """
@@ -103,6 +126,10 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 _TOP_KEYS = frozenset(("version", "id", "chars", "advice", "scope"))
 _REQUIRED_KEYS = frozenset(("version", "id", "chars", "scope"))
 _TREE_KEYS = frozenset(("tree", "suffixes", "skip"))
+# Every code point str.splitlines() treats as a line boundary, from the table in the Python documentation for
+# str.splitlines: \n, \r, \v, \f, \x1c, \x1d, \x1e, \x85, U+2028 and U+2029 (\r\n is a pair of two of them). The
+# gate scans line by line, so such a policy character would vanish before the check; the validator rejects it.
+LINE_BOUNDARIES = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 class PolicyError(ValueError):
@@ -163,6 +190,9 @@ def validate_policy(data):
     for char, name in chars.items():
         if len(char) != 1 or not _plain(char):
             raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character")
+        if char in LINE_BOUNDARIES:
+            raise PolicyError(f"chars key U+{ord(char):04X} is a line boundary (str.splitlines splits on it), "
+                              "which a line-by-line scan cannot see")
         if not _plain(name):
             raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string")
     if "advice" in data and not _plain(data["advice"]):
@@ -274,7 +304,8 @@ def _in_scope(parts, policy):
 
 def _escape(text, chars):
     """text with every policy character (every non-ASCII character when chars is None, as when the policy
-    could not be read), and every control character, written as U+XXXX."""
+    could not be read), and every control character, written as U+XXXX. The notation is ASCII, so a policy
+    character among "U", "+" and the hex digits survives in it."""
     return "".join(f"U+{ord(ch):04X}" if (ord(ch) > 126 if chars is None else ch in chars)
                    or ord(ch) < 32 or 127 <= ord(ch) <= 159 else ch for ch in text)
 
@@ -294,6 +325,12 @@ def _note(message):
     return {"systemMessage": f"AIQT character policy hook ({HOOK_ID}): {message}"}
 
 
+def _unchecked(why, tool="tool"):
+    """The allow-with-a-note verdict for a call the hook could not evaluate (fail-open, made visible)."""
+    return _note(_escape(f"this {tool} call was not checked against the character policy, because {why}. The CI "
+                         f"gate {GATE} still scans the files the policy scopes.", None))
+
+
 def _deny(policy, tool, rel, added, where):
     chars = policy["chars"]
     listed = " and ".join(f"U+{ord(c):04X} ({chars[c]})" for c in added)
@@ -310,27 +347,35 @@ def _deny(policy, tool, rel, added, where):
 def _decide(payload, env):
     """The verdict for one payload: None (allow silently), a note object, or a deny object."""
     root = env.get(ROOT_VAR)
-    if not isinstance(root, str) or not root or not os.path.isabs(root) or not _plain(root):
-        return None
-    if not isinstance(payload, dict) or payload.get("tool_name") not in TOOLS:
+    if not root:
+        return None  # unset or empty: the hook is not armed
+    if not isinstance(root, str) or not os.path.isabs(root) or not _plain(root):
+        return _unchecked(f"{ROOT_VAR} is set but is not an absolute path without control characters")
+    if not isinstance(payload, dict):
+        return _unchecked("the hook payload is not a JSON object")
+    if not isinstance(payload.get("tool_name"), str):
+        return _unchecked("the hook payload has no tool_name string")
+    if payload["tool_name"] not in TOOLS:
         return None
     tool, tool_input = payload["tool_name"], payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        return None
+        return _unchecked("its tool_input is not an object", tool)
     file_path = tool_input.get("file_path")
     if not _plain(file_path):
-        return None
+        return _unchecked("its file_path is not a non-empty string without control characters", tool)
     if not os.path.isabs(file_path):
         cwd = payload.get("cwd")
         if not _plain(cwd) or not os.path.isabs(cwd):
-            return None
+            return _unchecked("its file_path is relative and the payload has no absolute cwd", tool)
         file_path = os.path.join(cwd, file_path)
     try:
         root_real = os.path.realpath(root)
         target = os.path.realpath(file_path)
-        if target == root_real or os.path.commonpath([target, root_real]) != root_real:
-            return None
-    except (OSError, ValueError):
+        outside = target == root_real or os.path.commonpath([target, root_real]) != root_real
+    except (OSError, ValueError) as exc:  # a lone surrogate cannot be encoded as a file name: UnicodeEncodeError
+        return _unchecked(f"its file_path cannot be resolved or encoded as a file name ({type(exc).__name__})",
+                          tool)
+    if outside:
         return None
     policy, why = _load_policy(root_real)
     if policy is None:
@@ -346,7 +391,7 @@ def _decide(payload, env):
     if tool == "Edit":
         old, new = tool_input.get("old_string"), tool_input.get("new_string")
         if not isinstance(old, str) or not isinstance(new, str):
-            return None
+            return _unchecked("its old_string or new_string is not a string", tool)
         added = _added(chars, old, new)
         if added:
             line, column = _position(new, added)
@@ -355,14 +400,14 @@ def _decide(payload, env):
     if tool == "MultiEdit":
         edits = tool_input.get("edits")
         if not isinstance(edits, list) or not edits:
-            return None
+            return _unchecked("its edits value is not a non-empty list", tool)
         pairs = []
         for edit in edits:
             if not isinstance(edit, dict):
-                return None
+                return _unchecked("one of its edits is not an object", tool)
             old, new = edit.get("old_string"), edit.get("new_string")
             if not isinstance(old, str) or not isinstance(new, str):
-                return None
+                return _unchecked("one of its edits has an old_string or new_string that is not a string", tool)
             pairs.append((old, new))
         for number, (old, new) in enumerate(pairs, 1):
             added = _added(chars, old, new)
@@ -373,7 +418,7 @@ def _decide(payload, env):
         return None
     content = tool_input.get("content")
     if not isinstance(content, str):
-        return None
+        return _unchecked("its content is not a string", tool)
     if not any(c in content for c in chars):
         return None
     try:
@@ -435,21 +480,34 @@ def main(argv):
         return 0
     if len(argv) > 1:
         return _self_test() if list(argv[1:]) == ["--self-test"] else 0
+    if not os.environ.get(ROOT_VAR):
+        return 0  # unset or empty: the hook is not armed, so it reads nothing and says nothing
+    # Fail-open, made visible: a payload it cannot read, or an internal error, allows the call with a note.
     try:
-        out = _decide(_read_payload(), os.environ)
-    except Exception:
-        return 0  # malformed or unreadable input, or an internal error: fail open
+        payload = _read_payload()
+    except Exception as exc:
+        out = _unchecked(f"the hook payload cannot be read as JSON of at most {_MAX_INPUT} bytes "
+                         f"({type(exc).__name__})")
+    else:
+        try:
+            out = _decide(payload, os.environ)
+        except Exception as exc:
+            out = _unchecked(f"an internal error ({type(exc).__name__}) stopped the check")
     if out is not None:
         _emit_line(json.dumps(out))
     return 0
 
 
 def _self_test():
+    import ast
     import importlib.util
+    import io
     import shutil
     import subprocess
     import tempfile
     import unittest
+    from contextlib import redirect_stdout
+    from unittest import mock
 
     here = os.path.abspath(__file__)
     em, en, quote, hyphen = "\u2014", "\u2013", "\u201c", "-"
@@ -460,11 +518,13 @@ def _self_test():
     quotes = {"version": 1, "id": "no-curly-quotes", "chars": {quote: "left double quotation mark"},
               "scope": [{"tree": ".", "suffixes": [".md"]}]}
 
-    def sibling_gate():
+    gate_path = os.path.join(os.path.dirname(os.path.dirname(here)), *GATE.split("/"))
+
+    def sibling_gate(path=gate_path, env=None):
         """The sibling gate module, or None (skip) when it is absent and siblings are not required."""
-        path = os.path.join(os.path.dirname(os.path.dirname(here)), *GATE.split("/"))
+        env = os.environ if env is None else env
         if not os.path.isfile(path):
-            if os.environ.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
+            if env.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
                 raise AssertionError(f"sibling gate {GATE} is absent ({path}) and AIQT_HOOKS_REQUIRE_SIBLINGS=1 "
                                      "requires it")
             return None
@@ -530,6 +590,12 @@ def _self_test():
             self.assertEqual(set(out), {"systemMessage"})
             return out["systemMessage"]
 
+        def is_unchecked(self, out, needle):
+            note = self.is_note(out)
+            self.assertIn("was not checked", note)
+            self.assertIn(needle, note)
+            return note
+
         def test_h01_suffix(self):
             self.is_deny(self.edit("docs/a.md", "x", "x" + em))
             self.assertIsNone(self.edit("docs/a.txt", "x", "x" + em))
@@ -548,9 +614,13 @@ def _self_test():
         def test_h04_arming(self):
             payload = {"tool_name": "Edit", "tool_input": {"file_path": self.at("docs/a.md"), "old_string": "x",
                                                           "new_string": em}}
-            # a relative root is off, even one that resolves to the fixture root from here
-            for env in ({}, {ROOT_VAR: ""}, {ROOT_VAR: os.path.relpath(self.root)}):
+            # unset or empty: not armed, silent
+            for env in ({}, {ROOT_VAR: ""}):
                 self.assertIsNone(_decide(payload, env), env)
+                self.assertIsNone(_decide("not a payload", env), env)
+            # set but unusable: a note naming the variable, even for a root that resolves to the fixture from here
+            for root in (os.path.relpath(self.root), self.root + "\n"):
+                self.is_unchecked(_decide(payload, {ROOT_VAR: root}), ROOT_VAR)
             self.is_deny(_decide(payload, self.env))
 
         def test_h04_process(self):
@@ -564,9 +634,16 @@ def _self_test():
                     self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
                 else:
                     self.assertEqual(p.stdout, b"")
-            for junk in (b"", b"not json", b"[1]", b'{"tool_name": "Write"}'):
+            # armed: a payload it cannot evaluate is allowed with a note naming why; unarmed: silent
+            for junk, needle in ((b"", "cannot be read as JSON"), (b"not json", "cannot be read as JSON"),
+                                 (b"\xff", "cannot be read as JSON"), (b"[1]", "not a JSON object"),
+                                 (b'{"tool_name": "Write"}', "tool_input is not an object")):
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=junk, capture_output=True,
                                    env={"LC_ALL": "C", ROOT_VAR: self.root}, timeout=60)
+                self.assertEqual(p.returncode, 0, junk)
+                self.is_unchecked(json.loads(p.stdout), needle)
+                p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=junk, capture_output=True,
+                                   env={"LC_ALL": "C"}, timeout=60)
                 self.assertEqual((p.returncode, p.stdout), (0, b""), junk)
 
         def test_h05_policy(self):
@@ -579,6 +656,17 @@ def _self_test():
                 note = self.is_note(self.edit("docs/a.md", "x", em))
                 self.assertIn(GATE, note)
                 self.assertNotIn(em, note)
+            # a non-standard constant in an otherwise-valid policy, and the two line-boundary characters
+            for raw, needle in ((json.dumps(dashes).replace('"version": 1', '"version": NaN').encode("ascii"),
+                                 "non-standard JSON constant NaN"),
+                                (json.dumps(dashes | {"chars": {"\u2028": "line separator"}}).encode("ascii"),
+                                 "U+2028 is a line boundary"),
+                                (json.dumps(dashes | {"chars": {"\u2029": "paragraph separator"}}).encode("ascii"),
+                                 "U+2029 is a line boundary")):
+                self.set_policy(raw=raw)
+                note = self.is_note(self.edit("docs/a.md", "x", "\u2028\u2029" + em))
+                self.assertIn(needle, note)
+                self.assertIn("exits 2", note)
             self.set_policy(None)  # absent: silent
             self.assertIsNone(self.edit("docs/a.md", "x", em))
             elsewhere = self.put("elsewhere.json", json.dumps(dashes))
@@ -617,6 +705,10 @@ def _self_test():
             self.set_policy(dashes | {"id": f"no{em}dashes", "advice": f"use {en} never"})
             reason = self.is_deny(self.edit("docs/a.md", "x", em))
             self.assertFalse(any(c in reason for c in (em, en)), reason)
+            # the disclosed limit: the U+XXXX notation is ASCII, so a policy forbidding "U" sees "U" in it
+            self.set_policy(quotes | {"chars": {"U": "capital U"}})
+            reason = self.is_deny(self.edit("docs/a.md", "x", "xU"))
+            self.assertIn("U+0055+0055 (capital U+0055)", reason)  # each U of the notation escaped once, in turn
 
         def test_h10_adopter_set(self):
             self.set_policy(quotes)
@@ -635,6 +727,34 @@ def _self_test():
             gate = sibling_gate()
             if gate is None:
                 self.skipTest(f"sibling gate {GATE} absent; set AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it")
+            # The source: the marked validator region is byte-identical to the gate's, and nothing outside it
+            # here redefines a name it defines.
+            regions = {}
+            for path in (here, gate.__file__):
+                with open(path, "rb") as handle:
+                    lines = handle.read().splitlines(keepends=True)
+                begins = [i for i, line in enumerate(lines) if line.startswith(b"# --- BEGIN COPY")]
+                ends = [i for i, line in enumerate(lines) if line.startswith(b"# --- END COPY")]
+                self.assertEqual((len(begins), len(ends)), (1, 1), path)
+                self.assertLess(begins[0], ends[0], path)
+                regions[path] = (b"".join(lines[begins[0] + 1:ends[0]]), begins[0] + 1, ends[0],
+                                 b"".join(lines).decode("utf-8"))
+            self.assertEqual(regions[here][0], regions[gate.__file__][0], "the copied validator region drifted")
+            _, first, last, source = regions[here]
+            inside, outside = set(), set()
+            for node in ast.parse(source).body:
+                names = set()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names.add(node.name)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                        names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    names.update((a.asname or a.name).split(".")[0] for a in node.names)
+                (inside if first < node.lineno <= last else outside).update(names)
+            self.assertEqual(inside & outside, set(), "a name from the copied region is redefined outside it")
+            self.assertEqual((POLICY_CAP, POLICY_PATH), (gate.POLICY_CAP, gate.POLICY_PATH))
+            # The behaviour, on a sample: each fixture is otherwise valid, so a rejection is the named fault's.
             raws = [json.dumps(p).encode("ascii") for p in (
                 dashes, quotes, gate.DEFAULT_POLICY, dashes | {"version": 2}, dashes | {"extra": 1},
                 dashes | {"chars": {em + em: "x"}}, dashes | {"chars": {}}, dashes | {"id": ""},
@@ -644,9 +764,24 @@ def _self_test():
                 dashes | {"scope": [{"tree": ".", "suffixes": [".a.b"]}]},
                 dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": ["a/b"]}]},
                 dashes | {"scope": [{"tree": ".", "file": "x", "suffixes": [".md"]}]},
-                dashes | {"scope": [{"file": "x", "skip": []}]}, dashes | {"version": True})]
-            raws += [b"{", b"[]", b'{"version": 1, "version": 1}', b"\xff",
-                     json.dumps(dashes).encode("ascii") + b" " * POLICY_CAP]
+                dashes | {"scope": [{"file": "x", "skip": []}]}, dashes | {"version": True},
+                dashes | {"chars": {"\x9f": "c1"}}, dashes | {"chars": {"\x7f": "del"}}, dashes | {"id": "a\x80"},
+                dashes | {"chars": {"\u2028": "line separator"}},
+                dashes | {"chars": {"\u2029": "paragraph separator"}},
+                dashes | {"scope": [{"file": "a/./b"}]}, dashes | {"scope": [{"file": "a//b"}]},
+                dashes | {"scope": [{"tree": "a/", "suffixes": [".md"]}]},
+                dashes | {"scope": [{"tree": ".", "suffixes": [".m/d"]}]},
+                dashes | {"scope": [{"tree": ".", "suffixes": []}]},
+                dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": ["."]}]},
+                dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": [".."]}]},
+                dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": "x"}]})]
+            valid = json.dumps(dashes).encode("ascii")
+            raws += [b"{", b"[]", b"\xff", valid[:-1] + b', "version": 1}',
+                     valid.replace(b'"en dash"', b'"en dash", "\\u2013": "again"'),
+                     valid.replace(b'"version": 1', b'"version": NaN'),
+                     valid.replace(b'"version": 1', b'"version": Infinity'),
+                     valid + b" " * (gate.POLICY_CAP - len(valid)),
+                     valid + b" " * (gate.POLICY_CAP + 1 - len(valid))]
             for raw in raws:
                 verdicts = []
                 for parse, error in ((parse_policy, PolicyError), (gate.parse_policy, gate.PolicyError)):
@@ -656,6 +791,8 @@ def _self_test():
                     except error:
                         verdicts.append(False)
                 self.assertEqual(verdicts[0], verdicts[1], raw[:120])
+            for raw in (valid, raws[0], raws[1], raws[-2]):  # the sample holds accepted policies too
+                self.assertEqual(parse_policy(raw)["version"], 1)
             files = ["a.md", "a.mdc", "a.txt", "docs/a.md", "docs/node_modules/a.md", "node_modules.md",
                      "docs/__pycache__/a.md", ".git/a.md", "plugin/x.py", "plugin/x.json", "plugin/sub/y.toml",
                      "plugin/node_modules/z.py", ".aiqt/standards/s.toml", ".aiqt/standards/n/s.toml",
@@ -665,7 +802,8 @@ def _self_test():
                 self.put(f, "x\n")
             for policy in (gate.DEFAULT_POLICY, dashes, quotes,
                            quotes | {"scope": [{"tree": "b", "suffixes": [".md"]}, {"tree": ".",
-                                                                                  "suffixes": [".md"]}]}):
+                                                                                  "suffixes": [".md"]}]},
+                           quotes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": ["node_modules.md"]}]}):
                 listed = {os.path.relpath(p, self.root).replace(os.sep, "/")
                           for p in gate.scope_paths(self.root, policy)}
                 for f in files + ["docs/a.md"]:
@@ -683,11 +821,17 @@ def _self_test():
                                {"file_path": self.at("docs/a.md"), "content": 7},
                                {"file_path": self.at("docs/a.md"), "old_string": None, "new_string": em},
                                {"file_path": self.at("docs/a.md"), "edits": [{"old_string": "a"}]},
-                               {"file_path": self.at("docs/a.md"), "edits": "x"}):
-                for tool in TOOLS:
-                    self.assertIsNone(_decide({"tool_name": tool, "tool_input": tool_input}, self.env),
-                                      (tool, tool_input))
-            self.assertIsNone(_decide([], self.env))
+                               {"file_path": self.at("docs/a.md"), "edits": "x"},
+                               {"file_path": self.at("docs/a.md"), "edits": []},
+                               {"file_path": self.at("docs/a.md"), "edits": ["x"]}):
+                for tool in TOOLS:  # armed: a note naming the fault, never a silent allow
+                    self.is_unchecked(_decide({"tool_name": tool, "tool_input": tool_input}, self.env), tool)
+            self.is_unchecked(_decide([], self.env), "not a JSON object")
+            self.is_unchecked(_decide({"tool_input": {"file_path": self.at("docs/a.md")}}, self.env), "tool_name")
+            self.assertIsNone(_decide({"tool_name": "Read", "tool_input": None}, self.env))
+            # out of scope, a field the tool needs is never examined: silent
+            self.assertIsNone(_decide({"tool_name": "Write", "tool_input": {"file_path": self.at("a.txt")}},
+                                      self.env))
 
         def test_h15_existing_unreadable(self):
             os.makedirs(self.at("docs/dir.md"))
@@ -704,13 +848,63 @@ def _self_test():
             rel = {"tool_name": "Edit", "tool_input": {"file_path": "docs/a.md", "old_string": "x",
                                                       "new_string": em}}
             self.is_deny(_decide(rel | {"cwd": self.root}, self.env))
-            self.assertIsNone(_decide(rel, self.env))
-            self.assertIsNone(_decide(rel | {"cwd": "relative"}, self.env))
+            self.is_unchecked(_decide(rel, self.env), "no absolute cwd")
+            self.is_unchecked(_decide(rel | {"cwd": "relative"}, self.env), "no absolute cwd")
             self.is_deny(self.edit("NOTICE", "x", em))
             self.is_deny(self.edit("plugin/x.py", "x", em))
             self.assertIsNone(self.edit("docs/NOTICE", "x", em))
             self.assertIsNone(self.edit(".aiqt/char-policy.json", "x", em))  # the policy itself is never blocked
             self.assertIsNone(self.edit("", "x", em))
+
+        def test_h17_unencodable_path(self):
+            # a lone high surrogate cannot be encoded as a file name: a note, not a silent allow
+            note = self.is_unchecked(self.write("docs/a\ud800.md", f"x{em}"), "cannot be resolved or encoded")
+            self.assertIn("UnicodeEncodeError", note)
+            self.assertNotIn("\ud800", note)
+            # a low surrogate in the surrogateescape range is a byte of a file name: checked and denied
+            self.is_deny(self.write("docs/a\udc80.md", f"x{em}"))
+
+        def test_h18_visible_fail_open(self):
+            payload = {"tool_name": "Edit", "tool_input": {"file_path": self.at("docs/a.md"), "old_string": "x",
+                                                          "new_string": em}}
+
+            def boom(*_):
+                raise RuntimeError("internal")
+
+            def run_main(env, decide=_decide):
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, env, clear=True), \
+                        mock.patch.dict(globals(), {"_read_payload": lambda: payload, "_decide": decide}), \
+                        redirect_stdout(out):
+                    rc = main(["char-policy-write.py"])
+                return rc, out.getvalue()
+
+            rc, out = run_main({ROOT_VAR: self.root}, boom)
+            self.assertEqual(rc, 0)
+            self.is_unchecked(json.loads(out), "an internal error (RuntimeError)")
+            for env in ({}, {ROOT_VAR: ""}):  # not armed: nothing is read and nothing is said
+                self.assertEqual(run_main(env, boom), (0, ""))
+            rc, out = run_main({ROOT_VAR: self.root})
+            self.is_deny(json.loads(out))
+            # a payload over the read bound (lowered here to 64 bytes) is allowed with a note, not silently
+            bounded = ("import importlib.util, sys\n"
+                       "spec = importlib.util.spec_from_file_location('bounded_hook', sys.argv[1])\n"
+                       "module = importlib.util.module_from_spec(spec)\n"
+                       "spec.loader.exec_module(module)\n"
+                       "module._MAX_INPUT = 64\n"
+                       "sys.exit(module.main(['char-policy-write.py']))\n")
+            p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", bounded, here], capture_output=True,
+                               input=json.dumps(payload).encode("ascii"), env={"LC_ALL": "C", ROOT_VAR: self.root},
+                               timeout=60)
+            self.assertEqual(p.returncode, 0)
+            self.is_unchecked(json.loads(p.stdout), "at most 64 bytes (ValueError)")
+
+        def test_h19_require_siblings(self):
+            missing = os.path.join(self.tmp, "absent", "check_no_dashes.py")
+            self.assertIsNone(sibling_gate(missing, {}))
+            self.assertIsNone(sibling_gate(missing, {"AIQT_HOOKS_REQUIRE_SIBLINGS": "0"}))
+            with self.assertRaises(AssertionError):
+                sibling_gate(missing, {"AIQT_HOOKS_REQUIRE_SIBLINGS": "1"})
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
     result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)
