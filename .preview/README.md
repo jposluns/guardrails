@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Nine hooks are published here, each listed with its checksum and link in the integrity table below.
+Ten hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -24,9 +24,10 @@ backs the rule that a rerun pass does not erase an earlier failure
 ([the rule text](../.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)); both are linked in the
 [enforcement register](../ENFORCEMENT.md). The other hooks guard completion
 records, background polling loops, existing working-record files, and commands that select processes by a
-pattern. Each one is a discipline
-guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
-error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
+pattern, and `char-policy-write.py` applies your repository's own character policy to file writes; it backs
+no rule in the pack and claims none. Each one is a discipline guard against accidental drift, not a
+security boundary, and each one fails open: if the hook hits an error or input it cannot evaluate, it gets
+out of the way rather than blocking your work. The one
 exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
@@ -68,6 +69,28 @@ the authority, and the summary further down this page only points to it.
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
+- **`char-policy-write.py`** denies a file write that would add a character your repository's character
+  policy forbids, in a file that policy covers. The policy is the data file `.aiqt/char-policy.json` at the
+  repository root, the one the pack's CI gate `tools/check_no_dashes.py` reads: it lists the characters, a
+  name for each, optional advice, and the folders, file suffixes and files in scope. The hook names no
+  character of its own; this repository's policy forbids the en dash and the em dash in Markdown and in the
+  hook files. An edit is denied only when it adds more of a character than it removes, so a file that
+  already holds one can still be edited, and a whole-file write is compared with the file it replaces. The
+  reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
+  A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
+  ahead; the CI gate still checks the file. Once its root is set, every other call it cannot evaluate (a
+  payload it cannot read in full within 2 seconds as strict UTF-8 JSON without `NaN`, `Infinity` or a key
+  repeated in one object, a field
+  of the wrong type, a path it cannot resolve, such as one through a symbolic link loop, a root that is not
+  an absolute path, does not exist or is not a directory, a launch with an unknown command-line argument,
+  or an internal error) also goes ahead with a note naming the reason. It checks the form of a call's
+  `file_path`, then the fields the tool needs, and only then resolves the path, compares it with the root
+  and reads the policy file, so a malformed call gets that note wherever it points and whether or not the
+  root holds a policy file. Once its root is set, it stays silent only for a tool other than the three it
+  checks, and for a well-formed call that it checked and found clean, that targets a file outside the root
+  or outside the policy's scope, or whose root holds no policy file; while its root is unset or empty, it
+  is silent for every call. It does not skip worker processes.
+  Event: `PreToolUse`, matcher `Write|Edit|MultiEdit`.
 - **`pattern-self-match.py`** denies a shell command that would stop or wait on processes chosen by
   `pgrep -f` or `pkill -f` when the pattern is plain text in the command itself. The shell that runs the
   command carries that text in its own command line, so `pkill -f worker/` signals that shell, and
@@ -155,6 +178,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
+| `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -225,7 +249,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the nine hooks:
+   Use this launch line for each of the ten hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -240,8 +264,8 @@ fails and report it; do not work around a failed check.
      has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
-     `constraint-reread.py`, and `rerun-pass-check.py` do not define a `REGISTRATION` constant; use this
-     same guard for them.
+     `constraint-reread.py`, `rerun-pass-check.py`, and `char-policy-write.py` do not define a
+     `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
@@ -251,7 +275,7 @@ fails and report it; do not work around a failed check.
      `error: <file> requires Python 3.14 or newer` to standard error, and exits.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the five `PreToolUse` hooks the exit is 2 and every matching
+     assistant and nothing is blocked; for the six `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
      `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
@@ -267,10 +291,11 @@ fails and report it; do not work around a failed check.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the nine hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the ten hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, and the other four match `Bash`.
+   `future-stamp-write.py` matches file writes and shell commands, `char-policy-write.py` matches file writes
+   only, and the other four match `Bash`.
    `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
    `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
    `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
@@ -303,6 +328,7 @@ fails and report it; do not work around a failed check.
        ],
        "PreToolUse": [
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
+         { "matcher": "Write|Edit|MultiEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/char-policy-write.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] },
@@ -319,18 +345,64 @@ fails and report it; do not work around a failed check.
    `record-remove-check.py` differential check and the `pattern-self-match.py` check that bash accepts
    its deny examples also report `SKIPPED, no trusted bash` when they cannot find a trusted root-owned
    `/usr/bin/bash` or `/bin/bash`.
+   The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
+   `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
+   for byte with the gate's, and a sample of policies and its scope test with the gate. The hook's self-test
+   H12 walks both files' module-level statements, compound statements' bodies included, and fails when one
+   outside the copied region binds a name the region binds or reads, or `__builtins__`, at module scope, or a
+   def or class body outside it declares one global; or when one makes an attribute or item store (an
+   assignment, an augmented or annotated assignment, a for, with or comprehension target) or deletion, at
+   module scope, in a class body or in a def's or lambda's decorators or defaults, whose target chain starts
+   from such a name, `json`, `builtins`, `sys.modules`, this module or an alias of one of them.
+   Conservatively, whatever the stored value, it also fails on a store whose chain starts from anything but a
+   name (a call such as `__import__("json")`, `globals()` or `logging.getLogger("app")`, a conditional
+   expression) or has a link (an attribute or a constant string key) named `sys`, `json`, `builtins` or
+   `modules`. An alias is a name bound by one of these forms: an import of `json`, `builtins` or `sys`, of a
+   submodule of one or of a name from one (`from sys import modules` binds an alias of `sys.modules`); an
+   import of this module (`import __main__`, or the gate's module `check_no_dashes` imported under any name);
+   a from-import from this module, whose name is an alias of the name it imports; and a for, with,
+   comprehension or match target whose source is such a name or alias, `sys.modules` (`sys` or an alias of
+   `sys`, then `.modules`), or an item of `sys.modules`, which counts as this module. The source is the
+   iterable, the context expression or the subject and, recursively, each element of a tuple, list or set
+   display, the element of a comprehension and each positional argument of a call but a bare name of a builtin
+   function or class that the file does not bind (`map(list, _rows)`), never the function called or a keyword
+   argument. Scope follows Python's rules: a binding is module-level only at module scope or in a def or class
+   body whose own scope declares the name global (an enclosing def's declaration does not count); any other
+   binding is local to its def or class body, a comprehension target to its comprehension and a nonlocal name
+   to the enclosing def, and none aliases the module-level name of the same spelling. A name in a source or a
+   store's chain counts as the binding its scope reads: its own; for a name its scope does not bind, the
+   nearest enclosing def's that binds it (class bodies skipped) or else the module's; and in a class body that
+   binds the name, which can read it before binding it, conservatively both its own and the module's, never an
+   enclosing def's. Every other aliasing form is out of scope; diff review is the control. Ordinary stores are
+   not flagged: `sys.path[0] = ...`, an item of `os.environ` or of a module-level dict under a key not named
+   `sys`, `json`, `builtins` or `modules`, a store to an attribute not so named of any other name
+   (`_Options.verbose = True`), and a store whose chain has no link so named and starts from a target whose
+   source is none of those (`for _row in sorted(_rows, key=len): _row[0] = 2`). That walk catches accidental
+   drift between the two copies; it is not a defence against a deliberate edit that replaces behaviour through
+   a path the walk does not model. Examples, not a complete list: an alias made by plain assignment or a
+   walrus (`m = sys.modules[__name__]`, then `m.validate_policy = ...`) or by a target over a call's result
+   (`for m in (importlib.import_module("__main__"),): ...`); an item key that is not a constant string; a call
+   such as `setattr` or `exec`; an in-place method call such as `globals().update`, `sys.modules.update` or
+   `json.__dict__.update`; a store in a function or lambda body; reflective access through an object the walk
+   cannot name; another module patching the file; and a module that shadows a standard library module, such as
+   a `json.py`. The gate imports `json` before it puts `tools/` on `sys.path`, which keeps out a
+   `tools/json.py` under `python3 -I`, as CI runs it, but not in a run without `-I`. Diff review is the
+   control for a deliberate edit; the hashes recorded in `SHA256SUMS` and the release manifest
+   `.aiqt/manifest.toml` let an installer or a release check detect a shipped copy that differs from the
+   reviewed one. It finds the gate at `../tools/` from the hook's folder, as in a checkout of this repository;
+   installed on its own, that comparison reports skipped.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other eight, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other nine, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the nine above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the ten above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -340,9 +412,9 @@ you type directly (in Claude Code, a line starting with `!`).
 ## Configuration
 
 The hooks read their settings from environment variables. Each feature has its own off state, and nothing
-beyond these variables is assumed. Each `AIQT_` variable also accepts an older spelling with the prefix
-`ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is unset, so "unset" below means
-both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
+beyond these variables is assumed. Each `AIQT_` variable except `AIQT_CHAR_POLICY_ROOT` also accepts an
+older spelling with the prefix `ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is
+unset, so "unset" below means both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
 `ORCH_VERIFY_OWNER`; if your environment sets either for another purpose, the hooks stay silent there.
 
 - The current time needs no setting. `clock-inject.py` always reads it from the clock and injects it, and
@@ -364,6 +436,13 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   calls. For an intended destruction, put `# record-rm-ok: <reason>` after the last command token on the
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
+- **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
+  unset or empty, the hook does nothing, and with no policy file under that root it allows every
+  well-formed file write silently (a malformed call still gets a note).
+  Set to a relative path, or to a path that does not exist or is not a directory, it checks nothing and
+  says so in a note on every file write; so does a hook launched with any argument other than
+  `--self-test` alone. It has no opt-out comment: to allow a character, write it in words, or narrow the
+  policy's scope in a reviewed change to the policy file.
 - **`pattern-self-match.py`** needs no store or lease setting. It skips the worker processes described
   above, but still checks helper-session calls. When selecting the shell that runs the command is
   intended, end the command with a real, unquoted shell comment such as
@@ -379,9 +458,10 @@ content of the command. Their reasons are optional; text inside quotes does not 
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
+| `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
-| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
+| `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks that read it out of that output; `char-policy-write.py` does not read it and checks worker processes too. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `pattern-self-match.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
@@ -522,6 +602,24 @@ section of its opening docstring. Read that section before relying on a hook; in
   without a `stop_hook_active`
   field in the input, once it has refused twice in a row every later conclusive turn end is allowed with
   the warning until a final message names a disclosure word (a missed refusal).
+- **`char-policy-write.py`** sees only the `Write`, `Edit` and `MultiEdit` tools: shell commands
+  (redirections, here-documents, in-place `sed`, `tee`, one-line interpreter scripts), generator scripts,
+  notebook edits, other tools and other harnesses are not checked, nor is a session without the hook, so
+  the CI gate is the only check on those writes. It is off until you install it and set its root. A
+  character written as an HTML entity is not decoded. Moving an existing character within one edit is
+  allowed, and a `MultiEdit` call where a later edit removes what an earlier one added is denied. A hard
+  link, a case-insensitive or Unicode-normalizing filesystem, or a symbolic link inside the root can make
+  its scope differ from the gate's. A malformed policy file lets every write through with a note, while the
+  gate fails on it. A reviewed edit to the policy file narrows the hook and the gate together, and only
+  review guards that edit. The repository's other character checks, with their own fixed lists, are not
+  read. The file can change between the check and the write, and a payload over 64 MiB is allowed with
+  a note. The reason writes each policy character as `U+` and hex digits, so a policy that forbids an
+  ASCII character, such as `U` or a digit, still sees it in the reason. Not verified here: if Claude Code's
+  `Edit` rewrites straight quotes in the new text to the curly quotes the file uses, the file gains
+  characters the hook never saw, so a policy that forbids curly quotes can miss them until the CI gate
+  runs. Also not verified: if Claude Code writes a lone surrogate (an escaped `\ud800` in the new text)
+  through a UTF-8 encoder that replaces it with U+FFFD, the file gains a U+FFFD the hook did not count, so a
+  policy that forbids U+FFFD can miss it until the CI gate runs.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

@@ -161,6 +161,14 @@
       "target": ".github/copilot-instructions.md"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_char_policy.py",
+      "sources": [
+        "tools/check_no_dashes.py"
+      ],
+      "target": ".preview/char-policy-write.py"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_agents.py",
       "sources": [
