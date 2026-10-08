@@ -9900,8 +9900,8 @@ def orch_yield_tool(data):
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
         # a counter that cannot be saved leaves this deny uncounted; relief on a later call comes only from
-        # what that call reads (see _orch_build_ctx), never from this deny. The deny stands and the failure
-        # is reported on it
+        # what that call reads (its turn-state count, see _orch_build_ctx, or for a stop the payload's
+        # stop_hook_active loop signal), never from this deny. The deny stands and the failure is reported on it
         unsaved = _orch_record_denial(root, ts, kind, basis)
         counter_warn = "" if unsaved is None else (
             "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
@@ -9910,8 +9910,10 @@ def orch_yield_tool(data):
                 "a later call is relieved only when the count it reads from turn-state.json is at the cap on "
                 "an unchanged basis, which needs a state directory it can search and a turn-state.json it "
                 "can read" if kind == "schedule_idle" else
-                "a later call reaches the loop bound only when the count it reads from turn-state.json is at "
-                "it or that file cannot be read, either of which needs a state directory it can search"))
+                "a later stop=true call or Stop takes the loop-bound exit only when the count it reads from "
+                "turn-state.json is at the bound, that file cannot be read as a JSON object or its stop_denials "
+                "value is malformed (each of which needs a state directory it can search), or it carries the "
+                "platform's stop_hook_active loop signal"))
         tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
                                spoof_warn, ctx["record_warn"])
         return _deny(reason + tail,

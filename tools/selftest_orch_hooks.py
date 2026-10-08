@@ -1883,10 +1883,14 @@ def _fixture_tmpdir(prefix):
 # a ScheduleWakeup stop=true over an actionable item, "stop" a Stop over it, "quiet" a ScheduleWakeup whose
 # quiet-duration claim contradicts the measured gap, "badreg" a ScheduleWakeup under an unreadable registry.
 # writer: "opath" the O_PATH directory open, "rdonly" the O_RDONLY fallback of a platform without O_PATH.
-# earned: "0", or "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound). A cell is the
-# outcome (a allow, w warn, d deny, b block), the counter on disk after the call (the stop count for ystop
-# and stop, else the schedule count), the wake digests on disk after it, then c when the output names a
-# failed denial-counter save and w when it names a failed wake-digest save ('-' when it does not).
+# earned: "0", "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound), "bad" (both counts
+# the malformed value "m", which validation rejects), or "sig" (both counts 0, and the payload carries the
+# platform's stop_hook_active loop signal set to true). A cell is the outcome (a allow, w warn, d deny,
+# b block), the counter on disk after the call (the stop count for ystop and stop, else the schedule count),
+# the wake digests on disk after it, then c when the output names a failed denial-counter save and w when it
+# names a failed wake-digest save. Each output channel of the outcome is judged on its own (the deny reason
+# and the banner of a deny, the banner of a warn, stderr of a block): the letter needs every channel to name
+# the failure, '-' means none does, and '!' (never expected) means only some do.
 _PERM_SWEEP_TABLE = {
     ("sched", "opath", "read", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
     ("sched", "opath", "read", "same", "cap"): "d30c- w30-w d30c- w31-- d30c- w30-w d30c- w31--",
@@ -1936,6 +1940,18 @@ _PERM_SWEEP_TABLE = {
     ("stop", "rdonly", "unread", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
     ("stop", "rdonly", "unread", "changed", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
     ("stop", "rdonly", "unread", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("sched", "opath", "read", "same", "bad"): "dm0c- dm0c- dm0c- d10-- dm0c- dm0c- dm0c- d10--",
+    ("sched", "rdonly", "read", "same", "bad"): "dm0c- dm0c- dm0c- dm0c- dm0c- dm0c- dm0c- d10--",
+    ("sched", "opath", "read", "same", "sig"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "same", "sig"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "same", "bad"): "dm0c- wm0-- dm0c- wm0-- dm0c- wm0-- dm0c- wm0--",
+    ("ystop", "rdonly", "read", "same", "bad"): "dm0c- wm0-- dm0c- wm0-- dm0c- wm0-- dm0c- wm0--",
+    ("ystop", "opath", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("ystop", "rdonly", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("stop", "opath", "read", "same", "bad"): "wm0c- wm0-- wm0c- wm0-- wm0c- wm0-- wm0c- wm0--",
+    ("stop", "rdonly", "read", "same", "bad"): "wm0c- wm0-- wm0c- wm0-- wm0c- wm0-- wm0c- wm0--",
+    ("stop", "opath", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
+    ("stop", "rdonly", "read", "same", "sig"): "w00-- w00-- w00-- w00-- w00-- w00-- w00-- w00--",
     ("quiet", "opath", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
     ("quiet", "rdonly", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
     ("badreg", "opath", "read", "same", "cap"): "d30-- d30-- d30-- d30-- d30-- d30-- d30-- d30--",
@@ -2091,6 +2107,9 @@ def _perm_sweep(base):
         state = dict(schedule_denials=aiqt_hooks._ORCH_SCHEDULE_CAP if earned == "cap" else 0,
                      stop_denials=aiqt_hooks._ORCH_LOOP_BOUND if earned == "cap" else 0,
                      schedule_basis=recorded if basis == "same" else "a changed basis")
+        if earned == "bad":
+            state.update(schedule_denials="m", stop_denials="m")
+        extra = dict(stop_hook_active=True) if earned == "sig" else None
         if call == "quiet":
             state["last_human_input_utc"] = now_iso()
         fmode = 0o600 if readable == "read" else 0
@@ -2102,9 +2121,10 @@ def _perm_sweep(base):
         if call == "badreg":
             registry.write_text("not json", encoding="utf-8")
         if call == "stop":
-            run = lambda: aiqt_hooks.orch_stop_guard(fx.payload("Stop"))
+            run = lambda: aiqt_hooks.orch_stop_guard(fx.payload("Stop", extra=extra))
         else:
-            run = lambda: aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", inputs[call]))
+            run = lambda: aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", inputs[call],
+                                                                extra))
         saved_walk = aiqt_hooks._ORCH_O_WALK
         try:
             aiqt_hooks._ORCH_O_WALK = os.O_RDONLY if writer == "rdonly" else (native or spare)
@@ -2121,14 +2141,20 @@ def _perm_sweep(base):
             os.chmod(str(sd / "turn-state.json"), 0o600)
             registry.write_bytes(saved_registry)
         after = fx.turn_state()
+        verdict = _verdict(result)
         obj = result[1] if isinstance(result[1], dict) else dict()
         hso = obj.get("hookSpecificOutput")
-        text = "{} {} {}".format(hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else "",
-                                 obj.get("systemMessage", ""), result[2] or "")
+        reason = hso.get("permissionDecisionReason") if isinstance(hso, dict) else None
+        channels = dict(deny=(reason, obj.get("systemMessage")), warn=(obj.get("systemMessage"),),
+                        block2=(result[2],)).get(verdict, ())
+
+        def named(phrase, mark):
+            found = [isinstance(text, str) and phrase in text for text in channels]
+            return mark if found and all(found) else "!" if any(found) else "-"
         count = after.get("stop_denials" if call in ("ystop", "stop") else "schedule_denials", "x")
-        return "{}{}{}{}{}".format(letter.get(_verdict(result), "?"), count, len(after.get("wake_digests") or []),
-                                   "c" if "denial counter could not be" in text else "-",
-                                   "w" if "prompt digest could not be written" in text else "-")
+        return "{}{}{}{}{}".format(letter.get(verdict, "?"), count, len(after.get("wake_digests") or []),
+                                   named("denial counter could not be", "c"),
+                                   named("prompt digest could not be written", "w"))
     counts, mismatches = [0, 0], []
     for model in (False, True):
         for key, want in _PERM_SWEEP_TABLE.items():
@@ -6412,12 +6438,13 @@ def _main_isolated(report_path=None):
               (_r6_run("recwrite6b", 0o700, 0o100), _r6_run("recwrite6c", 0o700, 0o300, walk=os.O_RDONLY)),
               ((["deny", "deny", "deny", "warn"], True, 3), (["deny", "deny", "deny", "warn"], True, 3)))
 
-        # QA round 7: one sweep pins every counter-save sentence of the orch-yield-tool-guard and orch-stop-guard
-        # residues (see _PERM_SWEEP_TABLE): the kernel leg runs the platform's writers without root, the
-        # model leg runs both writers everywhere, and every cell matches the table.
+        # QA rounds 7 and 8: one sweep pins the counter-save and relief sentences of the orch-yield-tool-guard
+        # and orch-stop-guard residues (see _PERM_SWEEP_TABLE), the malformed-count and stop_hook_active exits
+        # included, and checks each output channel of a cell on its own: the kernel leg runs the platform's
+        # writers without root, the model leg runs both writers everywhere, and every cell matches the table.
         check("recwrite7/state-dir-permission-sweep-matches-the-table",
               _perm_sweep(tmp),
-              (0 if os.geteuid() == 0 else 416 if getattr(os, "O_PATH", 0) else 208, 416, []))
+              (0 if os.geteuid() == 0 else 512 if getattr(os, "O_PATH", 0) else 256, 512, []))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
