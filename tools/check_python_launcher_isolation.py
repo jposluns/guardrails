@@ -29,7 +29,9 @@ LAUNCHER PREDICATE. In a scanned command, a leading ``env`` and any ``VAR=val`` 
 the command word's basename must then match ``^python(3(\\.\\d+)?)?$`` to be a launcher (a non-python
 command word is out of scope, neither pass nor fail). Interpreter options are the tokens after the
 command word up to the first non-option, ``-m``, ``-c``, ``--``, or long ``--option``; single-dash
-clusters expand letter by letter. ``-c`` and ``-m`` terminate the option scan in every form, separate
+clusters expand letter by letter. ``--`` ends the options the way a non-option does: the token after it
+is the script operand (``python3 -I -B -- x.py`` runs ``x.py``), so a rule that reads the script operand
+still sees it. ``-c`` and ``-m`` terminate the option scan in every form, separate
 (``-c CMD``, ``-m MOD``), attached (``-cCMD``, ``-mMOD``), or mid-cluster (``-Ic...``): everything from
 that point is the command/module operand and is never letter-scanned, so an isolation letter inside the
 operand (``-cIbar``) is never credited. The value-taking interpreter options ``-W`` and ``-X`` are recognized:
@@ -41,13 +43,17 @@ launcher is isolated iff ``I`` is among those option letters, or all of ``P``, `
 Options after the script are never credited, and environment variables (PYTHONSAFEPATH and the like) are
 never credited.
 
-NO-SITE RULE. A launcher whose script operand (the first token after the interpreter options) has the
-core hook launcher's basename (gen_hooks.LAUNCHER_NAME, aiqt_hooks_launch.py), in the plugin hooks.json
-args form or in a settings.json shell-string, must also carry ``S`` among those option letters (``-S``,
-alone or in a cluster): without it the site module runs before the launcher's first line, and with it
-every .pth file and sitecustomize of the interpreter's site-packages (a PATH-selected project virtual
-environment's included), which can install a line trace that ends a blocking hook with exit 0. ``-I``
-does not exclude them. A launcher of any other script is not held to this rule.
+NO-SITE RULE. A launcher whose script operand (the first token after the interpreter options, or the
+token after ``--``) has the core hook launcher's basename (gen_hooks.LAUNCHER_NAME, aiqt_hooks_launch.py),
+in the plugin hooks.json args form or in a settings.json shell-string, must also carry ``S`` among those
+option letters (``-S``, alone or in a cluster): without it the site module runs before the launcher's
+first line, and with it every .pth file in the interpreter's site-packages (a PATH-selected project
+virtual environment's included), sitecustomize and usercustomize, any of which can install a line trace
+that ends a blocking hook with exit 0. ``-I`` does not exclude them. ``-S`` does not exclude a ._pth file
+beside the interpreter (``python3._pth`` beside the ``python3`` PATH selects): such a file turns the site
+module back on and replaces the module search path, and no interpreter option prevents it, so it belongs
+with the interpreter itself (whoever can write the interpreter's directory), not to this rule. A launcher
+of any other script is not held to this rule.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated (and each core hook launcher also runs without
 the site module); 1 at least one recognized launcher is not isolated, or a core hook launcher runs with
@@ -64,7 +70,8 @@ three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, 
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
 YAML or shell constructs beyond the supported line grammar, and the PATH provenance of ``python3``
-itself. A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
+itself, and a ._pth file beside the interpreter (which re-enables the site module despite ``-S``). A
+``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
   check_python_launcher_isolation.py             scan the declared surfaces
@@ -119,7 +126,8 @@ REQUIRED_FORM = "-I (or the full -P -E -s) before the script"
 # The NO-SITE RULE's scope and required form: a launcher of the core hook launcher must also run without
 # the site module.
 NO_SITE_SCRIPTS = frozenset((gen_hooks.LAUNCHER_NAME,))
-NO_SITE_FORM = "-S (no site module, so no .pth file or sitecustomize runs first) before the launcher"
+NO_SITE_FORM = ("-S (no site module, so no site-packages .pth file, sitecustomize or usercustomize runs "
+                "first) before the launcher")
 
 # The QA-suite Python sources whose sibling-import posture this gate keeps isolated. Each imports a sibling
 # module (the QA adapter, the shared tree walk, the leak gate) and MUST do so with sys.path.append, never a
@@ -211,13 +219,17 @@ def _option_letters(after_interpreter):
     `--check-hash-based-pycs`) has its value skipped rather than letter-scanned, so an isolation letter is
     never forged from a value and a real flag after a separate value is never missed. Returns (the set
     of option letters, the index of the script token in after_interpreter, or None when the scan stops
-    at `-m`, `-c`, `--`, an unrecognized long option or the end of the tokens)."""
+    at `-m`, `-c`, an unrecognized long option or the end of the tokens). `--` ends the options but,
+    unlike `-m` and `-c`, is followed by the script operand itself, so its index is the token after
+    `--` (None only when `--` is the last token)."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok in ("--", "-m", "-c"):
+        if tok == "--":
+            return flags, (i + 1 if i + 1 < len(tokens) else None)
+        if tok in ("-m", "-c"):
             return flags, None
         if tok in VALUE_LONG_OPTS:
             i += 2                       # skip the long option and its separate value token
@@ -732,7 +744,11 @@ def main():
 #  34. the NO-SITE RULE: the core hook launcher registered with -I alone, or with -S after the script,
 #      fails (exit 1) in the plugin hooks.json and in a settings.json shell-string; -I -S -B, the -IS
 #      cluster and the shell-string -I -S -B form pass (exit 0); another script with -I alone passes;
-#      and a real interpreter confirms -S is what keeps the site module (so every .pth file) from running.
+#      and a real interpreter confirms -S is what keeps the site module (so every site-packages .pth
+#      file) from running.
+#  35. the `--` delimiter does not hide the script operand: `-I -B -- <launcher>` fails the no-site rule
+#      (exit 1) in the plugin hooks.json args form and in a settings.json shell-string, and the same with
+#      -S before `--` passes (exit 0).
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1195,6 +1211,25 @@ def self_test_main():
                 dict(type="command", command=cmd)])]))) + "\n", encoding="utf-8")
             if run_quiet(tree) != want:
                 failures.append("no-site rule: the {} form expected exit {}".format(label, want))
+        # 35. The `--` delimiter ends the options, and the token after it is still the script operand:
+        #     `-I -B -- <launcher>` runs the core hook launcher with the site module, so it fails the
+        #     no-site rule (exit 1) in the args form and in a settings shell-string, and -S before `--`
+        #     passes (exit 0). Treating `--` like -m/-c (no script operand) passed both failing forms.
+        for label, args, want in (("delim-no-S", ("-I", "-B", "--", launcher, "h_one"), 1),
+                                  ("delim-S", ("-I", "-S", "-B", "--", launcher, "h_one"), 0)):
+            if run_quiet(_build(tmp / ("nosite-" + label), hooks_args=args)) != want:
+                failures.append("no-site rule: the {} hooks.json form expected exit {}".format(label, want))
+        for label, cmd, want in (("settings-delim-no-S",
+                                  "python3 -I -B -- /p/" + gen_hooks.LAUNCHER_NAME + " x", 1),
+                                 ("settings-delim-S",
+                                  "python3 -I -S -B -- /p/" + gen_hooks.LAUNCHER_NAME + " x", 0)):
+            tree = _build(tmp / ("nosite-" + label))
+            sp = tree / ".claude" / "settings.json"
+            sp.parent.mkdir(parents=True)
+            sp.write_text(json.dumps(dict(hooks=dict(PreToolUse=[dict(hooks=[
+                dict(type="command", command=cmd)])]))) + "\n", encoding="utf-8")
+            if run_quiet(tree) != want:
+                failures.append("no-site rule: the {} form expected exit {}".format(label, want))
         site_probe = "import sys; sys.stdout.write(str(int('site' in sys.modules)))"
         site_seen = [subprocess.run([sys.executable] + flags + ["-c", site_probe], capture_output=True,
                                     text=True, env=env, cwd=str(tmp), timeout=30).stdout
@@ -1243,7 +1278,8 @@ def self_test_main():
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); the core hook launcher registered without -S before it fails (exit 1) "
           "while -I -S -B and -IS pass, and a real interpreter imports site under -I alone but not under "
-          "-I -S -B; and "
+          "-I -S -B; `-I -B -- <launcher>` fails the no-site rule in hooks.json args and in a settings "
+          "shell-string (exit 1) while -S before `--` passes; and "
           "the gate refuses to run non-isolated (exit 2)" + note)
     return 0
 

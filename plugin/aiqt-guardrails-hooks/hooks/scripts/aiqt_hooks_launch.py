@@ -81,12 +81,16 @@ with -I -S -B (tools/gen_hooks.py renders those options before its path, and
 tools/check_python_floor.py and tools/check_python_launcher_isolation.py refuse a registration
 without -S). -I excludes the environment (every PYTHON* variable, PYTHONSTARTUP and PYTHONPATH
 included), the user site directory and the script's and the current directory on sys.path; -S
-excludes the site module, so no .pth file and no sitecustomize or usercustomize runs before the
-launcher's first line, whichever interpreter PATH selects (a project virtual environment's
-site-packages included; launcher/registered-options-skip-site-pth pins this). What remains before
-that line is the interpreter binary PATH selects, with the loader environment it starts under, and
-its standard library: whoever can write those (a user with the hook user's own rights included) can
-run code first, the same tier as whoever can write the hook files. An asynchronous exception needs a
+excludes the site module, so no .pth file in site-packages and no sitecustomize or usercustomize
+runs before the launcher's first line, whichever interpreter PATH selects (a project virtual
+environment's site-packages included; launcher/registered-options-skip-site-pth pins this). -S does
+not exclude a ._pth file beside the interpreter (python3._pth beside the python3 PATH selects): such
+a file turns the site module back on and replaces the module search path, and no option prevents it
+(the same row pins this too). What remains before that line is the interpreter binary PATH selects
+and the directory it sits in (a ._pth file there included), with the loader environment it starts
+under, and its standard library: whoever can write those (a user with the hook user's own rights
+included, who can write a project virtual environment) can run code first, the same tier as whoever
+can write the hook files. An asynchronous exception needs a
 sender with the right to signal the hook process: code running with the hook user's own rights
 (repository code that an earlier allowed tool call ran included), a privileged user, or the terminal
 of its process group. The launcher reads no adopter input before the hook runs, so none can drive

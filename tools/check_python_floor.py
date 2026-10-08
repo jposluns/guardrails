@@ -110,7 +110,9 @@ Legs, in order:
                  (REGISTRATIONS: the plugin hooks.json, and the `exec python3` lines of the preview
                  README) is present and names a registration; an undeclared entry adds nothing; each
                  registration must run the launcher with exactly the options REGISTRATION_FLAGS
-                 (-I -S -B) before it, so no .pth file or sitecustomize runs first. A
+                 (-I -S -B) before it, so no site-packages .pth file, sitecustomize or
+                 usercustomize runs first (a ._pth file beside the interpreter re-enables the site
+                 module despite -S; launcher/registered-options-skip-site-pth shows it). A
                  declared launcher must be present and listed, stay inside the LAUNCHER-SUBSET
                  ALLOWLIST (launcher_subset_findings: a CLOSED, MINIMAL list of the node types and
                  forms the launchers need, each compiled identically by Python 3.4, the first to
@@ -453,8 +455,12 @@ OLD_GRAMMAR = (3, 4)
 README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
 # The interpreter options every registration passes before a launcher: -I (no PYTHON* variable, no user
 # site directory, neither the script's nor the working directory on sys.path), -S (no site module, so no
-# .pth file and no sitecustomize of the interpreter PATH selects runs before the launcher's first line)
-# and -B (no bytecode written), the form tools/gen_hooks.py renders and the preview README registers.
+# .pth file in the site-packages of the interpreter PATH selects, and no sitecustomize or usercustomize,
+# runs before the launcher's first line) and -B (no bytecode written), the form tools/gen_hooks.py
+# renders and the preview README registers. -S does not hold against a ._pth file beside that
+# interpreter (python3._pth beside python3), which turns the site module back on and replaces the module
+# search path; no option prevents it, so it stays with the interpreter itself (whoever can write its
+# directory), and launcher/registered-options-skip-site-pth pins it as a disclosed witness.
 REGISTRATION_FLAGS = ("-I", "-S", "-B")
 SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.py\b")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
@@ -1596,12 +1602,17 @@ def dispatch_probe_findings(root, launcher, pinned, floor):
 
 
 def _leading_options(tokens):
-    """The tokens before the first one that does not start with a dash (the interpreter options)."""
+    """The tokens before the first one that does not start with a dash (the interpreter options). A
+    `--` delimiter is kept as an option and ends them: the token after it is the script operand, as
+    the interpreter reads it, so `-I -B -- <launcher>` names the launcher with the options
+    ['-I', '-B', '--'] (not the registered form) rather than hiding it."""
     options = []
     for token in tokens:
         if not token.startswith("-"):
             break
         options.append(token)
+        if token == "--":
+            break
     return options
 
 
@@ -3365,8 +3376,9 @@ def _self_test_cases(base):
                           for rel in sorted(LAUNCHERS)],
                          [(label, rel, True) for label, _ in ordinary_mutations for rel in sorted(LAUNCHERS)])
     check("launcher/ordinary-fault-scenarios", ordinary_got, ordinary_want)
-    # (site-packages .pth, the round-15 silent pass) The registered options keep every .pth file of
-    # the interpreter PATH selects from running before a launcher's first line. A virtual environment
+    # (site-packages .pth, the round-15 silent pass) The registered options keep every site-packages
+    # .pth file of the interpreter PATH selects from running before a launcher's first line. A virtual
+    # environment
     # (python -m venv --without-pip: once activated, its python3 is the one a PATH lookup finds) gets
     # a .pth file in its site-packages that imports a module setting a trace which raises
     # SystemExit(0) at the first event of any launcher frame. Each real launcher then runs from that
@@ -3374,7 +3386,13 @@ def _self_test_cases(base):
     # registered_scripts from the real registration files; the core source launcher has none of its
     # own and takes the plugin copy's) the mode rule must hold (exit 2, empty stdout, the .pth never
     # ran), and under those options without -S (the control) the .pth runs and the launcher exits 0
-    # with empty stdout, a silent pass, so the row shows that the options are what hold it.
+    # with empty stdout, a silent pass, so the row shows that the options are what hold it. A third
+    # run, the disclosed witness, writes python3._pth beside the venv's python3 (its own sys.path under
+    # -I -S, the site-packages directory and `import site`) and runs the registered options again: the
+    # ._pth turns the site module back on despite -S, so the .pth runs and the launcher exits 0 with
+    # empty stdout. No option prevents that; the file belongs with the interpreter itself (whoever can
+    # write its directory), as the launchers' FAULTS paragraph states, and the row keeps that text
+    # honest. The ._pth is removed after each such run.
     pth_module = (
         "import os, sys\n"
         "os.write(2, b'PTH_RAN\\n')\n"
@@ -3400,6 +3418,20 @@ def _self_test_cases(base):
                 made.returncode, made.stderr.decode("utf-8", "backslashreplace")[-300:]))
         (site_dirs[0] / "zz_launch_trace.py").write_text(pth_module, encoding="utf-8")
         (site_dirs[0] / "zz_launch_trace.pth").write_text("import zz_launch_trace\n", encoding="utf-8")
+        try:
+            venv_path = subprocess.run([str(venv_python), "-I", "-S", "-c",
+                                        "import sys; sys.stdout.write('\\n'.join(sys.path))"],
+                                       stdin=subprocess.DEVNULL, capture_output=True, env=CHILD_ENV,
+                                       timeout=CHILD_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CannotEvaluate("the .pth row's interpreter path was not read: {}".format(exc))
+        if venv_path.returncode != 0 or not venv_path.stdout.strip():
+            raise CannotEvaluate("the .pth row's interpreter path was not read: exit {}".format(
+                venv_path.returncode))
+        beside_pth = venv_python.parent / (venv_python.name + "._pth")
+        beside_text = "".join(line + "\n" for line in (
+            venv_path.stdout.decode("utf-8", "surrogateescape").splitlines() + [str(site_dirs[0]),
+                                                                                "import site"]))
         registered_options = dict()
         for registry, registered_launcher in REGISTRATIONS:
             registered_options[registered_launcher] = sorted(set(
@@ -3413,16 +3445,23 @@ def _self_test_cases(base):
             pth_want.append((rel, [REGISTRATION_FLAGS]))
             for options in options_seen:
                 for label, used in (("registered", list(options)),
-                                    ("without -S", [option for option in options if option != "-S"])):
+                                    ("without -S", [option for option in options if option != "-S"]),
+                                    ("registered, ._pth beside the interpreter", list(options))):
                     spot = Path(tempfile.mkdtemp(prefix="pth-", dir=base))
                     (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                    beside = label.endswith("beside the interpreter")
                     try:
+                        if beside:
+                            beside_pth.write_text(beside_text, encoding="utf-8", errors="surrogateescape")
                         proc = subprocess.run([str(venv_python), *used, str(spot / Path(rel).name),
                                                _hook_kind_mode(rel, "blocking")], cwd=spot,
                                               stdin=subprocess.DEVNULL, capture_output=True, env=CHILD_ENV,
                                               timeout=CHILD_TIMEOUT)
                     except (OSError, subprocess.SubprocessError) as exc:
                         raise CannotEvaluate("the .pth row's child launch failed: {}".format(exc))
+                    finally:
+                        if beside and os.path.lexists(beside_pth):
+                            beside_pth.unlink()
                     pth_got.append((rel, label, proc.returncode,
                                     proc.stdout.decode("utf-8", "backslashreplace"), b"PTH_RAN" in proc.stderr))
                     pth_want.append((rel, label) + ((REFUSAL_EXIT, "", False) if label == "registered"
@@ -3539,14 +3578,16 @@ def _self_test_cases(base):
     check("launcher/empty-registration-finding", leg(dict(conformant, **{plugin_json: json.dumps(
         dict(hooks={}))})), ["{}: names no hook registration to check".format(plugin_json)])
     # A registration that runs the launcher without -S (the site module, and with it each .pth file of
-    # the interpreter PATH selects, would run first), or with -S after the launcher path, is a
-    # finding, in the plugin hooks.json and in the preview README alike.
+    # the interpreter PATH selects, would run first), or with -S after the launcher path, or behind a
+    # `--` delimiter (the token after `--` is still the script operand, so `-I -B --` names the
+    # launcher without -S), is a finding, in the plugin hooks.json and in the preview README alike.
     site_note = ("(without -S the site module, and with it each .pth file and sitecustomize of the "
                  "interpreter PATH selects, runs before the launcher's first line)")
     check("launcher/registration-site-module-finding", [leg(dict(conformant, **{plugin_json: json.dumps(
         dict(hooks=dict(PreToolUse=[dict(hooks=[dict(args=args)])])))})) for args in (
             ["-I", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"],
-            ["-I", "-B", "/p/hooks/scripts/" + Path(plugin_launcher).name, "-S", "absolute_paths"])] + [
+            ["-I", "-B", "/p/hooks/scripts/" + Path(plugin_launcher).name, "-S", "absolute_paths"],
+            ["-I", "-B", "--", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"])] + [
         leg({readme: "Requires Python 3.14 or newer.\n" * 2
             + "exec python3 -I -B \"/p/preview-launch.py\" clock_inject\n", preview: (
                 guard_text(Path(preview).name, floor, LAUNCHERS[preview]) + "\n" + "{} = {!r}\n".format(
@@ -3555,7 +3596,7 @@ def _self_test_cases(base):
                 + "\nif __name__ == \"__main__\":\n    pass\n")}, source=_source_text(surfaces=[preview]))], [
         ["{} PreToolUse: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
             plugin_json, Path(plugin_launcher).name, options, list(REGISTRATION_FLAGS), site_note)]
-        for options in (["-I"], ["-I", "-B"])] + [
+        for options in (["-I"], ["-I", "-B"], ["-I", "-B", "--"])] + [
         ["{}:3: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
             readme, Path(preview).name, ["-I", "-B"], list(REGISTRATION_FLAGS), site_note)]])
     check("launcher/readme-declared-by-launcher", [line.split(": ", 1)[1] for line in leg(
