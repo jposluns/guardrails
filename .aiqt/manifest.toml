@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "25e7211a2b418d08ea37501dd668e026c6ad417ca2773348b90e16c6ca994a5e"
+tree-sha256 = "ee735dad03703cecac64646be3762cc956f8f7a8f2b00953a6e979acafe74627"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -116,8 +116,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7481
-sha256 = "870cb5c7de21987dea056b945a277488592910744949b1e343c35ea76963c7fa"
+bytes = 7519
+sha256 = "6ee3eb91116baac754eec321f85e30b9a364f2a7077ca1c45d182c88cc3e5530"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2251,8 +2251,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41844
-sha256 = "5973de3c54b84efe1f8ef9d1b42841d7ef67233b55cd0d76a34c537241885538"
+bytes = 41887
+sha256 = "df439dac3988a0e20198ba68e55c98ce377fe0c0dbef287bd2f6fdead79b807a"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2261,13 +2261,13 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 44307
-sha256 = "d11180dcaddcdabe03b1c5e9d8371a8bee6bd10608c1d3a9612e3afe08af1db8"
+bytes = 50791
+sha256 = "e3bffeab59c48ec19d63326a94a157ecaf95bcebdc2a54b18081f4ec5ee6b654"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
-bytes = 809
-sha256 = "e0071180e8c5a0f49e298141ee4c1fce9f9d1394441096a57d9fad92da66d187"
+bytes = 897
+sha256 = "c47d627d3b9dee32e78581b8828348c85b80c510f773b4839426c7059a2df378"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2283,6 +2283,11 @@ sha256 = "545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93"
 path = ".preview/future-stamp-write.py"
 bytes = 422943
 sha256 = "0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c"
+
+[[sources]]
+path = ".preview/pattern-self-match.py"
+bytes = 161028
+sha256 = "bbb2e0b1996e072a15eac0c740949dceb7205a5643b0dd0460e604f9ac9cb737"
 
 [[sources]]
 path = ".preview/record-remove-check.py"

@@ -34,6 +34,7 @@ guarded-surfaces = [
     ".preview/clock-inject.py",
     ".preview/constraint-reread.py",
     ".preview/future-stamp-write.py",
+    ".preview/pattern-self-match.py",
     ".preview/record-remove-check.py",
     ".preview/rerun-pass-check.py",
     ".preview/stamp-truth-stop.py",
