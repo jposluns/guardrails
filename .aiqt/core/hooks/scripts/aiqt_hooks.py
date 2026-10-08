@@ -203,6 +203,7 @@ import json
 import math
 import os
 import pathlib
+import posixpath
 import re
 import selectors
 import shlex
@@ -7229,7 +7230,7 @@ def _is_checker_segment(tokens):
 # The deny is held to ONE canonical shape, and both of its ends are ALLOW-LISTS, so a shape the lists do not
 # name costs the broad tier's note and never a false refusal: the first simple command of a pipeline (no
 # reserved word, no substitution, stdout not redirected; every earlier top-level segment known-benign,
-# _gate_benign_prefix, and the pipeline not joined to it by '&&' or '||') is a run form listed in _GATE_VERIFY_RUNS
+# _gate_benign_prefix, and the pipeline not joined to it by '||') is a run form listed in _GATE_VERIFY_RUNS
 # (_is_verification_run), and its stdout reaches, through zero or more plain pass-through stages
 # (_gate_plain_filter: cat, tee, tr, uniq), a sink on the sink allow-list (_truncating_sink_kind: head or tail
 # with one positive line count, or a grep-family stage with exactly one limiting flag and one pattern). Every
@@ -7594,9 +7595,10 @@ def _gate_case_depths(records):
 # variable ('printf %n PATH' sets PATH to 0, and -v can be spelled $'\x2dv'). Any other earlier command (an
 # assignment, export, declare or typeset, set, source or '.', alias, unset, a function definition, a
 # redirection, anything else) can change the run's environment, options or configuration (export
-# PYTEST_ADDOPTS=--collect-only, set -a, echo addopts > pytest.ini), so the pipeline notes. A benign command
-# joined to the producer pipeline by '&&' or '||' also notes (_gate_conditional_run): that pipeline runs only
-# on the command's status, and after 'true ||' it never runs.
+# PYTEST_ADDOPTS=--collect-only, set -a, echo addopts > pytest.ini), so the pipeline notes. A pipeline joined
+# by '&&' to a known-benign command runs whenever that command succeeds, and the deny text holds whenever it
+# runs, so it denies as after ';'. A pipeline joined by '||' notes (_gate_conditional_run): it runs only when
+# the command before it fails, and after 'true ||' it never runs.
 _GATE_BENIGN_ALONE = frozenset(("true", ":", "pwd"))
 _GATE_PLAIN_WORD_RE = re.compile(r"[A-Za-z0-9_./:,@%+=][A-Za-z0-9_./:,@%+=-]*\Z")
 
@@ -7623,12 +7625,14 @@ def _gate_benign_prefix(seg):
 
 
 def _gate_conditional_run(records, i):
-    """True when the pipeline whose first command is records[i] is joined to the command before it by '&&' or
-    '||' (empty newline segments between them skipped, as bash continues the list after either): it runs only
-    on that command's status, or never ('true || pytest | head')."""
+    """True when the pipeline whose first command is records[i] is joined to the command before it by '||'
+    (empty newline segments between them skipped, as bash continues the list after it): it runs only when that
+    command fails, or never ('true || pytest | head'). A join by '&&' is False: every earlier segment is
+    _gate_benign_prefix by then (_verification_sink), so the pipeline runs whenever they succeed, and the deny
+    text holds whenever it runs ('cd /x && pytest | head' denies as 'cd /x; pytest | head' does)."""
     for seg in reversed(records[:i]):
         if seg.argv or seg.redirects or seg.sep_after:
-            return seg.sep_after in ("&&", "||")
+            return seg.sep_after == "||"
     return False
 
 
@@ -7636,8 +7640,8 @@ def _verification_sink(records):
     """gatdis deny tier: (producer word, sink kind, tee file or None, filtered before the tee) for the first
     canonical verification pipeline, or None. Canonical: every segment before the producer is
     _gate_benign_prefix, the producer is outside every case compound
-    (_gate_case_depths), the first command of its pipeline (start of the command or after ';', '&' or a newline;
-    a pipeline joined by '&&' or '||' to the command before it only notes, _gate_conditional_run), _gate_simple,
+    (_gate_case_depths), the first command of its pipeline (start of the command or after ';', '&&', '&' or a
+    newline; a pipeline joined by '||' to the command before it only notes, _gate_conditional_run), _gate_simple,
     stdout not redirected, ending in '|' or '|&', and a listed run form
     (_is_verification_run); each later stage (an empty newline segment after a pipe is skipped, as bash
     continues the pipeline) is _gate_simple with its stdin not redirected; the first stage
@@ -7654,7 +7658,7 @@ def _verification_sink(records):
                 or case_depths[i] or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
             continue
         if _gate_conditional_run(records, i):
-            return None   # a pipeline run only on an earlier command's status, or never: it only notes
+            return None   # a pipeline run only when an earlier command fails, or never: it only notes
         tee, filtered = None, False
         for j in range(i + 1, n):
             stage = records[j]
@@ -7838,7 +7842,7 @@ def gate_weakening(data):
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
     a substitution, a wrapper beyond nice/timeout/time, a producer whose environment the command sets, a producer
     pipeline after an earlier command in the same line that is not known-benign (_gate_benign_prefix) or joined
-    to one by '&&' or '||' (_gate_conditional_run), a sed,
+    to one by '||' (_gate_conditional_run), a sed,
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
     followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
@@ -10511,14 +10515,17 @@ _GATE_GREP_VALUE_LONG = frozenset(("--regexp", "--file"))
 # attached '=' value, pattern operands before the input files, options that supply that pattern instead). A stage
 # reads its stdin when it has no input operand (a recursive grep then reads the tree) or when any input operand,
 # or the value of a file option such as a -f pattern file (_GATE_STDIN_FILE_OPTIONS), names the stdin
-# (_GATE_STDIN_NAMES), even beside other files or under -r. Each grammar is the option list of the installed
+# (_gate_stdin_name), even beside other files or under -r. Each grammar is the option list of the installed
 # tool's --help (checked 2026-10-07): GNU grep 3.12 (/usr/bin/grep; -NUM is a context count, so the digits are
 # flags), ripgrep 15.1.0 (with the negations and alternative spellings its --help names, such as --no-heading and
 # --maxdepth; the --print0 it names is find's) and uutils coreutils 0.8.0 head, tail and cut. An option outside
 # its grammar (an unknown one, an abbreviated long one such as grep --max=5, an option of another grep such as
 # ugrep) has an arity the hook does not know, so the stage may read its stdin: it notes rather than allowing
-# silently (_gate_reads_stdin). Not resolved: another path to the stdin (a symlink to it, /proc/PID/fd/0 for a
-# literal PID, a relative path).
+# silently (_gate_reads_stdin). A grep directory mode is resolved in option order, as GNU grep 3.12 does
+# (checked 2026-10-08): -r, -R, --recursive, --dereference-recursive and -d/--directories recurse set it to
+# recurse, a later -d/--directories read or skip (attached, separated or '=', the value abbreviated as grep's
+# argmatch accepts) sets it back, so with no input operand a final read or skip mode reads the stdin. Not
+# resolved: any other path to the stdin (a symlink to it, /proc/PID/fd/0 for a literal PID, a relative path).
 _GATE_GREP_STDIN = (
     "efmABCdD", "EFGPiwxzsvVbnHhoqaIrRLlcTZU0123456789",
     frozenset(("--regexp", "--file", "--max-count", "--label", "--binary-files", "--directories", "--devices",
@@ -10578,34 +10585,62 @@ _GATE_STDIN_GRAMMAR = dict((
 
 
 # The operands that name a stage's stdin: '-' (GNU grep: "When FILE is '-', read standard input"; rg, head, tail
-# and cut alike) and the fixed device paths of the stdin. The file options whose value can name it too: a pattern
-# file (grep and rg -f/--file) and GNU grep's --exclude-from list (grep 3.12 reads '-' there from its stdin,
-# checked 2026-10-08); rg --ignore-file was not probed.
-_GATE_STDIN_NAMES = frozenset(("-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"))
+# and cut alike) and the fixed device paths of the stdin, an absolute path compared after its repeated slashes
+# are collapsed and its '.' and '..' are resolved lexically (_gate_stdin_name: GNU grep 3.12 reads its stdin
+# through //dev/stdin, /dev/./stdin, /dev/../dev/stdin and /proc/thread-self/fd/0, checked 2026-10-08). The
+# file options whose value can name it too: a pattern file (grep and rg -f/--file) and GNU grep's
+# --exclude-from list (grep 3.12 reads '-' there from its stdin, checked 2026-10-08); rg --ignore-file was not
+# probed.
+_GATE_STDIN_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0", "/proc/thread-self/fd/0"))
 _GATE_GREP_STDIN_FILES = ("-f", "--file", "--exclude-from")
 _GATE_STDIN_FILE_OPTIONS = dict((("grep", _GATE_GREP_STDIN_FILES), ("egrep", _GATE_GREP_STDIN_FILES),
                                  ("fgrep", _GATE_GREP_STDIN_FILES), ("rg", ("-f", "--file"))))
+_GATE_GREP_DIRECTORIES = ("read", "recurse", "skip")
+
+
+def _gate_stdin_name(tok):
+    """True when an operand or file-option value names the stdin: '-', or an absolute path that is one of
+    _GATE_STDIN_PATHS once its repeated slashes are collapsed and posixpath.normpath has resolved its '.' and
+    '..' (lexically: a symlink or a literal PID is not followed)."""
+    if tok == "-":
+        return True
+    return tok.startswith("/") and posixpath.normpath(re.sub("/+", "/", tok)) in _GATE_STDIN_PATHS
+
+
+def _gate_grep_directories(value):
+    """The GNU grep directory mode a -d/--directories value selects ('read', 'recurse' or 'skip'; an
+    unambiguous prefix is accepted, as grep's argmatch does), or None for a value grep rejects ('r', '')."""
+    modes = [mode for mode in _GATE_GREP_DIRECTORIES if mode.startswith(value)]
+    return modes[0] if value and len(modes) == 1 else None
 
 
 def _gate_reads_stdin(word, args):
     """True when a sink stage may read its stdin rather than a named file (_GATE_STDIN_GRAMMAR). The operands are
-    resolved first: the stage reads its stdin when an input operand is in _GATE_STDIN_NAMES (even beside other
-    files or under -r), when a _GATE_STDIN_FILE_OPTIONS value is, or when there is no input operand and it is
-    not a recursive grep (-r, -R, which then reads the tree). An option outside the stage's grammar leaves open
-    whether the next word is that option's value or an input operand, so it is True too (the stage notes rather
-    than allowing silently). An unknown word is False."""
+    resolved first: the stage reads its stdin when an input operand or a _GATE_STDIN_FILE_OPTIONS value names
+    it (_gate_stdin_name; even beside other files or under -r), or when there is no input operand and it is not
+    a recursive grep (which then reads the tree): the directory mode is the last one set, in option order, by
+    -r, -R, --recursive, --dereference-recursive or -d/--directories (_gate_grep_directories), so
+    'grep -r -d read' reads its stdin. An option outside the stage's grammar, or a directory mode grep rejects,
+    leaves open whether the stage reads its stdin, so it is True too (the stage notes rather than allowing
+    silently). An unknown word is False."""
     grammar = _GATE_STDIN_GRAMMAR.get(word)
     if grammar is None:
         return False
     value_short, flag_short, value_long, flag_long, program, explicit = grammar
     stdin_files = _GATE_STDIN_FILE_OPTIONS.get(word, ())
+    grep = word in ("grep", "egrep", "fgrep")
     operands = []
     pending = None   # the option whose value is the next token
     opts_done = recursive = False
     for tok in args:
         if pending is not None:
-            if pending in stdin_files and tok in _GATE_STDIN_NAMES:
+            if pending in stdin_files and _gate_stdin_name(tok):
                 return True
+            if grep and pending in ("-d", "--directories"):
+                mode = _gate_grep_directories(tok)
+                if mode is None:
+                    return True   # grep rejects the value: it notes
+                recursive = mode == "recurse"
             pending = None
         elif opts_done or tok == "-" or not (tok.startswith("-") or (word == "tail" and tok.startswith("+"))):
             operands.append(tok)
@@ -10615,18 +10650,23 @@ def _gate_reads_stdin(word, args):
             name, eq, value = tok.partition("=")
             if name in explicit:
                 program = 0
-            if name in ("--recursive", "--dereference-recursive") and word != "rg":
+            if name in ("--recursive", "--dereference-recursive") and grep:
                 recursive = True
             if name in value_long:
                 if not eq:
                     pending = name
-                elif name in stdin_files and value in _GATE_STDIN_NAMES:
+                elif name in stdin_files and _gate_stdin_name(value):
                     return True
+                elif grep and name == "--directories":
+                    mode = _gate_grep_directories(value)
+                    if mode is None:
+                        return True   # grep rejects the value: it notes
+                    recursive = mode == "recurse"
             elif name not in flag_long:
                 return True   # an unknown or abbreviated long option: its arity is unknown
         else:
             for k, ch in enumerate(tok[1:]):
-                if ch in "rR" and word in ("grep", "egrep", "fgrep"):
+                if ch in "rR" and grep:
                     recursive = True
                 if "-" + ch in explicit:
                     program = 0
@@ -10634,13 +10674,18 @@ def _gate_reads_stdin(word, args):
                     value = tok[k + 2:]
                     if not value:
                         pending = "-" + ch   # a bare value letter: its value is the next token
-                    elif "-" + ch in stdin_files and value in _GATE_STDIN_NAMES:
+                    elif "-" + ch in stdin_files and _gate_stdin_name(value):
                         return True
+                    elif grep and ch == "d":
+                        mode = _gate_grep_directories(value)
+                        if mode is None:
+                            return True   # grep rejects the value: it notes
+                        recursive = mode == "recurse"
                     break
                 if ch not in flag_short:
                     return True   # an unknown short letter: its arity is unknown
     inputs = operands[program:]
-    return any(op in _GATE_STDIN_NAMES for op in inputs) or not (inputs or recursive)
+    return any(_gate_stdin_name(op) for op in inputs) or not (inputs or recursive)
 
 
 def _grep_truncation(word, args):
