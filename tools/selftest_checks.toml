@@ -548,6 +548,7 @@ expected-check-ids = [
   "recwrite5/each-save-descriptor-closed-exactly-once-on-success-and-failure",
   "recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
   "recwrite6/earned-cap-relief-survives-a-failed-save",
+  "recwrite7/state-dir-permission-sweep-matches-the-table",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

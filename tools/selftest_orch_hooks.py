@@ -1876,6 +1876,272 @@ def _fixture_tmpdir(prefix):
     raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
 
 
+# QA round 7 of the silent-write fixes: the state-directory permission sweep. Each cell of _PERM_SWEEP_TABLE
+# is one hook call after the state directory is set to an owner mode. The row key is (call, writer,
+# turn-state.json, recorded schedule basis, counter earned so far), and the eight cells are owner modes 0000,
+# 0100, ... 0700 in order. call: "sched" a ScheduleWakeup the decision core denies on wake hygiene, "ystop"
+# a ScheduleWakeup stop=true over an actionable item, "stop" a Stop over it, "quiet" a ScheduleWakeup whose
+# quiet-duration claim contradicts the measured gap, "badreg" a ScheduleWakeup under an unreadable registry.
+# writer: "opath" the O_PATH directory open, "rdonly" the O_RDONLY fallback of a platform without O_PATH.
+# earned: "0", or "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound). A cell is the
+# outcome (a allow, w warn, d deny, b block), the counter on disk after the call (the stop count for ystop
+# and stop, else the schedule count), the wake digests on disk after it, then c when the output names a
+# failed denial-counter save and w when it names a failed wake-digest save ('-' when it does not).
+_PERM_SWEEP_TABLE = {
+    ("sched", "opath", "read", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "read", "same", "cap"): "d30c- w30-w d30c- w31-- d30c- w30-w d30c- w31--",
+    ("sched", "opath", "read", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "read", "changed", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "opath", "unread", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "unread", "same", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "opath", "unread", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("sched", "opath", "unread", "changed", "cap"): "d30c- d30c- d30c- d10-- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "read", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "same", "cap"): "d30c- w30-w d30c- w30-w d30c- w30-w d30c- w31--",
+    ("sched", "rdonly", "read", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "read", "changed", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "unread", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "unread", "same", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("sched", "rdonly", "unread", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("sched", "rdonly", "unread", "changed", "cap"): "d30c- d30c- d30c- d30c- d30c- d30c- d30c- d10--",
+    ("ystop", "opath", "read", "same", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "read", "changed", "0"): "d00c- d00c- d00c- d10-- d00c- d00c- d00c- d10--",
+    ("ystop", "opath", "read", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "unread", "same", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "opath", "unread", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "opath", "unread", "changed", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "opath", "unread", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "read", "same", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "rdonly", "read", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "read", "changed", "0"): "d00c- d00c- d00c- d00c- d00c- d00c- d00c- d10--",
+    ("ystop", "rdonly", "read", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "unread", "same", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "rdonly", "unread", "same", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("ystop", "rdonly", "unread", "changed", "0"): "d00c- w00-- d00c- w00-- d00c- w00-- d00c- w00--",
+    ("ystop", "rdonly", "unread", "changed", "cap"): "d20c- w20-- d20c- w20-- d20c- w20-- d20c- w20--",
+    ("stop", "opath", "read", "same", "0"): "w00c- w00c- w00c- b10-- w00c- w00c- w00c- b10--",
+    ("stop", "opath", "read", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "read", "changed", "0"): "w00c- w00c- w00c- b10-- w00c- w00c- w00c- b10--",
+    ("stop", "opath", "read", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "unread", "same", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "opath", "unread", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "opath", "unread", "changed", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "opath", "unread", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "read", "same", "0"): "w00c- w00c- w00c- w00c- w00c- w00c- w00c- b10--",
+    ("stop", "rdonly", "read", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "read", "changed", "0"): "w00c- w00c- w00c- w00c- w00c- w00c- w00c- b10--",
+    ("stop", "rdonly", "read", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "unread", "same", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "rdonly", "unread", "same", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("stop", "rdonly", "unread", "changed", "0"): "w00c- w00-- w00c- w00-- w00c- w00-- w00c- w00--",
+    ("stop", "rdonly", "unread", "changed", "cap"): "w20c- w20-- w20c- w20-- w20c- w20-- w20c- w20--",
+    ("quiet", "opath", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
+    ("quiet", "rdonly", "read", "same", "cap"): "w30-w d30-- w30-w d30-- w30-w d30-- w30-w d30--",
+    ("badreg", "opath", "read", "same", "cap"): "d30-- d30-- d30-- d30-- d30-- d30-- d30-- d30--",
+    ("badreg", "rdonly", "read", "same", "cap"): "d30-- d30-- d30-- d30-- d30-- d30-- d30-- d30--",
+}
+
+
+def _perm_spare_flag():
+    """A flag bit above every flag the hook passes to os.open: the model leg's stand-in for O_PATH where the
+    platform has none (the seam clears it before the real open)."""
+    used = (os.O_RDONLY | os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_DIRECTORY
+            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    return 1 << used.bit_length()
+
+
+class _PermModel:
+    """The model leg's seams: for the operations the hook makes in the state directory sd, refuse what owner
+    mode `mode` on sd, and `fmode` on its turn-state.json, refuse a non-root owner, whatever the real modes
+    (left at 0700 and 0600) and euid; the kernel leg holds this model to the kernel where the modes bind.
+    A name looked up in sd needs search; a create, replace, rename or unlink there needs write too; an open
+    of sd itself without O_PATH needs read; a read of turn-state.json needs its read bit. walk is the bit
+    that marks an O_PATH open (the native O_PATH, or the spare bit, cleared before the real open, which
+    then opens for reading)."""
+
+    def __init__(self, sd, mode, fmode, walk, spare):
+        self.sd, self.mode, self.fmode, self.walk, self.spare = str(sd), mode, fmode, walk, spare
+        st = os.stat(self.sd)
+        self.key = (st.st_dev, st.st_ino)
+        self.real = dict(open=os.open, stat=os.stat, lstat=os.lstat, replace=os.replace, rename=os.rename,
+                         unlink=os.unlink, remove=os.remove, mkdir=os.mkdir)
+
+    def _where(self, path, dir_fd=None):
+        if not isinstance(path, (str, bytes, os.PathLike)):
+            return None
+        name = os.fsdecode(path)
+        if dir_fd is not None and not os.path.isabs(name):
+            st = os.fstat(dir_fd)
+            return "name" if (st.st_dev, st.st_ino) == self.key else None
+        full = os.path.abspath(name)
+        if full == self.sd:
+            return "dir"
+        return "name" if os.path.dirname(full) == self.sd else None
+
+    def _need(self, bits, path, mode=None):
+        if (self.mode if mode is None else mode) & bits != bits:
+            raise PermissionError(13, "Permission denied (modelled)", os.fsdecode(path))
+
+    def _exists(self, path, dir_fd=None):
+        try:
+            self.real["lstat"](path, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _is_state(self, path):
+        return os.path.basename(os.fsdecode(path)) == "turn-state.json"
+
+    def os_open(self, path, flags, *a, dir_fd=None, **k):
+        lookup = self.walk and flags & self.walk
+        if self.spare and flags & self.spare:
+            flags &= ~self.spare
+        where = self._where(path, dir_fd)
+        if where == "dir" and not lookup:
+            self._need(0o400, path)
+        elif where == "name":
+            self._need(0o100, path)
+            if flags & os.O_CREAT and not self._exists(path, dir_fd):
+                self._need(0o200, path)
+            if (self._is_state(path) and not lookup
+                    and flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY):
+                self._need(0o400, path, self.fmode)
+        return self.real["open"](path, flags, *a, dir_fd=dir_fd, **k)
+
+    def open(self, file, mode="r", *a, **k):
+        if self._where(file) == "name":
+            self._need(0o100, file)
+            if any(c in mode for c in "wax+") and not self._exists(file):
+                self._need(0o200, file)
+            if self._is_state(file) and any(c in mode for c in "r+"):
+                self._need(0o400, file, self.fmode)
+        return open(file, mode, *a, **k)
+
+    def lookup(self, name):
+        real = self.real[name]
+
+        def seam(path, *a, dir_fd=None, **k):
+            if self._where(path, dir_fd) == "name":
+                self._need(0o100, path)
+            return real(path, *a, dir_fd=dir_fd, **k)
+        return seam
+
+    def change(self, name):
+        real = self.real[name]
+
+        def seam(path, *a, dir_fd=None, **k):
+            if self._where(path, dir_fd) == "name":
+                self._need(0o300, path)
+            return real(path, *a, dir_fd=dir_fd, **k)
+        return seam
+
+    def move(self, name):
+        real = self.real[name]
+
+        def seam(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if "name" in (self._where(src, src_dir_fd), self._where(dst, dst_dir_fd)):
+                self._need(0o300, src)
+            return real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        return seam
+
+    def __enter__(self):
+        os.open, os.stat, os.lstat = self.os_open, self.lookup("stat"), self.lookup("lstat")
+        os.replace, os.rename = self.move("replace"), self.move("rename")
+        os.unlink, os.remove, os.mkdir = self.change("unlink"), self.change("remove"), self.change("mkdir")
+        aiqt_hooks.open = self.open
+        return self
+
+    def __exit__(self, *exc):
+        real = self.real
+        os.open, os.stat, os.lstat, os.replace = real["open"], real["stat"], real["lstat"], real["replace"]
+        os.rename, os.unlink, os.remove, os.mkdir = real["rename"], real["unlink"], real["remove"], real["mkdir"]
+        del aiqt_hooks.open
+
+
+def _perm_sweep(base):
+    """Run every _PERM_SWEEP_TABLE row in two legs and return (kernel cells, model cells, mismatches). The
+    MODEL leg runs everywhere: the real modes stay 0700 and 0600 and _PermModel refuses what the owner mode
+    refuses, so a root run and a platform without O_PATH get the same answers (the O_RDONLY fallback open
+    is refused for a mode without read whatever the native O_PATH, and a spare bit stands in for a missing
+    O_PATH). The KERNEL leg uses real chmod and the platform's own writers (O_PATH where it exists, and
+    the O_RDONLY fallback) and runs only without root, since the modes do not bind root; it holds the model
+    to the kernel."""
+    native = getattr(os, "O_PATH", 0)
+    spare = 0 if native else _perm_spare_flag()
+    root_run = os.geteuid() == 0
+    fixtures = dict()
+    for call in ("sched", "ystop", "stop"):
+        fx = Fixture(base, "permsweep-" + call)
+        sd = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root)))
+        sd.mkdir(parents=True, exist_ok=True)
+        fx.set_items([item("QA-R6", blocker=dict(kind="not-before", ref=now_iso(-48)))] if call == "sched"
+                     else [item("QA-S")])
+        fx.set_turn_state(dict())
+        aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting")))
+        fixtures[call] = (fx, sd, fx.turn_state().get("schedule_basis"))
+    fixtures["quiet"] = fixtures["badreg"] = fixtures["sched"]
+    inputs = dict(sched=dict(prompt="waiting"), quiet=dict(prompt="quiet for 90 minutes, recheck QA-R6"),
+                  badreg=dict(prompt="waiting"), ystop=dict(prompt="done", stop=True))
+    letter = dict(allow="a", warn="w", deny="d", block2="b")
+
+    def _cell(key, mode, model):
+        call, writer, readable, basis, earned = key
+        fx, sd, recorded = fixtures[call]
+        state = dict(schedule_denials=aiqt_hooks._ORCH_SCHEDULE_CAP if earned == "cap" else 0,
+                     stop_denials=aiqt_hooks._ORCH_LOOP_BOUND if earned == "cap" else 0,
+                     schedule_basis=recorded if basis == "same" else "a changed basis")
+        if call == "quiet":
+            state["last_human_input_utc"] = now_iso()
+        fmode = 0o600 if readable == "read" else 0
+        for name in os.listdir(str(sd)):
+            os.unlink(str(sd / name))
+        (sd / "turn-state.json").write_text(json.dumps(state), encoding="utf-8")
+        registry = fx.root / ".aiqt" / "orchestration.local.json"
+        saved_registry = registry.read_bytes()
+        if call == "badreg":
+            registry.write_text("not json", encoding="utf-8")
+        if call == "stop":
+            run = lambda: aiqt_hooks.orch_stop_guard(fx.payload("Stop"))
+        else:
+            run = lambda: aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", inputs[call]))
+        saved_walk = aiqt_hooks._ORCH_O_WALK
+        try:
+            aiqt_hooks._ORCH_O_WALK = os.O_RDONLY if writer == "rdonly" else (native or spare)
+            if model:
+                with _PermModel(sd, mode, fmode, native or spare, spare):
+                    result = run()
+            else:
+                os.chmod(str(sd / "turn-state.json"), fmode)
+                os.chmod(str(sd), mode)
+                result = run()
+        finally:
+            aiqt_hooks._ORCH_O_WALK = saved_walk
+            os.chmod(str(sd), 0o700)
+            os.chmod(str(sd / "turn-state.json"), 0o600)
+            registry.write_bytes(saved_registry)
+        after = fx.turn_state()
+        obj = result[1] if isinstance(result[1], dict) else dict()
+        hso = obj.get("hookSpecificOutput")
+        text = "{} {} {}".format(hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else "",
+                                 obj.get("systemMessage", ""), result[2] or "")
+        count = after.get("stop_denials" if call in ("ystop", "stop") else "schedule_denials", "x")
+        return "{}{}{}{}{}".format(letter.get(_verdict(result), "?"), count, len(after.get("wake_digests") or []),
+                                   "c" if "denial counter could not be" in text else "-",
+                                   "w" if "prompt digest could not be written" in text else "-")
+    counts, mismatches = [0, 0], []
+    for model in (False, True):
+        for key, want in _PERM_SWEEP_TABLE.items():
+            if not model and (root_run or (key[1] == "opath" and not native)):
+                continue
+            for index, expected in enumerate(want.split()):
+                got = _cell(key, index << 6, model)
+                counts[model] += 1
+                if got != expected:
+                    mismatches.append(("model" if model else "kernel",) + key + (oct(index << 6), got, expected))
+    return counts[0], counts[1], mismatches
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -6089,10 +6355,11 @@ def _main_isolated(report_path=None):
         # QA round 6 of the silent-write fixes: the yield residue counter claims. (1) A write-and-search-only
         # (0300) state directory: the schedule denials accumulate there and the fourth call on an unchanged
         # basis is cap-relieved (three denies, then a warn, the counter at 3). The real chmod binds a non-root
-        # run; the os.open seam refuses any open of the state directory itself that lacks O_PATH, so the row
-        # also discriminates on a root run and a writer reverted to an O_RDONLY directory open fails it (its
-        # saves fail, the count stays unset and the fourth call denies). Where O_PATH is absent the seam is
-        # inert and the row expects the disclosed fallback for a non-root run (no count, four denies). (2)
+        # run; the os.open seam refuses an open of the state directory itself that lacks O_PATH whenever the
+        # directory's current mode lacks read, whatever the native O_PATH and euid, so the row also
+        # discriminates on a root run and a writer reverted to an O_RDONLY directory open fails it (its saves
+        # fail, the count stays unset and the fourth call denies). Where O_PATH is absent the row expects
+        # the disclosed fallback, as root too (no count, four denies). (2)
         # Relief already earned survives a later save failure: decide_yield reads the counter before any
         # save, so three denials in a 0700 directory, then the directory set to search only (0100), still
         # relieve, and so does a counter at the cap in a 0300 directory under the O_RDONLY fallback writer;
@@ -6112,7 +6379,9 @@ def _main_isolated(report_path=None):
                 fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting"))))
 
             def _open(path, flags, *a, **k):
-                if (_r6_opath and not flags & _r6_opath and isinstance(path, (str, bytes, os.PathLike))
+                current = switched[0] if switched else setup_mode
+                if (not current & 0o400 and not (_r6_opath and flags & _r6_opath)
+                        and isinstance(path, (str, bytes, os.PathLike))
                         and k.get("dir_fd") is None and os.path.abspath(os.fsdecode(path)) == str(sd)):
                     raise PermissionError(13, "Permission denied", os.fsdecode(path))
                 if (switched and mode == 0o100 and flags & os.O_CREAT and k.get("dir_fd") is not None
@@ -6136,13 +6405,19 @@ def _main_isolated(report_path=None):
                 os.chmod(str(sd), 0o755)
             return ([o[0] for o in out], "prompt digest could not be written" in out[-1][2],
                     fx.turn_state().get("schedule_denials"))
-        _r6_ok = bool(_r6_opath) or os.geteuid() == 0
         check("recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
               _r6_run("recwrite6a", 0o300, 0o300),
-              (["deny", "deny", "deny", "warn"], False, 3) if _r6_ok else (["deny"] * 4, False, None))
+              (["deny", "deny", "deny", "warn"], False, 3) if _r6_opath else (["deny"] * 4, False, None))
         check("recwrite6/earned-cap-relief-survives-a-failed-save",
               (_r6_run("recwrite6b", 0o700, 0o100), _r6_run("recwrite6c", 0o700, 0o300, walk=os.O_RDONLY)),
               ((["deny", "deny", "deny", "warn"], True, 3), (["deny", "deny", "deny", "warn"], True, 3)))
+
+        # QA round 7: one sweep pins every counter-save sentence of the orch-yield-tool-guard and orch-stop-guard
+        # residues (see _PERM_SWEEP_TABLE): the kernel leg runs the platform's writers without root, the
+        # model leg runs both writers everywhere, and every cell matches the table.
+        check("recwrite7/state-dir-permission-sweep-matches-the-table",
+              _perm_sweep(tmp),
+              (0 if os.geteuid() == 0 else 416 if getattr(os, "O_PATH", 0) else 208, 416, []))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

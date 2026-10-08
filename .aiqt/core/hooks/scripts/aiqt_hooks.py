@@ -8733,7 +8733,9 @@ def _orch_warn_tail(*warns):
 
 def _orch_turn_state(root):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
-    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies).
+    In a state directory the hook cannot search, os.path.lexists reports False (EACCES), so the file reads
+    as absent and the result is {} (a fresh turn-state): a counter recorded there is not seen."""
     path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
     try:
         if not os.path.lexists(path):
@@ -9897,13 +9899,19 @@ def orch_yield_tool(data):
                      "contradicts the measured figure." + tail)
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
-        # a counter that cannot be persisted leaves this deny uncounted, so the cap (or the loop bound) is
-        # never reached while the write fails; the deny stands and the failure is reported on it
+        # a counter that cannot be saved leaves this deny uncounted; relief on a later call comes only from
+        # what that call reads (see _orch_build_ctx), never from this deny. The deny stands and the failure
+        # is reported on it
         unsaved = _orch_record_denial(root, ts, kind, basis)
         counter_warn = "" if unsaved is None else (
             "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
-            "count toward the {} and its relief is not reached while the write fails ({}); record it manually "
-            "(nocncl).".format("scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved))
+            "count toward the {} ({}); {}; record it manually (nocncl).".format(
+                "scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved,
+                "a later call is relieved only when the count it reads from turn-state.json is at the cap on "
+                "an unchanged basis, which needs a state directory it can search and a turn-state.json it "
+                "can read" if kind == "schedule_idle" else
+                "a later call reaches the loop bound only when the count it reads from turn-state.json is at "
+                "it or that file cannot be read, either of which needs a state directory it can search"))
         tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
                                spoof_warn, ctx["record_warn"])
         return _deny(reason + tail,
