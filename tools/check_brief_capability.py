@@ -65,9 +65,10 @@ ignore, disregard, override and their forms; and, at a clause start only, VOID_S
 their forms), or ends as a question, or has an R1, R5, R6 or R7 hit. A fence's contents are read as such
 sentences. A closed-shape sentence asks nothing (its words are fixed), and neither does a heading. A void group is
 a top-level numbered item with every block that belongs to it (its lazy continuation lines, nested list items
-whatever their numbers, indented paragraphs and fences), named by the top-level item and never by a nested
-numeral; outside the numbered items, it is the blocks from one heading (or the brief's start, or the end of a
-numbered item) to the next heading or numbered item. Nothing else demotes a command line (the S1 not-to-be-run
+whatever their numbers, indented paragraphs, indented headings at any level, and fences), named by the top-level
+item and never by a nested numeral or a heading; outside the numbered items, it is the blocks from one unindented
+heading (or the brief's start, or the end of a numbered item) to the next such heading or numbered item. Nothing
+else demotes a command line (the S1 not-to-be-run
 introduction demotes only a fence): not quoted source text ("Quote the README command `make test`" refuses), not
 a Find clause, not a code span, not quotes.
 
@@ -125,7 +126,9 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
   exit 1  REFUSE           at least one HARD hit (S1, S2 or S3). Rewrite the brief, or send the item to a
-                           family that can execute.
+                           family that can execute. When a hit is a command line (S2 or S3), the REFUSE line
+                           says how to rewrite: name the function, row or entry instead of embedding the
+                           command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
                            blank; a scope range runs backwards; the family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
@@ -139,8 +142,11 @@ RESIDUALS (what it does not catch; examples, not a complete list). A request wit
 command line never refuses: "run the self-test and report its exit code", "which commit added the
 helper?" and "build the docs" are ADVISORY only, so a human must read the ADVISORY lines; for the same
 reason a closed shape stays INFO when the request that follows it is in another numbered item ("1. Do not run
-`git log -p`." then "2. Run it.") or under another heading, or is phrased with no listed request word, no
-question and no advisory hit ("CI failed on `make test`. Make it pass."); test and fix void only at a clause start,
+`git log -p`." then "2. Run it.") or under another unindented heading, when the request is in a lead-in before
+the list ("Please confirm each of these passes now:" then "1. CI failed on `make test`.") or in an unindented
+paragraph or bullet after the item ends ("Confirm it passes now." or "- Confirm it passes now." after a blank
+line), or when it is phrased with no listed request word, no question and no advisory hit ("CI failed on `make
+test`. Make it pass."); test and fix void only at a clause start,
 so "Please make the test pass." does not void it, while "Tests are flaky on main." does.
 A command outside the COMMAND LINE list does not refuse ("mktemp -d", "go test ./..." or "make test"
 outside a code span, "./x" with no `.sh` or `.py`, a git alias such as "git lg", a capitalised "Git log",
@@ -152,8 +158,9 @@ line in it refuses (S2 inside a numbered item, S3 outside), and any other comman
 text refuses that a human would pass; that is the accepted cost of closed shapes, and the sender rewrites the
 brief. A command line held as quoted source text refuses ("Quote the README command `make test`", "Quote the
 scope_rows entry for FOO=1 ./x.sh with its expected exit", "Quote the README command: `make test`."): name
-the row or entry by its id, or describe the line ("the README's test command"), instead of embedding the
-command line. So do a prose or code-span mention of a git subcommand or a command line outside the two
+the function, row or entry by its id, or describe the line ("the README's test command"), instead of embedding
+the command line, as the REFUSE line says. So do a prose or code-span mention of a git subcommand or a command
+line outside the two
 closed shapes ("the git log shows the fix", "a `git diff` excerpt follows", "is `t.py --self-test` listed in
 CI?", "Does the docstring example `git show HEAD` match the usage line?", "Which line of t.py calls `git
 rev-parse HEAD`?", a heading "PR 9 adds a git log parser"); a closed shape with anything after the command
@@ -177,12 +184,19 @@ only where the sender refuses to send on exit 1 or 2.
 
 TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes. No regular
 expression reads a run of arguments, options or markup: such runs are walked token by token in Python.
-THE REGEX AUDIT (the self-test, regex_audit) parses every compiled pattern reachable from this module's namespace
-(a global, an item of a tuple, list, set, frozenset or dict global at any depth, an attribute of a class defined
-here), each of COMMAND_FORMS, and each regular expression call in the production source that the namespace does not
-hold (a call inside a function, read from its literal pattern), all enumerated and never listed by hand. A call
-whose pattern or flags is not a literal, and any other use of the re module's matching functions (an alias,
-getattr on re, an import from re), fails the audit. It fails on five constructs, each a guard the self-test patches
+THE REGEX AUDIT (the self-test, regex_audit) covers the compiled patterns bound to module-level names and each of
+COMMAND_FORMS, enumerated and never listed by hand, and fails on any construct in them it cannot read. Beyond that,
+without claiming to find every pattern, it also parses the items of tuple, list, set and frozenset globals and the
+values of dict globals at any depth, the attributes of a class defined here, and each call of a re matching
+function in the production source that the namespace does not hold (read from its literal pattern and flags). In
+that source it fails on a call whose pattern or flags is not a literal, that passes a starred or double-starred
+argument or that gives its flags twice, and on the other uses of re it recognizes: a bare `re` passed or bound
+(getattr(re, ...)), a matching function named without a call, `import re as`, an import from re. Outside the
+audit, and not chased: a pattern held as a dict key or in any other object the walk does not enter (an instance, a
+function's closure or defaults) unless the source read meets its call with a literal pattern, a module-level name
+compiled twice (only its last value is walked), and re reached by reflection (re.__dict__, getattr on anything but
+the bare name re, re's private modules, __import__, importlib).
+It fails on five constructs, each a guard the self-test patches
 out alone against a canary that only that guard flags: two quantifiers whose classes overlap, adjacent or separated
 only by atoms that can match empty (`\\s*,?\\s+`, `\\s*\\s+`, `\\w+\\w*`); a repeated group whose tail and head
 quantifiers overlap; a repeated group whose body can match empty; an unbounded repeat (*, +, {n,}) that is not
@@ -195,9 +209,15 @@ back, so it is not the first of a pair and the repeat rule does not flag it: it 
 after it is not retried inside it. Single-character alternatives are read as the one class the parser folds them
 into. Its limits: it does not flag a failed match retried at every offset of a long run by search() or finditer(), a
 bounded repeat over alternatives (LEAD_IN_RE reads at most six lead-in words), a quantifier that backtracks against
-one fixed atom, or work that grows faster than the input in the Python code around the patterns; it compares classes
+one fixed atom, two adjacent repeats of groups longer than one character that can match the same text
+(`(?:ab)*(?:ab)*$`: the pair rule compares only the first group's last class with the next one's first, and such a
+pair takes time that grows with the square of the input), or work that grows faster than the input in the Python
+code around the patterns; it compares classes
 over a sample of characters (ASCII and a few others), so an overlap only outside the sample is missed; and it reads
 the interpreter's private regular expression parser, so a Python release that changes it fails the audit closed.
+The self-test pins with a canary the walk's tuple, dict, frozenset and class-attribute branches, the source read's
+refusals (an alias, non-literal flags, a starred or double-starred argument, flags given twice) and the repeat
+rule's atomic-group branch, and checks that the source it reads assigns every module-level pattern.
 Those gaps are covered, as far as they are, by construction and by the shapes: every scan is one pass per sentence
 (or per paragraph, line or fence), with bisection over positions found once (clause breaks, code spans, negations,
 noun uses, and the last result and static-source positions for R5, each search resuming one character after the
@@ -403,6 +423,12 @@ def encloses(top, indented):
     return indented and top is not None
 
 
+def heading_in_item(top, indented):
+    """Whether a heading, at any level, belongs to the open top-level item `top` rather than ending it: it is
+    indented under it. It stays in the item's void group; only an unindented heading opens a section."""
+    return indented and top is not None
+
+
 def lazy_continuation(current):
     """Whether an unindented line right after a line of the prose block `current` is a lazy continuation of a
     numbered item: `current` is a numbered item's block (Markdown continues the item's paragraph)."""
@@ -411,8 +437,8 @@ def lazy_continuation(current):
 
 def parse_blocks(text):
     """The brief as a list of Blocks: fences, headings, list items, and paragraphs. Each block records the top-level
-    numbered item it belongs to (`top`): a nested numbered item, an indented block, a fence inside the item and an
-    unindented lazy continuation line all keep the number of the item that encloses them."""
+    numbered item it belongs to (`top`): a nested numbered item, an indented block or heading, a fence inside the item
+    and an unindented lazy continuation line all keep the number of the item that encloses them."""
     blocks, current, item, top, fence, opening, blank = [], None, None, None, None, "", False
     for number, line in enumerate(text.split("\n"), 1):
         line = line.rstrip("\r")
@@ -439,8 +465,10 @@ def parse_blocks(text):
         was_blank, blank = blank, False
         heading = HEADING_RE.match(line)
         if heading:
-            current, item, top = None, None, None
-            block = Block("prose", number, heading=len(heading.group(1)))
+            current = None
+            if not heading_in_item(top, indented):
+                item = top = None
+            block = Block("prose", number, item=item, heading=len(heading.group(1)), top=top)
             block.lines.append((number, line))
             blocks.append(block)
             continue
@@ -1392,6 +1420,11 @@ def evaluate(data, family, table, scoped=True):
     return (EXIT_REFUSE if hard else EXIT_OK), findings
 
 
+# printed with a refusal that holds a command line (S2 or S3): how to ask about the line without asking to run it
+COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or entry that holds it instead of "
+                     "embedding the command (for example: quote the def line of X, not the line that runs git push)")
+
+
 def run(brief_path, family, table_path, scoped=True):
     try:
         table = load_table(table_path)
@@ -1404,8 +1437,9 @@ def run(brief_path, family, table_path, scoped=True):
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     if code == EXIT_REFUSE:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
     elif can_execute(table[family]):
         print("OK: family {} can execute ({}); the execution rules do not apply".format(
             family, table[family]["execute"]))
@@ -1553,12 +1587,17 @@ def _expected_check_ids():
 
 RUN_ITEM = "3. Run `t.py --self-test` on a snapshot of the change.\n"
 # a production source for the source audit: a module-level compile it does not hold, a function-local literal, a
-# non-literal pattern, a matching function referenced without a call, getattr on re, and an import from re
+# non-literal pattern, a matching function referenced without a call, getattr on re, an import from re, an alias of
+# re, non-literal flags, a starred and a double-starred argument after a literal pattern, and flags given twice
 AUDIT_SOURCE_CANARY = ("import re\nX = re.compile(r\"(?:a|ab)*c\")\n\ndef f(text):\n"
                        "    return re.search(r\"\\s*\\s+\", text, re.I)\n\ndef g(pattern, text):\n"
                        "    return re.match(pattern, text)\n\ndef h():\n"
                        "    return re.findall\n\ndef k():\n    return getattr(re, \"compile\")\n\n"
-                       "from re import compile\n")
+                       "from re import compile\nimport re as r\n\ndef m(text, flags):\n"
+                       "    return re.search(r\"x\", text, flags)\n\ndef n(*rest):\n"
+                       "    return re.search(r\"x\", *rest)\n\ndef o(text, **options):\n"
+                       "    return re.search(r\"x\", text, **options)\n\ndef q(text):\n"
+                       "    return re.search(r\"x\", text, 0, flags=re.I)\n")
 RUN_PROSE = "3. Run the parser on a snapshot of the change.\n"
 NEGATED = "Do not run code or git.\n"
 CLAUSE_MID = "Describe the build of the parser.\n"
@@ -1632,6 +1671,15 @@ LAZY_LINE = "1. Do not run `git log -p`.\nRun it anyway.\n"
 LAZY_CONFIRM = "1. CI failed on `make test`.\nPlease confirm it passes now.\n"
 FENCE_REQUEST = "1. CI failed on `make test`.\n\n   ```text\n   Run it.\n   ```\n"
 NESTED_NUMERAL = "2. CI failed on `make test`.\n\n   1. Run it.\n"
+# a heading indented under the item stays in its void group, with or without blank lines around it
+ITEM_HEADING = "1. CI failed on `make test`.\n   ### Notes\n   Confirm it passes now.\n"
+ITEM_HEADING_BLANK = "1. CI failed on `make test`.\n\n   ### Details\n\n   Run it.\n"
+RETEST_IT = "1. CI failed on `make test`.\n   Retest it.\n"
+SPAN_CLAUSE_START = "1. CI failed on `make test`.\n   Its label was `a, tested`.\n"   # a clause start in a code span
+# a request in a lead-in before the list or in a paragraph or bullet after it is in another void group (a residual)
+LEAD_IN_REQUEST = "Please confirm each of these passes now:\n\n1. CI failed on `make test`.\n"
+AFTER_LIST_REQUEST = "1. CI failed on `make test`.\n\nConfirm it passes now.\n"
+AFTER_LIST_BULLET = "1. CI failed on `make test`.\n\n- Confirm it passes now.\n"
 RETRY = "1. CI failed on `make test`.\n   Retry it.\n"
 KIDDING_PASTE = "1. Do not run `git log -p`.\n   Kidding: paste what it prints.\n"
 TEST_IT = "1. CI failed on `make test`.\n   Test it locally.\n"
@@ -1777,7 +1825,7 @@ AUDIT_SAMPLE = frozenset([chr(code) for code in range(128)] + [chr(code) for cod
 # the previous revision's argument tail (CLOSED_ARGS_END_RE), which backtracks exponentially
 _OLD_CLOSED_ARGS_END = r"(?:\s+(?:-|[^\s/:=@~^<.]*[/:=@~^<.]|\d)\S*)*\.\s*\Z"
 AUDIT_FLAGGED = (r"\s*,?\s+or", r"\s*\s+", r"\w+\w*", r"(?:x+)+", r"(?:a*)*", r"(?:,\s*)?\s+", r"(?:\s+\S+)*\.",
-                 r"(?:a|ab)*c", r"(?:a|ab)*?c", r"(?:\w|\W\w*)+!", _OLD_CLOSED_ARGS_END)
+                 r"(?:a|ab)*c", r"(?:a|ab)*?c", r"(?>a|ab)*c", r"(?:\w|\W\w*)+!", _OLD_CLOSED_ARGS_END)
 # clean: a possessive repeat, a bounded repeat, and single-character alternatives, which the parser folds into one
 # class ((?:\d|\w)+ is [\d\w]+), so nothing in the body can be split two ways
 AUDIT_CLEAN = (r"(?:\s*,\s+|\s+)or\s+", r"[A-Za-z][\w-]*+(?:\s*,\s*[A-Za-z][\w-]*+)++", r"(?:\s+\S+)*+\.",
@@ -1999,18 +2047,21 @@ def _audit_literal(node, function):
 
 
 def audit_source(source, namespace):
-    """(sites, unseen) for the regular expression calls in `source` (the production code) that the namespace walk
-    does not hold: sites [(name, pattern, flags)] read from a literal pattern argument, and unseen {name: [finding]}
-    for a call whose pattern or flags is not a literal and for any other use of a matching function or of the re
-    module (an alias, getattr(re, ...), an import from re). A module-level `NAME = re.compile(...)` whose NAME holds
-    a compiled pattern in `namespace` is walked there and skipped here."""
+    """(sites, unseen, held) for the regular expression calls in `source` (the production code) that the namespace
+    walk does not hold: sites [(name, pattern, flags)] read from a literal pattern argument, and unseen {name:
+    [finding]} for a call whose pattern or flags is not a literal and for the other uses of re it recognizes (a
+    matching function named without a call, a bare `re` passed or bound, `import re as`, an import from re). A
+    module-level `NAME = re.compile(...)` whose NAME holds a compiled pattern in `namespace` is walked there and
+    skipped here; held: the sorted names so skipped. It does not see re reached any other way (re.__dict__, re's
+    private modules, __import__, importlib), and a NAME compiled twice is walked only for its last value."""
     tree = ast.parse(source)
-    held, called, qualified, sites, unseen = set(), set(), set(), [], dict()
+    held, held_names, called, qualified, sites, unseen = set(), [], set(), set(), [], dict()
     for node in tree.body:
         if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
                 and _re_function(node.value) == "compile"
                 and isinstance(namespace.get(node.targets[0].id), re.Pattern)):
             held.add(id(node.value))
+            held_names.append(node.targets[0].id)
     nodes = list(ast.walk(tree))
     for node in nodes:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "re":
@@ -2036,7 +2087,7 @@ def audit_source(source, namespace):
                                                            for alias in node.names))):
             continue
         _audit_flag(unseen.setdefault(name, []), "unseen")
-    return sites, dict((name, found) for name, found in unseen.items() if found)
+    return sites, dict((name, found) for name, found in unseen.items() if found), sorted(held_names)
 
 
 def _production_source():
@@ -2050,19 +2101,20 @@ def _production_source():
 
 
 def regex_audit():
-    """(walked, flagged): the names of every pattern walked (namespace objects, COMMAND_FORMS, and the production
-    calls the namespace does not hold, named by line), and name -> flagged constructs for each one the audit flags
-    that REGEX_AUDIT_EXEMPTIONS does not exempt (an exemption whose pattern is absent or passes is reported as
-    stale). A call the audit cannot read, or a missing production end line, is flagged too."""
+    """(walked, flagged, read): the names of every pattern walked (namespace objects, COMMAND_FORMS, and the
+    production calls the namespace does not hold, named by line), name -> flagged constructs for each one the audit
+    flags that REGEX_AUDIT_EXEMPTIONS does not exempt (an exemption whose pattern is absent or passes is reported as
+    stale), and the names of the module-level compiles the production source assigns and the namespace holds. A
+    call the audit cannot read, or a missing production end line, is flagged too."""
     namespace = globals()
     patterns = [(name, value.pattern, value.flags) for name, value in _audit_objects(namespace)]
     patterns += [("COMMAND_FORMS[{}]".format(index), form, 0) for index, form in enumerate(COMMAND_FORMS)]
-    flagged = dict()
+    flagged, read = dict(), []
     source = _production_source()
     if source is None:
         flagged["source"] = ["the production end line is missing, so the calls in the source are not read"]
     else:
-        sites, unseen = audit_source(source, namespace)
+        sites, unseen, read = audit_source(source, namespace)
         patterns += sites
         flagged.update(unseen)
     for name, pattern, flags in patterns:
@@ -2074,7 +2126,7 @@ def regex_audit():
     walked = [name for name, _, _ in patterns]
     for name in sorted(set(REGEX_AUDIT_EXEMPTIONS) - set(walked)):
         flagged[name] = ["a stale exemption: no such pattern"]
-    return walked, flagged
+    return walked, flagged, read
 
 
 def _bounded_option_end(text, position, option_re, memo):
@@ -2288,6 +2340,12 @@ def self_test(report_path=None):
            (1, [("R1", "ADVISORY"), ("S2", "HARD")])])
     check("demote/void-added-words-refused", [_outcome(text)[0] for text in (RETRY, KIDDING_PASTE, TEST_IT, FIX_IT)],
           [1, 1, 1, 1])
+    check("demote/void-item-heading-refused", [_outcome(ITEM_HEADING), _outcome(ITEM_HEADING_BLANK)],
+          [(1, [("S2", "HARD")]), (1, [("R1", "ADVISORY"), ("S2", "HARD")])])
+    check("demote/void-retest-start-refused", _outcome(RETEST_IT), (1, [("S2", "HARD")]))
+    check("demote/span-clause-start-info", _outcome(SPAN_CLAUSE_START), (0, [("S2", "INFO")]))
+    check("demote/lead-in-after-list-not-voided-residual", [_outcome(text) for text in (
+        LEAD_IN_REQUEST, AFTER_LIST_REQUEST, AFTER_LIST_BULLET)], [(0, [("S2", "INFO")])] * 3)
     check("demote/test-noun-info", _outcome(TEST_NOUN), (0, [("S2", "INFO")]))
     check("demote/markup-head-info", [_outcome(DASH_PROHIBITION), _outcome(PAREN_PROHIBITION)],
           [(0, [("S3", "INFO")]), (0, [("S2", "INFO")])])
@@ -2298,8 +2356,11 @@ def self_test(report_path=None):
         " 1/ x.", " 1/ 2.  ")], [False, True, True, True, False, False, False, False, False, False, False, True])
     # ---------- time: the regex audit and the measured shapes ----------
     check("perf/word-run-token-start", WORD_RUN_RE.search("aaaa, b", 1), None)
-    walked, flagged = regex_audit()
+    walked, flagged, read = regex_audit()
     check("perf/regex-audit-clean", flagged, dict())
+    # only the real production source assigns every module-level pattern: an empty or wrong source reads none of them
+    check("perf/regex-audit-reads-production", (bool(read), read), (True, sorted(
+        name for name, value in globals().items() if isinstance(value, re.Pattern))))
     check("perf/regex-audit-walks-module", (len(walked) == len(set(walked)), set(
         name for name, value in globals().items() if isinstance(value, re.Pattern)) <= set(walked),
         set(REGEX_AUDIT_CANARIES) <= set(walked)), (True, True, True))
@@ -2309,13 +2370,18 @@ def self_test(report_path=None):
                                                if guard in AUDIT_GUARD_CANARIES],
           [[AUDIT_GUARDS[guard] + (" (GROUPREF)" if guard == "unread" else "")] for guard in AUDIT_GUARDS
            if guard in AUDIT_GUARD_CANARIES])
-    sites, unseen = audit_source(AUDIT_SOURCE_CANARY, dict())
+    sites, unseen, _ = audit_source(AUDIT_SOURCE_CANARY, dict())
     check("perf/regex-audit-reads-source", ([name for name, _, _ in sites], sorted(unseen),
                                             [bool(audit_pattern(pattern, flags)) for _, pattern, flags in sites]),
-          (["line 2", "line 5"], ["line 11", "line 14", "line 16", "line 8"], [True, True]))
-    with _patched(_AUDIT_PROBE=(re.compile(r"(?:a|ab)*c"),), _AUDIT_PROBE_MAP=dict(k=[re.compile(r"\s*\s+")])):
+          (["line 2", "line 5"], ["line 11", "line 14", "line 16", "line 17", "line 20", "line 23", "line 26", "line 29",
+                     "line 8"],
+           [True, True]))
+    probe_class = type("_AuditProbeClass", (), dict(X=re.compile(r"\w+\w*")))
+    with _patched(_AUDIT_PROBE=(re.compile(r"(?:a|ab)*c"),), _AUDIT_PROBE_MAP=dict(k=[re.compile(r"\s*\s+")]),
+                  _AUDIT_PROBE_SET=frozenset([re.compile(r"(?:a+){2,5}")]), _AUDIT_PROBE_CLASS=probe_class):
         probed = sorted(name for name in regex_audit()[1] if name.startswith("_AUDIT_PROBE"))
-    check("perf/regex-audit-reads-containers", probed, ["_AUDIT_PROBE[0]", "_AUDIT_PROBE_MAP['k'][0]"])
+    check("perf/regex-audit-reads-containers", probed, ["_AUDIT_PROBE[0]", "_AUDIT_PROBE_CLASS.X",
+                                                        "_AUDIT_PROBE_MAP['k'][0]", "_AUDIT_PROBE_SET{0}"])
     with _patched(LINEAR_CHILD="import sys\nprint(0.1)\nprint(0.2)\nsys.exit(9)\n"):
         failed_child = _linear("a")
     with _patched(LINEAR_CHILD="print('nan')\nprint('nan')\n"):
@@ -2425,12 +2491,21 @@ def self_test(report_path=None):
     try:
         table_path = str(tmp / "table.toml")
         for name, body in (("table.toml", TABLE_FIXTURE), ("refuse.md", RUN_ITEM), ("ok.md", NEGATED),
-                           ("large.md", "a" * (MAX_BYTES + 1))):
+                           ("quoted.md", QUOTED_README), ("preamble.md", GIT_SHOW_PREAMBLE),
+                           ("fence.md", BASH_FENCE), ("large.md", "a" * (MAX_BYTES + 1))):
             with open(tmp / name, "w", encoding="utf-8") as handle:
                 handle.write(body)
         tail = ["--family", "gamma", "--table", table_path]
         check("main/refuse-exit-1", _quiet(main, [str(tmp / "refuse.md")] + tail), 1)
         check("main/ok-exit-0", _quiet(main, [str(tmp / "ok.md")] + tail), 0)
+        hinted = []
+        for name in ("quoted.md", "preamble.md", "fence.md"):
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(io.StringIO()):
+                code_seen = main([str(tmp / name)] + tail)
+            hinted.append((code_seen, COMMAND_LINE_HINT in printed.getvalue()))
+        # a command-line refusal (S2, S3) says how to rewrite; an executable fence alone (S1) has no command line
+        check("main/command-line-hint", hinted, [(1, True), (1, True), (1, False)])
         check("main/missing-brief-2", _quiet(main, [str(tmp / "absent.md")] + tail), 2)
         check("main/directory-brief-2", _quiet(main, [str(tmp)] + tail), 2)
         try:
@@ -2525,10 +2600,13 @@ def self_test(report_path=None):
     check("revert/closed-command-start-red", *flip([code(ARGUMENT_COMMAND)], [0], Demotions=_AnyStartDemotions))
     check("revert/void-word-red", *flip([code(VOID_CONTINUATION), code(PROHIBITION_KIDDING), code(RETRY),
                                         code(KIDDING_PASTE)], [0, 0, 0, 0], VOID_WORD_RE=never))
-    check("revert/void-start-word-red", *flip([code(TEST_IT), code(FIX_IT)], [0, 0], VOID_START_RE=never))
+    check("revert/void-start-word-red", *flip([code(TEST_IT), code(FIX_IT), code(RETEST_IT)], [0, 0, 0],
+                                             VOID_START_RE=never))
     check("revert/void-lazy-line-red", *flip([code(LAZY_LINE), code(LAZY_CONFIRM)], [0, 0],
                                             lazy_continuation=lambda current: False))
     check("revert/void-nested-numeral-red", *flip([code(NESTED_NUMERAL)], [0], encloses=lambda top, indented: False))
+    check("revert/void-item-heading-red", *flip([code(ITEM_HEADING), code(ITEM_HEADING_BLANK)], [0, 0],
+                                                heading_in_item=lambda top, indented: False))
     check("revert/void-fence-red", *flip([code(FENCE_REQUEST)], [0], fence_asks=lambda block: False))
     check("revert/void-section-heading-red", *flip([code(OTHER_HEADING)], [1], starts_section=lambda block: False))
     check("revert/void-question-red", *flip([code(VOID_QUESTION)], [0], QUESTION_END_RE=never))
@@ -2618,7 +2696,7 @@ def self_test(report_path=None):
     check("revert/r7-red", *flip([lambda: _outcome(GIT_PARENTS)], [(0, [])], rule_r7=nothing))
     check("revert/r7-request-red", *flip([lambda: _outcome(GIT_STATEMENT)], [(0, [("R7", "ADVISORY")])],
                                         _asks=lambda sentence: True))
-    check("revert/every-flip-ran", len(flipped), 75)
+    check("revert/every-flip-ran", len(flipped), 76)
 
     expected = _expected_check_ids()
     if expected is None:
@@ -2635,10 +2713,12 @@ def self_test(report_path=None):
     print("PASS: check_brief_capability self-test: {} unique checks executed (the shipped table loads and a "
           "malformed table exits 2; S1, S2 and S3 refuse executable fences and command lines in numbered "
           "items and outside them, a command line is INFO only as a whole-sentence prohibition or past report "
-          "that no other sentence of its void group (lazy lines, nested items and fence contents included) voids, "
-          "quoted source text is not a data context, and every blocking rule, command-line form, closed-shape "
+          "that no other sentence of its void group (lazy lines, nested items, indented headings and fence contents "
+          "included) voids, quoted source text is not a data context and a command-line refusal says how to "
+          "rewrite, and every blocking rule, command-line form, closed-shape "
           "guard and void patched out flips its fixture; R1, R5, R6 and R7 print ADVISORY lines and never refuse; "
-          "the regex audit reads the namespace, its containers and the production source, flags no pattern, "
+          "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
+          "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 24 repeated shapes "
           "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
