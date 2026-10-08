@@ -455,6 +455,7 @@
 .github/copilot-instructions.md text eol=lf
 .preview/README.md text eol=lf
 .preview/SHA256SUMS text eol=lf
+.preview/char-policy-write.py text eol=lf
 .preview/clock-inject.py text eol=lf
 .preview/constraint-reread.py text eol=lf
 .preview/future-stamp-write.py text eol=lf
@@ -700,6 +701,7 @@ tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf
 tools/gen_agents.py text eol=lf
 tools/gen_changelog.py text eol=lf
+tools/gen_char_policy.py text eol=lf
 tools/gen_claude.py text eol=lf
 tools/gen_crosswalk.py text eol=lf
 tools/gen_cursor.py text eol=lf
