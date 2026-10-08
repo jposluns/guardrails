@@ -644,6 +644,10 @@ runner = "tools/selftest_git_fixture_env.py"
 expected-check-ids = [
   "config/member-bound-table",
   "config/member-close-on-interrupt",
+  "config/member-close-handlers",
+  "config/member-close-lock",
+  "config/member-close-unresolved-verdict",
+  "config/member-failed-no-late-launch",
   "config/member-closing-refuses-start",
   "config/member-failure-diagnostic-stdout",
   "config/member-grandchild-after-normal-exit",
