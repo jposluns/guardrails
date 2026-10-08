@@ -13,32 +13,53 @@ FAILED delivery. A whole-tree search alone is not enough: a sentence quoted as t
 exist, reworded or not, only in another.
 
 The reviewed tree is the commit named by the brief's one BRIEF-PIN line (a full 40-hex SHA; two lines,
-even identical ones, are CANNOT_EVALUATE). The delivery's first line that does not start with
-WORKER_STATUS must be exactly that SHA (surrounding whitespace aside); a differing or malformed SHA line
-is CANNOT_EVALUATE. Every byte of reviewed content comes from that commit through git -C REPO
---no-replace-objects (cat-file -t, ls-tree, cat-file blob, cat-file --batch; each launch also carries the
-gc.auto=0, gc.autoDetach=false, maintenance.auto=false and core.commitGraph=false pins), never from the
-working tree, under an environment that drops every ambient GIT_ variable and sets
+even identical ones, are CANNOT_EVALUATE). Every byte of reviewed content comes from that commit through
+git -C REPO --no-replace-objects (cat-file -t, ls-tree, cat-file blob, cat-file --batch; each launch also
+carries the gc.auto=0, gc.autoDetach=false, maintenance.auto=false and core.commitGraph=false pins),
+never from the working tree, under an environment that drops every ambient GIT_ variable and sets
 GIT_NO_REPLACE_OBJECTS, GIT_GRAFT_FILE (an empty file, so no info/grafts entry is read),
-GIT_NO_LAZY_FETCH, GIT_TERMINAL_PROMPT=0 and GIT_OPTIONAL_LOCKS=0. Every blob read is re-hashed (SHA-1 of
-its git blob header and bytes) against the id the tree lists, so a rewritten object file is
-CANNOT_EVALUATE, never read as the pinned content. An unreadable, oversized, non-regular or non-UTF-8
-input file, a missing or ambiguous BRIEF-PIN, an unresolvable SHA or one that names no commit, an
-unclosed fenced block, an indented code block, more than MAX_QUOTES quotes, a blob that does not hash to
-its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
+GIT_NO_LAZY_FETCH, GIT_TERMINAL_PROMPT=0 and GIT_OPTIONAL_LOCKS=0. Every blob read, by cat-file blob or
+by the whole-tree cat-file --batch, is re-hashed (SHA-1 of its git blob header and bytes) against the id
+the tree lists, so a rewritten object file is CANNOT_EVALUATE, never read as the pinned content. An
+unreadable, oversized, non-regular or non-UTF-8 input file, a missing or ambiguous BRIEF-PIN, a brief
+with no numbered question, an unresolvable SHA or one that names no commit, a delivery outside the
+closed shape below, an unclosed fenced block, an indented code block, more than MAX_QUOTES quotes, a
+blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
+
+THE CLOSED DELIVERY SHAPE. Answer and finding boundaries are never inferred from free text; the
+question-list template fixes them:
+  * WORKER_STATUS lines (transport) may come first; the first other line is exactly the pinned SHA
+    (surrounding whitespace aside). A differing or malformed SHA line is CANNOT_EVALUATE.
+  * Then, for each of the brief's m numbered questions in order, a line starting at column 0 with
+    "QN." (N = 1 to m, each once, ascending; the "QN." ends the line or is followed by a space or tab)
+    opens the answer to question N; the answer runs to the next such line, the findings line or the
+    VERDICT line, and may start on its "QN." line. Only blank lines come between the SHA line and Q1.
+    (a WORKER_STATUS line outside a fenced block is transport wherever it stands, never content).
+  * Optionally, after the last answer, one line exactly "## Findings" (trailing spaces or tabs aside)
+    opens the findings section, which runs to the VERDICT line. No line in it opens an answer.
+  * Then one VERDICT line ("VERDICT:", "**VERDICT:**" or "**VERDICT**:", any case, leading spaces or
+    tabs allowed; its value is the rest of the line), then, after blank lines only, a line
+    "QA-COMPLETE"; after it only blank and WORKER_STATUS lines.
+  Anything else is CANNOT_EVALUATE naming the line: text before Q1., a missing, repeated or out-of-order
+  "QN.", a "QN." past Q{m}., a "QN." inside the findings section, a column-0 "QN." inside a fenced block,
+  a second findings line, a VERDICT or QA-COMPLETE line out of place, text after QA-COMPLETE, and a
+  delivery that ends early. Inside an answer or the findings section every other line (a numbered
+  list, a heading, a grade word such as MAJOR, a WORKER_STATUS line aside) is content and moves no
+  boundary.
 
 Rules:
   C1 coverage. A verdict of any kind (VERDICT: NO BLOCKERS, VERDICT: BLOCKERS FOUND or another) is
-     reclassed NO_VOTE (exit 1, reason named) when no numbered item is answered: a verdict counts only
-     for answered items, so a BLOCKERS verdict with coverage 0/m is no vote. An item is answered when it
-     is not UNVERIFIABLE and carries a quote or answer content: a word (a run of letters or digits)
-     outside its number marker and the file names it holds, where the item's words are not exactly the
-     words of its question (a restated question). So "1. ", a heading with nothing under it, "1.
-     README.md" and the question copied back are not answered. A clean verdict is also NO_VOTE when every
-     numbered question of the brief asks for a quote and no delivery item carries one. One UNVERIFIABLE
-     item among answered ones is legitimate. Coverage n/m is reported: n answered items, m the brief's
-     numbered questions (the delivery's items when the brief numbers none); an unanswered question
-     counts as uncovered. A delivery with no VERDICT line, or with conflicting VERDICT lines, is NO_VOTE.
+     reclassed NO_VOTE (exit 1, reason named) when no answer is answered: a verdict counts only for
+     answered items, so a BLOCKERS verdict with coverage 0/m is no vote. An answer is UNVERIFIABLE when
+     the word UNVERIFIABLE (upper case) appears in it outside fenced blocks and blockquotes. Otherwise it
+     is answered when it carries a quote; an answer to a question that asks for a quote (its text holds
+     the word quote, quotes, quoted or quoting) is answered only with a quote, so prose alone is "no
+     quote", not answered. An answer to any other question is also answered by answer content: a word
+     (a run of letters or digits) outside its "QN." marker and the file names it holds, where its words
+     are not exactly the words of its question (a restated question). So "Q1. ", "Q1. README.md", the
+     question copied back and "Q2. Confirmed." under a quote question are not answered, and findings
+     text never answers the last question. One UNVERIFIABLE answer among answered ones is legitimate.
+     Coverage n/m is reported: n answered answers, m the brief's numbered questions.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
      appear byte for byte (UTF-8) as a contiguous span of one file of the pinned tree (a tree file stored
      with CRLF line ends also matches the quote's lines joined with CRLF). A quote may start or end
@@ -49,122 +70,123 @@ Rules:
      after the first, adding indentation to the first, and adding an escape fail. Leading indentation
      inside a fenced block counts (only the opening fence's own indentation is removed from each line,
      as CommonMark does for a list item's fence). Where a quote must match:
-       * an item: in the files its heading names; otherwise in the files the brief's question with the
-         item's number names; otherwise anywhere in the tree.
-       * a finding section (below): in the files its unnumbered heading names, or the files of its grade
-         line's head token; otherwise anywhere in the tree. An inline quote on the grade, heading or
-         VERDICT line itself is checked against the whole tree (such a line contrasts two wordings or
-         quotes a rule title).
-       * the preamble (text before the first item): anywhere in the tree.
+       * an answer: in the files the answer names anywhere in its own text (its "QN." line and body,
+         outside its quotes); when it names none, in the files its question names; only when neither
+         names a file, anywhere in the tree.
+       * the findings section: in the files it names anywhere in its text, outside its quotes;
+         otherwise anywhere in the tree.
+       * the VERDICT line: anywhere in the tree.
      A named path with a slash binds exactly; a bare file name (no slash) binds to every file of the
      pinned tree with that basename, root or not (a root README.md and .preview/README.md are both
-     named by "README.md"), and the result's found_in names the file that matched. When the names
-     include a path absent from the pinned tree (a relative path with a slash and a file extension, or
-     an absolute or home-relative path outside the repository), a quote found in none of the present
-     named files fails, naming the absent path; when every name is absent, every quote under it fails:
-     an unresolved name never widens the search to the whole tree. An absolute path under the --repo
-     directory (as given or resolved) is read as its repository path. A match only in another file
-     fails, naming both. Any failing quote fails the whole delivery (exit 1); the first MAX_LISTED
+     named by "README.md"), and the result's found_in names the file that matched. Names never widen:
+     a file reference that resolves to no blob of the pinned tree is held, not dropped, so a quote found
+     in none of the present named files fails, naming the absent one, and when every name is absent
+     every quote under it fails. An answer's own file reference that resolves to no blob fails the
+     answer outright, quote or not (reason named), unless its question names the same reference (an
+     answer may say that a file the question asks about is absent). A match only in another file fails,
+     naming both. Any failing quote or answer fails the whole delivery (exit 1); the first MAX_LISTED
      failures list the other files holding the quote and the nearest whitespace-normalised match (a
      diagnostic only, never a pass). A whole-tree search stops at its first matching file.
 
-Output: one JSON object on stdout (verdict PASS, FAIL, NO_VOTE or CANNOT_EVALUATE; reasons; per-item
-results with every quote and each item's answer state; coverage) and a one-line human summary on stderr.
-Exit 0 PASS; 1 FAIL or NO_VOTE (FAIL wins when both apply); 2 CANNOT_EVALUATE or a usage error.
+Output: one JSON object on stdout (verdict PASS, FAIL, NO_VOTE or CANNOT_EVALUATE; reasons; per-answer
+results with every quote, each answer's state and its absent file references; coverage) and a one-line
+human summary on stderr. Exit 0 PASS; 1 FAIL or NO_VOTE (FAIL wins when both apply); 2 CANNOT_EVALUATE
+or a usage error.
 
 The grammar read (a declared subset of Markdown, not a general parser; every scanner is linear in its
 line, with no backtracking pattern):
   * Lines are split at LF; one trailing CR per line is the delivery's transport, not quote content.
-    WORKER_STATUS lines are transport too and are not read as answer content.
-  * A fenced block opens on a line of three or more backticks or tildes, at any indentation (a list
-    item's fence included; a backtick fence's info string holds no backtick), and closes on a line of
-    the same character, at least as long, with nothing after it but spaces or tabs. Every fenced block
-    with a non-blank line is a quote, whatever its info string: a command or output shown in a fence is
-    held to the same rule as a quote. A line indented four or more columns after a blank line (an
-    indented code block, or a list continuation paragraph) is CANNOT_EVALUATE: its reading depends on
-    list nesting this grammar does not track.
+  * A fenced block opens on a line of three or more backticks or tildes after any number of spaces (a
+    list item's fence included; a backtick fence's info string holds no backtick; a tab before the
+    fence is not read as indentation, so such a line is answer text), and closes on a line of the same
+    character, at least as long, with nothing after it but spaces or tabs. Every fenced block with a
+    non-blank line is a quote, whatever its info string: a command or output shown in a fence is held
+    to the same rule as a quote. A line indented four or more columns after a blank line (an indented
+    code block, or a list continuation paragraph) is CANNOT_EVALUATE: its reading depends on list
+    nesting this grammar does not track.
   * A blockquote run is consecutive lines starting with ">" (at most three spaces before it); one
     space after the ">" is removed and the run's lines are joined with LF into one quote.
   * An inline quote is the text between a straight double quote and the next one on the same line,
     or between a left and a right curly double quote, outside inline code spans (a run of n backticks
-    closed by the next run of exactly n) and outside a parenthetical example opened by "(e.g.", "(i.e."
-    or "(for example" and closed by the next ")" (an example word is not a quote of the tree). A
+    closed by the next run of exactly n) and outside a parenthetical example: "(e.g." or "(for example"
+    up to and including the next ")" (an example word is not a quote of the tree). An example opener
+    with no ")" after it masks nothing, and "(i.e." opens no example (a restatement is a claim). A
     straight double quote right after a digit (an inch mark) opens nothing. A quote that does not close
-    on its line is not read.
-  * A numbered item is a line at column 0 such as "1. ", "Q1: ", "**2.**", "### 3) " or "Item 4. ". When
-    any such line is a Markdown heading (#), only heading lines are items, so a numbered list nested in
-    an answer is not mistaken for one. A duplicate item number, or one the brief's numbered questions
-    do not hold, is CANNOT_EVALUATE, except after a finding marker (a column-0 grade line, a VERDICT
-    line or an unnumbered heading, once an item has opened), where such a line is a list inside the
-    finding (a reproduction's steps). Text before the first item is the preamble.
-  * A finding section opens, after the last numbered item, at a column-0 grade line (BLOCKER, MAJOR,
-    MEDIUM or MINOR in upper case, optionally in "**", plural allowed), a VERDICT line or an unnumbered
-    Markdown heading, and runs to the next finding marker. It ends the last item, so evidence filed
-    under a finding is never attributed to the last answer. A grade line's head token is the first
-    token after the grade word, its punctuation and an optional finding number ("MAJOR: src/t.py:12
-    ...", "**BLOCKER** `src/t.py` ..."); a file the line names later, in its prose (a contrast or a
-    second file), does not bind. A grade line between two items stays part of the item above it.
-  * A VERDICT line is "VERDICT:", "**VERDICT:**" or "**VERDICT**:" (any case, leading spaces or tabs
-    allowed); its value is the rest of the line.
-  * An item is UNVERIFIABLE when the word UNVERIFIABLE (upper case) appears in its heading or its text
-    outside fenced blocks and blockquotes.
+    on its line is not read, and an opener with no closer drops out of the scan without hiding a later
+    complete quote of the other kind.
   * The brief's questions are its first run of column-0 numbered lines counting 1, 2, 3 and so on
-    (after a line reading QUESTIONS: when the brief has one); a number out of sequence ends the run, so
-    a later numbered list that restarts at 1 is not a question. A question's text is its line plus the
-    lines after it up to a blank line. A question asks for a quote when it holds the word quote (or
-    quotes, quoted, quoting).
-  * A file is named when a token of the heading, grade-line head or question (split at whitespace,
-    quotes, backticks, brackets, commas, semicolons and asterisks; a ":LINE" or ":LINE-LINE" suffix, a
-    "#" anchor and trailing dots or colons removed) is a blob path of the pinned tree, or is a bare name
-    (no slash) that is the basename of a blob and either is a root blob itself or carries a file
-    extension; a bare name names every blob with that basename. A token shaped like a relative file
-    path (a slash and a file extension) that is absent from the tree, and an absolute or home-relative
-    path outside the repository whose last part carries a file extension, are named absent paths. A
-    bare name absent from the tree names nothing (it cannot be told from an abbreviation such as
-    "e.g.").
+    ("1.", "Q1:", "**2.**", "### 3)" and "Item 4." forms; after a line reading QUESTIONS: when the
+    brief has one); a number out of sequence ends the run, so a later numbered list that restarts at 1
+    is not a question. A question's text is its line plus the lines after it up to a blank line.
+  * A file reference is a token (split at whitespace, quotes, apostrophes, backticks, brackets,
+    parentheses, commas and semicolons; a "#" anchor and a ":" suffix cut, then asterisks at its ends
+    and trailing dots, "!" or "?" removed), whatever other characters it holds, that is: a blob path of the pinned
+    tree; a path with a slash whose last part carries a file extension (a dot, then ASCII letters and
+    digits holding a letter) or whose first part is a directory of the tree; an absolute or
+    home-relative path whose last part carries an extension (one under the --repo directory, as given
+    or resolved, is read as its repository path); or a bare name (no slash) that is a root blob, the
+    basename of a blob with an extension, or a name carrying an extension some blob of the tree
+    carries. So "nonexistent/source+test.py", "docs/retired/ALPHA" and "alpha_old.md" are references
+    (absent ones), while "and/or", "2/2", "e.g." and "PinnedTree.read" are not. A URL, a directory of
+    the tree and a token holding a glob or placeholder character (* ? < > { } $) are not references.
 
 LIMITS. An input file is read up to MAX_INPUT_BYTES (16 MiB); a delivery is parsed in time linear in its
-size (the self-test runs a 16 MiB backtick run and a 16 MiB whitespace run on a VERDICT line in a capped
-child, each under RUNTIME_CAP_SECONDS, where the 8a61dfb9 patterns exceed that cap, plus a 16 MiB run of
-inch marks, which 8a61dfb9 did not scan, with no such flip). At most MAX_QUOTES
-quotes are checked; each costs at most one pass over the tree's blobs, which are read into memory
-(bounded at MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure needs its diagnostic.
+size (the self-test runs, in a capped child each under RUNTIME_CAP_SECONDS, a 16 MiB backtick run after a
+quote and a 16 MiB run of inch marks in the last answer and a 16 MiB whitespace run on the VERDICT line; the
+8a61dfb9 forms of the code-span and VERDICT scanners exceed that cap on the backtick and whitespace
+runs). At most MAX_QUOTES quotes are checked; each costs at most one pass over the tree's blobs, which
+are read into memory (bounded at MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
+needs its diagnostic. The brief's question text is joined line by line, which is not linear in a very
+long question.
 
-DISCLOSED RESIDUAL. C2 proves a quote EXISTS in the named file at the pinned SHA, not that it supports
-the grade the verifier gave; a grade resting on an earlier answer is not linked to that answer;
-runtime claims (that a name exists, or does not, at runtime) are out of scope here (a later rule). A
-Gemini-family verifier's actual read path is undeclared, so a verbatim quote proves the text is in the
-tree, not that the verifier read it there. False PASS: inline code spans, single-quoted text and text in
-other quotation marks (guillemets, low-9 quotes) are not read as quotes, so a fabricated quote presented
-only that way passes unseen; a double-quoted span that breaks across lines is not read; a quote cut at a
-line edge passes (above); attribution inside an answer's body (a "from file X:" lead-in) and in a grade
-line's prose is not parsed, only the heading, the grade line's head token and the question are; a
-question or heading naming several files accepts a match in any present one; a finding section whose
-marker names no file is checked against the whole tree; an answer word need not answer the question
-(only an exact restatement is caught). False FAIL: a double-quoted word used as a scare quote ("belt and
-braces"), not an example in "(e.g. ...)", is held to the tree; a quote of the brief's own text is held to
-the tree like any other. Fail closed: answers in a table, numbered without punctuation ("Q1 ") or not
-numbered give NO_VOTE (0/m); a leading blank line, a byte-order mark or a "REVIEWED: <sha>" line before
-the SHA gives CANNOT_EVALUATE; the UNVERIFIABLE and quote-question tests are word tests, so a stray
-mention moves an item toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are not
-re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing blob
-ids; a shallow file cuts only parent lists, which no read here uses. git is resolved through PATH, a
-trusted-toolchain concern; a repository in SHA-256 object format never resolves a 40-hex pin and so
+DISCLOSED RESIDUAL. C2 proves a quote EXISTS in a file the answer, its question or the findings section
+names at the pinned SHA, not that it supports the grade the verifier gave; a grade resting on an earlier
+answer is not linked to that answer; runtime claims (that a name exists, or does not, at runtime) are out
+of scope here (a later rule). A Gemini-family verifier's actual read path is undeclared, so a verbatim
+quote proves the text is in the tree, not that the verifier read it there. False PASS: inline code
+spans, single-quoted text and text in other quotation marks (guillemets, low-9 quotes) are not read as
+quotes, so a fabricated quote presented only that way passes unseen; a double-quoted span that breaks
+across lines is not read; a quote cut at a line edge passes (above); an answer naming several files
+accepts a match in any one of them, and the findings section is one unit, so a finding's quote may
+match a file another finding names; a findings section naming no file is checked against the whole
+tree; a glob or placeholder path is not a reference, so an answer naming only such a path binds like
+one naming none; findings written after the last answer without the exact "## Findings" line (a
+bulleted "- MAJOR:", "### Findings" or "Findings:") are read as text of the last answer, so their words
+can answer a question that does not ask for a quote and their quotes can answer one that does (each
+quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught). False FAIL: a
+double-quoted word used as a scare quote ("belt and braces"), not an example in "(e.g. ...)", is held to
+the tree; a quote of the brief's own text is held to the tree like any other; an answer that names a
+file absent from the tree its question does not name (a placeholder path without a placeholder
+character, a file outside the repository, or a product name such as "Node.js" when some blob carries a
+.js extension) fails. Fail closed: a delivery outside the closed shape (answers numbered "1." or
+"**Q1.**", answers in a table, a leading blank line, a byte-order mark or a "REVIEWED: <sha>" line
+before the SHA) is CANNOT_EVALUATE; the UNVERIFIABLE and quote-question tests are word tests, so a stray
+mention moves an answer toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are
+not re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing
+blob ids; a shallow file cuts only parent lists, which no read here uses. git is resolved through PATH,
+a trusted-toolchain concern; a repository in SHA-256 object format never resolves a 40-hex pin and so
 cannot be evaluated.
 
-SELF-TEST COVERAGE. Each rule has a fixture; a flip/ check patches a rule out and shows its fixture's
-result change for C1 (no answered item, answer content, quote-only), C2 (verbatim, inline, fenced,
-list-item fences, blockquotes, named files, headings, absent paths, finding sections, grade-line head,
-bare-name binding, excerpts, indentation, examples, CRLF tree files), the question marker, pin matching,
+SELF-TEST COVERAGE. Each rule has a fixture that changes result when the rule is removed; a flip/ check
+patches a rule out in the suite and shows its fixture's result change for C1 (no answered item, answer
+content, a quote question needs a quote, findings evidence is no answer), C2 (verbatim, inline, fenced,
+list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
+the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
+paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
+the closed shape (a heading inside a fence, the fence-close length), the question marker, pin matching,
 repeated pins, commit-only pins, strict decoding, CRLF transport, indented code blocks, ambient GIT_
-variables, replace refs, blob re-hashing, the pinned tree and both runtime scanners. These guards have
-a fixture but no discriminating flip, because another guard also refuses the same input: the
-non-regular-file check and O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input),
-git exit status (the type and listing checks also refuse), the --batch truncation check (blob
-re-hashing also refuses), the fence-close length and backtick info-string rules and the stop of the
-question run. The gc, maintenance and core.commitGraph pins and GIT_GRAFT_FILE have no fixture (no
-fixture builds a tampered commit-graph; grafts change only parent lists); the repository's
-maintenance-pin scan enforces the gc and maintenance pins on every git launch.
+variables, replace refs, blob re-hashing on both read paths, the pinned tree and both runtime scanners.
+These have a fixture but no flip/ check, since they sit inside the parser's loop or another guard also
+refuses the same input: each closed-shape refusal (missing, repeated, out-of-order and extra answers,
+text before Q1., a heading in the findings section, a second findings line, VERDICT and QA-COMPLETE
+placement), the unmatched-opener rule of the inline scanner, the non-regular-file check and
+O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input), git exit status (the type
+and listing checks also refuse), the --batch truncation check (blob re-hashing also refuses), the
+backtick info-string rule and the stop of the question run. The --no-replace-objects option and
+GIT_NO_REPLACE_OBJECTS each back the other, so the replace-ref flip removes both. The gc, maintenance
+and core.commitGraph pins and GIT_GRAFT_FILE have no fixture (no fixture builds a tampered
+commit-graph; grafts change only parent lists); the repository's maintenance-pin scan enforces the gc
+and maintenance pins on every git launch.
 """
 import sys
 
@@ -194,11 +216,11 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 PIN_LINE_RE = re.compile(r"BRIEF-PIN:(.*)")
 STATUS_PREFIX = "WORKER_STATUS"
 CLEAN_VERDICT = "NO BLOCKERS"
-GRADE_RE = re.compile(r"(?:\*\*)?(?:BLOCKER|MAJOR|MEDIUM|MINOR)S?(?![A-Za-z0-9_])")
-HEADING_RE = re.compile(r"#{1,6}(?:[ \t]|$)")
-GRADE_HEAD_RE = re.compile(r"[ \t*:\u2013\u2014-]*(?:\d{1,3}[.):]?[ \t*:\u2013\u2014-]*)?")
-ITEM_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?(\d{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
-                     re.I)
+ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
+FINDINGS_HEADING = "## Findings"
+COMPLETE_LINE = "QA-COMPLETE"
+QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?(\d{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
+                         re.I)
 QUESTIONS_MARKER_RE = re.compile(r"QUESTIONS:?", re.I)
 QUOTE_WORD_RE = re.compile(r"\bquot(?:e|es|ed|ing)\b", re.I)
 UNVERIFIABLE_RE = re.compile(r"\bUNVERIFIABLE\b")
@@ -206,13 +228,11 @@ FENCE_RE = re.compile(r"( *)(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r" *(`{3,}|~{3,})[ \t]*")
 BLOCKQUOTE_RE = re.compile(r" {0,3}>[ ]?(.*)$")
 BACKTICK_RUN_RE = re.compile(r"`+")
-EXAMPLE_RE = re.compile(r"\((?:e\.g\.|i\.e\.|for example)[^)]*\)?", re.I)
+EXAMPLE_OPEN_RE = re.compile(r"\((?:e\.g\.|for example)", re.I)
 INLINE_QUOTE_PAIRS = (('"', '"'), ("\u201c", "\u201d"))
-PATH_TOKEN_RE = re.compile(r"[^\s`'\"()\[\]<>{},;*\u201c\u201d]+")
-LINE_SUFFIX_RE = re.compile(r":\d+(?:-\d+)?$")
+PATH_TOKEN_RE = re.compile(r"[^\s`'\"()\[\],;\u2018\u2019\u201c\u201d]+")
+TEMPLATE_CHARS = frozenset("*?<>{}$")
 WORD_RE = re.compile(r"[^\W_]+")
-PATHLIKE_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+")
-FILE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+")
 WHOLE_TREE = "<pinned tree>"
 
 
@@ -265,6 +285,8 @@ class PinnedTree:
         self.blobs = {}
         self.dirs = set()
         self.by_basename = {}
+        self.extensions = set()
+        self.undotted = set()
         self._content = {}
         for entry in listing.split(b"\0"):
             if not entry:
@@ -280,7 +302,12 @@ class PinnedTree:
                 except ValueError:
                     raise CannotEvaluate("git ls-tree returned a non-numeric size for {}".format(path))
                 self.blobs[path] = (fields[2].decode("ascii"), size)
-                self.by_basename.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+                basename = path.rsplit("/", 1)[-1]
+                self.by_basename.setdefault(basename, []).append(path)
+                if _extension(basename):
+                    self.extensions.add(_extension(basename).casefold())
+                if "/" not in path and "." not in path:
+                    self.undotted.add(path)
             elif fields[1] == b"tree":
                 self.dirs.add(path)
 
@@ -425,7 +452,7 @@ def _segments(lines):
             continue
         start, indent, marker, content = fence
         close = FENCE_CLOSE_RE.fullmatch(line)
-        if close and close.group(1)[0] == marker[0] and len(close.group(1)) >= len(marker):
+        if close and _fence_closes(close, marker):
             out.append(("fence", start, content))
             fence = None
             continue
@@ -433,6 +460,12 @@ def _segments(lines):
     if fence is not None:
         raise CannotEvaluate("unclosed fenced block opened at line {}".format(fence[0]))
     return out
+
+
+def _fence_closes(close, marker):
+    """Whether a closing-fence line closes the fence its marker opened: the same character, at least
+    as long (a shorter run is fence content, so a four-backtick fence is not closed by three)."""
+    return close.group(1)[0] == marker[0] and len(close.group(1)) >= len(marker)
 
 
 def _code_spans(line):
@@ -455,11 +488,35 @@ def _code_spans(line):
     return spans
 
 
-def _inline_quotes(line):
-    """The double-quoted spans of one line, read outside its inline code spans and outside a
-    parenthetical example opened by "(e.g.", "(i.e." or "(for example"; a straight double quote right
-    after a digit (an inch or seconds mark) opens nothing. Linear: each search moves forward."""
-    masks = _code_spans(line) + [match.span() for match in EXAMPLE_RE.finditer(line)]
+def _example_spans(line):
+    """(start, end) of each parenthetical example of one line: "(e.g." or "(for example" up to and
+    including the next ")". An opener with no ")" after it masks nothing, and neither can any later
+    one, so the scan stops there. Linear: each search starts past the last span."""
+    spans, at = [], 0
+    while (match := EXAMPLE_OPEN_RE.search(line, at)) is not None:
+        end = line.find(")", match.end())
+        if end < 0:
+            break
+        spans.append((match.start(), end + 1))
+        at = end + 1
+    return spans
+
+
+def _inline_quotes(line, spans=None):
+    """The double-quoted texts of one line (see _inline_quote_spans), from spans when given."""
+    return [line[start + 1:end - 1] for start, end in (_inline_quote_spans(line) if spans is None else spans)
+            if line[start + 1:end - 1].strip()]
+
+
+def _inline_quote_spans(line):
+    """(start, end) of each double-quoted span of one line, its quote marks included, read outside its
+    inline code spans and outside a parenthetical example opened by "(e.g." or "(for example" and closed
+    by the next ")"; a straight double quote right after a digit (an inch or seconds mark) opens
+    nothing. An opener with no closer after it drops out of the scan without hiding a later complete
+    quote of the other kind. Linear: each search moves forward."""
+    if '"' not in line and "\u201c" not in line:
+        return []
+    masks = _code_spans(line) + _example_spans(line)
     masked = line
     if masks:
         pieces, at = [], 0
@@ -474,7 +531,7 @@ def _inline_quotes(line):
         masked = "".join(pieces)
     closers = dict(INLINE_QUOTE_PAIRS)
     following = {opener: -1 for opener in closers}
-    quotes = []
+    spans = []
     index = 0
     while True:
         for opener in closers:
@@ -491,11 +548,12 @@ def _inline_quotes(line):
             continue
         end = masked.find(closers[masked[start]], start + 1)
         if end < 0:
-            break
-        if line[start + 1:end].strip():
-            quotes.append(line[start + 1:end])
+            # No closer follows this opener, nor any later one of its kind: that kind drops out.
+            following[masked[start]] = None
+            continue
+        spans.append((start, end + 1))
         index = end + 1
-    return quotes
+    return spans
 
 
 def _verdict_of(line):
@@ -528,45 +586,52 @@ def _indented_code_start(previous, line):
 
 
 def _new_item(number, line, heading, kind="item"):
-    return {"item": number, "line": line, "heading": heading, "body": [], "quotes": [], "kind": kind}
+    return {"item": number, "line": line, "heading": heading, "body": [], "quotes": [], "kind": kind,
+            "names_text": []}
 
 
-def _item_heads(segments, heading_style, question_count):
-    """The segment positions that open a numbered item. After a finding marker (a column-0 grade line,
-    a VERDICT line or an unnumbered heading), a numbered line whose number is already used or names
-    no question of the brief is a list inside that finding (a reproduction's steps), not an item."""
-    heads, used, marked = {}, set(), False
-    # A marker counts only once an item has opened: a VERDICT line written before the answers ends nothing.
-    for position, (kind, _, payload) in enumerate(segments):
-        if kind != "line":
-            continue
-        head = ITEM_RE.match(payload)
-        if head and (head.group(1) or not heading_style):
-            number = int(head.group(2))
-            if marked and (number in used or (question_count and not 1 <= number <= question_count)):
-                continue
-            heads[position] = number
-            used.add(number)
-        elif heads and (_verdict_of(payload) is not None or GRADE_RE.match(payload) or HEADING_RE.match(payload)):
-            marked = True
-    return heads
+def _names_text(line, spans):
+    """line with its inline quote spans blanked: the text whose tokens can name a file (a quoted span
+    is quoted content, not the answer's own reference)."""
+    if not spans:
+        return line
+    pieces, at = [], 0
+    for start, end in spans:
+        pieces.append(line[at:start])
+        pieces.append(" ")
+        at = end
+    pieces.append(line[at:])
+    return "".join(pieces)
 
 
-def _parse_delivery(lines, question_count=0):
-    """(items, preamble, finding sections, verdict lines) of the delivery body. A finding section
-    opens, after the last numbered item, at a column-0 grade line, a VERDICT line or an unnumbered
-    heading, and ends that item: its evidence is not attributed to the last answer."""
+def _fenced_answer_head(content):
+    """The index of the first line of a fenced block's content that is shaped as an answer heading."""
+    return next((index for index, text in enumerate(content) if ANSWER_HEAD_RE.match(text)), None)
+
+
+def _is_findings_heading(line):
+    return line.rstrip(" \t") == FINDINGS_HEADING
+
+
+def _parse_delivery(lines, question_count):
+    """(answers, findings sections, verdict line) of the delivery body, read in the closed shape: for
+    each question in order a column-0 line "QN." (N = 1 to question_count, each once, ascending) opening
+    its answer; optionally one line "## Findings" opening a findings section, in which no line opens an
+    answer; one VERDICT line; then a QA-COMPLETE line. Blank and WORKER_STATUS lines may follow it.
+    Any other shape is CannotEvaluate naming the line: a boundary is never inferred from free text."""
     segments = _segments(lines)
-    heads = [ITEM_RE.match(seg[2]) for seg in segments if seg[0] == "line"]
-    heading_style = any(match and match.group(1) for match in heads)
-    item_heads = _item_heads(segments, heading_style, question_count)
-    last_item = max(item_heads, default=-1)
-    preamble = _new_item(None, None, "", "preamble")
-    current = preamble
-    items, sections = [], []
-    verdicts = []
+    answers, sections = [], []
+    current = None
+    verdict = None
+    phase = "answers"
+    expected = 1
     quote_run = []
     count = [0]
+
+    def refuse(number, what):
+        raise CannotEvaluate("delivery line {}: {} (closed delivery shape: the SHA line, then Q1. to Q{}. in "
+                             "order, an optional {!r} section, one VERDICT line, then {})".format(
+                                 number, what, question_count, FINDINGS_HEADING, COMPLETE_LINE))
 
     def add(quote):
         count[0] += 1
@@ -580,40 +645,82 @@ def _parse_delivery(lines, question_count=0):
         quote_run.clear()
 
     previous = ""
-    for position, (kind, number, payload) in enumerate(segments):
-        if kind == "line" and _indented_code_start(previous, payload):
-            raise CannotEvaluate("delivery line {} opens an indented block after a blank line; an indented "
-                                 "code block is outside the declared grammar (fence the quote)".format(number))
-        previous = payload if kind == "line" else None
+    for kind, number, payload in segments:
         if kind == "fence":
             flush()
+            inner = _fenced_answer_head(payload)
+            if inner is not None:
+                refuse(number + inner + 1, "an answer heading inside the fenced block opened at line {}".format(number))
+            if phase not in ("answers", "findings") or current is None:
+                refuse(number, "a fenced block outside an answer or the findings section")
             if any(text.strip() for text in payload):
                 add({"kind": "fenced", "line": number, "text": "\n".join(payload)})
+            previous = None
             continue
+        if _indented_code_start(previous, payload):
+            raise CannotEvaluate("delivery line {} opens an indented block after a blank line; an indented "
+                                 "code block is outside the declared grammar (fence the quote)".format(number))
+        previous = payload
         quoted = BLOCKQUOTE_RE.match(payload)
-        if quoted:
+        if quoted and phase in ("answers", "findings") and current is not None:
             quote_run.append((number, quoted.group(1)))
             continue
         flush()
-        if payload.startswith(STATUS_PREFIX):
+        if payload.startswith(STATUS_PREFIX) or (phase in ("closed", "complete") and not payload.strip()):
             continue
-        verdict = _verdict_of(payload)
-        if position in item_heads:
-            current = _new_item(item_heads[position], number, payload)
-            items.append(current)
-        elif position > last_item and (verdict is not None or GRADE_RE.match(payload)
-                                       or HEADING_RE.match(payload)):
-            current = _new_item(None, number, payload, "verdict" if verdict is not None else "finding")
-            sections.append(current)
+        if phase == "complete":
+            refuse(number, "text after the {} line".format(COMPLETE_LINE))
+        if phase == "closed":
+            if payload.rstrip(" \t") != COMPLETE_LINE:
+                refuse(number, "text between the VERDICT line and {}".format(COMPLETE_LINE))
+            phase = "complete"
+            continue
+        head = ANSWER_HEAD_RE.match(payload) if payload.startswith("Q") else None
+        value = _verdict_of(payload)
+        spans = _inline_quote_spans(payload)
+        if head:
+            if phase == "findings":
+                refuse(number, "an answer heading inside the findings section")
+            if expected > question_count:
+                refuse(number, "an answer heading after Q{}., the brief's last question".format(question_count))
+            if head.group(0) != "Q{}.".format(expected):
+                refuse(number, "answer heading {} where Q{}. is expected".format(head.group(0), expected))
+            current = _new_item(expected, number, payload)
+            current["names_text"].append(_names_text(payload, spans)[head.end():])
+            answers.append(current)
+            expected += 1
+        elif value is not None or _is_findings_heading(payload) or payload.rstrip(" \t") == COMPLETE_LINE:
+            if expected <= question_count:
+                refuse(number, "Q{}. is missing before this line".format(expected))
+            if value is None and _is_findings_heading(payload) and phase == "answers":
+                current = _new_item(None, number, payload, "finding")
+                sections.append(current)
+                phase = "findings"
+            elif value is None:
+                refuse(number, "a second {!r} line".format(FINDINGS_HEADING) if _is_findings_heading(payload)
+                       else "{} before the VERDICT line".format(COMPLETE_LINE))
+            else:
+                current = verdict = _new_item(None, number, payload, "verdict")
+                verdict["value"] = value
+                phase = "closed"
+        elif current is None:
+            if payload.strip():
+                refuse(number, "text before Q1.")
+            continue
         else:
             current["body"].append(payload)
-        if verdict is not None:
-            verdicts.append((number, verdict))
-        for text in _inline_quotes(payload):
-            add({"kind": "inline", "line": number, "text": text,
-                 "on_marker": current["kind"] in ("finding", "verdict") and current["line"] == number})
+            current["names_text"].append(_names_text(payload, spans))
+        for text in _inline_quotes(payload, spans):
+            add({"kind": "inline", "line": number, "text": text})
     flush()
-    return items, preamble, sections, verdicts
+    end = lines[-1][0] if lines else 1
+    if expected <= question_count:
+        refuse(end, "the delivery ends before Q{}.".format(expected))
+    if verdict is None:
+        refuse(end, "no VERDICT line")
+    if phase != "complete":
+        refuse(end, "no {} line after the VERDICT line".format(COMPLETE_LINE))
+    return answers, sections, verdict
 
 
 def _parse_questions(lines):
@@ -627,7 +734,7 @@ def _parse_questions(lines):
     questions = []
     current = None
     for number, text in text_lines[start:]:
-        match = ITEM_RE.match(text)
+        match = QUESTION_RE.match(text)
         if match:
             if int(match.group(2)) != len(questions) + 1:
                 if questions:
@@ -652,50 +759,78 @@ def _verdict_value(raw):
 # Rules
 # ---------------------------------------------------------------------------------------------------
 
+def _extension(name):
+    """The file extension of a name: the text after its last dot, when text other than dots stands
+    before that dot and the extension is ASCII letters and digits holding a letter; otherwise ""."""
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem.strip(".") or not (ext.isascii() and ext.isalnum()) or ext.isdigit():
+        return ""
+    return ext
+
+
+def _repository_path(token, tree):
+    """The repository path of an absolute path under the --repo directory (as given or resolved), or
+    None for any other absolute or home-relative path."""
+    return next((token[len(root) + 1:] for root in tree.roots if token.startswith(root + "/")), None)
+
+
 def _path_tokens(text, tree):
-    """(raw token, path or None, unresolved name or None) for each path-like token of text. A
-    repository-local absolute path (under the --repo directory, as given or resolved) is read as its
-    repository path; any other absolute or home-relative path with a file name is unresolved."""
+    """(blob path, None) for each file of the pinned tree text names, and (None, name) for each file
+    reference that resolves to no blob. A token (split at whitespace, quotes, apostrophes, backticks,
+    brackets, parentheses, commas and semicolons; a "#" anchor, a ":" suffix (so a URL keeps only its
+    scheme), asterisks at its ends and trailing dots, "!" or "?" removed) is a file reference, whatever
+    other characters it holds, when it
+    is a blob path; a path with a slash whose last part carries a file extension or whose first part is
+    a directory of the tree; an absolute or home-relative path whose last part carries an extension (a
+    path under the --repo directory is read as its repository path); or a bare name that is a root blob
+    or carries an extension some blob of the tree carries. A token holding a glob or placeholder
+    character (* ? < > { } $) and a directory of the tree are not file references."""
     for match in PATH_TOKEN_RE.finditer(text):
-        raw = match.group(0)
-        if "://" in raw:
+        token = match.group(0)
+        if "." not in token and "/" not in token and not (
+                tree.undotted and token.strip("*").split(":", 1)[0] in tree.undotted):
             continue
-        token = LINE_SUFFIX_RE.sub("", raw.split("#", 1)[0].rstrip(".:")).rstrip(".:")
-        outside = False
+        token = token.split("#", 1)[0].split(":", 1)[0].strip("*").rstrip(".!?").strip("*")
+        if not token or TEMPLATE_CHARS.intersection(token):
+            continue
         if token.startswith(("/", "~/")):
-            local = next((token[len(root) + 1:] for root in tree.roots if token.startswith(root + "/")), None)
+            local = _repository_path(token, tree)
             if local is None:
-                outside = True
-            else:
-                token = local
-        if token.startswith("./"):
+                if _extension(token.rsplit("/", 1)[-1]):
+                    yield None, token + " (outside the repository)"
+                continue
+            token = local
+        while token.startswith("./"):
             token = token[2:]
-        if not token:
+        if not token.strip("/."):
             continue
-        if outside:
-            if FILE_NAME_RE.fullmatch(token.rsplit("/", 1)[-1]):
-                yield raw, None, token + " (outside the repository)"
-            continue
-        bound = [token] if "/" in token and token in tree.blobs else _basename_bindings(token, tree)
-        if bound:
-            for path in bound:
-                yield raw, path, None
-        elif (PATHLIKE_RE.fullmatch(token) and token not in tree.dirs
-              and FILE_NAME_RE.fullmatch(token.rsplit("/", 1)[1])):
-            yield raw, None, token
+        if "/" in token:
+            if token in tree.blobs:
+                yield token, None
+            elif token.rstrip("/") in tree.dirs:
+                continue
+            elif _extension(token.rstrip("/").rsplit("/", 1)[-1]) or token.split("/", 1)[0] in tree.dirs:
+                yield None, token
+        else:
+            bound = _basename_bindings(token, tree)
+            if bound:
+                for path in bound:
+                    yield path, None
+            elif _extension(token).casefold() in tree.extensions:
+                yield None, token
 
 
-def _named_paths(text, tree, keep_unresolved=True):
-    """(blob paths of the tree named in text, path-shaped names absent from the tree)."""
+def _named_paths(text, tree):
+    """(blob paths of the tree text names, file references of text absent from the tree)."""
     found, unresolved, seen = [], [], set()
-    for _, path, absent in _path_tokens(text, tree):
+    for path, absent in _path_tokens(text, tree):
         key = path or absent
         if key in seen:
             continue
         seen.add(key)
         if path is not None:
             found.append(path)
-        elif keep_unresolved:
+        else:
             unresolved.append(absent)
     return found, unresolved
 
@@ -703,44 +838,39 @@ def _named_paths(text, tree, keep_unresolved=True):
 def _basename_bindings(token, tree):
     """The blobs a bare name (no slash) names: every blob with that basename, the root one first, when
     the name is a root blob or carries a file extension; a name that is no basename binds nothing."""
-    if "/" in token or not (token in tree.blobs or FILE_NAME_RE.fullmatch(token)):
+    if "/" in token or not (token in tree.blobs or _extension(token)):
         return []
     return sorted(tree.by_basename.get(token, ()), key=lambda path: ("/" in path, path))
 
 
-def _heading_names(heading, tree):
-    return _named_paths(heading, tree, True)
+def _answer_names(item, tree):
+    """The files an answer names anywhere in its own text (its QN. line and body, outside quotes)."""
+    return _named_paths("\n".join(item["names_text"]), tree)
 
 
-def _grade_line_names(line, tree):
-    """The files a grade line attributes its finding to: the names of its head token, the first token
-    after the grade word, its punctuation and an optional finding number ("MAJOR: src/t.py:12 ...",
-    "**BLOCKER** `src/t.py` ..."). A file named later in the line's prose (a contrast, a second
-    file) does not bind, since prose attribution is not parsed."""
-    rest = line[GRADE_RE.match(line).end():]
-    head = GRADE_HEAD_RE.match(rest)
-    token = PATH_TOKEN_RE.search(rest, head.end() if head else 0)
-    if token is None or rest[head.end() if head else 0:token.start()].strip(" \t`*'\"([<"):
-        return [], []
-    return _named_paths(token.group(0), tree, True)
+def _findings_names(section, tree):
+    """The files the findings section names anywhere in its text, outside quotes."""
+    return _named_paths("\n".join(section["names_text"]), tree)
 
 
 def _quote_targets(item, questions, tree):
-    """(files the item's quotes must match in, named paths absent from the tree, what named them)."""
-    if item["kind"] in ("preamble", "verdict"):
-        return [], [], "none"
-    if item["kind"] == "finding" and GRADE_RE.match(item["heading"]):
-        found, unresolved = _grade_line_names(item["heading"], tree)
-    else:
-        found, unresolved = _heading_names(item["heading"], tree)
+    """(files the item's quotes must match in, named files absent from the tree, what named them, the
+    answer's own absent file references that its question does not name). An answer that names a
+    file binds to the files it names, never to the whole tree; one that names none binds to its
+    question's files; the whole tree only when neither names a file."""
+    if item["kind"] == "verdict":
+        return [], [], "none (the VERDICT line)", []
+    if item["kind"] == "finding":
+        found, unresolved = _findings_names(item, tree)
+        return (found, unresolved, "findings section", []) if found or unresolved else ([], [], "none", [])
+    found, unresolved = _answer_names(item, tree)
+    question = questions.get(item["item"])
+    asked = _named_paths(question["text"], tree) if question is not None else ([], [])
     if found or unresolved:
-        return found, unresolved, "heading" if item["kind"] == "item" else item["kind"]
-    question = questions.get(item["item"]) if item["kind"] == "item" else None
-    if question is not None:
-        found, unresolved = _named_paths(question["text"], tree, True)
-        if found or unresolved:
-            return found, unresolved, "question"
-    return [], [], "none"
+        return found, unresolved, "answer", [name for name in unresolved if name not in asked[1]]
+    if asked[0] or asked[1]:
+        return asked[0], asked[1], "question", []
+    return [], [], "none", []
 
 
 def _substance_words(text, tree):
@@ -754,22 +884,30 @@ def _substance_words(text, tree):
         yield from WORD_RE.findall(token.casefold())
 
 
+def _asks_for_quote(question):
+    """Whether a question asks for a quote: it holds the word quote (quotes, quoted, quoting)."""
+    return bool(QUOTE_WORD_RE.search(question["text"]))
+
+
 def _answer_state(item, question, tree):
-    """"answered", or why the item is not: UNVERIFIABLE, empty (no word beyond its number and file
-    names, and no quote), or the question restated (exactly its words). Both word streams are read
-    only as far as their first difference."""
+    """"answered", or why the item is not: UNVERIFIABLE, no quote (prose alone answering a question
+    that asks for a quote), empty (no word beyond its QN. marker and file names, and no quote), or
+    the question restated (exactly its words). Both word streams are read only as far as their first
+    difference."""
     if item["unverifiable"]:
         return "unverifiable"
     if item["quotes"]:
         return "answered"
-    head = ITEM_RE.match(item["heading"])
+    if question is not None and _asks_for_quote(question):
+        return "no quote"
+    head = ANSWER_HEAD_RE.match(item["heading"])
     words = _substance_words("\n".join([item["heading"][head.end():] if head else item["heading"]]
                                         + item["body"]), tree)
     first = next(words, None)
     if first is None:
         return "empty"
     if question is not None:
-        asked = ITEM_RE.match(question["text"])
+        asked = QUESTION_RE.match(question["text"])
         wanted = _substance_words(question["text"][asked.end():] if asked else question["text"], tree)
         ours = iter([first])
         missing = object()
@@ -875,15 +1013,9 @@ def _rule_all_unverifiable(verdict, answered, total):
     """C1: a verdict of any kind with no answered item is no vote (a verdict counts only for answered
     items)."""
     if verdict is not None and answered == 0:
-        return "verdict {!r} with no answered item (every item UNVERIFIABLE or absent; coverage 0/{})" \
+        return "verdict {!r} with no answered item (every item UNVERIFIABLE, empty, restated or unquoted; " \
+               "coverage 0/{})" \
             .format(verdict, total)
-    return None
-
-
-def _rule_quote_only(clean, quote_only, items):
-    """C1: a clean verdict on a quote-only question list with no quote in any item is no vote."""
-    if clean and quote_only and not any(item["quotes"] for item in items):
-        return "clean verdict on a quote-only question list with no quote in any item"
     return None
 
 
@@ -894,8 +1026,8 @@ def _rule_quote_only(clean, quote_only, items):
 def evaluate(brief_path, delivery_path, repo):
     """(report, exit code) for one delivery against one brief and repository."""
     report = {"tool": "check_verifier_delivery", "verdict": None, "reasons": [], "pin": None,
-              "delivery_verdict": None, "clean": False, "quote_only_questions": False,
-              "coverage": None, "quotes_checked": 0, "quotes_failed": 0, "items": []}
+              "delivery_verdict": None, "clean": False, "coverage": None, "quotes_checked": 0,
+              "quotes_failed": 0, "items": []}
     try:
         brief = _decode(_read_input(brief_path, "brief"), "brief")
         delivery = _decode(_read_input(delivery_path, "delivery"), "delivery")
@@ -903,28 +1035,25 @@ def evaluate(brief_path, delivery_path, repo):
         report["pin"] = pin
         body = _delivery_body(delivery, pin)
         questions = _parse_questions(_lines(brief))
-        items, preamble, sections, verdicts = _parse_delivery(body, len(questions))
-        numbers = [item["item"] for item in items]
-        seen = set()
-        for number in numbers:
-            if number in seen:
-                raise CannotEvaluate("delivery item {} appears more than once".format(number))
-            seen.add(number)
-            if questions and not 1 <= number <= len(questions):
-                raise CannotEvaluate("delivery item {} answers no numbered question of the brief ({})"
-                                     .format(number, len(questions)))
+        if not questions:
+            raise CannotEvaluate("the brief numbers no question; the closed delivery shape answers a numbered "
+                                 "question list")
+        items, sections, verdict_line = _parse_delivery(body, len(questions))
         tree = PinnedTree(repo, pin)
         by_number = {question["number"]: question for question in questions}
         failures = []
-        for item in [preamble] + items + sections:
-            targets, unresolved, named_by = _quote_targets(item, by_number, tree)
+        for item in items + sections + [verdict_line]:
+            targets, unresolved, named_by, stray = _quote_targets(item, by_number, tree)
             unverifiable = bool(UNVERIFIABLE_RE.search("\n".join([item["heading"]] + item["body"])))
             item["unverifiable"] = unverifiable
+            if stray:
+                failures.append("item {} line {} names {}{}, absent from the pinned tree (an answer's file reference "
+                                "must resolve)".format(item["item"], item["line"], ", ".join(stray[:MAX_LISTED]),
+                                                       " and {} more".format(len(stray) - MAX_LISTED)
+                                                       if len(stray) > MAX_LISTED else ""))
             results = []
             for quote in item["quotes"]:
-                scope = ([], [], "none (inline on the marker line)") if quote.get("on_marker") else \
-                    (targets, unresolved, named_by)
-                result = _check_quote(tree, quote, *scope, diagnose=len(failures) < MAX_LISTED)
+                result = _check_quote(tree, quote, targets, unresolved, named_by, diagnose=len(failures) < MAX_LISTED)
                 results.append(result)
                 if not result["ok"]:
                     failures.append("{} line {} {} quote: {}".format(
@@ -938,31 +1067,19 @@ def evaluate(brief_path, delivery_path, repo):
                 report["items"].append({"item": item["item"] if item["kind"] == "item" else item["kind"],
                                         "line": item["line"], "heading": item["heading"][:400],
                                         "unverifiable": unverifiable if item["kind"] == "item" else None,
-                                        "answer": state, "quotes": results})
+                                        "answer": state, "absent_references": stray[:MAX_LISTED], "quotes": results})
             report["quotes_checked"] += len(results)
             report["quotes_failed"] += sum(1 for result in results if not result["ok"])
     except CannotEvaluate as exc:
         report["verdict"] = "CANNOT_EVALUATE"
         report["reasons"].append(str(exc))
         return report, 2
-    no_vote = []
-    values = sorted({_verdict_value(value) for _, value in verdicts})
-    if not values:
-        no_vote.append("no VERDICT line")
-    elif len(values) > 1:
-        no_vote.append("conflicting VERDICT lines: {}".format("; ".join(values)))
-    else:
-        report["delivery_verdict"] = values[0]
-        report["clean"] = values[0] == CLEAN_VERDICT
-    total = len(questions) if questions else len(items)
+    report["delivery_verdict"] = _verdict_value(verdict_line["value"])
+    report["clean"] = report["delivery_verdict"] == CLEAN_VERDICT
+    total = len(questions)
     answered = sum(1 for item in items if item["state"] == "answered")
     report["coverage"] = {"answered": answered, "total": total, "text": "{}/{}".format(answered, total)}
-    quote_only = bool(questions) and all(QUOTE_WORD_RE.search(question["text"]) for question in questions)
-    report["quote_only_questions"] = quote_only
-    for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),
-                   _rule_quote_only(report["clean"], quote_only, items)):
-        if reason:
-            no_vote.append(reason)
+    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),) if reason]
     if failures:
         report["verdict"] = "FAIL"
         report["reasons"] = failures + no_vote
@@ -1000,6 +1117,7 @@ FIXTURE_FILES = {
     "README.md": "Only the root readme carries this line.\n",
     ".preview/README.md": "| Tool | Role |\n| pattern-self-match.py | matches its own pattern |\n",
     "docs/crlf.md": "Stored with CRLF line ends.\r\nSecond stored line.\r\n",
+    "VERSION": "0.0.1-fixture\n",
 }
 BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
                "1. Quote the first rule from docs/alpha.md.\n"
@@ -1023,10 +1141,17 @@ BRIEF_MARKER = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\nBackground steps:\
                 "1. Quote the first rule from docs/alpha.md.\n\nQUESTIONS:\n"
                 "1. Quote the sentence in docs/gamma.md.\n")
 BRIEF_ONE = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Inspect docs/alpha.md and say whether it states a rule.\n"
-A1 = '1. docs/alpha.md reads "The first rule is plain."'
-A2 = "2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
-A3 = '3. docs/gamma.md says "Only gamma carries this exact sentence."'
-A4 = '4. Yes: "    return 0" ends beta().'
+BRIEF_OPEN = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Inspect the tree and report one sentence of it.\n"
+BRIEF_QUOTE_TWO = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
+                   "1. Quote the readiness guard from src/beta.py.\n"
+                   "2. Quote the first rule from docs/alpha.md.\n")
+BRIEF_ABSENT_ASKED = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Does docs/retired/alpha.md still exist?\n"
+BRIEF_VERSION = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the VERSION line as written.\n"
+BRIEF_BARE_ABSENT = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the first rule from alpha_old.md.\n"
+A1 = 'Q1. docs/alpha.md reads "The first rule is plain."'
+A2 = "Q2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
+A3 = 'Q3. docs/gamma.md says "Only gamma carries this exact sentence."'
+A4 = 'Q4. Yes: "    return 0" ends beta().'
 
 
 def check(name, got, want):
@@ -1040,11 +1165,21 @@ def check(name, got, want):
 
 
 def _unverifiable(number):
-    return "{}. UNVERIFIABLE: the file could not be read.".format(number)
+    return "Q{}. UNVERIFIABLE: the file could not be read.".format(number)
 
 
-def _delivery(pin, *items, verdict="VERDICT: NO BLOCKERS", lead=""):
-    return "{}{}\n{}\n\n{}\n\nWORKER_STATUS: COMPLETE\n".format(lead, pin, verdict, "\n\n".join(items))
+def _delivery(pin, *items, verdict="VERDICT: NO BLOCKERS", lead="", findings=None):
+    """A delivery in the closed shape: the SHA line, the answers, an optional findings section, the
+    VERDICT line and QA-COMPLETE, then the transport's WORKER_STATUS line."""
+    body = "\n\n".join(items) + ("\n\n{}\n{}".format(FINDINGS_HEADING, findings) if findings is not None else "")
+    return "{}{}\n\n{}\n\n{}\n{}\n\nWORKER_STATUS: COMPLETE\n".format(lead, pin, body, verdict, COMPLETE_LINE)
+
+
+def _mixed(pin, replace=None, **options):
+    """The four answers A1 to A4 to BRIEF_MIXED, with the answers replace maps by number swapped in."""
+    answers = {1: A1, 2: A2, 3: A3, 4: A4}
+    answers.update(replace or {})
+    return _delivery(pin, *(answers[number] for number in sorted(answers)), **options)
 
 
 class _Fixture:
@@ -1111,6 +1246,8 @@ def _whole_line_only(content, data):
 def _self_test_cases(fx):
     sha = fx.pin
     verdict = lambda report: report["verdict"]
+    refusal = lambda report, words: (report["verdict"], words in " ".join(report["reasons"]))
+    refused = ("CANNOT_EVALUATE", True)
     never = re.compile(r"(?!)")
 
     # C1 coverage
@@ -1119,17 +1256,28 @@ def _self_test_cases(fx):
     check("flip/c1-all-unverifiable",
           verdict(_patched("_rule_all_unverifiable", lambda *a: None, lambda: fx.run(all_unverifiable))),
           "PASS")
-    one = fx.run(_delivery(sha, A1, A2, _unverifiable(3), A4, lead="WORKER_STATUS: RUNNING\n"))
+    one = fx.run(_mixed(sha, {3: _unverifiable(3)}, lead="WORKER_STATUS: RUNNING\n"))
     check("c1/one-unverifiable-passes", (verdict(one), one["coverage"]["text"]), ("PASS", "3/4"))
-    no_quotes = _delivery(sha, *("{}. Confirmed after reading the file.".format(n) for n in range(1, 5)))
-    check("c1/quote-only-without-quotes-no-vote", verdict(fx.run(no_quotes, BRIEF_QUOTE_ONLY)), "NO_VOTE")
+    no_quotes = _delivery(sha, *("Q{}. Confirmed after reading the file.".format(n) for n in range(1, 5)))
+    report = fx.run(no_quotes, BRIEF_QUOTE_ONLY)
+    check("c1/quote-only-without-quotes-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/4"))
     check("flip/c1-quote-only",
-          verdict(_patched("_rule_quote_only", lambda *a: None, lambda: fx.run(no_quotes, BRIEF_QUOTE_ONLY))),
+          verdict(_patched("_asks_for_quote", lambda question: False, lambda: fx.run(no_quotes, BRIEF_QUOTE_ONLY))),
           "PASS")
     check("c1/quote-only-with-quotes-passes", verdict(fx.run(
-        _delivery(sha, A1, A2, A3, '4. docs/alpha.md: "The third rule closes the set."'), BRIEF_QUOTE_ONLY)),
-        "PASS")
-    check("c1/mixed-list-without-quotes-passes", verdict(fx.run(no_quotes)), "PASS")
+        _mixed(sha, {4: 'Q4. docs/alpha.md: "The third rule closes the set."'}), BRIEF_QUOTE_ONLY)), "PASS")
+    report = fx.run(no_quotes)
+    check("c1/mixed-list-without-quotes-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "1/4"))
+    prose = _delivery(sha, "Q1. src/beta.py:\n```\n    if ready:\n        return 1\n```", "Q2. Confirmed.")
+    report = fx.run(prose, BRIEF_QUOTE_TWO)
+    check("c1/quote-question-prose-not-answered",
+          (verdict(report), report["coverage"]["text"], [item["answer"] for item in report["items"]]),
+          ("PASS", "1/2", ["answered", "no quote"]))
+    check("flip/c1-quote-question-prose", _patched(
+        "_asks_for_quote", lambda question: False, lambda: fx.run(prose, BRIEF_QUOTE_TWO))["coverage"]["text"], "2/2")
+    report = fx.run(prose.replace("Q2. Confirmed.", "Q2. UNVERIFIABLE"), BRIEF_QUOTE_TWO)
+    check("c1/quote-question-unverifiable-word-passes",
+          (verdict(report), [item["answer"] for item in report["items"]]), ("PASS", ["answered", "unverifiable"]))
     blockers_none = _delivery(sha, *(_unverifiable(n) for n in range(1, 6)), verdict="VERDICT: BLOCKERS FOUND")
     report = fx.run(blockers_none, BRIEF_FIVE)
     check("c1/blockers-zero-coverage-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/5"))
@@ -1138,40 +1286,118 @@ def _self_test_cases(fx):
           verdict(_patched("_rule_all_unverifiable", clean_only, lambda: fx.run(blockers_none, BRIEF_FIVE))), "PASS")
     report = fx.run(_delivery(sha, A1, *(_unverifiable(n) for n in range(2, 5)), verdict="VERDICT: BLOCKERS FOUND"))
     check("c1/blockers-with-answered-item-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "1/4"))
-    check("c1/absent-verdict-no-vote", verdict(fx.run(_delivery(sha, A1, A2, A3, A4, verdict="Summary."))),
-          "NO_VOTE")
-    check("c1/conflicting-verdicts-no-vote",
-          verdict(fx.run(_delivery(sha, A1, A2, A3, A4 + "\nVERDICT: BLOCKERS"))), "NO_VOTE")
+
+    # The closed delivery shape
+    check("shape/absent-verdict-cannot-evaluate", refusal(fx.run(
+        _mixed(sha).replace("VERDICT: NO BLOCKERS\n{}\n".format(COMPLETE_LINE), "")), "no VERDICT line"), refused)
+    check("shape/second-verdict-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {4: A4 + "\n\nVERDICT: BLOCKERS"})), "between the VERDICT line"), refused)
+    check("shape/missing-qa-complete-cannot-evaluate", refusal(fx.run(
+        _mixed(sha).replace("\n{}\n".format(COMPLETE_LINE), "\n")), "no QA-COMPLETE line"), refused)
+    check("shape/text-after-qa-complete-cannot-evaluate", refusal(fx.run(
+        _mixed(sha).replace("WORKER_STATUS: COMPLETE", "A late note.")), "after the QA-COMPLETE line"), refused)
+    check("shape/text-before-first-answer-cannot-evaluate", refusal(fx.run(
+        _mixed(sha).replace("\n\nQ1.", '\nIntro "never in the tree"\n\nQ1.', 1)), "text before Q1."), refused)
+    check("shape/legacy-numbered-answers-cannot-evaluate", refusal(fx.run(
+        _delivery(sha, *(answer[1:] for answer in (A1, A2, A3, A4)))), "text before Q1."), refused)
+    check("shape/duplicate-answer-cannot-evaluate",
+          refusal(fx.run(_delivery(sha, A1, A1, A2, A3, A4)), "Q1. where Q2. is expected"), refused)
+    check("shape/out-of-order-answer-cannot-evaluate",
+          refusal(fx.run(_delivery(sha, A2, A1, A3, A4)), "Q2. where Q1. is expected"), refused)
+    check("shape/missing-answer-cannot-evaluate",
+          refusal(fx.run(_delivery(sha, A1, A2, A3)), "Q4. is missing"), refused)
+    check("shape/truncated-delivery-cannot-evaluate",
+          refusal(fx.run("{}\n\n{}\n\n{}\n".format(sha, A1, A2)), "the delivery ends before Q3."), refused)
+    check("shape/answer-beyond-questions-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {5: 'Q5. docs/alpha.md "The first rule is plain."'})), "after Q4."), refused)
+    fenced_head = _mixed(sha, {1: "Q1. docs/alpha.md:\n```\nThe first rule is plain.\nQ2. src/beta.py\n```"})
+    check("shape/answer-heading-inside-fence-cannot-evaluate",
+          refusal(fx.run(fenced_head), "answer heading inside the fenced block"), refused)
+    check("flip/shape-answer-heading-inside-fence",
+          verdict(_patched("_fenced_answer_head", lambda content: None, lambda: fx.run(fenced_head))), "FAIL")
+    below = _delivery(sha, "Q1. \nSymbol: `beta`\n```python\ndef beta(ready):\n```", "Q2. \n> The first rule is plain.")
+    report = fx.run(below, BRIEF_QUOTE_TWO)
+    check("shape/answer-below-its-heading-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "2/2"))
+    numbered = _mixed(sha, {1: A1 + "\n1. one\n2. two\n### 3. three",
+                            2: A2 + "\nMAJOR: a grade word inside an answer\n## A sub-heading\n4. four"})
+    check("shape/numbered-lines-inside-answer-are-content-passes", verdict(fx.run(numbered)), "PASS")
+    check("shape/unclosed-fence-cannot-evaluate", refusal(fx.run(
+        _delivery(sha, "Q1. docs/alpha.md:\n```\nThe first rule is plain."), BRIEF_ONE), "unclosed fenced block"),
+        refused)
+    short_close = _delivery(sha, "Q1. docs/alpha.md:\n````\nThe first rule is plain.\n```")
+    check("shape/shorter-fence-close-cannot-evaluate",
+          refusal(fx.run(short_close, BRIEF_ONE), "unclosed fenced block"), refused)
+    same_char = lambda close, marker: close.group(1)[0] == marker[0]
+    check("flip/shape-fence-close-length",
+          verdict(_patched("_fence_closes", same_char, lambda: fx.run(short_close, BRIEF_ONE))), "PASS")
+
+    # Findings: after the last answer, under one "## Findings" line, never an answer
+    unrelated = _delivery(sha, "Q1. src/beta.py: yes.", "Q2. docs/alpha.md: yes.",
+                          findings="MAJOR: an unrelated sentence:\n> Only gamma carries this exact sentence.",
+                          verdict="VERDICT: BLOCKERS FOUND")
+    check("c2/findings-not-attributed-to-last-answer-passes", verdict(fx.run(unrelated, BRIEF_TWO)), "PASS")
+    check("flip/c2-findings-section",
+          verdict(_patched("FINDINGS_HEADING", "## Not the findings line", lambda: fx.run(unrelated, BRIEF_TWO))), "FAIL")
+    empty_last = _delivery(sha, "Q1. src/beta.py: yes.", "Q2.", findings="MAJOR: the rule reads\n> The first rule is plain.")
+    report = fx.run(empty_last, BRIEF_TWO)
+    check("c1/findings-evidence-not-an-answer", (verdict(report), report["coverage"]["text"]), ("PASS", "1/2"))
+    check("flip/c1-findings-evidence", _patched(
+        "FINDINGS_HEADING", "## Not the findings line", lambda: fx.run(empty_last, BRIEF_TWO))["coverage"]["text"], "2/2")
+    steps = "MAJOR: could not read the tree; steps:\n1. open it\n2. read it\n3. fail\n4. observe the error"
+    check("shape/findings-steps-never-fill-answers-cannot-evaluate", refusal(fx.run(
+        _delivery(sha, *(_unverifiable(n) for n in range(1, 4)), findings=steps)), "Q4. is missing"), refused)
+    report = fx.run(_delivery(sha, *(_unverifiable(n) for n in range(1, 4)), "Q4.", findings=steps,
+                              verdict="VERDICT: BLOCKERS FOUND"))
+    check("c1/findings-steps-not-answers-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/4"))
+    check("shape/answer-heading-in-findings-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, findings="MAJOR: steps:\nQ4. observe the error")), "inside the findings section"), refused)
+    check("shape/second-findings-heading-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, findings="MAJOR: one.\n{}\nMINOR: two.".format(FINDINGS_HEADING))), "a second"), refused)
+    check("shape/findings-reproduction-list-passes", verdict(fx.run(_delivery(
+        sha, "Q1. src/beta.py: yes.", "Q2. docs/alpha.md: yes.", findings="MAJOR: steps to see it:\n1. run it\n2. see it\n3. done"),
+        BRIEF_TWO)), "PASS")
+    named_finding = _delivery(sha, "Q1. src/beta.py: yes.", "Q2. docs/alpha.md: yes.",
+                              findings="MAJOR: docs/gamma.md: the guard reads\n```\n    if ready:\n```")
+    check("c2/findings-names-bind-fails", verdict(fx.run(named_finding, BRIEF_TWO)), "FAIL")
+    check("flip/c2-findings-names",
+          verdict(_patched("_findings_names", lambda *a: ([], []), lambda: fx.run(named_finding, BRIEF_TWO))), "PASS")
+    check("c2/findings-contrast-quotes-pass", verdict(fx.run(_delivery(
+        sha, "Q1. src/beta.py: yes.", "Q2. docs/alpha.md: yes.",
+        findings='MINOR: docs/alpha.md says "The first rule is plain." where src/beta.py says "    return 0"'),
+        BRIEF_TWO)), "PASS")
+    evidence = "Q4. src/beta.py: yes, it returns 0.\n{}\n```\nOnly gamma carries this exact sentence.\n```"
+    check("c2/sub-heading-keeps-answer-binding-fails",
+          verdict(fx.run(_mixed(sha, {4: evidence.format("### Evidence")}))), "FAIL")
+    check("c2/grade-word-line-keeps-answer-binding-fails",
+          verdict(fx.run(_mixed(sha, {4: evidence.format("MINOR detail, the guard reads:")}))), "FAIL")
 
     # C2 verbatim
-    check("c2/exact-delivery-passes", verdict(fx.run(_delivery(sha, A1, A2, A3, A4))), "PASS")
-    joined = _delivery(sha, '1. docs/alpha.md reads "The first rule is plain. The second rule follows it."',
-                       A2, A3, A4)
+    check("c2/exact-delivery-passes", verdict(fx.run(_mixed(sha))), "PASS")
+    joined = _mixed(sha, {1: 'Q1. docs/alpha.md reads "The first rule is plain. The second rule follows it."'})
     report = fx.run(joined)
     check("c2/joined-lines-fails", (verdict(report), report["quotes_failed"]), ("FAIL", 1))
     check("flip/c2-verbatim-joined",
           verdict(_patched("_verbatim_in", _normalised_containment, lambda: fx.run(joined))), "PASS")
     check("flip/c2-inline-quotes", verdict(_patched("INLINE_QUOTE_PAIRS", (), lambda: fx.run(joined))), "PASS")
-    dropped = _delivery(sha, "1. docs/alpha.md:\n```\nThe first rule is plain.\nThe third rule closes the set.\n```",
-                        A2, A3, A4)
+    dropped = _mixed(sha, {1: "Q1. docs/alpha.md:\n```\nThe first rule is plain.\nThe third rule closes the set.\n```"})
     check("c2/dropped-middle-line-fails", verdict(fx.run(dropped)), "FAIL")
     check("flip/c2-fenced-blocks", verdict(_patched("FENCE_RE", never, lambda: fx.run(dropped))), "PASS")
-    other = _delivery(sha, '1. The rule reads "Only gamma carries this exact sentence."', A2, A3, A4)
+    other = _mixed(sha, {1: 'Q1. The rule reads "Only gamma carries this exact sentence."'})
     report = fx.run(other)
     reason = " ".join(report["reasons"])
     check("c2/other-file-than-question-fails",
           (verdict(report), "docs/alpha.md" in reason, "docs/gamma.md" in reason), ("FAIL", True, True))
     check("flip/c2-named-file",
-          verdict(_patched("_quote_targets", lambda *a: ([], [], "none"), lambda: fx.run(other))), "PASS")
-    precedence = _delivery(sha, A1, A2, '3. docs/alpha.md says "Only gamma carries this exact sentence."', A4)
-    check("c2/heading-file-precedence-fails", verdict(fx.run(precedence)), "FAIL")
-    check("flip/c2-heading-names",
-          verdict(_patched("_heading_names", lambda *a: ([], []), lambda: fx.run(precedence))), "PASS")
-    absent = _delivery(sha, A1, A2, '3. docs/missing.md says "Only gamma carries this exact sentence."', A4)
-    check("c2/heading-names-absent-path-fails", verdict(fx.run(absent)), "FAIL")
-    check("flip/c2-heading-absent-path",
-          verdict(_patched("_heading_names", lambda *a: ([], []), lambda: fx.run(absent))), "PASS")
-    rewrapped = _delivery(sha, "1. docs/alpha.md:\n```\nThe second rule\nfollows it.\n```", A2, A3, A4)
+          verdict(_patched("_quote_targets", lambda *a: ([], [], "none", []), lambda: fx.run(other))), "PASS")
+    precedence = _mixed(sha, {3: 'Q3. docs/alpha.md says "Only gamma carries this exact sentence."'})
+    check("c2/answer-file-precedence-fails", verdict(fx.run(precedence)), "FAIL")
+    check("flip/c2-answer-names",
+          verdict(_patched("_answer_names", lambda *a: ([], []), lambda: fx.run(precedence))), "PASS")
+    absent = _mixed(sha, {3: 'Q3. docs/missing.md says "Only gamma carries this exact sentence."'})
+    check("c2/answer-names-absent-path-fails", verdict(fx.run(absent)), "FAIL")
+    found_only = lambda text, tree: ([path for path, _ in _path_tokens(text, tree) if path], [])
+    check("flip/c2-answer-absent-path", verdict(_patched("_named_paths", found_only, lambda: fx.run(absent))), "PASS")
+    rewrapped = _mixed(sha, {1: "Q1. docs/alpha.md:\n```\nThe second rule\nfollows it.\n```"})
     report = fx.run(rewrapped)
     diagnostic = report["items"][0]["quotes"][0]["normalised_match"] if report["items"] else None
     check("c2/rewrapped-fails-with-diagnostic",
@@ -1179,35 +1405,33 @@ def _self_test_cases(fx):
           ("FAIL", "docs/alpha.md", "The second rule follows it."))
     check("flip/c2-normalised-is-not-a-pass",
           verdict(_patched("_verbatim_in", _normalised_containment, lambda: fx.run(rewrapped))), "PASS")
-    excerpt = _delivery(sha, '1. docs/alpha.md: "second rule follows"', A2, A3, A4)
+    excerpt = _mixed(sha, {1: 'Q1. docs/alpha.md: "second rule follows"'})
     check("c2/mid-line-excerpt-passes", verdict(fx.run(excerpt)), "PASS")
     check("flip/c2-excerpt", verdict(_patched("_verbatim_in", _whole_line_only, lambda: fx.run(excerpt))),
           "FAIL")
-    indented = _delivery(sha, A2)
+    indented = _mixed(sha)
     check("c2/fenced-indentation-exact-passes", verdict(fx.run(indented)), "PASS")
     check("flip/c2-fenced-indentation",
           verdict(_patched("_fence_content_line", lambda line, indent: line.lstrip(), lambda: fx.run(indented))),
           "FAIL")
     check("c2/fenced-indentation-changed-fails",
-          verdict(fx.run(_delivery(sha, "2. src/beta.py:\n```\nif ready:\n    return 1\n```"))), "FAIL")
-    check("c2/indented-fence-strips-only-its-own-indent-passes",
-          verdict(fx.run(_delivery(sha, "2. src/beta.py:\n  ```\n      if ready:\n          return 1\n  ```"))),
-          "PASS")
-    blockquote = _delivery(sha, "1. docs/alpha.md:\n> The first rule is plain\n> and the second follows.")
+          verdict(fx.run(_mixed(sha, {2: "Q2. src/beta.py:\n```\nif ready:\n    return 1\n```"}))), "FAIL")
+    check("c2/indented-fence-strips-only-its-own-indent-passes", verdict(fx.run(
+        _mixed(sha, {2: "Q2. src/beta.py:\n  ```\n      if ready:\n          return 1\n  ```"}))), "PASS")
+    blockquote = _mixed(sha, {1: "Q1. docs/alpha.md:\n> The first rule is plain\n> and the second follows."})
     check("c2/blockquote-reworded-fails", verdict(fx.run(blockquote)), "FAIL")
     check("flip/c2-blockquote", verdict(_patched("BLOCKQUOTE_RE", never, lambda: fx.run(blockquote))), "PASS")
     check("c2/blockquote-exact-passes", verdict(fx.run(
-        _delivery(sha, "1. docs/alpha.md:\n> The first rule is plain.\n> The second rule follows it."))), "PASS")
+        _mixed(sha, {1: "Q1. docs/alpha.md:\n> The first rule is plain.\n> The second rule follows it."}))), "PASS")
     check("c2/curly-quote-fabricated-fails", verdict(fx.run(
-        _delivery(sha, "1. docs/alpha.md reads \u201cThe first rule is optional.\u201d"))), "FAIL")
-    check("c2/code-span-not-a-quote-passes", verdict(fx.run(
-        _delivery(sha, '1. docs/alpha.md: the flag `"made up"` is not a quote here; "The first rule is plain."'))),
-        "PASS")
+        _mixed(sha, {1: "Q1. docs/alpha.md reads “The first rule is optional.”"}))), "FAIL")
+    check("c2/code-span-not-a-quote-passes", verdict(fx.run(_mixed(
+        sha, {1: 'Q1. docs/alpha.md: the flag `"made up"` is not a quote here; "The first rule is plain."'}))), "PASS")
     check("c2/escape-added-fails", verdict(fx.run(
-        _delivery(sha, "2. src/beta.py:\n```\n    if ready\\:\n```"))), "FAIL")
-    check("c2/preamble-quote-checked-fails", verdict(fx.run(
-        _delivery(sha, A1, A2, A3, A4).replace("VERDICT:", 'Intro "never in the tree"\nVERDICT:', 1))), "FAIL")
-    row = _delivery(sha, '1. The row reads "| pattern-self-match.py | matches its own pattern |"')
+        _mixed(sha, {2: "Q2. src/beta.py:\n```\n    if ready\\:\n```"}))), "FAIL")
+    check("c2/verdict-line-quote-checked-fails", verdict(fx.run(
+        _mixed(sha, verdict='VERDICT: NO BLOCKERS "never in the tree"'))), "FAIL")
+    row = _delivery(sha, 'Q1. The row reads "| pattern-self-match.py | matches its own pattern |"')
     report = fx.run(row, BRIEF_README)
     check("c2/bare-name-binds-by-basename-passes",
           (verdict(report), report["items"][0]["quotes"][0]["found_in"] if report["items"] else None),
@@ -1215,157 +1439,168 @@ def _self_test_cases(fx):
     root_only = lambda token, tree: [token] if token in tree.blobs else []
     check("flip/c2-bare-name-root-only",
           verdict(_patched("_basename_bindings", root_only, lambda: fx.run(row, BRIEF_README))), "FAIL")
-    neither = _delivery(sha, '1. The row reads "Only gamma carries this exact sentence."')
+    check("c2/body-quoted-text-names-nothing-passes", verdict(fx.run(_delivery(
+        sha, 'Q1. The row, as read:\n"| pattern-self-match.py | matches its own pattern |"'), BRIEF_README)), "PASS")
+    check("flip/c2-quoted-text-names-nothing",
+          verdict(_patched("_names_text", lambda line, spans: line, lambda: fx.run(row, BRIEF_README))), "FAIL")
+    neither = _delivery(sha, 'Q1. The row reads "Only gamma carries this exact sentence."')
     report = fx.run(neither, BRIEF_README)
     reason = " ".join(report["reasons"])
     check("c2/bare-name-other-basename-fails",
           (verdict(report), ".preview/README.md" in reason, "docs/gamma.md" in reason), ("FAIL", True, True))
-    check("flip/c2-bare-name-binding",
-          verdict(_patched("_basename_bindings", lambda token, tree: [], lambda: fx.run(neither, BRIEF_README))),
-          "PASS")
+    report = _patched("_basename_bindings", lambda token, tree: [], lambda: fx.run(neither, BRIEF_README))
+    check("flip/c2-bare-name-binding", (verdict(report), ".preview/README.md" in " ".join(report["reasons"])),
+          ("FAIL", False))
     check("c2/slash-path-binds-exactly-fails", verdict(fx.run(
-        _delivery(sha, '1. The line reads "Only the root readme carries this line."'), BRIEF_SLASH)), "FAIL")
-    nested = _delivery(sha, "## 1. docs/alpha.md\n1. one\n2. two\n\"The first rule is plain.\"",
-                       "## 2. src/beta.py\n1. again\n\"    if ready:\"")
-    check("items/heading-style-ignores-nested-lists-passes", verdict(fx.run(nested)), "PASS")
-    check("items/duplicate-number-cannot-evaluate", verdict(fx.run(_delivery(sha, A1, A1))), "CANNOT_EVALUATE")
-    check("items/unknown-number-cannot-evaluate",
-          verdict(fx.run(_delivery(sha, A1, '5. docs/alpha.md "The first rule is plain."'))), "CANNOT_EVALUATE")
-    check("items/unclosed-fence-cannot-evaluate",
-          verdict(fx.run(_delivery(sha, "1. docs/alpha.md:\n```\nThe first rule is plain."))), "CANNOT_EVALUATE")
+        _delivery(sha, 'Q1. The line reads "Only the root readme carries this line."'), BRIEF_SLASH)), "FAIL")
 
     # C1: an item counts as answered only with answer content
-    empty = _delivery(sha, "1. ")
+    empty = _delivery(sha, "Q1. ")
     report = fx.run(empty, BRIEF_ONE)
     check("c1/empty-item-not-answered", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/1"))
     answered_always = lambda item, question, tree: "unverifiable" if item["unverifiable"] else "answered"
     check("flip/c1-answer-content",
           verdict(_patched("_answer_state", answered_always, lambda: fx.run(empty, BRIEF_ONE))), "PASS")
-    check("c1/file-name-only-not-answered", verdict(fx.run(_delivery(sha, "1. docs/alpha.md"), BRIEF_ONE)), "NO_VOTE")
-    restated = _delivery(sha, "## 1. Inspect docs/alpha.md and say whether it states a rule.")
+    check("c1/file-name-only-not-answered", verdict(fx.run(_delivery(sha, "Q1. docs/alpha.md"), BRIEF_ONE)), "NO_VOTE")
+    restated = _delivery(sha, "Q1. Inspect docs/alpha.md and say whether it states a rule.")
     check("c1/question-restated-not-answered", verdict(fx.run(restated, BRIEF_ONE)), "NO_VOTE")
     check("c1/short-answer-is-answered",
-          verdict(fx.run(_delivery(sha, "1. docs/alpha.md: yes, three rules."), BRIEF_ONE)), "PASS")
+          verdict(fx.run(_delivery(sha, "Q1. docs/alpha.md: yes, three rules."), BRIEF_ONE)), "PASS")
 
-    # Finding sections after the last numbered item
-    trailing = _delivery(sha, "1. src/beta.py: yes.", "2. docs/alpha.md: yes.",
-                         "MAJOR: f in src/beta.py:\n```\n    if ready:\n```", verdict="VERDICT: BLOCKERS FOUND")
-    check("c2/finding-after-last-item-passes", verdict(fx.run(trailing, BRIEF_TWO)), "PASS")
-    check("flip/c2-finding-section", verdict(_patched("GRADE_RE", never, lambda: fx.run(trailing, BRIEF_TWO))), "FAIL")
-    prose = _delivery(sha, "Q1. `beta`:\n```python\ndef beta(ready):\n```", "Q2. `alpha`:\n> The first rule is plain.",
-                      "BLOCKER: The guard returns early, unlike the rule of docs/alpha.md; it rests on this quote:\n"
-                      "```python\n    if ready:\n        return 1\n```", verdict="VERDICT: BLOCKERS FOUND")
-    check("c2/finding-prose-names-do-not-bind-passes", verdict(fx.run(prose, BRIEF_TWO)), "PASS")
-    every_name = lambda line, tree: _named_paths(line, tree, True)
-    check("flip/c2-grade-line-head-only",
-          verdict(_patched("_grade_line_names", every_name, lambda: fx.run(prose, BRIEF_TWO))), "FAIL")
-    check("c2/finding-grade-head-binds-fails", verdict(fx.run(_delivery(
-        sha, "1. src/beta.py: yes.", "2. docs/alpha.md: yes.",
-        "MAJOR: docs/gamma.md: the guard reads\n```\n    if ready:\n```"), BRIEF_TWO)), "FAIL")
-    check("c2/finding-heading-binds-fails", verdict(fx.run(_delivery(
-        sha, "1. src/beta.py: yes.", "2. docs/alpha.md: yes.", "## Finding in docs/gamma.md\n```\n    if ready:\n```"),
-        BRIEF_TWO)), "FAIL")
-    check("c2/grade-line-inline-quote-whole-tree-passes", verdict(fx.run(_delivery(
-        sha, "1. src/beta.py: yes.", "2. docs/alpha.md: yes.",
-        'MINOR: docs/alpha.md says "The first rule is plain." where src/beta.py says "    return 0"'), BRIEF_TWO)), "PASS")
-    check("items/reproduction-list-in-finding-passes", verdict(fx.run(_delivery(
-        sha, "1. src/beta.py: yes.", "2. docs/alpha.md: yes.", "MAJOR: steps to see it:\n1. run it\n2. see it\n3. done"),
-        BRIEF_TWO)), "PASS")
-
-    # Attribution the tool cannot resolve is refused, never widened
-    absent_question = _delivery(sha, '1. The rule reads "The first rule is plain."')
+    # Names never widen: every file reference of an answer resolves, or the item fails
+    absent_question = _delivery(sha, 'Q1. The rule reads "The first rule is plain."')
     check("c2/question-names-absent-path-fails", verdict(fx.run(absent_question, BRIEF_ABSENT)), "FAIL")
-    found_only = lambda text, tree, keep_unresolved=True: ([path for _, path, _ in _path_tokens(text, tree) if path], [])
     check("flip/c2-question-absent-path",
           verdict(_patched("_named_paths", found_only, lambda: fx.run(absent_question, BRIEF_ABSENT))), "PASS")
-    check("c2/absolute-repository-path-normalised-fails", verdict(fx.run(_delivery(
-        sha, '1. {}/docs/gamma.md reads "The first rule is plain."'.format(fx.repo)))), "FAIL")
-    check("c2/absolute-outside-path-fails", verdict(fx.run(_delivery(
-        sha, '1. /elsewhere/docs/alpha.md reads "The first rule is plain."'))), "FAIL")
-    marker = _delivery(sha, '1. The sentence reads "Only gamma carries this exact sentence."')
+    check("c2/question-bare-absent-name-fails", verdict(fx.run(absent_question, BRIEF_BARE_ABSENT)), "FAIL")
+    plus = _delivery(sha, 'Q1. nonexistent/source+test.py: "The first rule is plain."')
+    report = fx.run(plus, BRIEF_OPEN)
+    check("c2/answer-absent-name-any-characters-fails",
+          (verdict(report), "nonexistent/source+test.py" in " ".join(report["reasons"])), ("FAIL", True))
+    check("c2/answer-absent-bare-name-fails", verdict(fx.run(
+        _delivery(sha, 'Q1. alpha_old.md: "The first rule is plain."'), BRIEF_OPEN)), "FAIL")
+    check("c2/answer-absent-path-without-extension-fails", verdict(fx.run(
+        _delivery(sha, 'Q1. docs/retired/ALPHA: "The first rule is plain."'), BRIEF_OPEN)), "FAIL")
+    unquoted = _delivery(sha, "Q1. src/beta.py: yes.", "Q2. docs/retired/alpha.md states it.")
+    check("c2/answer-absent-name-without-quote-fails", verdict(fx.run(unquoted, BRIEF_TWO)), "FAIL")
+    targets = _quote_targets
+    check("flip/c2-answer-absent-name",
+          verdict(_patched("_quote_targets", lambda *a: targets(*a)[:3] + ([],), lambda: fx.run(unquoted, BRIEF_TWO))),
+          "PASS")
+    check("c2/question-named-absent-reference-passes", verdict(fx.run(
+        _delivery(sha, "Q1. No: docs/retired/alpha.md is absent from the pinned tree."), BRIEF_ABSENT_ASKED)), "PASS")
+    check("c2/non-file-tokens-pass", verdict(fx.run(_delivery(
+        sha, 'Q1. **docs/alpha.md:1**: yes, and/or `PinnedTree.read`, e.g. 2/2 or 1/2.5 of src/gen_*.py at '
+             '<clone>/src/x.py, see https://example.invalid/a.py; "The first rule is plain."'), BRIEF_OPEN)), "PASS")
+    check("c2/bold-name-binds-fails", verdict(fx.run(
+        _delivery(sha, 'Q1. **docs/gamma.md**: "The first rule is plain."'), BRIEF_OPEN)), "FAIL")
+    check("c2/bare-root-name-binds-fails", verdict(fx.run(
+        _delivery(sha, 'Q1. The line reads "The first rule is plain."'), BRIEF_VERSION)), "FAIL")
+    check("c2/absolute-repository-path-normalised-fails", verdict(fx.run(_mixed(
+        sha, {1: 'Q1. {}/docs/gamma.md reads "The first rule is plain."'.format(fx.repo)}))), "FAIL")
+    repository_path = _mixed(sha, {1: 'Q1. {}/docs/alpha.md reads "The first rule is plain."'.format(fx.repo)})
+    check("c2/absolute-repository-path-normalised-passes", verdict(fx.run(repository_path)), "PASS")
+    check("flip/c2-absolute-repository-path",
+          verdict(_patched("_repository_path", lambda token, tree: None, lambda: fx.run(repository_path))), "FAIL")
+    check("c2/absolute-outside-path-fails", verdict(fx.run(_mixed(
+        sha, {1: 'Q1. /elsewhere/docs/alpha.md reads "The first rule is plain."'}))), "FAIL")
+    marker = _delivery(sha, 'Q1. The sentence reads "Only gamma carries this exact sentence."')
     check("questions/marker-starts-the-run-passes", verdict(fx.run(marker, BRIEF_MARKER)), "PASS")
     check("flip/questions-marker",
           verdict(_patched("QUESTIONS_MARKER_RE", never, lambda: fx.run(marker, BRIEF_MARKER))), "FAIL")
+    check("questions/no-numbered-question-cannot-evaluate", refusal(fx.run(
+        _mixed(sha), BRIEF_MIXED.split("\n\n1.", 1)[0] + "\n"), "numbers no question"), refused)
 
     # Quote grammar
-    continuation = _delivery(sha, "2. src/beta.py:\n    ```\n    TIMEOUT = 999  # fabricated\n    ```")
+    continuation = _mixed(sha, {2: "Q2. src/beta.py:\n    ```\n    TIMEOUT = 999  # fabricated\n    ```"})
     check("c2/list-continuation-fence-read-fails", verdict(fx.run(continuation)), "FAIL")
     check("flip/c2-list-continuation-fence",
           verdict(_patched("FENCE_RE", re.compile(r"( {0,3})(`{3,}|~{3,})(.*)$"), lambda: fx.run(continuation))), "PASS")
-    example = _delivery(sha, '1. docs/alpha.md: a word cut at a slice edge (e.g., "knot" cut to "not") is read; '
-                             '"The first rule is plain."')
+    example = _mixed(sha, {1: 'Q1. docs/alpha.md: a word cut at a slice edge (e.g., "knot" cut to "not") is read; '
+                              '"The first rule is plain."'})
     check("c2/inline-example-not-a-quote-passes", verdict(fx.run(example)), "PASS")
-    indented = _delivery(sha, "2. src/beta.py:\n\n        TIMEOUT = 999")
+    check("flip/c2-inline-example", verdict(_patched("EXAMPLE_OPEN_RE", never, lambda: fx.run(example))), "FAIL")
+    unclosed = _mixed(sha, {4: 'Q4. src/beta.py: yes (e.g. it reads "return FABRICATED" when not ready.'})
+    check("c2/unclosed-example-masks-nothing-fails", verdict(fx.run(unclosed)), "FAIL")
+    to_end = lambda line: [(match.start(), len(line)) for match in EXAMPLE_OPEN_RE.finditer(line)]
+    check("flip/c2-example-needs-its-close", verdict(_patched("_example_spans", to_end, lambda: fx.run(unclosed))),
+          "PASS")
+    restatement = _mixed(sha, {4: 'Q4. src/beta.py: yes (i.e. "return FABRICATED").'})
+    check("c2/i-e-restatement-is-read-fails", verdict(fx.run(restatement)), "FAIL")
+    check("flip/c2-example-openers", verdict(_patched(
+        "EXAMPLE_OPEN_RE", re.compile(r"\((?:e\.g\.|i\.e\.|for example)", re.I), lambda: fx.run(restatement))), "PASS")
+    check("c2/unmatched-curly-opener-hides-nothing-fails", verdict(fx.run(
+        _mixed(sha, {4: 'Q4. src/beta.py: “ aside; "return FABRICATED"'}))), "FAIL")
+    indented = _mixed(sha, {2: "Q2. src/beta.py:\n\n        TIMEOUT = 999"})
     check("items/indented-code-block-cannot-evaluate", verdict(fx.run(indented)), "CANNOT_EVALUATE")
     check("flip/items-indented-code-block",
           verdict(_patched("_indented_code_start", lambda *a: False, lambda: fx.run(indented))), "PASS")
-    check("flip/c2-inline-example", verdict(_patched("EXAMPLE_RE", never, lambda: fx.run(example))), "FAIL")
     check("c2/inch-mark-opens-nothing-passes",
-          verdict(fx.run(_delivery(sha, '1. docs/alpha.md: a 5" display shows "The first rule is plain."'))), "PASS")
-    crlf_tree = _delivery(sha, "1. docs/crlf.md:\n```\nStored with CRLF line ends.\nSecond stored line.\n```")
+          verdict(fx.run(_mixed(sha, {1: 'Q1. docs/alpha.md: a 5" display shows "The first rule is plain."'}))), "PASS")
+    crlf_tree = _mixed(sha, {1: "Q1. docs/crlf.md:\n```\nStored with CRLF line ends.\nSecond stored line.\n```"})
     check("c2/crlf-tree-file-passes", verdict(fx.run(crlf_tree)), "PASS")
     check("flip/c2-crlf-tree-file",
           verdict(_patched("_verbatim_in", lambda content, data: data in content, lambda: fx.run(crlf_tree))), "FAIL")
-    crlf_delivery = _delivery(sha, A1, A2, A3, A4).replace("\n", "\r\n")
+    crlf_delivery = _mixed(sha).replace("\n", "\r\n")
     check("input/crlf-delivery-passes", verdict(fx.run(crlf_delivery)), "PASS")
     check("flip/input-crlf",
           verdict(_patched("_lines", lambda text: list(enumerate(text.split("\n"), 1)), lambda: fx.run(crlf_delivery))),
           "CANNOT_EVALUATE")
-    capped = _delivery(sha, A1, A2, A3, A4)
+    capped = _mixed(sha)
     check("input/quote-cap-cannot-evaluate", verdict(_patched("MAX_QUOTES", 3, lambda: fx.run(capped))), "CANNOT_EVALUATE")
     check("input/size-cap-cannot-evaluate",
           verdict(_patched("MAX_INPUT_BYTES", len(capped.encode("utf-8")) - 1, lambda: fx.run(capped))),
           "CANNOT_EVALUATE")
     check("tree/size-cap-cannot-evaluate", verdict(_patched(
-        "MAX_TREE_BYTES", 8, lambda: fx.run(_delivery(sha, A1).replace("VERDICT:", 'Preamble "The first rule is plain."\nVERDICT:', 1)))),
-        "CANNOT_EVALUATE")
+        "MAX_TREE_BYTES", 8, lambda: fx.run(_mixed(sha, findings="> The first rule is plain.")))), "CANNOT_EVALUATE")
 
     # Runtime: adversarial deliveries at the 16 MiB cap, each in a capped child
     check("runtime/inch-mark-run-at-cap-bounded",
-          _capped_run(fx, _padded(_delivery(sha, A1, A2, A3, A4), "text 5", '5"'), "linear"), (0, "PASS"))
-    backticks = _padded(_delivery(sha, A1, A2, A3, A4), "text ", "`")
+          _capped_run(fx, _padded(_mixed(sha), "text 5", '5"', "\nVERDICT:"), "linear"), (0, "PASS"))
+    # The line holds a quote, so its code spans are scanned (a line with no double quote skips that scan).
+    backticks = _padded(_mixed(sha), 'text "ready" ', "`", "\nVERDICT:")
     check("runtime/backtick-run-at-cap-bounded",
           (len(backticks.encode("utf-8")), _capped_run(fx, backticks, "linear")), (MAX_INPUT_BYTES, (0, "PASS")))
     check("flip/runtime-backtick-run-backtracking", _capped_run(fx, backticks, "backtracking"), "timeout")
-    spaces = _padded(_delivery(sha, A1, A2, A3, A4), "VERDICT: x", " ")
+    spaces = _padded(_mixed(sha).replace("VERDICT: NO BLOCKERS\n", ""), "VERDICT: x", " ", "\n" + COMPLETE_LINE)
     check("runtime/verdict-whitespace-at-cap-bounded",
-          (len(spaces.encode("utf-8")), _capped_run(fx, spaces, "linear")), (MAX_INPUT_BYTES, (1, "NO_VOTE")))
+          (len(spaces.encode("utf-8")), _capped_run(fx, spaces, "linear")), (MAX_INPUT_BYTES, (0, "PASS")))
     check("flip/runtime-verdict-whitespace-backtracking", _capped_run(fx, spaces, "backtracking"), "timeout")
 
     # Pin, decode, git
-    mismatch = _delivery(OTHER_SHA, A1, A2, A3, A4)
+    mismatch = _mixed(OTHER_SHA)
     check("pin/sha-mismatch-cannot-evaluate", verdict(fx.run(mismatch)), "CANNOT_EVALUATE")
     check("flip/pin-match", verdict(_patched("_pin_matches", lambda *a: True, lambda: fx.run(mismatch))), "PASS")
-    check("pin/short-sha-cannot-evaluate", verdict(fx.run(_delivery(sha[:12], A1))), "CANNOT_EVALUATE")
+    check("pin/short-sha-cannot-evaluate", verdict(fx.run(_mixed(sha[:12]))), "CANNOT_EVALUATE")
     repeated = BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nBRIEF-PIN: {pin}\n")
     check("pin/repeated-identical-brief-pin-cannot-evaluate",
-          verdict(fx.run(_delivery(sha, A1, A2, A3, A4), brief=repeated)), "CANNOT_EVALUATE")
+          verdict(fx.run(_mixed(sha), brief=repeated)), "CANNOT_EVALUATE")
     set_pins = lambda text: next(iter({m.group(1).strip() for _, line in _lines(text) if (m := PIN_LINE_RE.match(line))}))
     check("flip/pin-repeated-lines",
-          verdict(_patched("_brief_pin", set_pins, lambda: fx.run(_delivery(sha, A1, A2, A3, A4), brief=repeated))), "PASS")
+          verdict(_patched("_brief_pin", set_pins, lambda: fx.run(_mixed(sha), brief=repeated))), "PASS")
     tree_id = fx._git("rev-parse", "HEAD^{tree}").strip()
-    tree_pin = _delivery(tree_id, A1, A2, A3, A4)
+    tree_pin = _mixed(tree_id)
     check("pin/tree-id-cannot-evaluate", verdict(fx.run(tree_pin, pin=tree_id)), "CANNOT_EVALUATE")
     check("flip/pin-commit-only",
           verdict(_patched("_require_commit", lambda *a: None, lambda: fx.run(tree_pin, pin=tree_id))), "PASS")
     check("pin/missing-brief-pin-cannot-evaluate",
-          verdict(fx.run(_delivery(sha, A1), brief=BRIEF_MIXED.replace("BRIEF-PIN", "PIN"))), "CANNOT_EVALUATE")
-    undecodable = _delivery(sha, A1, A2, A3, A4).encode("utf-8").replace(b"ends beta", b"ends \xff beta")
+          verdict(fx.run(_mixed(sha), brief=BRIEF_MIXED.replace("BRIEF-PIN", "PIN"))), "CANNOT_EVALUATE")
+    undecodable = _mixed(sha).encode("utf-8").replace(b"ends beta", b"ends \xff beta")
     check("decode/undecodable-delivery-cannot-evaluate", verdict(fx.run(undecodable)), "CANNOT_EVALUATE")
     check("flip/decode-strict",
           verdict(_patched("_decode", lambda raw, label: raw.decode("utf-8", "replace"),
                            lambda: fx.run(undecodable))), "PASS")
     check("git/unresolvable-sha-cannot-evaluate",
-          verdict(fx.run(_delivery(OTHER_SHA, A1), pin=OTHER_SHA)), "CANNOT_EVALUATE")
+          refusal(fx.run(_mixed(OTHER_SHA), pin=OTHER_SHA), "git cat-file"), refused)
     plain = fx.base / "plain"
     plain.mkdir()
     check("git/not-a-repository-cannot-evaluate",
-          verdict(fx.run(_delivery(sha, A1), repo=plain)), "CANNOT_EVALUATE")
+          refusal(fx.run(_mixed(sha), repo=plain), "git cat-file"), refused)
     check("input/directory-delivery-cannot-evaluate",
           verdict(evaluate(fx.files("x")[0], str(plain), str(fx.repo))[0]), "CANNOT_EVALUATE")
 
     # Object reads: ambient GIT_ variables, replace refs and rewritten objects
-    ambient = _delivery(sha, A1, A2, A3, A4)
+    ambient = _mixed(sha)
     saved_dir = os.environ.get("GIT_DIR")
     os.environ["GIT_DIR"] = str(plain)
     try:
@@ -1381,7 +1616,7 @@ def _self_test_cases(fx):
     forged = fx._git("hash-object", "-w", str(fx.base / "forged.txt")) if (
         fx.base / "forged.txt").write_text("A forged gamma sentence.\n", encoding="utf-8") else ""
     fx._git("replace", gamma_oid, forged.strip())
-    replaced = _delivery(sha, A1, A2, '3. docs/gamma.md says "A forged gamma sentence."', A4)
+    replaced = _mixed(sha, {3: 'Q3. docs/gamma.md says "A forged gamma sentence."'})
     check("git/replace-ref-ignored-fails", verdict(fx.run(replaced)), "FAIL")
 
     def honoring(repo, *args, stdin=None):
@@ -1404,16 +1639,22 @@ def _self_test_cases(fx):
     original = loose.read_bytes()
     loose.write_bytes(zlib.compress(b"blob %d\0" % len(body) + body))
     try:
-        rewritten = _delivery(sha, A1, A2, '3. docs/gamma.md says "A rewritten gamma sentence."', A4)
+        rewritten = _mixed(sha, {3: 'Q3. docs/gamma.md says "A rewritten gamma sentence."'})
         check("git/rewritten-object-cannot-evaluate", verdict(fx.run(rewritten)), "CANNOT_EVALUATE")
         check("flip/git-object-hash",
               verdict(_patched("_verified_blob", lambda path, oid, content: content, lambda: fx.run(rewritten))), "PASS")
+        # Reached only through the whole-tree cat-file --batch read: the answer and its question name no file.
+        whole_tree = _delivery(sha, 'Q1. The tree holds "A rewritten gamma sentence."')
+        check("git/rewritten-object-whole-tree-cannot-evaluate",
+              refusal(fx.run(whole_tree, BRIEF_OPEN), "does not hash to its id"), refused)
+        check("flip/git-object-hash-whole-tree", verdict(_patched(
+            "_verified_blob", lambda path, oid, content: content, lambda: fx.run(whole_tree, BRIEF_OPEN))), "PASS")
     finally:
         loose.write_bytes(original)
 
     # The pinned tree, never the working tree
     (fx.repo / "docs" / "alpha.md").write_text("A fabricated working-tree sentence.\n", encoding="utf-8")
-    working = _delivery(sha, '1. docs/alpha.md reads "A fabricated working-tree sentence."')
+    working = _mixed(sha, {1: 'Q1. docs/alpha.md reads "A fabricated working-tree sentence."'})
     check("tree/working-tree-text-fails", verdict(fx.run(working)), "FAIL")
     check("flip/tree-pinned-only",
           verdict(_patched("_blob_bytes", lambda tree, path: (Path(tree.repo) / path).read_bytes(),
@@ -1422,7 +1663,7 @@ def _self_test_cases(fx):
     # The command line: exit codes, one JSON object on stdout, one summary line on stderr
     script = str(Path(__file__).resolve())
     for check_id, delivery, want_code, want_verdict in (
-            ("cli/pass-exit-0", _delivery(sha, A1, A2, A3, A4), 0, "PASS"),
+            ("cli/pass-exit-0", _mixed(sha), 0, "PASS"),
             ("cli/fail-exit-1", joined, 1, "FAIL"),
             ("cli/no-vote-exit-1", all_unverifiable, 1, "NO_VOTE"),
             ("cli/cannot-evaluate-exit-2", mismatch, 2, "CANNOT_EVALUATE")):
@@ -1444,7 +1685,7 @@ def _self_test_cases(fx):
           (result.returncode, len(result.stdout.splitlines()), result.stdout.startswith("check_verifier_delivery: OK"),
            result.stderr), (0, 1, True, ""))
     check("bare/static-tables-valid", _static_config_problems(), [])
-    check("bare/broken-grammar-refused", bool(_patched("ITEM_RE", never, _static_config_problems)), True)
+    check("bare/broken-grammar-refused", bool(_patched("ANSWER_HEAD_RE", never, _static_config_problems)), True)
     check("bare/broken-quote-pairs-refused",
           bool(_patched("INLINE_QUOTE_PAIRS", (('"',),), _static_config_problems)), True)
 
@@ -1496,10 +1737,10 @@ def _capped_run(fx, delivery, scanners):
         return result.returncode, None
 
 
-def _padded(text, line_head, fill):
-    """text with one line of line_head plus fill characters inserted before its WORKER_STATUS line,
-    sized so the whole delivery is exactly MAX_INPUT_BYTES."""
-    head, sep, tail = text.rpartition("\nWORKER_STATUS")
+def _padded(text, line_head, fill, anchor):
+    """text with one line of line_head plus fill characters inserted before its last anchor (a line
+    start, "\n" included), sized so the whole delivery is exactly MAX_INPUT_BYTES."""
+    head, sep, tail = text.rpartition(anchor)
     room = MAX_INPUT_BYTES - len((head + "\n" + line_head + "\n" + sep + tail).encode("utf-8"))
     width = len(fill.encode("utf-8"))
     return head + "\n" + line_head + fill * (room // width) + "y" * (room % width) + "y\n" + sep[1:] + tail \
@@ -1561,15 +1802,17 @@ USAGE = ("usage: check_verifier_delivery.py --brief FILE --delivery FILE --repo 
          "       check_verifier_delivery.py [--self-test] [--execution-report ABS_PATH]")
 # The bare run's probes of the declared grammar: (pattern name, line, whether it must match).
 GRAMMAR_PROBES = (
-    ("ITEM_RE", "1. answer", True), ("ITEM_RE", "Q1: answer", True), ("ITEM_RE", "**2.** answer", True),
-    ("ITEM_RE", "### 3) answer", True), ("ITEM_RE", "Item 4. answer", True), ("ITEM_RE", "1.5 answer", False),
+    ("ANSWER_HEAD_RE", "Q1. answer", True), ("ANSWER_HEAD_RE", "Q12.", True), ("ANSWER_HEAD_RE", "1. answer", False),
+    ("ANSWER_HEAD_RE", "Q1: answer", False), ("ANSWER_HEAD_RE", " Q1. answer", False),
+    ("ANSWER_HEAD_RE", "**Q1.** answer", False), ("ANSWER_HEAD_RE", "Q1.5 answer", False),
+    ("QUESTION_RE", "1. question", True), ("QUESTION_RE", "Q1: question", True), ("QUESTION_RE", "1.5 x", False),
     ("FENCE_RE", "```python", True), ("FENCE_RE", "   ~~~", True), ("FENCE_RE", "      ```", True),
     ("FENCE_RE", "``", False), ("BLOCKQUOTE_RE", "> quoted", True), ("PIN_LINE_RE", "BRIEF-PIN: " + "0" * 40, True),
     ("_verdict_of", "**VERDICT:** NO BLOCKERS", True), ("_verdict_of", "verdict : clean", True),
     ("_verdict_of", "Overall VERDICT: clean", False), ("QUESTIONS_MARKER_RE", "QUESTIONS:", True),
-    ("GRADE_RE", "BLOCKER: a finding", True), ("GRADE_RE", "**MAJOR** finding", True),
-    ("GRADE_RE", "MAJORITY of lines", False), ("GRADE_RE", " MINOR: indented", False),
-    ("HEADING_RE", "## Findings", True), ("HEADING_RE", "#hashtag", False),
+    ("EXAMPLE_OPEN_RE", "(e.g. x)", True), ("EXAMPLE_OPEN_RE", "(For example x)", True),
+    ("EXAMPLE_OPEN_RE", "(i.e. x)", False), ("_is_findings_heading", "## Findings", True),
+    ("_is_findings_heading", "### Findings", False), ("_is_findings_heading", "## Findings:", False),
 )
 
 
@@ -1583,7 +1826,7 @@ def _static_config_problems():
         if isinstance(pattern, re.Pattern):
             got = bool(pattern.match(line))
         elif callable(pattern):
-            got = pattern(line) is not None
+            got = pattern(line) not in (None, False)
         else:
             got = None
         if got != want:
@@ -1602,7 +1845,8 @@ def _static_config_problems():
             isinstance(pair, tuple) and len(pair) == 2 and all(isinstance(c, str) and len(c) == 1 for c in pair)
             for pair in INLINE_QUOTE_PAIRS):
         problems.append("INLINE_QUOTE_PAIRS is not a table of (opener, closer) characters")
-    elif _code_spans("a `x` b ``y`z`` c `") != [(2, 5), (8, 15)] or _inline_quotes('`"a"` (e.g. "b") 5" "c"') != ["c"]:
+    elif _code_spans("a `x` b ``y`z`` c `") != [(2, 5), (8, 15)] or _inline_quotes('`"a"` (e.g. "b") 5" "c"') != ["c"] \
+            or _inline_quotes('\u201c x "d" (e.g. "e"') != ["d", "e"]:
         problems.append("the inline code span or inline quote scanner does not hold the declared grammar")
     for name in ("TIMEOUT", "MAX_INPUT_BYTES", "MAX_TREE_BYTES", "MAX_LISTED", "MAX_QUOTES"):
         value = getattr(module, name, None)
