@@ -1132,7 +1132,7 @@ expected-check-ids = [
   "launcher/acquire-unmapped-exception-mode-rule",
   "launcher/main-setup-fault-mode-rule",
   "launcher/dispatch-fault-mode-rule",
-  "launcher/refusal-handler-pass-two-fault-boundary",
+  "launcher/line-fault-sweep",
   "launcher/acquire-refusal-fault-injection",
   "launcher/refusal-fault-injection-stdout-mutant",
   "launcher/refusal-stdout-buffer-fd-closed",

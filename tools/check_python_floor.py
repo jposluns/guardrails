@@ -2431,52 +2431,67 @@ def _self_test_cases(base):
     old = OLD_GRAMMAR + (0,)
     preview_deny_modes = ("future_stamp_write", "record_remove_check", "unbounded_wait",
                           "ungated_record")
-    check("launcher/real-launchers-block-below-floor", [
-        tuple(refusal_observed(ROOT / rel, old, (), [mode])[:2]) for rel in sorted(LAUNCHERS)
-        for mode in (preview_deny_modes if isinstance(LAUNCHERS[rel], tuple)
-                     else ("absolute_paths",))],
-        [(2, "")] * 6)
-    # At the real interpreter version, a launcher whose hook file is missing beside it refuses a
-    # PreToolUse mode with exit 2 and empty stdout (never runpy's FileNotFoundError exit 1, which
-    # would fail open, and never a stdout object beside the blocking exit).
-    sibling_runner = ("import runpy, sys\n"
-                      "path = sys.argv[1]\n"
-                      "sys.argv = [path] + sys.argv[2:]\n"
-                      "runpy.run_path(path, run_name='__main__')\n")
-    results = []
-    for rel in sorted(LAUNCHERS):
-        spot = base / "missing-sibling" / Path(rel).name
-        _write(base, "missing-sibling/" + Path(rel).name, _read_text(ROOT / rel))
-        mode = preview_deny_modes[0] if isinstance(LAUNCHERS[rel], tuple) else "absolute_paths"
-        results.append(_child(sibling_runner, [str(spot), mode], (), base)[:2])
-    check("launcher/real-launchers-missing-sibling-blocks", results, [(2, "")] * 3)
     # (stdout mutants) A launcher that prints a stdout object and then exits 2, at the floor guard
-    # (below the floor) and at the acquisition refusal (its hook missing), passed the two rows above
-    # when they read the exit status only (replayed here as rc == 2), and so did the below-floor
-    # dispatch probe (dispatch_probe_findings); each now refuses it.
+    # (below the floor) and at the acquisition refusal (its hook missing), passed the two rows below
+    # when they read the exit status only, and so did the below-floor dispatch probe
+    # (dispatch_probe_findings). Each of the two rows reads the real launchers AND these mutants
+    # through the same function against the same wanted list, and requires every mutant entry to
+    # differ from it: a revert of either row to an exit-only reading turns that row itself red, since
+    # the mutants then match the wanted list.
     junk_line = "os.write(1, %r)" % (json.dumps(dict(decision="approve")) + "\n").encode()
     floor_tail = "    except BaseException:\n        pass\n    os._exit(_floor_status)\n"
     acquire_tail = "        pass\n    try:\n        os._exit(_refusal_status)\n"
-    mutant_got, mutant_want = [], []
+    mutant_root = base / "stdout-mutant"
+    mutant_counts = []
     for rel in sorted(LAUNCHERS):
         text = _read_text(ROOT / rel)
         mutant = text.replace(floor_tail, floor_tail.replace(
             "    os._exit(", "    " + junk_line + "\n    os._exit("), 1)
         mutant = mutant.replace(acquire_tail, acquire_tail.replace(
             "    try:\n", "    " + junk_line + "\n    try:\n"), 1)
-        spot = base / "stdout-mutant" / rel
-        _write(base, "stdout-mutant/" + rel, mutant)
-        multi = isinstance(LAUNCHERS[rel], tuple)
-        mode = preview_deny_modes[0] if multi else "absolute_paths"
-        floor_seen = tuple(refusal_observed(spot, old, (), [mode])[:2])
-        missing_seen = tuple(_child(sibling_runner, [str(spot), mode], (), base)[:2])
-        probe = dispatch_probe_findings(base / "stdout-mutant", rel, LAUNCHERS[rel], floor) if multi else []
-        mutant_got.append((rel, text.count(floor_tail), text.count(acquire_tail),
-                           floor_seen[0] == REFUSAL_EXIT, floor_seen == (REFUSAL_EXIT, ""),
-                           missing_seen[0] == REFUSAL_EXIT, missing_seen == (REFUSAL_EXIT, ""),
-                           len(probe)))
-        mutant_want.append((rel, 1, 1, True, False, True, False, len(preview_deny_modes) if multi else 0))
-    check("launcher/real-launchers-stdout-mutant", mutant_got, mutant_want)
+        _write(mutant_root, rel, mutant)
+        _write(base / "missing-sibling", rel, text)
+        mutant_counts.append((rel, text.count(floor_tail), text.count(acquire_tail)))
+
+    def _below_floor_seen(root):
+        return [tuple(refusal_observed(root / rel, old, (), [mode])[:2]) for rel in sorted(LAUNCHERS)
+                for mode in (preview_deny_modes if isinstance(LAUNCHERS[rel], tuple)
+                             else ("absolute_paths",))]
+
+    below_floor_want = [(REFUSAL_EXIT, "")] * 6
+    below_floor_mutants = _below_floor_seen(mutant_root)
+    check("launcher/real-launchers-block-below-floor", (
+        _below_floor_seen(ROOT), [seen != want for seen, want in zip(below_floor_mutants, below_floor_want)],
+        len(below_floor_mutants)), (below_floor_want, [True] * 6, 6))
+    # At the real interpreter version, a launcher whose hook file is missing beside it refuses a
+    # PreToolUse mode with exit 2 and empty stdout (never runpy's FileNotFoundError exit 1, which
+    # would fail open, and never a stdout object beside the blocking exit). Each copy sits in a
+    # directory holding no hook file.
+    sibling_runner = ("import runpy, sys\n"
+                      "path = sys.argv[1]\n"
+                      "sys.argv = [path] + sys.argv[2:]\n"
+                      "runpy.run_path(path, run_name='__main__')\n")
+
+    def _missing_sibling_seen(root):
+        return [tuple(_child(sibling_runner, [str(root / rel), preview_deny_modes[0]
+                                              if isinstance(LAUNCHERS[rel], tuple) else "absolute_paths"],
+                             (), base)[:2]) for rel in sorted(LAUNCHERS)]
+
+    missing_want = [(REFUSAL_EXIT, "")] * 3
+    missing_mutants = _missing_sibling_seen(mutant_root)
+    check("launcher/real-launchers-missing-sibling-blocks", (
+        _missing_sibling_seen(base / "missing-sibling"),
+        [seen != want for seen, want in zip(missing_mutants, missing_want)], len(missing_mutants)),
+        (missing_want, [True] * 3, 3))
+    # The mutants themselves: each mutation applies exactly once, each mutant still exits 2 at both
+    # refusals (so only its stdout tells it apart), and the dispatch probe refuses the preview mutant
+    # once per PreToolUse mode.
+    check("launcher/real-launchers-stdout-mutant", (
+        mutant_counts, [seen[0] for seen in below_floor_mutants], [seen[0] for seen in missing_mutants],
+        [len(dispatch_probe_findings(mutant_root, rel, LAUNCHERS[rel], floor)) for rel in sorted(LAUNCHERS)
+         if isinstance(LAUNCHERS[rel], tuple)]), (
+        [(rel, 1, 1) for rel in sorted(LAUNCHERS)], [REFUSAL_EXIT] * 6, [REFUSAL_EXIT] * 3,
+        [len(preview_deny_modes)]))
     # REQUIRED acquisition behavior (each real launcher, deterministic): the sibling hook is
     # acquired ONCE (open without following a symbolic link, fstat, read, compile) and ONLY the
     # acquired content runs, and every acquisition failure (missing, a symbolic link, a directory,
@@ -3142,106 +3157,97 @@ def _self_test_cases(base):
                         dispatch_want.append((rel, kind, statement, present, fault, rc_want, True, True,
                                               True, True if kind == "fail_open" else ""))
     check("launcher/dispatch-fault-mode-rule", dispatch_got, dispatch_want)
-    # The two-fault boundary each launcher's RESIDUAL discloses: the `pass` of a refusal's diagnostic
-    # handler (the floor guard's, the acquisition refusal's and the preview launcher's unknown-mode
-    # refusal's) runs outside the mode rule. One diagnostic fault (a MemoryError from the floor
-    # message's formatting, through sys.executable's __str__, or from the refusal's first _deliver
-    # call, whose global the line trace replaces with a raiser just before that line runs) is
-    # swallowed and the mode rule holds; a second fault, raised by the line trace AT that handler's
-    # `pass`, escapes, so the process exits 1 (MemoryError) or with the status an injected SystemExit
-    # carries (SystemExit(0), a silent exit 0 on a blocking event). The trace raises only once, since
-    # a trace function that raises is unset. This row pins both sides, so a launcher that protects
-    # the `pass` (or loses its single-fault protection) fails it and the RESIDUAL must be revisited.
-    # The parent finds each line itself and refuses a line found on any other number of lines than
-    # one; each child also reports whether its first fault fired.
-    boundary_runner = (
+    # (line-fault sweep) Each launcher's FAULTS paragraph is categorical: outside its protected blocks
+    # it keeps the mode rule against the ordinary faults its own code raises, and an INJECTED fault (a
+    # line-trace or asynchronous exception) can arrive at any line and then ends the process with that
+    # fault's own outcome. This row faults EVERY line a blocking-mode run executes, in each scenario a
+    # blocking event reaches (below the floor, the hook missing, the hook present, and for the preview
+    # launcher an unknown mode): a line trace raises MemoryError, then SystemExit(0), at that line's
+    # first line event in the module or in any launcher function. Each outcome must be the mode rule
+    # (exit 2, empty stdout, no traceback, nothing escaped) or EXACTLY the injected fault's own outcome
+    # (the injected object itself escapes the launcher, exit 1 for MemoryError, exit 0 for
+    # SystemExit(0), empty stdout). Anything else is listed: an ordinary exception escaping (a handler
+    # that faults on its own once the injection lands, for example), another status, stdout output,
+    # or an injection that never fired. Each scenario's baseline (traced only to list its lines) must
+    # take that scenario's own outcome, and both accepted outcomes must occur, so the sweep cannot
+    # pass vacuously. Byte-identical launchers share one sweep. Lines a blocking run never executes
+    # (the fail-open branches and the --self-test branch) are outside it, and only the first line
+    # event of each line is faulted.
+    sweep_runner = (
         "import os, runpy, sys\n"
-        "fault, path, first, second, version = sys.argv[1], sys.argv[2], int(sys.argv[3]), "
-        "int(sys.argv[4]), sys.argv[5]\n"
-        "sys.argv = [path] + sys.argv[6:]\n"
+        "fault, path, target, version = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]\n"
+        "sys.argv = [path] + sys.argv[5:]\n"
         "if version != 'real':\n"
         "    sys.version_info = tuple(int(p) for p in version.split('.')) + ('final', 0)\n"
-        "fired = []\n"
-        "def _raiser(*args, **kwargs):\n"
-        "    fired.append('deliver')\n"
-        "    raise MemoryError('injected in the diagnostic block')\n"
-        "class _Boom:\n"
-        "    def __bool__(self):\n"
-        "        return True\n"
-        "    def __str__(self):\n"
-        "        fired.append('format')\n"
-        "        raise MemoryError('injected at formatting')\n"
-        "if first == 0:\n"
-        "    sys.executable = _Boom()\n"
-        "def _report():\n"
-        "    os.write(2, ('FIRST_FAULT=%d\\n' % len(fired)).encode())\n"
+        "injected = []\n"
         "def _local(frame, event, arg):\n"
-        "    if event == 'line' and frame.f_lineno == first:\n"
-        "        frame.f_globals['_deliver'] = _raiser\n"
-        "    if event == 'line' and frame.f_lineno == second:\n"
-        "        _report()\n"
-        "        if fault == 'memoryerror':\n"
-        "            raise MemoryError('injected at the handler pass')\n"
-        "        raise SystemExit(0)\n"
-        "    if event == 'line' and frame.f_code.co_name == '<module>' and 'os._exit(' in "
-        "lines[frame.f_lineno - 1]:\n"
-        "        _report()\n"
+        "    if event == 'line' and target == 0:\n"
+        "        os.write(2, ('SWEEP_LINE=%d\\n' % frame.f_lineno).encode())\n"
+        "    if event == 'line' and frame.f_lineno == target and not injected:\n"
+        "        injected.append(MemoryError('injected by the line sweep') if fault == 'memoryerror'\n"
+        "                        else SystemExit(0))\n"
+        "        os.write(2, b'SWEEP_FIRED\\n')\n"
+        "        raise injected[0]\n"
         "    return _local\n"
-        "handle = open(path, encoding='utf-8')\n"
-        "lines = handle.read().splitlines()\n"
-        "handle.close()\n"
         "def _global(frame, event, arg):\n"
-        "    if frame.f_code.co_filename == path and frame.f_code.co_name == '<module>':\n"
+        "    if frame.f_code.co_filename == path:\n"
         "        return _local\n"
         "    return None\n"
         "sys.settrace(_global)\n"
-        "runpy.run_path(path, run_name='__main__')\n")
+        "try:\n"
+        "    runpy.run_path(path, run_name='__main__')\n"
+        "except BaseException as exc:\n"
+        "    sys.settrace(None)\n"
+        "    os.write(2, ('SWEEP_ESCAPED=%d\\n' % int(bool(injected) and exc is injected[0])).encode())\n"
+        "    raise\n")
 
-    def _handler_pass(lines, after):
-        return [n for n in range(2, len(lines)) if lines[n - 1].strip() == "pass"
-                and lines[n - 2].strip() == "except BaseException:"
-                and [text.strip() for text in lines[n:n + len(after)]] == list(after)]
+    def _sweep_outcome(fault, rc, out, err):
+        if "SWEEP_FIRED" not in err:
+            return "never fired"
+        if (rc, out, "Traceback" in err, "SWEEP_ESCAPED" in err) == (REFUSAL_EXIT, "", False, False):
+            return "mode rule"
+        if "SWEEP_ESCAPED=1" in err and out == "" and rc == (1 if fault == "memoryerror" else 0):
+            return "injected"
+        return (rc, out, (err.strip().splitlines() or [""])[-1])
 
-    boundary_legs = (
-        ("floor", None, ("os._exit(_floor_status)",), "%d.%d.%d" % old, None),
-        ("acquire", lambda text: text.strip() == "_deliver(2, _missing)",
-         ("try:", "os._exit(_refusal_status)"), "real", None),
-        ("unknown-mode", lambda text: text.strip().startswith(
-            '_deliver(2, "error: preview-launch.py: the first argument'), ("try:", "os._exit(2)"), "real",
-         "no_such_mode"))
     if os.name != "posix":
-        boundary_got = boundary_want = "skipped (the line-trace child needs posix)"
+        sweep_got = sweep_want = "skipped (the line-trace child needs posix)"
     else:
-        boundary_got, boundary_want = [], []
+        sweep_got, sweep_want, sweep_seen = [], [], set()
+        groups = dict()
         for rel in sorted(LAUNCHERS):
-            multi = isinstance(LAUNCHERS[rel], tuple)
-            lines = _read_text(ROOT / rel).splitlines()
-            for leg, first_test, after, version, only_mode in boundary_legs:
-                if only_mode is not None and not multi:
-                    continue
-                first = ([0] if first_test is None
-                         else [n for n, text in enumerate(lines, 1) if first_test(text)])
-                second = _handler_pass(lines, after)
-                if (len(first), len(second)) != (1, 1):
-                    boundary_got.append((rel, leg, "found on", len(first), len(second)))
-                    boundary_want.append((rel, leg, "found on", 1, 1))
-                    continue
-                kinds = (("blocking", REFUSAL_EXIT),) if only_mode else (("blocking", REFUSAL_EXIT),
-                                                                         ("fail_open", 0))
-                for kind, rc_want in kinds:
-                    mode = only_mode or _hook_kind_mode(rel, kind)
-                    for fault, at, want in (("memoryerror", 0, (rc_want, True)),
-                                            ("memoryerror", second[0], (1, False)),
-                                            ("systemexit", second[0], (0, True))):
-                        spot = Path(tempfile.mkdtemp(prefix="handler-pass-", dir=base))
-                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
-                        rc, out, err = _child(boundary_runner, [fault, str(spot / Path(rel).name),
-                                                                str(first[0]), str(at), version, mode],
-                                              (), spot)
-                        boundary_got.append((rel, leg, kind, fault, at > 0, "FIRST_FAULT=1" in err, rc,
-                                             "Traceback" not in err))
-                        boundary_want.append((rel, leg, kind, fault, at > 0, True) + want)
-    check("launcher/refusal-handler-pass-two-fault-boundary", boundary_got, boundary_want)
+            groups.setdefault(_read_text(ROOT / rel), []).append(rel)
+        for text, rels in groups.items():
+            multi = isinstance(LAUNCHERS[rels[0]], tuple)
+            mode = _hook_kind_mode(rels[0], "blocking")
+            sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+            scenarios = [("below-floor", "%d.%d.%d" % old, mode, False, (REFUSAL_EXIT, "")),
+                         ("hook-missing", "real", mode, False, (REFUSAL_EXIT, "")),
+                         ("hook-present", "real", mode, True, (0, "HOOK_RAN\n"))]
+            if multi:
+                scenarios.append(("unknown-mode", "real", "no_such_mode", False, (REFUSAL_EXIT, "")))
+            for scenario, version, argv_mode, present, baseline_want in scenarios:
+                spot = Path(tempfile.mkdtemp(prefix="line-sweep-", dir=base))
+                launcher = spot / Path(rels[0]).name
+                launcher.write_text(text, encoding="utf-8")
+                if present:
+                    (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                rc, out, err = _child(sweep_runner, ["none", str(launcher), "0", version, argv_mode], (), spot)
+                swept = sorted(set(int(line.split("=", 1)[1]) for line in err.splitlines()
+                                   if line.startswith("SWEEP_LINE=")))
+                listed = []
+                for number in swept:
+                    for fault in ("memoryerror", "systemexit"):
+                        outcome = _sweep_outcome(fault, *_child(
+                            sweep_runner, [fault, str(launcher), str(number), version, argv_mode], (), spot))
+                        sweep_seen.add(outcome if isinstance(outcome, str) else "other")
+                        if outcome not in ("mode rule", "injected"):
+                            listed.append((number, fault, outcome))
+                sweep_got.append((tuple(rels), scenario, (rc, out), len(swept) > 0, listed))
+                sweep_want.append((tuple(rels), scenario, baseline_want, True, []))
+        sweep_got.append(("both outcomes occur", "mode rule" in sweep_seen, "injected" in sweep_seen))
+        sweep_want.append(("both outcomes occur", True, True))
+    check("launcher/line-fault-sweep", sweep_got, sweep_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,

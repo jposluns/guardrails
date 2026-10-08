@@ -28,11 +28,12 @@ call proceed unchecked. Every refusal here (the floor guard included) decides
 its exit status FIRST, runs ALL its diagnostic work (imports, string formatting, serialization,
 encoding, unbuffered os.write delivery with a bounded retry of a partial write) inside one
 try/except BaseException that swallows everything, and ends with os._exit(status), never
-SystemExit: no diagnostic fault (a MemoryError included), no state of stdout or stderr (closed
-before Python starts, so the sys stream is None, closed after, or a pipe whose reader is gone),
-no bytes already waiting in a stream buffer (os._exit skips the interpreter's shutdown flush, so
-a refusal discards such bytes rather than letting a failed flush replace the status with 120) and
-no atexit handler can change that status. Two bounds hold, stated exactly: a FULL BLOCKING PIPE
+SystemExit: no diagnostic fault its own code raises (a MemoryError included; FAULTS below states
+what an injected fault does), no state of stdout or stderr (closed before Python starts, so the sys
+stream is None, closed after, or a pipe whose reader is gone), no bytes already waiting in a
+stream buffer (os._exit skips the interpreter's shutdown flush, so a refusal discards such bytes
+rather than letting a failed flush replace the status with 120) and no atexit handler can change
+that status. Two bounds hold, stated exactly: a FULL BLOCKING PIPE
 on the diagnostic stream can block the os.write until the reader drains it (O_NONBLOCK is never
 set on a shared descriptor, so the exit is delayed, never changed), and an EXTERNAL SIGNAL that
 terminates the process ends it outside any exit-status guarantee. A successful hook run is
@@ -49,31 +50,39 @@ with O_NOFOLLOW kept on the final component, and where the platform does not sup
 os.open the hook is opened by its full name, still with O_NOFOLLOW on the final component; and a
 writer whose in-place rewrite of the SAME inode is still in progress when the launcher reads it
 (never a rename, removal or replacement, which the descriptor acquisition covers) can expose a
-partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs. These
-launcher steps, and no others, run outside any protected block, so a fault in one of them exits 1 (a
-MemoryError, for example) or with the status an injected SystemExit carries (SystemExit(0) exits 0),
-and neither blocks a PreToolUse call: the module imports (sys
-before the floor guard; os, stat and types after it), the FLOOR_FAIL_OPEN_MODES assignment, the
-floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor guard's own steps before its try (its
-`import os`, its status decision and the def statement for _floor_tail) and its closing
-`os._exit(_floor_status)` after that try, the def statements for _deliver_tail, _deliver and
-_acquire_hook, the _hook path computation, and the acquisition refusal's own status decision (the
-mode test on sys.argv). Every later launcher statement runs inside the dispatch's one outer
-try/except BaseException, whose handler is the acquisition refusal and applies the same mode rule:
-the `_got = ("the acquisition raised", None)` sentinel assignment, the acquisition, the __main__
-setup (the sys.argv[0] rewrite, the module allocation, its __file__, __package__ and __cached__
+partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs.
+FAULTS. The protected blocks are the floor guard's diagnostic try and the dispatch's one outer
+try/except BaseException, whose handler is the acquisition refusal (it applies the same mode rule,
+runs its diagnostic work in its own try and retries its closing os._exit once under another): the
+`_got = ("the acquisition raised", None)` sentinel assignment, the acquisition, the __main__ setup
+(the sys.argv[0] rewrite, the module allocation, its __file__, __package__ and __cached__
 assignments and its sys.modules install), the `isinstance(_got, tuple)` test and the raise that
-selects the refusal. The refusal's closing os._exit is retried once under its own try/except
-BaseException, so a fault there escapes only when the retry faults too, and then exits 1 or with
-the status an injected SystemExit carries. A line trace can also raise at a bare `try:` or
-`except BaseException:` clause line of the dispatch (those lines call no function; the except
-clause loads and matches the name BaseException), and such an injected fault exits 1, or with the
-status an injected SystemExit carries (SystemExit(0) exits 0, even on a blocking event). One
-two-fault case also escapes the mode rule: the `pass` of each refusal's diagnostic handler (the
-outer `except BaseException:` of the floor guard and of the acquisition refusal) runs only after a
-first diagnostic fault was swallowed there, and a second fault injected at that `pass` (by a line
-trace) escapes the same way, exiting 1 or with the status an injected SystemExit carries; one
-diagnostic fault alone keeps the mode rule (tools/check_python_floor.py pins both sides). The
+selects the refusal run inside that outer try. Outside the protected blocks the launcher keeps the
+mode rule against the ORDINARY faults its own code can raise: each operation that can fail on what
+it is given (opening, checking, reading and compiling the hook file, formatting an acquisition error
+whose __str__ raises, writing to a closed or broken descriptor) runs inside a protected block, and
+the statements between those blocks (the imports, the literal assignments, the version and mode
+tests, the def statements and the path computation) read nothing but the registered argv, the
+interpreter's version and the launcher's own path. An INJECTED fault is outside that rule: a
+line-trace exception or an asynchronous exception (the KeyboardInterrupt a delivered SIGINT raises;
+the launcher does not ignore SIGINT) can arrive at ANY line, the clause lines (`try:`, `except
+BaseException:`), the floor guard, the module docstring and the `pass` of each diagnostic handler
+included, and where no protected block catches it the process ends with that fault's own outcome: an
+uncaught exception prints its traceback and exits 1, SystemExit(n) exits n, and KeyboardInterrupt
+ends the process by SIGINT. That outcome may not block: exit 1, exit 0 and a SIGINT death do not
+block a PreToolUse call (SystemExit(2) does). A MemoryError from real memory exhaustion can likewise
+arise at any allocating line outside the protected blocks, and then exits 1. That channel is not
+reachable from adopter input (the repository content and the tool-call payload a hook judges): a
+line trace needs code already running in this interpreter, and the launcher is started with -I, so
+no PYTHON* environment variable (PYTHONSTARTUP and PYTHONPATH included), no user site directory and
+no module from the script's or the current directory runs before its first line (the only earlier
+code is the interpreter installation's own: its standard library, its site module and the .pth files
+of its system site-packages, which belong to whoever installed that interpreter); an asynchronous
+exception needs a sender with the right to signal the hook process (its own user, a privileged user,
+or the terminal of its process group); and the launcher reads no adopter input before the hook runs,
+so none can drive its memory use. tools/check_python_floor.py faults every line a blocking-mode run
+of the launcher executes (launcher/line-fault-sweep) and accepts only the mode rule or the injected
+fault's own outcome, so an ordinary fault that escapes the mode rule there fails it. The
 hook's own execution, the exec statement (its evaluation of exec, _got and
 _module.__dict__ included) and the hook's code, keeps the platform's exit semantics as any hook
 does: an exception it does not catch exits 1, as when aiqt_hooks.py is launched directly. Each

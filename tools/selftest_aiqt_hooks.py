@@ -1142,7 +1142,9 @@ def _test_gd146_reason_site(failures):
     its reason, and that deny plus "continue": false or a top-level "decision": "approve". The
     well-formed deny must pass and each malformed one must fail. The round-13 site (replayed here:
     "not a deny: " plus the reduction, then searched for the needles) accepted both malformed denies,
-    because the reduction string embeds the whole object and so its reason."""
+    because the reduction string embeds the whole object and so its reason. A well-formed deny whose
+    reason lacks one needle (one fixture per needle) must fail too: _site_ok accepts it, so only the
+    judge's needle test can refuse it, and a judge that drops that test fails here."""
     reasons = (("(gd146-site-m26)", "git -c remote.origin.mirror=true push origin",
                 ("remote.origin.mirror", "DELETES")),
                ("(gd146-site-m27)", "git --config-env remote.origin.mirror=MFLAG push origin",
@@ -1163,6 +1165,16 @@ def _test_gd146_reason_site(failures):
                                 .format(label, bad[1]))
             if _gd146_reason_failure(lambda _data, _r=bad: _r, label, command, "/r", needles) is None:
                 failures.append("{} the judge accepts the malformed deny {!r}".format(label, bad[1]))
+        for needle in needles:
+            short = (0, dict(good[1], hookSpecificOutput=dict(
+                good[1]["hookSpecificOutput"], permissionDecisionReason=" ".join(
+                    [other for other in needles if other != needle]))), None)
+            if not _site_ok("gd146-reason", short[0], short[1]):
+                failures.append("{} the fixture does not discriminate: the site refuses the deny {!r}"
+                                .format(label, short[1]))
+            if _gd146_reason_failure(lambda _data, _r=short: _r, label, command, "/r", needles) is None:
+                failures.append("{} the judge accepts the deny {!r}, whose reason does not name {!r}"
+                                .format(label, short[1], needle))
 
 
 def _test_block2_parity(failures):
