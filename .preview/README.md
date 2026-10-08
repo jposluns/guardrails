@@ -158,7 +158,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `3da9d99bfb51d130afba1d4ffe4af0c639ccab60c47ce9b4ccaecb943838d591` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `ba20c8df86529feca1d3f5553c432ef120a532d9a96c27dedc1bbcf1fd1bb338` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -367,7 +367,8 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
 - **`pattern-self-match.py`** needs no store or lease setting. It skips the worker processes described
   above, but still checks helper-session calls. When selecting the shell that runs the command is
   intended, end the command with a real, unquoted shell comment such as
-  `# self-match-ok: the shell is meant to stop too`.
+  `# self-match-ok: the shell is meant to stop too`. A `#` directly after `)`, as in `$(...)#`, continues
+  the word in bash and does not opt out.
 
 The `record-ok`, `wait-ok`, and `self-match-ok` comments must begin a word and be the last non-blank
 content of the command. Their reasons are optional; text inside quotes does not opt out.
@@ -529,20 +530,28 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps
-  matches. A shell function or alias named `kill`, `pkill` or `pgrep` can change what a denied command
-  runs. Everything else, including compound commands, `&&` lists, `ps | grep` pipelines, `sudo` or
-  `exec` prefixes, `killall`, `pidof` and nested shell strings, gets a note at most, and a pattern built
-  when the command runs (holding `$` or a backtick) gets nothing. Its notes come from an approximate
-  reading of the words, so some are missed or given wrongly, and a matcher word counts even as an
-  argument. Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to you,
-  has not been checked.
+  matches. A shell function or alias named `kill`, `pkill` or `pgrep`, or shell state set before the
+  command (an `IFS` without a newline, or a loop variable made readonly), can change what a denied command
+  runs. A denied shape may end with `|| true` or `|| :`, and its signalling command with `>/dev/null`,
+  `2>/dev/null`, `&>/dev/null` or `2>&1` after its last word. Everything else gets a note at most: compound
+  commands, `&&` lists, other `||` lists, `ps | grep` pipelines, `sudo` or `exec` prefixes, `killall`,
+  `pidof`, nested shell strings, other redirections, `printf`, `cd`, an `echo` with an option, an
+  all-caps or special loop variable, and sleeps that add up to more than 60 seconds before the shape. A
+  pattern built when the command runs (holding `$` or a backtick) gets nothing. Its notes come from an
+  approximate reading of the words, so some are missed or given wrongly, and a matcher word counts even
+  as an argument. Whether Claude Code shows a `PreToolUse` `systemMessage` to the assistant, or only to
+  you, has not been checked.
 
 `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` also allow commands over 64 KiB or
 input they cannot follow. Their docstrings describe further parsing limits and work budgets. All three skip
 verification worker processes; `ungated-record.py` and `unbounded-wait.py` also skip helper-session calls.
 `pattern-self-match.py` instead adds a note for a command over 64 KiB, or one it cannot read, that names
-a process matcher, and for its own internal error; it skips verification worker processes and checks
-helper-session calls.
+a process matcher, and for its own internal error. It also adds a cannot-evaluate note for a hook payload
+it cannot read: a closed stdin or a read error, more than 16 MiB, input that is not complete JSON within
+2 seconds, JSON that is not an object, or a Bash call without a string command. It writes nothing when
+standard input is a directory (its launch line exits before Python starts), for another tool or event,
+for an empty command, and for a command it allows without a note. It skips verification worker processes
+and checks helper-session calls.
 
 ## Status and retirement
 
