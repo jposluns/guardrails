@@ -5566,24 +5566,92 @@ def _self_test_checks():
     # through it, never through a patched os.fstat.
     _real_stat, _real_lstat, _real_fstat = os.stat, os.lstat, os.fstat
 
+    def _anon_ident(fd):
+        """For an anonymous-inode descriptor (its /proc/self/fd link reads anon_inode:..., one inode
+        shared by every descriptor of that filesystem), its kind (the link) and, for an eventfd, the
+        eventfd-id its /proc/self/fdinfo entry names (round 8); None for any other descriptor."""
+        link = os.readlink("/proc/self/fd/{}".format(fd))
+        if not link.startswith("anon_inode:"):
+            return None
+        info = Path("/proc/self/fdinfo/{}".format(fd)).read_bytes().splitlines()
+        return (link, tuple(tuple(line.split()[1:]) for line in info if line.startswith(b"eventfd-id:")))
+
     def _fd_ident(fd):
-        """What `fd` names now (st_dev, st_ino, file type, st_rdev, access mode and status flags), or
-        None when it is OBSERVED closed (EBADF); any other read failure is cannot-evaluate, raised
-        naming `fd`, never read as a closed descriptor (round 6)."""
+        """What `fd` names now (st_dev, st_ino, file type, st_rdev, access mode, and for an anonymous
+        inode its kind and eventfd-id, _anon_ident), or None when it is OBSERVED closed (EBADF); any other
+        read failure is cannot-evaluate, raised naming `fd`, never read as a closed descriptor (round 6).
+        Only the access mode (O_ACCMODE) of the status flags is compared: the other status flags (such
+        as O_NONBLOCK) live on the open file description and may change while it stays open, which is no
+        leak (round 8)."""
         try:
             st = _real_fstat(fd)
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            anon = _anon_ident(fd) if census else None
         except OSError as exc:
             if exc.errno == errno.EBADF:
                 return None
             raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
-        return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)
+        return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags & os.O_ACCMODE, anon)
+
+    def _held_open(recorded):
+        """Of `recorded`, (number, identity) pairs each taken while its descriptor was known open, the
+        pairs still open now (round 8): a number OBSERVED closed (EBADF) or now naming another identity
+        (closed, and the number reused) is left out; any other read failure raises naming the descriptor
+        (_fd_ident), never read as closed. The same limit as _fds_open applies."""
+        return [(fd, ident) for fd, ident in recorded if _fd_ident(fd) == ident]
+
+    @contextlib.contextmanager
+    def _census_read_fault(target, read="fstat"):
+        """Inject EIO into every census read of descriptor `target` (round 8): `read` "fstat" fails the
+        census's real fstat and os.fstat, "getfl" fails fcntl F_GETFL."""
+        nonlocal _real_fstat
+        real_fstat, real_fcntl = _real_fstat, fcntl.fcntl
+
+        def fstat_eio(fd, *args, **kwargs):
+            if fd == target:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fstat(fd, *args, **kwargs)
+
+        def fcntl_eio(fd, cmd, *args):
+            if fd == target and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fcntl(fd, cmd, *args)
+        if read == "fstat":
+            _real_fstat = fstat_eio
+        try:
+            with mock.patch.object(os, "fstat", fstat_eio) if read == "fstat" else \
+                    mock.patch.object(fcntl, "fcntl", fcntl_eio):
+                yield
+        finally:
+            _real_fstat = real_fstat
+
+    def _scan_fault_named(scan, recorded, read="fstat"):
+        """(ok, observed) for one site's scan under an injected EIO (round 8): a probe descriptor, open
+        and recorded beside the site's own `recorded` pairs, whose read fails with EIO, must make
+        `scan` raise naming the probe (red against a scan that reads any OSError as closed)."""
+        probe = os.open(os.devnull, os.O_RDONLY)
+        try:
+            rec = list(recorded) + [(probe, _fd_ident(probe))]
+            try:
+                with _census_read_fault(probe, read):
+                    got = ("returned", scan(rec))
+            except RuntimeError as exc:
+                got = ("raised", str(exc))
+        finally:
+            os.close(probe)
+        return (got[0] == "raised" and "descriptor {}:".format(probe) in got[1]
+                and "injected census read fault" in got[1]), (probe, got)
 
     def _fds_open():
         """Every descriptor open now, as (number, identity) pairs (round 6, the class sweep's census
-        form): a number closed and reopened on another file, or with other flags, is a new pair, so a
-        leak at a reused number is seen. Limit (disclosed): one reopened on the same file with the same
-        flags is the same pair."""
+        form): a number closed and reopened on another file, or with another access mode, is a new pair,
+        so a leak at a reused number is seen. Limits (disclosed): one reopened on the same file with the
+        same access mode is the same pair. An anonymous-inode descriptor (eventfd, timerfd, signalfd,
+        epoll, inotify and the like share one inode) is told apart only by its kind (the /proc/self/fd
+        link) and, for an eventfd, by the eventfd-id /proc/self/fdinfo names: a replacement of the same
+        kind and access mode is the same pair for every kind but eventfd, and for an eventfd when the
+        kernel names no eventfd-id or reuses the id (it is unique only among live eventfds, so a
+        replacement made after the last reference to the original is gone may carry its id)."""
         out = set()
         for fd_name in os.listdir("/proc/self/fd"):
             identity = _fd_ident(int(fd_name))
@@ -5626,6 +5694,67 @@ def _self_test_checks():
         check("self-test-census-reports-reused-number",
               reopened_fd == entry_fd and [fd for fd, _identity in reuse_left] == [entry_fd],
               observed="opened at {}, reopened at {}, reported {!r}".format(entry_fd, reopened_fd, reuse_left))
+    # Round 8: a distinct eventfd at a reused number is a new pair (red against the stat and flags tuple
+    # alone: every eventfd shares one anonymous inode). The original is retained by a duplicate, so its
+    # eventfd-id stays live and the replacement's differs.
+    if not census or not hasattr(os, "eventfd"):
+        skipped.append(("self-test-census-reports-replaced-eventfd", no_census))
+    else:
+        first_efd = os.eventfd(0)
+        kept_efd = os.dup(first_efd)
+        try:
+            try:
+                efd_entry = descriptors()
+            finally:
+                os.close(first_efd)
+            second_efd = os.eventfd(0)
+            try:
+                efd_left = sorted(descriptors() - efd_entry)
+            finally:
+                os.close(second_efd)
+        finally:
+            os.close(kept_efd)
+        check("self-test-census-reports-replaced-eventfd",
+              second_efd == first_efd and [fd for fd, _identity in efd_left] == [first_efd],
+              observed="opened at {}, replaced at {}, reported {!r}".format(first_efd, second_efd, efd_left))
+    # Round 8: a status flag toggled (O_NONBLOCK) on a descriptor open at entry is no leak: the census
+    # compares the access mode only (red against an identity carrying every status flag).
+    if not census:
+        skipped.append(("self-test-census-ignores-status-flag-change", no_census))
+    else:
+        flag_r, flag_w = os.pipe()
+        try:
+            flag_entry = descriptors()
+            os.set_blocking(flag_r, False)
+            flag_left = sorted(descriptors() - flag_entry)
+        finally:
+            os.close(flag_r)
+            os.close(flag_w)
+        check("self-test-census-ignores-status-flag-change", not flag_left,
+              observed="toggled O_NONBLOCK on {}, reported {!r}".format(flag_r, flag_left))
+    # Round 8: _fd_ident's fail-closed rule, pinned through the whole-run census itself: EIO injected into
+    # fstat, and separately into F_GETFL, for one open descriptor makes descriptors() raise naming it
+    # (red against an _fd_ident that reads any OSError as a closed descriptor).
+    for _read in ("fstat", "getfl"):
+        if not census:
+            skipped.append(("self-test-census-{}-failure-cannot-evaluate".format(_read), no_census))
+            continue
+        _ok, _seen = _scan_fault_named(lambda _rec: descriptors(), [], _read)
+        check("self-test-census-{}-failure-cannot-evaluate".format(_read), _ok, observed=_seen)
+    # Round 8: _held_open, the recorded-descriptor scan of the close-out checks below, reads a recorded
+    # number now naming another file as the recorded descriptor closed (red against a number-only scan).
+    held_fd = os.open(os.devnull, os.O_RDONLY)
+    held_rec = [(held_fd, _fd_ident(held_fd))]
+    held_before = _held_open(held_rec)
+    os.close(held_fd)
+    held_again = os.open(os.path.dirname(os.devnull), os.O_RDONLY)
+    try:
+        held_after = _held_open(held_rec)
+    finally:
+        os.close(held_again)
+    check("held-open-scan-reused-number-reads-closed",
+          held_again == held_fd and held_before == held_rec and held_after == [],
+          observed=(held_fd, held_again, held_before, held_after))
 
     def refusal(fn, *args, **kwargs):
         """The refusal text when fn refuses with AdoptApplyError, else None."""
@@ -8423,6 +8552,7 @@ def _self_test_checks():
     try:
         for _ in range(5):
             list_fds.append(os.open(os.devnull, os.O_RDONLY))
+        list_rec = [(fd, _fd_ident(fd)) for fd in list_fds]
         held_list = list(list_fds)
         with mock.patch.object(_journal, "_close_fd_quietly", list_faulting_quiet):
             try:
@@ -8430,15 +8560,12 @@ def _self_test_checks():
             except _ListCloseFault as exc:
                 list_raised = exc
         list_notes = getattr(list_raised, "__notes__", [])
-        list_open = []
-        for fd in list_fds:
-            try:
-                _real_fstat(fd)
-            except OSError:
-                continue
-            list_open.append(fd)
+        list_open = [fd for fd, _ident in _held_open(list_rec)]
+        list_fault = _scan_fault_named(_held_open, list_rec)
     finally:
         _close_held(list(list_popped))
+    # Round 8: the still-open scan above fails closed: an EIO read is cannot-evaluate, never closed.
+    check("close-held-list-scan-read-failure-cannot-evaluate", list_fault[0], observed=list_fault[1])
     check("close-held-first-exception-raised-later-noted",
           list_raised is not None and list_raised.args == (1,) and not held_list
           and len(list_notes) == 2 and repr(_ListCloseFault(2)) in list_notes[0]
@@ -8455,6 +8582,7 @@ def _self_test_checks():
         pass
     verify_code = _verify_bundle_at.__code__
     verify_seen, verify_popped, verify_raised = [], [], None
+    verify_rec = []
 
     def verify_faulting_quiet(fd):
         up = sys._getframe(1)
@@ -8464,6 +8592,7 @@ def _self_test_checks():
         if (up is not None and up.f_code is verify_code
                 and fd in (up.f_locals.get("dir_fds") or {}).values()):
             verify_seen.append(fd)
+            verify_rec.append((fd, _fd_ident(fd)))
             if not verify_popped:
                 verify_popped.append(fd)
                 raise _VerifyCloseFault("the first retained directory close")
@@ -8483,13 +8612,8 @@ def _self_test_checks():
                     verify_bundle(_root3f, rid)
                 except _VerifyCloseFault as exc:
                     verify_raised = exc
-            verify_open = []
-            for fd in verify_seen:
-                try:
-                    _real_fstat(fd)
-                except OSError:
-                    continue
-                verify_open.append(fd)
+            verify_open = [fd for fd, _ident in _held_open(verify_rec)]
+            verify_fault = _scan_fault_named(_held_open, verify_rec)
         finally:
             _close_held(list(verify_popped))
     check("verify-bundle-close-out-injected-fault-closes-the-rest",
@@ -8497,6 +8621,8 @@ def _self_test_checks():
           and len(verify_seen) >= 3 and verify_open == verify_popped,
           observed="control={!r} raised={!r} closes seen={!r} still open={!r} popped={!r}".format(
               verify_control.status, verify_raised, verify_seen, verify_open, verify_popped))
+    check("verify-bundle-close-out-scan-read-failure-cannot-evaluate", verify_fault[0],
+          observed=verify_fault[1])
     # 6a'''b3g: the close-out clause names each recorded exception with what it says of its descriptor:
     # an OSError is a close's own error, whose close has still released the descriptor (man 2 close),
     # and any other exception may leave the descriptor it had popped open; both stand beside the run's
@@ -10024,11 +10150,13 @@ def _self_test_checks():
         root_fd = store._open_dir_nofollow(root)
         home_fd = os.open("home", os.O_RDONLY | os.O_DIRECTORY, dir_fd=root_fd)
         _m1_seen = dict()
+        _m1_rec = []
         _m1_real_dup = os.dup
 
         def _m1_dup(fd):
             nfd = _m1_real_dup(fd)
             _m1_seen["dup"] = nfd
+            _m1_rec.append((nfd, _fd_ident(nfd)))
             return nfd
 
         os.dup = _m1_dup
@@ -10041,14 +10169,11 @@ def _self_test_checks():
         finally:
             os.dup = _m1_real_dup
         check("r7-verify-bundle-malformed-rel-raises", _m1_out == "raised")
-        _m1_leaked = False
-        if "dup" in _m1_seen:
-            try:
-                os.fstat(_m1_seen["dup"])
-                _m1_leaked = True
-            except OSError:
-                pass
+        _m1_leaked = bool(_held_open(_m1_rec))
         check("r7-verify-bundle-home-dup-never-stranded", not _m1_leaked)
+        _m1_fault = _scan_fault_named(_held_open, _m1_rec)
+        check("r7-verify-bundle-home-dup-scan-read-failure-cannot-evaluate", _m1_fault[0],
+              observed=_m1_fault[1])
         if _m1_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
             try:
                 os.close(_m1_seen["dup"])
@@ -10071,7 +10196,7 @@ def _self_test_checks():
         def _m2_open(*args, **kwargs):
             fd = _m2_real_open(*args, **kwargs)
             if kwargs.get("dir_fd") == jr_fd:
-                _m2_opened.append(fd)
+                _m2_opened.append((fd, _fd_ident(fd)))
             return fd
 
         os.open = _m2_open
@@ -10084,14 +10209,10 @@ def _self_test_checks():
         finally:
             os.open = _m2_real_open
         check("r7-txn-dirs-held-path-error-raises", _m2_out == "raised")
-        _m2_left = []
-        for _fd in _m2_opened:
-            try:
-                os.fstat(_fd)
-            except OSError:
-                continue
-            _m2_left.append(_fd)
+        _m2_left = [fd for fd, _ident in _held_open(_m2_opened)]
         check("r7-txn-dirs-no-held-descriptor-survives-path-error", not _m2_left)
+        _m2_fault = _scan_fault_named(_held_open, _m2_opened)
+        check("r7-txn-dirs-held-scan-read-failure-cannot-evaluate", _m2_fault[0], observed=_m2_fault[1])
         _close_held(_m2_left)             # a pre-fix run leaks it; close so the failing suite stays clean
         os.close(jr_fd)
 

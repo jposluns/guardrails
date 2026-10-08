@@ -1471,10 +1471,17 @@ def _watchdog_launcher_case(label, disposition):
 
 def _fixture_fd_census():
     """Every descriptor this process holds open, as (number, identity) pairs, identity being (st_dev,
-    st_ino, file type, st_rdev, access mode and status flags): a number closed and reopened on another
-    file between two censuses is a new pair, never read as the one open before. Only a descriptor
+    st_ino, file type, st_rdev, access mode, and for an anonymous inode its kind and eventfd-id): a
+    number closed and reopened on another file between two censuses is a new pair, never read as the
+    one open before. Only the access mode (O_ACCMODE) of the status flags is compared: another status
+    flag (such as O_NONBLOCK) changed on a descriptor that stays open is no leak. Only a descriptor
     OBSERVED closed (EBADF, the listing's own) is left out; any other read failure raises naming it,
-    never read as closed. Limit: one reopened on the same file with the same flags is the same pair."""
+    never read as closed. Limits: one reopened on the same file with the same access mode is the same
+    pair. An anonymous-inode descriptor (eventfd, timerfd, signalfd, epoll, inotify and the like share
+    one inode) is told apart only by its kind (the /proc/self/fd link) and, for an eventfd, by the
+    eventfd-id /proc/self/fdinfo names: a replacement of the same kind and access mode is the same pair
+    for every kind but eventfd, and for an eventfd when the kernel names no eventfd-id or reuses the id
+    (it is unique only among live eventfds)."""
     import errno
     import fcntl
     live = set()
@@ -1482,12 +1489,94 @@ def _fixture_fd_census():
         try:
             st = os.fstat(int(name))
             flags = fcntl.fcntl(int(name), fcntl.F_GETFL)
+            link = os.readlink("/proc/self/fd/" + name)
+            anon = None
+            if link.startswith("anon_inode:"):
+                info = Path("/proc/self/fdinfo", name).read_bytes().splitlines()
+                anon = (link, tuple(tuple(line.split()[1:]) for line in info
+                                    if line.startswith(b"eventfd-id:")))
         except OSError as exc:
             if exc.errno == errno.EBADF:
                 continue
             raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(name, exc))
-        live.add((int(name), (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev, flags)))
+        live.add((int(name), (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_rdev,
+                              flags & os.O_ACCMODE, anon)))
     return live
+
+
+def _fixture_fd_census_pins():
+    """Round 8: the pins of _fixture_fd_census, run by each completion mode that uses it, raising
+    AssertionError naming the first that fails. A number closed and reopened on another file is reported
+    (red against a number-only census); a distinct eventfd at a reused number is reported (red against
+    the stat and flags tuple alone); an O_NONBLOCK toggle is no leak (red against every status flag in
+    the identity); EIO injected into fstat, and separately into F_GETFL, raises naming the descriptor
+    (red against a census that reads any OSError as closed)."""
+    import errno
+    import fcntl
+    from unittest.mock import patch
+    entry_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        before = _fixture_fd_census()
+    finally:
+        os.close(entry_fd)
+    reopened_fd = os.open(os.path.dirname(os.devnull), os.O_RDONLY)
+    try:
+        left = sorted(fd for fd, _ident in _fixture_fd_census() - before)
+    finally:
+        os.close(reopened_fd)
+    assert reopened_fd == entry_fd and left == [entry_fd], ("census-reports-reused-number", entry_fd,
+                                                            reopened_fd, left)
+    if hasattr(os, "eventfd"):
+        first_efd = os.eventfd(0)
+        kept_efd = os.dup(first_efd)
+        try:
+            try:
+                before = _fixture_fd_census()
+            finally:
+                os.close(first_efd)
+            second_efd = os.eventfd(0)
+            try:
+                left = sorted(fd for fd, _ident in _fixture_fd_census() - before)
+            finally:
+                os.close(second_efd)
+        finally:
+            os.close(kept_efd)
+        assert second_efd == first_efd and left == [first_efd], ("census-reports-replaced-eventfd",
+                                                                 first_efd, second_efd, left)
+    flag_r, flag_w = os.pipe()
+    try:
+        before = _fixture_fd_census()
+        os.set_blocking(flag_r, False)
+        left = sorted(_fixture_fd_census() - before)
+    finally:
+        os.close(flag_r)
+        os.close(flag_w)
+    assert not left, ("census-ignores-status-flag-change", flag_r, left)
+    real_fstat, real_fcntl = os.fstat, fcntl.fcntl
+    for read in ("fstat", "getfl"):
+        probe = os.open(os.devnull, os.O_RDONLY)
+
+        def fstat_eio(fd, *args, **kwargs):
+            if fd == probe:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fstat(fd, *args, **kwargs)
+
+        def fcntl_eio(fd, cmd, *args):
+            if fd == probe and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "injected census read fault")
+            return real_fcntl(fd, cmd, *args)
+        try:
+            with (patch.object(os, "fstat", fstat_eio) if read == "fstat"
+                  else patch.object(fcntl, "fcntl", fcntl_eio)):
+                try:
+                    got = ("returned", _fixture_fd_census())
+                except RuntimeError as exc:
+                    got = ("raised", str(exc))
+        finally:
+            os.close(probe)
+        assert (got[0] == "raised" and "descriptor {}:".format(probe) in got[1]
+                and "injected census read fault" in got[1]), ("census-" + read + "-failure-cannot-evaluate",
+                                                              probe, got[0])
 
 
 def _watchdog_completion_case(mode):
@@ -2108,6 +2197,7 @@ def _watchdog_completion_case(mode):
         real_start = threading.Thread.start
 
         open_fds = _fixture_fd_census
+        _fixture_fd_census_pins()
 
         def no_children():
             try:
@@ -3132,6 +3222,7 @@ def _watchdog_completion_case(mode):
         real_finish = emit._FixtureProcess._finish_close
 
         open_fds = _fixture_fd_census
+        _fixture_fd_census_pins()
 
         def no_children():
             try:

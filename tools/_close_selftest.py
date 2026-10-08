@@ -201,13 +201,17 @@ def _st_fcntl():
 
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file."""
+    is reused by a different file. Only a number OBSERVED closed (EBADF) is left out; any other fstat
+    failure raises naming the descriptor, never read as closed (a missed leak)."""
+    import errno
     table = {}
     for fd in range(1024):
         try:
             st = os.fstat(fd)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise RuntimeError("descriptor table cannot evaluate descriptor {}: {!r}".format(fd, exc))
         table[fd] = (st.st_dev, st.st_ino)
     return table
 

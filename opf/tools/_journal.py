@@ -2432,13 +2432,17 @@ def _st_fcntl():
 
 def _st_fd_table():
     """The open descriptors below 1024 and the file each names, so a leak is found even when its number
-    is reused by a different file."""
+    is reused by a different file. Only a number OBSERVED closed (EBADF) is left out; any other fstat
+    failure raises naming the descriptor, never read as closed (a missed leak)."""
+    import errno
     table = {}
     for fd in range(1024):
         try:
             st = os.fstat(fd)
-        except OSError:
-            continue
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise RuntimeError("descriptor table cannot evaluate descriptor {}: {!r}".format(fd, exc))
         table[fd] = (st.st_dev, st.st_ino)
     return table
 
@@ -2842,6 +2846,32 @@ def _st_n2a():
     return True
 
 
+def _st_fd_table_fails_closed():
+    """FD-table: _st_fd_table raises naming a held descriptor whose fstat fails with EIO, and lists it
+    when its fstat succeeds (red against a table that reads any OSError as a closed descriptor)."""
+    import errno
+    from unittest import mock
+    real_fstat = os.fstat
+    probe = os.open(os.devnull, os.O_RDONLY)
+
+    def fstat_eio(fd, *args, **kwargs):
+        if fd == probe:
+            raise OSError(errno.EIO, "injected fd-table read fault")
+        return real_fstat(fd, *args, **kwargs)
+    try:
+        listed = probe in _st_fd_table()
+        with mock.patch.object(os, "fstat", fstat_eio):
+            try:
+                _st_fd_table()
+                said = None
+            except RuntimeError as exc:
+                said = str(exc)
+    finally:
+        os.close(probe)
+    return (listed and said is not None and "descriptor {}:".format(probe) in said
+            and "injected fd-table read fault" in said)
+
+
 def _st_n2d():
     """N2d: the helper's one os.close raises EIO while a stderr write would raise OSError too (a broken
     stderr): the helper must RETURN, having made exactly one close (P1, #378: no probe, no second close).
@@ -2882,6 +2912,8 @@ def _st_descriptor_helper_checks():
       N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
       N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
                  stderr itself is broken, and the helper still returns without a second close.
+      FD-table   _st_fd_table, the close vectors' leak table, fails closed: an fstat error other than EBADF
+                 raises naming the descriptor, never reads as closed.
     No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
     leg's descriptors are its own, closed once. Returns (failures, checks)."""
     n2d_returned, n2d_single = _st_n2d()
@@ -2889,7 +2921,8 @@ def _st_descriptor_helper_checks():
                ("C1-osread-converts-to-journalerror", _st_c1_osread()),
                ("N2a-close-quietly-swallows-oserror", _st_n2a()),
                ("N2d-close-quietly-nonthrow", n2d_returned),
-               ("N2d-close-quietly-single-close", n2d_single))
+               ("N2d-close-quietly-single-close", n2d_single),
+               ("FD-table-read-failure-cannot-evaluate", _st_fd_table_fails_closed()))
     return [name for name, ok in results if ok is not True], len(results)
 
 
