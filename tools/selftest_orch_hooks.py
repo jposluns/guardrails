@@ -50,6 +50,7 @@ import subprocess
 import tempfile
 import shutil
 import datetime
+import hashlib
 from pathlib import Path
 try:
     import tomllib
@@ -5285,6 +5286,198 @@ def _main_isolated(report_path=None):
                      in m, "to clear the barrier" in m) for v, m in (_r22_unarmed, _r22_armed))
               + (json.loads(_r22_bar.read_text(encoding="utf-8")).get("active"),),
               (("warn", True, True, False), ("warn", True, False, True), True))
+
+        # EVERY FAILED RECORD WRITE ON A DENY, FINDINGS OR ESCAPE PATH IS REPORTED, THE DECISION UNCHANGED:
+        # (1) a scheduling deny whose denial counter cannot be written (turn-state.json a directory, a real
+        # failed write) still denies, past the cap too, with the warning in its deny reason and banner, and a
+        # stop=true call whose counter save fails (the save seam) says the loop bound is not advanced; (2) an
+        # allowed schedule whose wake digest cannot be written allows with a note saying so, on the clean
+        # ALLOW (a real failed write), the cap-relieved ALLOW_WITH_FINDINGS and the operator-escape ALLOW (the
+        # save seam); (3) a genuine prompt whose stamp cannot be written proceeds with a note, and a
+        # timer-originated prompt whose digest cannot be consumed says so in its context line; (4) a brief
+        # declaring a working-tree or a not-a-review target is allowed with a note naming an unwritten
+        # guard-events row; (5) the TeammateIdle operator-escape ALLOW names its unwritten row; (6) a resume
+        # barrier that cannot be written for a reason other than a directory at its path names that error
+        # and the state directory remedy, and a directory names its removal; (7) a clean audit whose clear
+        # fails leaves an armed barrier that is noted once per arming, so one already warned about stays
+        # silent. Each row fails when its warning (or, for (7), the once-per-arming flag) is removed, and each
+        # control leg shows no warning where the write succeeds.
+        _rw = Fixture(tmp, "recwrite")
+        _rw_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_rw.root)))
+        _rw_ts = _rw_sd / "turn-state.json"
+        _rw_ge = _rw_sd / "guard-events.jsonl"
+        _rw_sched = lambda ti: aiqt_hooks.orch_yield_tool(_rw.payload("PreToolUse", "ScheduleWakeup", ti))
+
+        def _rw_msg(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            return _verdict(result), str(obj.get("systemMessage", ""))
+
+        def _rw_note(result, needle):
+            verdict, msg = _rw_msg(result)
+            return verdict, needle in msg
+
+        def _rw_deny(result, needle):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            reason = hso.get("permissionDecisionReason", "") if isinstance(hso, dict) else ""
+            return _verdict(result), needle in reason, needle in str(obj.get("systemMessage", ""))
+
+        def _rw_context(result):
+            obj = result[1] if isinstance(result[1], dict) else dict()
+            hso = obj.get("hookSpecificOutput")
+            return str(hso.get("additionalContext", "")) if isinstance(hso, dict) else ""
+        _rw_counter = "the denial counter could not be written to turn-state.json"
+        _rw_wake = "this wake's prompt digest could not be written to turn-state.json"
+        _rw.set_items([item("RW-1")])
+        _rw_sd.mkdir(parents=True, exist_ok=True)
+        _rw_ts.unlink(missing_ok=True)
+        _rw_ts.mkdir()
+        check("recwrite/schedule-deny-unpersisted-counter-warns",
+              [_rw_deny(_rw_sched(dict(prompt="recheck RW-1 later")),
+                        _rw_counter + ", so this deny does not count toward the scheduling cap")
+               for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP + 1)],
+              [("deny", True, True)] * (aiqt_hooks._ORCH_SCHEDULE_CAP + 1))
+        _rw.set_items([])
+        check("recwrite/wake-digest-unwritten-clean-allow-warns",
+              _rw_note(_rw_sched(dict(prompt="check back later")), _rw_wake), ("warn", True))
+        _rw_ts.rmdir()
+        _rw.set_turn_state(dict())
+        check("recwrite/wake-digest-written-no-warning",
+              (_rw_sched(dict(prompt="check back later")), len(_rw.turn_state().get("wake_digests") or [])),
+              ((0, None, None), 1))
+        _rw_save = aiqt_hooks._orch_save_turn_state
+        _rw_escape = aiqt_hooks._orch_escape_active
+        try:
+            _rw.set_items([item("RW-1")])
+            _rw.set_turn_state(dict())
+            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            check("recwrite/stop-call-deny-unpersisted-counter-warns",
+                  _rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")),
+                           _rw_counter + ", so this deny does not count toward the loop bound"),
+                  ("deny", True, True))
+            aiqt_hooks._orch_save_turn_state = _rw_save
+            _rw.set_turn_state(dict())
+            check("recwrite/stop-call-deny-counted-no-warning",
+                  (_rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")), _rw_counter),
+                   _rw.turn_state().get("stop_denials")),
+                  (("deny", False, False), 1))
+            _rw.set_turn_state(dict())
+            for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP):
+                _rw_sched(dict(prompt="recheck RW-1 later"))
+            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            check("recwrite/wake-digest-unwritten-findings-warns",
+                  _rw_note(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_wake), ("warn", True))
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _rw.set_turn_state(dict())
+            check("recwrite/wake-digest-unwritten-escape-warns",
+                  _rw_note(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_wake), ("warn", True))
+        finally:
+            aiqt_hooks._orch_save_turn_state = _rw_save
+            aiqt_hooks._orch_escape_active = _rw_escape
+        _rw_ts.unlink()
+        _rw_ts.mkdir()
+        check("recwrite/stamp-unwritten-notes",
+              _rw_note(aiqt_hooks.orch_prompt_stamp(_rw.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+                       "its time was not stamped and the denial counters were not reset"),
+              ("warn", True))
+        _rw_ts.rmdir()
+        check("recwrite/stamp-written-silent",
+              (aiqt_hooks.orch_prompt_stamp(_rw.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+               bool(_rw.turn_state().get("last_human_input_utc"))),
+              ((0, None, None), True))
+        _rw.set_turn_state(dict(wake_digests=[hashlib.sha256(b"wake RW-1").hexdigest()]))
+        _rw_wake_prompt = lambda: aiqt_hooks.orch_prompt_stamp(
+            _rw.payload("UserPromptSubmit", extra=dict(prompt="wake RW-1")))
+        try:
+            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            _rw_timer = _rw_context(_rw_wake_prompt())
+        finally:
+            aiqt_hooks._orch_save_turn_state = _rw_save
+        _rw_timer_ctl = _rw_context(_rw_wake_prompt())
+        check("recwrite/stamp-timer-digest-unconsumed-says-so",
+              ("TIMER-ORIGINATED" in _rw_timer, "this wake's digest was not consumed" in _rw_timer,
+               "TIMER-ORIGINATED" in _rw_timer_ctl, "Additionally" in _rw_timer_ctl,
+               _rw.turn_state().get("wake_digests")),
+              (True, True, True, False, []))
+        _rw_ge.unlink(missing_ok=True)
+        _rw_ge.mkdir()
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
+            _rw.set_turn_state(dict())
+            check("recwrite/teammate-idle-escape-allow-unrecorded-warns",
+                  _rw_note(aiqt_hooks.orch_teammate_idle(_rw.payload("TeammateIdle")),
+                           "the guard-events row recording this operator-escape release (TeammateIdle) could "
+                           "not be written"),
+                  ("warn", True))
+            _rw_ge.rmdir()
+            _rw.set_turn_state(dict())
+            check("recwrite/teammate-idle-escape-allow-recorded-no-warning",
+                  (aiqt_hooks.orch_teammate_idle(_rw.payload("TeammateIdle")),
+                   [(r.get("kind"), r.get("decision")) for r in aiqt_hooks._orch_read_jsonl(str(_rw_ge))[0] or []]),
+                  ((0, None, None), [("TeammateIdle", "allow")]))
+        finally:
+            aiqt_hooks._orch_escape_active = _rw_escape
+        _rw_rd = RdpFixture(tmp, "recwrite-rdp")
+        _rw_rd_ge = _rw_rd.briefs / "state" / "guard-events.jsonl"
+        _rw_rd_out = []
+        for _rw_target in ("working-tree", "not-a-review"):
+            _rw_brief = _rw_rd.brief(["Review-target: " + _rw_target])
+            _rw_rd_ge.unlink(missing_ok=True)
+            _rw_rd_ge.mkdir(parents=True)
+            _rw_failed = _rw_note(_rw_rd.dispatch(_rw_brief),
+                                  "the guard-events row for this allow-declared-target (review-dispatch-pin) "
+                                  "could not be written")
+            _rw_rd_ge.rmdir()
+            _rw_ok = _rw_note(_rw_rd.dispatch(_rw_brief), "Additionally")
+            _rw_rd_out.append((_rw_target, _rw_failed, _rw_ok, [
+                (r.get("kind"), r.get("decision"), r.get("detail"))
+                for r in aiqt_hooks._orch_read_jsonl(str(_rw_rd_ge))[0] or []]))
+        check("recwrite/declared-target-unrecorded-notes", _rw_rd_out, [
+            (t, ("warn", True), ("warn", False),
+             [("review-dispatch-pin", "allow-declared-target", "{}: {}".format(_rw_rd.briefs / "brief.txt", t))])
+            for t in ("working-tree", "not-a-review")])
+        _rw_b = Fixture(tmp, "recwrite-barrier")
+        _rw_b_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_rw_b.root)))
+        _rw_bar = _rw_b_sd / "resume-barrier.json"
+        _rw_audit = lambda: _rw_msg(aiqt_hooks.orch_resume_audit(_rw_b.payload("SessionStart")))
+        shutil.rmtree(_rw_b_sd, ignore_errors=True)
+        _rw_b_sd.write_text("not a directory" + chr(10), encoding="utf-8")
+        _rw_b.handoff.write_text("Branch: feature/other" + chr(10), encoding="utf-8")
+        _rw_bv, _rw_bm = _rw_audit()
+        _rw_b_sd.unlink()
+        check("recwrite/resume-barrier-unwritten-other-error-names-it",
+              (_rw_bv, "feature/other" in _rw_bm,
+               "the resume barrier could not be written (FileExistsError), so it was not persisted" in _rw_bm,
+               "once the state directory can be created and written" in _rw_bm,
+               "remove the directory at the barrier path" in _rw_bm, "to clear the barrier" in _rw_bm),
+              ("warn", True, True, True, False, False))
+        _rw_bar.mkdir(parents=True)
+        _rw_dv, _rw_dm = _rw_audit()
+        _rw_bar.rmdir()
+        check("recwrite/resume-barrier-directory-names-removal",
+              (_rw_dv, "remove the directory at the barrier path {}".format(_rw_bar) in _rw_dm,
+               "once the state directory can be created" in _rw_dm),
+              ("warn", True, False))
+        _rw_b.handoff.write_text("", encoding="utf-8")
+        _rw_write = aiqt_hooks._orch_barrier_write
+
+        def _rw_refuse(path, obj):
+            raise PermissionError("the clear is refused")
+        _rw_outside = lambda: _verdict(aiqt_hooks.orch_resume_barrier(_rw_b.payload(
+            "PreToolUse", "Write", dict(file_path=str(_rw_b.root / "src.py"), content="x"))))
+        _rw_pin = []
+        for _rw_warned in (True, False):
+            _rw_bar.write_text(json.dumps(dict(active=True, findings=["recwrite-armed"], warned=_rw_warned)),
+                               encoding="utf-8")
+            try:
+                aiqt_hooks._orch_barrier_write = _rw_refuse
+                _rw_clean = aiqt_hooks.orch_resume_audit(_rw_b.payload("SessionStart"))
+            finally:
+                aiqt_hooks._orch_barrier_write = _rw_write
+            _rw_pin.append((_rw_warned, _rw_clean, _rw_outside(), _rw_outside(),
+                            json.loads(_rw_bar.read_text(encoding="utf-8")).get("active")))
+        check("recwrite/failed-clear-armed-barrier-noted-once-per-arming", _rw_pin,
+              [(True, (0, None, None), "allow", "allow", True), (False, (0, None, None), "warn", "allow", True)])
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

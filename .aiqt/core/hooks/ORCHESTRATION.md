@@ -107,8 +107,11 @@ the doctor and the resume audit report and arm from it):
   log fails other than as not found, because the state directory cannot be searched or is not a
   directory, as with that regular file, the warning also names the forced-exit log as unreadable).
   That warning then also says the barrier was not persisted (this audit did not arm it) and asks for a
-  manual record, instead of saying that a re-run clears the barrier. A clean audit that cannot clear the
-  barrier adds no warning: a barrier it leaves armed, or a directory in its place, still reads as armed. The
+  manual record, instead of saying that a re-run clears the barrier, and names the remedy: remove a
+  directory at the barrier path (neither audit can replace one), otherwise make the state directory
+  creatable and writable. A clean audit that cannot clear the barrier adds no warning: a barrier it
+  leaves armed still reads as armed, noted once per arming (one already warned about stays silent), and
+  a directory in its place reads as armed and is noted on each mutation outside the record surfaces. The
   PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
   for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
   reads an absent barrier file (a dangling symlink included) as clear, and a symlink to a regular file
@@ -210,7 +213,9 @@ value is empty or does not begin with attended/unattended, a JSON-shaped marker 
 included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
 scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
 `mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
-(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty
+(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file (one
+whose open reports not found; a missing file under a parent path that is a regular file reports not a
+directory and fails closed, as any other unreadable file does), an empty
 or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
 JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
 mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
@@ -362,7 +367,8 @@ one space. The value is the rest of that line. The brief must be UTF-8 with no N
 boundary other than a physical newline.
 
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
-  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row.
+  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where
+  that row cannot be written, the note says so (the allow stands).
 - `Reviewed-revision:` is required, once, for a `revision` target. It must be the full lowercase
   commit id, at the length of the repository's object format. A short id, a branch name or `HEAD`
   is refused.

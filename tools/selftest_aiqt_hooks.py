@@ -766,9 +766,9 @@ def _test_note_literal_sites(failures, tmp):
     site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
     (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
     review_dispatch_pin's;
-    the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
-    fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
-    are selftest_orch_hooks.Fixture repos under tmp."""
+    the UserPromptSubmit stamp's unwritten-stamp note, the PostToolUse ledger returns, the Stop loop-bound
+    _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
+    dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
@@ -844,6 +844,15 @@ def _test_note_literal_sites(failures, tmp):
              "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
+    saved_save = aiqt_hooks._orch_save_turn_state
+    try:
+        aiqt_hooks._orch_save_turn_state = lambda root, state: False
+        note("(nl-stamp-unwritten) a genuine prompt whose turn-state stamp cannot be written proceeds with a note "
+             "saying the stamp was not written",
+             aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
+             "its time was not stamped")
+    finally:
+        aiqt_hooks._orch_save_turn_state = saved_save
     s = orch.Fixture(base, "stop")
     s.set_items([orch.item("NL-3")])
     s.set_turn_state(dict(stop_denials=aiqt_hooks._ORCH_LOOP_BOUND))
