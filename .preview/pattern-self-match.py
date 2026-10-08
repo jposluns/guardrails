@@ -1034,16 +1034,18 @@ def _self_test():
         "sys.stdout.write(json.dumps(out) + '\\n')"))
 
     # The child that T.run_hook runs: this file loaded as a module, its main called with this file's path and the
-    # arguments after it, its _read_complete given 30 seconds, the child's own bound (T.child), so a verdict there
-    # never depends on how fast the host runs the child (QA round 11). The production deadline main passes is
-    # pinned in process (T.scheduled with via_main).
+    # arguments after it, its _read_complete given 30 seconds whatever arguments main passes, the child's default
+    # bound (T.child), so a verdict there depends on how fast the host runs the child only when the host stalls it
+    # (or this test) for about that long (QA rounds 11 and 12). The arguments main passes, stdin at the production
+    # deadline, are pinned in process (T.scheduled with via_main); the script's own entry point runs on the
+    # actual command line in T.hook.
     MAIN = "\n".join((
         "import importlib.util, sys",
         "spec = importlib.util.spec_from_file_location('hook', sys.argv[1])",
         "hook = importlib.util.module_from_spec(spec)",
         "spec.loader.exec_module(hook)",
         "read = hook._read_complete",
-        "hook._read_complete = lambda: read(0, 30.0)",
+        "hook._read_complete = lambda *a, **k: read(0, 30.0)",
         "sys.exit(hook.main(sys.argv[1:]))"))
 
     def decide(command, env=None, **extra):
@@ -1447,18 +1449,23 @@ def _self_test():
                 self.assertIsNotNone(decide("pkill -f qa-x/", env=env), env)
 
         def test_09_process_outputs(self):
-            rc, out, err = self.run_hook(payload_bytes("pkill -f qa-x/"))
+            # the script on the actual command line, through its own entry point (hook): a deny, the note and
+            # silence for a well-formed payload (QA round 12)
+            rc, out, err = self.hook(payload_bytes("pkill -f qa-x/"))
             self.assertEqual((rc, err), (0, b""))
             self.assertTrue(out.endswith(b"\n") and out.count(b"\n") == 1, out)
             h = json.loads(out)["hookSpecificOutput"]
             self.assertEqual(h["permissionDecision"], "deny")
-            rc, out, err = self.run_hook(payload_bytes("pkill sleep"))
+            rc, out, err = self.hook(payload_bytes("pkill sleep"))
             self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1))
             self.assertEqual(json.loads(out), {"systemMessage": _NOTE})
-            self.assertEqual(self.run_hook(payload_bytes("echo hi")), (0, b"", b""))
-            self.assertEqual(self.run_hook(payload_bytes("pkill -f qa-x/", agent_id="a1"))[1].count(b"deny"), 1)
-            out = self.run_hook(payload_bytes("pkill -f " + chr(233) + "x"))[1]
+            self.assertEqual(self.hook(payload_bytes("echo hi")), (0, b"", b""))
+            self.assertEqual(self.hook(payload_bytes("pkill -f qa-x/", agent_id="a1"))[1].count(b"deny"), 1)
+            out = self.hook(payload_bytes("pkill -f " + chr(233) + "x"))[1]
             out.decode("ascii")  # json.dumps writes ASCII escapes
+            # and through main in a child (run_hook), whatever arguments main passes its reader
+            out = self.run_hook(payload_bytes("pkill -f qa-x/"))[1]
+            self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
 
         def test_09_process_fail_open(self):
             # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently
@@ -1473,7 +1480,7 @@ def _self_test():
                 self.assertEqual(json.loads(out), dict(systemMessage=_NOTE_PAYLOAD), data[:30])
             for data in (payload_bytes("pkill -f qa-x/", tool_name="Read"),
                          payload_bytes("pkill -f qa-x/", hook_event_name="PostToolUse")):
-                self.assertEqual(self.run_hook(data), (0, b"", b""), data[:30])
+                self.assertEqual(self.hook(data), (0, b"", b""), data[:30])
             if os.path.exists("/bin/sh"):  # a closed stdin
                 p = subprocess.run(["/bin/sh", "-c", 'exec "$0" -I -S -B "$1" <&-', sys.executable, here],
                                    capture_output=True, env=dict(LC_ALL="C"), timeout=30)
@@ -1481,7 +1488,7 @@ def _self_test():
                 self.assertEqual(json.loads(p.stdout), dict(systemMessage=_NOTE_PAYLOAD))
             for extra in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}, {"ORCH_VERIFY_OWNER": ""}):
                 env = dict({"LC_ALL": "C"}, **extra)
-                rc, out, err = self.run_hook(payload_bytes("pkill -f qa-x/"), env)
+                rc, out, err = self.hook(payload_bytes("pkill -f qa-x/"), env)  # the actual command line
                 self.assertEqual((rc, out, err), (0, b"", _WORKER_LINE.encode() + b"\n"), extra)
 
         def test_09_read_error_note(self):
@@ -1524,8 +1531,9 @@ def _self_test():
                 self.assertEqual(sys.stdout.getvalue(), "")
             finally:
                 sys.stdout = old
+            # on the actual command line (hook): an unsupported argument returns before stdin is read (QA round 12)
             for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""]):
-                self.assertEqual(self.run_hook(payload_bytes("pkill -f qa-x/"), argv=argv), (0, b"", b""), argv)
+                self.assertEqual(self.hook(payload_bytes("pkill -f qa-x/"), argv=argv), (0, b"", b""), argv)
 
         def test_10_directory_stdin_guard(self):
             if not os.path.exists("/bin/sh"):
@@ -2040,25 +2048,36 @@ def _self_test():
                 out = whole_input(bad)
                 self.assertEqual(out, "refused: hook payload has " + name + ", which is not JSON", bad)
 
-        def child(self, argv, parts, end=True, bound=30, env=None):
+        def child(self, argv, parts, end=True, bound=30, env=None, before=False):
             """python3 -I -S -B argv run as a child process (env its whole environment, LC_ALL=C alone when None),
             its stdin a pipe that this test writes with no thread:
             parts are (pause, bytes) each, each written after sleeping pause seconds through a non-blocking write
             end, so a child that stops reading cannot block the test. The write end is then closed when end is
             true, and kept open until the child exits when it is false (an input that never ends). A child that
-            stops reading (EPIPE) gets no more parts. A child still running bound seconds after it was started,
-            or one whose input could not all be written by then, is killed and fails the test with its output; it
-            never hangs the test. On every path the child is killed if it still runs and is reaped, and each
-            descriptor opened here is closed. Returns (status, stdout, stderr)."""
+            stops reading (EPIPE) gets no more parts. before: the parts (each with no pause) are all written and
+            the write end closed before the child is started, so the child finds its whole input and its end
+            already there whenever it starts reading; a part that does not fit in the pipe's buffer fails the
+            test. bound is parent-observed: it runs on this test's clock from just after the child is started, so
+            it includes the child's start-up and any stall of this test process (its pauses and writes too), and
+            it is an outer bound, not a measure of how long the child took. A child that has not finished within
+            it, or whose input could not all be written by then, is killed and fails the test with its output,
+            reported as not finished within the parent-observed bound (not as an overrun the child was shown to
+            make); it never hangs the test. On every path the child is killed if it still runs and is reaped,
+            and each descriptor opened here is closed. Returns (status, stdout, stderr)."""
             r, w = os.pipe()
             p, late = None, False
             try:
+                os.set_blocking(w, False)
+                if before:
+                    for pause, data in parts:
+                        self.assertEqual((pause, os.write(w, data)), (0, len(data)), "a part written before the start")
+                    os.close(w)
+                    w, parts = None, ()
                 p = subprocess.Popen([sys.executable, "-I", "-S", "-B"] + argv, stdin=r, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, env=dict(LC_ALL="C") if env is None else env)
                 stop = wall_clock() + bound
                 os.close(r)
                 r = None
-                os.set_blocking(w, False)
                 try:
                     for pause, data in parts:
                         wall_sleep(pause)
@@ -2069,7 +2088,7 @@ def _self_test():
                                 view = view[os.write(w, view):]
                 except BrokenPipeError:
                     pass  # the child stopped reading
-                if end:
+                if end and w is not None:
                     os.close(w)
                     w = None
                 if not late:
@@ -2080,8 +2099,9 @@ def _self_test():
                 if late:
                     p.kill()
                     out, err = p.communicate()
-                    self.fail("the child ran past its %d-second bound: status %r, stdout %r, stderr %r" % (
-                        bound, p.returncode, out[-2000:], err[-2000:]))
+                    self.fail("the child did not finish within the parent-observed %d-second bound (it includes the "
+                              "child's start-up and any stall of this test process): status %r, stdout %r, stderr "
+                              "%r" % (bound, p.returncode, out[-2000:], err[-2000:]))
                 return p.returncode, out, err
             finally:
                 for fd in (r, w):
@@ -2095,9 +2115,20 @@ def _self_test():
         def run_hook(self, data, env=None, argv=()):
             """The hook's main run in a child process (child, MAIN) on data and then the end of input, with argv
             after this file's path and env the whole environment: (status, stdout, stderr). Its reader is given
-            30 seconds, the child's bound, so these verdicts do not depend on how fast the host runs the child (QA
-            round 11); scheduled with via_main pins that main reads stdin at the production deadline."""
+            30 seconds whatever arguments main passes, the child's bound, so these verdicts depend on how fast the
+            host runs the child only when the host stalls it (or this test) for about that long (QA rounds 11 and
+            12); scheduled with via_main pins that main reads stdin at the production deadline."""
             return self.child(["-c", MAIN, here] + list(argv), [(0, data)], env=env)
+
+        def hook(self, data, env=None, argv=()):
+            """This file on the actual command line, python3 -I -S -B <this file> argv, so through its own entry
+            point (raise SystemExit(main(sys.argv))), with env the whole environment (child): data and its end of
+            input are in the pipe before the child starts (child with before), so the reader, at the production
+            deadline, finds them whenever it starts, and no pause or write of this test can make it late; a
+            correct hook fails here only if the host stalls the child itself for about that deadline while it
+            reads them, or stalls the child or this test for about the child's parent-observed 30-second bound
+            (QA round 12). data must fit in the pipe's buffer. Returns (status, stdout, stderr)."""
+            return self.child([here] + list(argv), [(0, data)], env=env, before=True)
 
         def child_read(self, parts, deadline=30.0, end=True, reader="_read_complete", max_input=None,
                        bound=30):
@@ -2358,8 +2389,8 @@ def _self_test():
             assertion, not by an error (QA round 11): one that sleeps 1 second before each refusal for lateness,
             one that sleeps 2 ** -10 seconds before it first reads the clock, and one that waits through
             select.poll. A delay through a name the harness does not patch is not seen there (scheduled); the
-            bound on the production-deadline runs in test_m46_input_still_open catches one of about 10 seconds or
-            more."""
+            parent-observed bound on the production-deadline runs in test_m46_input_still_open catches one of
+            just under 10 seconds or more."""
             def late_sleep(fd, deadline):
                 try:
                     return _read_complete(fd, deadline)
@@ -2386,11 +2417,14 @@ def _self_test():
             production deadline, although a whole JSON value has been written; through main it gets the
             cannot-evaluate note, not the deny that payload gets once read. A reader with no deadline never
             returns on that input, and one that takes a whole JSON value without its end of input (QA round 3
-            mutant B) returns it: each fails here. Each child has a bound of 30 seconds, and the two at the
-            production deadline one of 12 seconds, 10 seconds after that deadline, with their input open
-            throughout: the refusal must come by then, from the child's exit (QA round 11). So a reader that
-            delays its refusal by about 10 seconds or more fails here, and a correct one fails only if the host
-            stalls the child for about that long; no other assertion here depends on when anything happened, and
+            mutant B) returns it: each fails here. Each child has a parent-observed bound (child) of 30 seconds,
+            and the two at the production deadline one of 12 seconds, with their input open throughout: the
+            refusal must come by then, from the child's exit (QA round 11). That bound starts just after the
+            child is started, and the reader's deadline once the child has started up (about 0.05 seconds here;
+            the 0.3-second pause runs within the deadline), so the margin after the deadline is just under 10
+            seconds, less any stall of this test process. So a reader that delays its refusal by just under 10
+            seconds or more fails here, and a correct one fails only if the host stalls the child, or this test,
+            for about that long; no other assertion here depends on when anything happened, and
             test_m46_wait_for_time_left is the only verdict on the timeouts."""
             one, prompt = json.dumps(dict(a=1)).encode(), int(_READ_DEADLINE) + 10
             self.assertEqual(self.child_read([(0, one)]), dict(a=1))
@@ -2470,22 +2504,28 @@ def _self_test():
             """An end of input that comes after the deadline is refused even when the OS runs the hook late (QA
             round 4): the clock is read again after each wait and after each read, before an end of input is
             accepted. On injected schedules (scheduled), with no thread and nothing timed (QA round 11), at a
-            deadline of 0.05 seconds: each clock reading in turn held off 0.12 seconds between taking it and using
-            it, while the input ends 0.08 seconds after the first reading; a wait reported at once whose read
-            then takes the clock past the deadline; and a wait that ends 1.0 seconds past the deadline, which is
-            not followed by a read (asserted on the count of reads, QA round 10). Through main, at the production
+            deadline of 0.05 seconds: no reading held, then each of the six clock readings in turn held off 0.12
+            seconds between taking it and using it, on a schedule whose second wait ends the input and takes 0.08
+            seconds; a wait reported at once whose read then takes the clock past the deadline; and a wait that
+            takes 1.0 second, so it ends about 0.95 seconds past the deadline, which is not followed by a read
+            (asserted on the count of reads, QA round 10). Through main, at the production
             deadline, waits that each take 1.1 seconds: the end of input is seen at 2.2 seconds and gets the
             cannot-evaluate note."""
             late, one = "refused: " + _LATE, b"{}"
-            # the reported regression: each of the six clock readings in turn is held off, refused after as many
-            # reads (without the check after a wait, a wait held off is followed by a read)
-            for held, reads in ((1, 0), (2, 0), (3, 1), (4, 1), (5, 1), (6, 1)):
-                out, _, n = self.scheduled([(0.0, one), (0.08, b"")], deadline=0.05, held=(held, 0.12))
+            # the reported regression. Unheld, the second wait alone takes the clock to 100.08, past the deadline
+            # at 100.05: refused after one read. Holding reading 3, 4, 5 or 6 gives that same result (with 1 to 4
+            # held the reader refuses before the second wait, so the input never ends in the run; with 5 held the
+            # end comes 0.20 seconds after the first reading). Holding reading 1 or 2 gives a refusal with no read:
+            # reading 2 is the time left before the first wait, so without the check after a wait, that wait,
+            # held off, is followed by a read
+            for held, reads in ((None, 1), (1, 0), (2, 0), (3, 1), (4, 1), (5, 1), (6, 1)):
+                out, _, n = self.scheduled([(0.0, one), (0.08, b"")], deadline=0.05,
+                                           held=held and (held, 0.12))
                 self.assertEqual((out, n), (late, reads), held)
             # a wait reported at once: the read of the end of input itself takes the clock past the deadline
             out, _, n = self.scheduled([(0.0, one), (0.0, b"")], read_takes=[0.0, 0.08], deadline=0.05)
             self.assertEqual((out, n), (late, 2))
-            # a wait that ends past the deadline is not followed by a read
+            # a wait that takes 1.0 second ends about 0.95 seconds past the deadline: it is not followed by a read
             out, _, n = self.scheduled([(1.0, b"")], deadline=0.05)
             self.assertEqual((out, n), (late, 0))
             # through main: each wait moves the clock on 1.1 seconds, so the end of input is seen at 2.2 seconds
