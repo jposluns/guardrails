@@ -26,23 +26,28 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
     sanctioned sibling-import form is sys.path.append.
 
 SETTINGS SCOPE (the literal-scope ruling). A settings.json hook command is in scope only when it is a
-CANDIDATE python launcher, decided without a shell lexer: in its text with every line continuation and
-backslash removed, or in that text with its quote characters removed as well, a python interpreter
-name (``python``, or ``python`` followed by digits, digits.digits or ``w``: ``python2``, ``python3``,
-``python3.12``, ``pythonw``) or the core hook launcher's name (aiqt_hooks_launch.py) appears as a token
+CANDIDATE python launcher, decided without a shell lexer: in its raw text, in that text with its
+escapes read pairwise as the shell reads them outside quotes (a backslash and a newline after it are
+removed, a backslash and any other character read as that character, so ``\\\\`` stays one literal
+backslash and the newline after ``ok\\\\`` still ends a command), or in that text with its quote
+characters removed as well, a python interpreter name (``python``, or ``python`` followed by digits,
+digits.digits or ``w``: ``python2``, ``python3``, ``python3.12``, ``pythonw``) or the core hook
+launcher's name (aiqt_hooks_launch.py) appears as a token
 bounded on the left by the start of the text, whitespace, a quote or one of ``/ ; | & ( ) { } ` = , <
 > *`` (so ``$(`` too) and on the right by the end of the text, whitespace, a quote or one of ``; | & ( )
 { } ` , < > [ * ? $``. A ``-`` is no boundary, so an option name (``--python-version``, ``--python
 3.12``) makes no candidate, and neither does a longer name (``xpython3``, ``python3x``) or a path through
 the name (``python3/x``); ``PY=python3``, ``{x,python3}``, ``python3<x.py`` and ``python3$X`` each make
-one, as do a name split by quotes (``pyt"hon"3``) and a python word in a heredoc body, inside ``$(...)``
-or inside a quoted argument (``echo "python3 done"``). A candidate is parsed only inside
-the allow-listed shell grammar below. ANY other settings hook command is OUT OF SCOPE (exit 0) and is
-not lexed at all, its expansions, substitutions, redirections, ``~`` paths, groups, globs and heredocs
+one, as do a name split by quotes (``pyt"hon"3``) and a python word in a heredoc body, inside ``$(...)``,
+inside a quoted argument (``echo "python3 done"``) or in a comment (``true # python3 note``). A
+candidate is parsed only inside the allow-listed shell grammar below. ANY other settings hook command
+is OUT OF SCOPE (exit 0) and is not lexed at all, its expansions, substitutions, redirections, ``~``
+paths, groups, globs and heredocs
 included: a python launch disguised by shell expansion, globbing, quoting, eval or watch re-parsing or
 similar inside a command that names neither a python interpreter nor the core hook launcher (``"$PY"
-x.py``, ``eval "$CMD"``, ``/usr/bin/pyth?n3 x.py``) is the disclosed literal-scope residual; only the
-repository's own settings author can write such a command.
+x.py``, ``eval "$CMD"``, ``/usr/bin/pyth?n3 x.py``, ``env -Spython3 x.py``, ANSI-C ``$'pyth'on3`` or
+locale ``$"pyth"on3`` quoting) is the disclosed literal-scope residual; only the repository's own
+settings author can write such a command.
 
 SHELL GRAMMAR (an allow-list). A candidate settings.json hook command, and a CI shell line the gate
 parses, is PARSED only if it lies entirely inside this grammar: words of the characters ``A-Z a-z 0-9 _ . / - + = ,
@@ -168,9 +173,11 @@ symlink, an alternate-case name on a case-insensitive filesystem, a ``.pyc`` or 
 without ``-S``), and a ``-h``, ``-?`` or ``-V`` letter in the
 registered cluster (``-ISh``) prints help or the version and exits 0 without running the hook. A
 settings hook command that names neither a python interpreter nor the core hook launcher is out of scope
-(the literal-scope residual): a python launch disguised there by shell expansion, globbing, quoting,
-eval or watch re-parsing, or a wrapper (``"$PY" x.py``, ``eval "$CMD"``, ``pyt${E}hon3``,
-``/usr/bin/pyth?n3``) is not caught. Inside a candidate, a wrapper that executes a quoted argument
+(the literal-scope residual): a python launch disguised there by shell expansion, globbing, quoting
+(ANSI-C ``$'...'`` or locale ``$"..."`` quoting included), eval or watch re-parsing, or a wrapper
+(``"$PY" x.py``, ``eval "$CMD"``, ``pyt${E}hon3``, ``/usr/bin/pyth?n3``, ``env -Spython3 x.py``,
+``$'pyth'on3``, ``$"pyth"on3``) is not caught, and only the repository's own settings author can write
+such a command. Inside a candidate, a wrapper that executes a quoted argument
 (``env -S'python3 x.py'``, ``bash -c 'python3 x.py'``) parses as one argument word and passes
 unexamined; and the lines of a heredoc body in run_all_checks.sh or a ``run:`` block are scanned as shell lines,
 mirroring the roster-scan limit the enforceability ledger discloses.
@@ -655,22 +662,45 @@ CANDIDATE_RE = re.compile(
     r"(?=$|[\s'\"" + re.escape(CANDIDATE_RIGHT) + r"])")
 
 
+def _unescaped_text(s):
+    """s with its backslash escapes read pairwise, as the shell reads them outside quotes: a backslash
+    and the newline after it (a line continuation) are removed, a backslash and any other character
+    read as that character (so `\\\\` stays one literal backslash, and `ok\\\\<newline>python3` keeps
+    the newline before python3). A python word or a NO_SITE_SCRIPTS name spelled with escapes
+    (`pyt\\hon3`, `pyth\\<newline>on3`) reads here as the shell reads it. One deliberate departure: a
+    trailing lone backslash, which bash keeps literally, is removed, so `python3\\` at the end of the
+    text stays a candidate (fail-closed)."""
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\":
+            if i + 1 < len(s) and s[i + 1] != "\n":
+                out.append(s[i + 1])
+            i += 2
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
 def _unquoted_text(s):
-    """s with every line continuation, backslash and quote character removed: a python word or a
-    NO_SITE_SCRIPTS name spelled with quotes or escapes (`pyt"hon"3`, `pyt\\hon3`, `pyt\\<newline>hon3`)
-    reads here as the shell reads it once its quoting is removed."""
-    return s.replace("\\\n", "").replace("\\", "").translate(QUOTES)
+    """_unescaped_text(s) with its quote characters removed as well: a python word or a NO_SITE_SCRIPTS
+    name split by quotes as well as escapes (`pyt"hon"3`, `py\\'th'on3`) reads here as the shell reads
+    it once its quoting is removed."""
+    return _unescaped_text(s).translate(QUOTES)
 
 
 def _is_candidate(s):
     """True iff the settings hook command s is a CANDIDATE python launcher: CANDIDATE_RE finds a token in
-    s with its line continuations and backslashes removed, or in that text with its quote characters
-    removed as well (_unquoted_text). The first reading keeps a quote as a boundary (`env -S'python3
-    x.py'`), the second joins a quote-split name (`pyt"hon"3`). No shell lexing: a heredoc body, a
-    `$(...)` or a quoted argument that names python makes a candidate, which the grammar then refuses or
-    parses (fail-closed)."""
-    kept = s.replace("\\\n", "").replace("\\", "")
-    return bool(CANDIDATE_RE.search(kept) or CANDIDATE_RE.search(_unquoted_text(s)))
+    the raw text s, in s with its escapes read pairwise (_unescaped_text), or in that text with its quote
+    characters removed as well (_unquoted_text). The raw reading keeps every boundary the text spells,
+    so no escape reading can delete one (`ok\\\\<newline>python3`, and a backslash inside single quotes,
+    which the shell keeps literally); the pairwise reading joins an escape-split name and keeps a quote
+    as a boundary (`env -S'pyt\\hon3 x.py'`); the last joins a quote-split name (`pyt"hon"3`). Each
+    extra reading can only add a candidate, which fails closed. No shell lexing: a heredoc body, a
+    `$(...)`, a comment or a quoted argument that names python makes a candidate, which the grammar
+    then refuses or parses (fail-closed)."""
+    return any(CANDIDATE_RE.search(text) for text in (s, _unescaped_text(s), _unquoted_text(s)))
 
 
 def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures, launch_surface):
@@ -1816,11 +1846,12 @@ def self_test_main():
                                 .format(label, line, want))
 
         # 42. SCOPE (the literal-scope ruling), and the leading path segment. A CANDIDATE settings hook
-        #     command (_is_candidate: its text, line continuations and backslashes removed, with or
-        #     without its quote characters, names a python interpreter or the core hook launcher as a
-        #     bounded token) is parsed in the allow-listed grammar; inside it the form Claude Code's hook
-        #     documentation shows, a double-quoted `$NAME` or `${NAME}` as the leading path segment of the
-        #     script operand, is admitted (compliant 0, non-compliant 1, the basename read literally), and
+        #     command (_is_candidate: its raw text, that text with its escapes read pairwise, or that
+        #     text with its quote characters removed as well, names a python interpreter or the core
+        #     hook launcher as a bounded token) is parsed in the allow-listed grammar; inside it the
+        #     form Claude Code's hook documentation shows, a double-quoted `$NAME` or `${NAME}` as the
+        #     leading path segment of the script operand, is admitted (compliant 0, non-compliant 1, the
+        #     basename read literally), and
         #     an expansion at or before the command word, among the interpreter options, their values and
         #     their -c/-m operands, or anywhere but a leading path segment is a cannot-evaluate (exit 2).
         #     Every round 18-21 reproduction that names python or the launcher literally keeps its exit.
@@ -1894,6 +1925,18 @@ def self_test_main():
             ('${X}python3 x.py', 2),
             ('python3$X x.py', 2),
             ('echo "$(python3 x.py)"', 2),
+            # Round 22: an escaped backslash before a newline is one literal backslash, so the newline
+            # still ends the command and python3 runs (bash runs `python3 hook.py` after `echo ok\\`);
+            # read pairwise and raw, each is a candidate the grammar refuses. A plain line continuation
+            # before a python name stays a candidate by the raw reading (fail-closed), and so does a
+            # comment that names python.
+            ('echo ok\\\\\npython3 hook.py', 2),
+            ('echo ok\\\\\npyt"hon"3 hook.py', 2),
+            ('echo ok\\\\\npyt\\hon3 hook.py', 2),
+            ('echo ok\\\\\n/p/aiqt_hooks_launch.py h_one', 2),
+            ('echo ok\\\\\\\\\npython3 hook.py', 2),
+            ('echo ok\\\npython3 hook.py', 2),
+            ('true # python3 note', 2),
         )
         # 43. OUT OF SCOPE: a settings hook command that names neither a python interpreter nor the core
         #     hook launcher is exit 0 and is never lexed. These rows pin the DISCLOSED literal-scope
@@ -1922,6 +1965,9 @@ def self_test_main():
             '[ "$PY" x.py ]; "$PY" x.py', '[[ -n "$X" ]] && "$PY" x.py', 'eval "$PY" x.py',
             'eval "$CMD"', 'eval pyt${E}hon3 x.py', 'watch -n 1 "$PY" x.py', 'exec "$PY"',
             'xargs "$PY"', 'bash -c "$PY x.py"', "pyt$'h'on3 x.py",
+            # Round 22: a name glued to an option letter or to ANSI-C or locale quoting is no bounded
+            # token, so each stays the disclosed residual although env or bash runs python3.
+            'env -Spython3 x.py', "$'pyth'on3 x.py", '$"pyth"on3 x.py',
         )
         adopter_rows = (
             '"$CLAUDE_PROJECT_DIR"/.claude/hooks/check-style.sh',
@@ -1949,8 +1995,9 @@ def self_test_main():
         #     double-quoted "$V" is no leading path segment): exit 2 pins a candidate, exit 0 pins a
         #     non-candidate. One row per CANDIDATE_LEFT and CANDIDATE_RIGHT character (spelled out here,
         #     not read from the constants, so dropping a character fails its row), per quote, per
-        #     interpreter-name form, per reading (quotes kept: env -S'python3 x.py'; quotes removed:
-        #     pyt"hon"3), the backslash and line-continuation removals, and the non-boundaries.
+        #     interpreter-name form, per reading (raw: ok\\<newline>python3; escapes read pairwise,
+        #     quotes kept: env -S'pyt\hon3 x.py'; quotes removed: pyt"hon"3), the backslash and
+        #     line-continuation readings, and the non-boundaries.
         candidacy_rows = [(': "$V" X{}python3'.format(ch), 2) for ch in "/;|&(){}`=,<>*"]
         candidacy_rows += [('python3{}X "$V"'.format(ch), 2) for ch in ";|&(){}`,<>[*?$"]
         candidacy_rows += [
@@ -1967,6 +2014,11 @@ def self_test_main():
             (': "$V" python3.x', 0), (': "$V" python3:', 0), (': "$V" pythonx', 0),
             (': "$V" aiqt_hooks_launch.pyc', 0), (': "$V" xaiqt_hooks_launch.py', 0),
             (': "$V" /p/aiqt_hooks_launch.py.bak', 0),
+            # Round 22: a multi-digit version, `+` (no boundary), a backslash inside the quote-kept
+            # reading, and the raw reading of an escaped backslash before a newline.
+            (': "$V" python123', 2), (': "$V" python3+x', 0), (': "$V" +python3', 0),
+            ("env -S'pyt\\hon3 x.py' \"$V\"", 2), (': "$V" ok\\\\\npython3', 2),
+            (': "$V" ok\\\npython3', 2), (': "$V" ok\\\\python3', 0), (': "$V" python3\\', 2),
         ]
         # 45. A CLUSTERED -c/-m protects the following operand exactly like a separate one: an admitted
         #     leading-path expansion after `-Ic`, `-Im`, `-BIc` or `-ISc` is inside the protected span
@@ -1975,7 +2027,8 @@ def self_test_main():
         cluster_rows = (
             ('python3 -Ic "$D"/x', 2), ('python3 -Im "$D"/x', 2), ('python3 -BIc "$D"/x', 2),
             ('python3 -ISc "$D"/aiqt_hooks_launch.py', 2), ('python3 -I -Bc "$D"/x', 2),
-            ('python3 -IcX "$D"/x', 0), ('python3 -I -c X "$D"/x', 0),
+            ('python3 -IcX "$D"/x', 0), ('python3 -I -c X "$D"/x', 0), ('python3 -ImMOD "$D"/x', 0),
+            ('python3 -I -mMOD "$D"/x', 0),
         )
         rows = ([(cmd, want, "scope") for cmd, want in scope_rows]
                 + [(cmd, 0, "out-of-scope") for cmd in out_of_scope_rows]
@@ -2040,13 +2093,16 @@ def self_test_main():
           "unquoted operators still split; a CI line that compiles or hashes the launcher passes while "
           "the same line as a settings hook command fails; a bare trailing `-` in a cluster hands the next "
           "token to the script operand, confirmed against a real interpreter; a second mention of the "
-          "launcher after a compliant operand passes; every reviewer reproduction and every other construct "
-          "outside the allow-listed shell grammar is a cannot-evaluate (exit 2) naming it while plain "
+          "launcher after a compliant operand passes; inside a candidate, every reviewer reproduction and "
+          "every other construct outside the allow-listed shell grammar is a cannot-evaluate (exit 2) "
+          "naming it while plain "
           "compliant commands pass and plain non-compliant ones fail; a settings hook command whose text "
           "names no python interpreter and no core hook launcher as a bounded token is out of scope "
           "(exit 0, the literal-scope residual, the adopter table included), a candidate is parsed in the "
-          "grammar (pyt\"hon\"3, a heredoc body or a $(...) naming python3 included), each candidacy "
-          "boundary and non-boundary is pinned, the documented `\"$CLAUDE_PROJECT_DIR\"/...` script operand "
+          "grammar (pyt\"hon\"3, a heredoc body, a comment or a $(...) naming python3 included, and "
+          "an escaped backslash before a newline, `ok\\\\<newline>python3`, read as the shell reads it), "
+          "each candidacy boundary and non-boundary is pinned, the documented `\"$CLAUDE_PROJECT_DIR\"/...` "
+          "script operand "
           "passes compliant (exit 0) and fails non-compliant (exit 1) while an expansion at the command "
           "word, among the options or after a -c/-m, separate or ending a cluster (-Ic, -Im, -BIc), is "
           "exit 2 ({} settings-command scope and grammar rows); and the gate refuses to run non-"
