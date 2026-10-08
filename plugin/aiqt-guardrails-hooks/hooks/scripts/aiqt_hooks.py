@@ -10513,19 +10513,23 @@ _GATE_GREP_VALUE_LONG = frozenset(("--regexp", "--file"))
 # Which sink stages read their STDIN (the pipe) rather than a named file: word -> (short letters that take a
 # value, short letters that take none, long options that take a value, long options that take none or only an
 # attached '=' value, pattern operands before the input files, options that supply that pattern instead). A stage
-# reads its stdin when it has no input operand (a recursive grep then reads the tree) or when any input operand,
-# or the value of a file option such as a -f pattern file (_GATE_STDIN_FILE_OPTIONS), names the stdin
-# (_gate_stdin_name), even beside other files or under -r. Each grammar is the option list of the installed
+# reads its stdin when it has no input operand, recursive or not, or when any input operand, or the value of a file
+# option such as a -f pattern file (_GATE_STDIN_FILE_OPTIONS), names the stdin (_gate_stdin_name), even beside other
+# files or under -r. GNU grep 3.12 with -r, -R, --recursive, --dereference-recursive or -d/--directories recurse and
+# no input operand reads the working directory and not its stdin, unless a later -d/--directories read or skip sets
+# the mode back (checked 2026-10-08), but a grep word may run another grep: the ugrep a shell function may run as grep
+# reads its stdin under -r too (checked 2026-10-08), so a recursive grep-family stage with no input operand notes
+# rather than allowing silently. Each grammar is the option list of the installed
 # tool's --help (checked 2026-10-07): GNU grep 3.12 (/usr/bin/grep; -NUM is a context count, so the digits are
 # flags), ripgrep 15.1.0 (with the negations and alternative spellings its --help names, such as --no-heading and
 # --maxdepth; the --print0 it names is find's) and uutils coreutils 0.8.0 head, tail and cut. An option outside
 # its grammar (an unknown one, an abbreviated long one such as grep --max=5, an option of another grep such as
 # ugrep) has an arity the hook does not know, so the stage may read its stdin: it notes rather than allowing
-# silently (_gate_reads_stdin). A grep directory mode is resolved in option order, as GNU grep 3.12 does
-# (checked 2026-10-08): -r, -R, --recursive, --dereference-recursive and -d/--directories recurse set it to
-# recurse, a later -d/--directories read or skip (attached, separated or '=', the value abbreviated as grep's
-# argmatch accepts) sets it back, so with no input operand a final read or skip mode reads the stdin. Not
-# resolved: any other path to the stdin (a symlink to it, /proc/PID/fd/0 for a literal PID, a relative path).
+# silently (_gate_reads_stdin). So does a -d/--directories value GNU grep rejects (attached, separated or '=';
+# a value abbreviated as grep's argmatch accepts is a mode) and an option left without its value at the end
+# (grep -d), conservatively: GNU grep exits on either before it reads anything. Not resolved: any other path
+# to the stdin (a symlink to it or a path through one, such as /dev/fd/../../self/fd/0, /proc/PID/fd/0 for a
+# literal PID, a relative path).
 _GATE_GREP_STDIN = (
     "efmABCdD", "EFGPiwxzsvVbnHhoqaIrRLlcTZU0123456789",
     frozenset(("--regexp", "--file", "--max-count", "--label", "--binary-files", "--directories", "--devices",
@@ -10617,12 +10621,12 @@ def _gate_grep_directories(value):
 def _gate_reads_stdin(word, args):
     """True when a sink stage may read its stdin rather than a named file (_GATE_STDIN_GRAMMAR). The operands are
     resolved first: the stage reads its stdin when an input operand or a _GATE_STDIN_FILE_OPTIONS value names
-    it (_gate_stdin_name; even beside other files or under -r), or when there is no input operand and it is not
-    a recursive grep (which then reads the tree): the directory mode is the last one set, in option order, by
-    -r, -R, --recursive, --dereference-recursive or -d/--directories (_gate_grep_directories), so
-    'grep -r -d read' reads its stdin. An option outside the stage's grammar, or a directory mode grep rejects,
-    leaves open whether the stage reads its stdin, so it is True too (the stage notes rather than allowing
-    silently). An unknown word is False."""
+    it (_gate_stdin_name; even beside other files or under -r), or when there is no input operand, recursive or
+    not (GNU grep -r then reads the working directory, but a grep word may run another grep, such as the ugrep
+    that reads its stdin under -r too). An option outside the stage's grammar leaves open whether the stage
+    reads its stdin, so it is True too (the stage notes rather than allowing silently); a -d/--directories value
+    grep rejects (_gate_grep_directories) or an option left without its value at the end is True as well, and
+    notes conservatively, since GNU grep exits on either before reading anything. An unknown word is False."""
     grammar = _GATE_STDIN_GRAMMAR.get(word)
     if grammar is None:
         return False
@@ -10631,16 +10635,13 @@ def _gate_reads_stdin(word, args):
     grep = word in ("grep", "egrep", "fgrep")
     operands = []
     pending = None   # the option whose value is the next token
-    opts_done = recursive = False
+    opts_done = False
     for tok in args:
         if pending is not None:
             if pending in stdin_files and _gate_stdin_name(tok):
                 return True
-            if grep and pending in ("-d", "--directories"):
-                mode = _gate_grep_directories(tok)
-                if mode is None:
-                    return True   # grep rejects the value: it notes
-                recursive = mode == "recurse"
+            if grep and pending in ("-d", "--directories") and _gate_grep_directories(tok) is None:
+                return True   # grep rejects the value: it notes, conservatively
             pending = None
         elif opts_done or tok == "-" or not (tok.startswith("-") or (word == "tail" and tok.startswith("+"))):
             operands.append(tok)
@@ -10650,24 +10651,17 @@ def _gate_reads_stdin(word, args):
             name, eq, value = tok.partition("=")
             if name in explicit:
                 program = 0
-            if name in ("--recursive", "--dereference-recursive") and grep:
-                recursive = True
             if name in value_long:
                 if not eq:
                     pending = name
                 elif name in stdin_files and _gate_stdin_name(value):
                     return True
-                elif grep and name == "--directories":
-                    mode = _gate_grep_directories(value)
-                    if mode is None:
-                        return True   # grep rejects the value: it notes
-                    recursive = mode == "recurse"
+                elif grep and name == "--directories" and _gate_grep_directories(value) is None:
+                    return True   # grep rejects the value: it notes, conservatively
             elif name not in flag_long:
                 return True   # an unknown or abbreviated long option: its arity is unknown
         else:
             for k, ch in enumerate(tok[1:]):
-                if ch in "rR" and grep:
-                    recursive = True
                 if "-" + ch in explicit:
                     program = 0
                 if ch in value_short:
@@ -10676,16 +10670,15 @@ def _gate_reads_stdin(word, args):
                         pending = "-" + ch   # a bare value letter: its value is the next token
                     elif "-" + ch in stdin_files and _gate_stdin_name(value):
                         return True
-                    elif grep and ch == "d":
-                        mode = _gate_grep_directories(value)
-                        if mode is None:
-                            return True   # grep rejects the value: it notes
-                        recursive = mode == "recurse"
+                    elif grep and ch == "d" and _gate_grep_directories(value) is None:
+                        return True   # grep rejects the value: it notes, conservatively
                     break
                 if ch not in flag_short:
                     return True   # an unknown short letter: its arity is unknown
+    if pending is not None:
+        return True   # an option left without its value at the end (grep -d): it notes, conservatively
     inputs = operands[program:]
-    return any(_gate_stdin_name(op) for op in inputs) or not (inputs or recursive)
+    return not inputs or any(_gate_stdin_name(op) for op in inputs)
 
 
 def _grep_truncation(word, args):
