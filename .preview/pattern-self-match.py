@@ -111,7 +111,8 @@ THREAT MODEL
     is accepted, so input that ends after the deadline is refused however late the OS runs the hook; input that
     ends in time but is read late is refused too), one with bytes other than JSON blanks (space, tab, CR, LF)
     after its JSON, one that is not JSON in strict UTF-8 (bytes that are not valid UTF-8, encoded surrogates, a
-    byte order mark, UTF-16 and UTF-32 included), a JSON value that is not an object, and a Bash call whose
+    byte order mark, UTF-16 and UTF-32 included, and the constants NaN, Infinity and -Infinity, which JSON does
+    not have), a JSON value that is not an object, and a Bash call whose
     tool_input is not an object or whose command is not a string. A JSON prefix followed by an idle interval is
     not taken as the whole payload: the hook reads on until the input ends, so a host that keeps stdin open after
     the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
@@ -300,6 +301,11 @@ def _read_payload(fd=0, deadline=_READ_DEADLINE):
 _LATE = "hook payload did not end within the read deadline"
 
 
+def _no_constant(name):
+    """parse_constant for json.loads: NaN, Infinity and -Infinity are not JSON (RFC 8259, section 6)."""
+    raise ValueError("hook payload has " + name + ", which is not JSON")
+
+
 def _read_complete(fd=0, deadline=_READ_DEADLINE):
     """The payload, parsed once the input has ended (EOF) and that end was read before the deadline. Every byte
     read through the end counts toward one _MAX_INPUT budget. The clock is read again after each wait and after
@@ -308,8 +314,9 @@ def _read_complete(fd=0, deadline=_READ_DEADLINE):
     Each wait is for the time left at most, but the OS can return from a wait late, so refusing can take longer
     than the deadline. The whole input must be one JSON value in strict UTF-8 with no byte order mark (BOM), so
     only JSON blanks (space, tab, CR and LF) may follow it; UTF-16, UTF-32 and encoded surrogates are not
-    UTF-8. Raises ValueError for more than _MAX_INPUT bytes, for no end read before the deadline, and for input
-    that is not one JSON value in strict UTF-8 (UnicodeDecodeError is a ValueError)."""
+    UTF-8. NaN, Infinity and -Infinity, which json.loads takes by default, are not JSON and are refused. Raises
+    ValueError for more than _MAX_INPUT bytes, for no end read before the deadline, and for input that is not one
+    JSON value in strict UTF-8 (UnicodeDecodeError is a ValueError)."""
     end = time.monotonic() + deadline
     data = bytearray()
     while True:
@@ -328,7 +335,7 @@ def _read_complete(fd=0, deadline=_READ_DEADLINE):
         if time.monotonic() >= end:  # after the read, before its end of input is accepted
             raise ValueError(_LATE)
         if not chunk:  # strict UTF-8 first: json.loads on bytes would also take UTF-16, UTF-32 and surrogates
-            return json.loads(bytes(data).decode("utf-8", "strict"))
+            return json.loads(bytes(data).decode("utf-8", "strict"), parse_constant=_no_constant)
         data += chunk
         if len(data) > _MAX_INPUT:
             raise ValueError("hook payload over the read bound")
@@ -1024,18 +1031,26 @@ def _self_test():
         return json.dumps(payload).encode()
 
     def not_strict_utf8():
-        """Payloads that json.loads parses from bytes but that are not strict UTF-8 without a BOM: encoded
-        surrogates (lone high and low, and a CESU-8 pair), UTF-8 after a BOM, and UTF-16 and UTF-32 in each byte
-        order with and without a BOM. Parsed, each Bash call would get the deny, silence or another note, not the
-        cannot-evaluate note."""
+        """The thirteen payloads that json.loads parses from bytes but that are not strict UTF-8 without a BOM:
+        four with encoded surrogates (a lone high one, a lone low one and a CESU-8 pair in echo hi, a lone high
+        one in a deny), one in UTF-8 after a BOM, and eight in UTF-16 and UTF-32, each of them little-endian and
+        big-endian, each of those without and with a BOM. Parsed, each Bash call would get the deny, silence or
+        another note, not the cannot-evaluate note."""
         deny = payload_bytes("pkill -f qa-x/")
         out = [payload_bytes("echo hi").replace(b"hi", b"h" + s + b"i")
                for s in (b"\xed\xa0\x80", b"\xed\xbf\xbf", b"\xed\xa0\xbd\xed\xb8\x80")]
         out.append(deny.replace(b"qa-x/", b"qa-x/\xed\xa0\x80"))
         out.append(b"\xef\xbb\xbf" + deny)
-        for codec in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
-            out.append(deny.decode("ascii").encode(codec))
+        for codec in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):  # each byte order built explicitly
+            body = deny.decode("ascii").encode(codec)
+            out += [body, "\ufeff".encode(codec) + body]
         return out
+
+    def non_json_constants():
+        """Payloads that json.loads parses by default but that are not JSON: NaN, Infinity and -Infinity, each as
+        an extra member of a deny and of echo hi (which would be silent)."""
+        return [payload_bytes(command)[:-1] + b', "extra": ' + name.encode() + b"}"
+                for name in ("NaN", "Infinity", "-Infinity") for command in ("pkill -f qa-x/", "echo hi")]
 
     def vendor_blocks():
         """name -> (fence header fields, block bytes) read from this file's own fences."""
@@ -1425,6 +1440,7 @@ def _self_test():
                    payload_bytes("pkill -f qa-x/")[:-1], payload_bytes("echo hi").replace(b"hi", b"h\xffi"),
                    payload_bytes("pkill -f qa-x/ #" + "x" * (17 * 1024 * 1024)))  # over the 16 MiB read bound
             bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM (QA round 5)
+            bad += tuple(non_json_constants())  # NaN, Infinity and -Infinity are not JSON (QA round 6)
             for data in bad:
                 rc, out, err = run_hook(data)
                 self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), data[:30])
@@ -1995,27 +2011,51 @@ def _self_test():
                 json.loads(bad)  # parsed when the bytes go to json.loads undecoded
                 out = self.feed([(0, bad)], 30)[0]
                 self.assertTrue(isinstance(out, str) and out.startswith("refused: "), (bad[:12], out))
+            # the matrix is the thirteen its docstring names: the UTF-16 and UTF-32 ones in both byte orders, each
+            # without and with its BOM, built explicitly rather than in the interpreter's own byte order (QA round 6)
+            self.assertEqual(len(not_strict_utf8()), 13)
+            self.assertEqual([bad[:4].hex() for bad in not_strict_utf8()[5:]],
+                             ["7b002200", "fffe7b00", "007b0022", "feff007b",
+                              "7b000000", "fffe0000", "0000007b", "0000feff"])
+            # NaN, Infinity and -Infinity are not JSON: json.loads takes them by default, the reader refuses them
+            # (QA round 6)
+            for bad in non_json_constants():
+                json.loads(bad)  # parsed without a parse_constant that refuses them
+                name = bad.rsplit(b" ", 1)[1][:-1].decode()
+                out = self.feed([(0, bad)], 30)[0]
+                self.assertEqual(out, "refused: hook payload has " + name + ", which is not JSON", bad)
 
-        def feed(self, parts, deadline, close_after=None):
+        def feed(self, parts, deadline, close_after=None, log=None):
             """_read_complete(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, and then
             closes, after close_after seconds when given: (the payload or "refused: <message>", seconds taken). The
-            read end is closed before the thread is joined, so a writer the reader has stopped reading gets EPIPE."""
+            read end is closed before the thread is joined, so a writer the reader has stopped reading gets EPIPE.
+            A log dict, when given, records the schedule the run actually kept, by time.monotonic: "start" (the
+            reader's), "writes" ((before, after) for each part written) and "closed" (just before the close)."""
             r, w = os.pipe()
+            if log is not None:
+                log["writes"] = []
 
             def write():
                 try:
                     for pause, data in parts:
                         time.sleep(pause)
+                        before = time.monotonic()
                         os.write(w, data)
+                        if log is not None:
+                            log["writes"].append((before, time.monotonic()))
                     if close_after is not None:
                         time.sleep(close_after)
                 except OSError:
                     pass  # the reader stopped reading
                 finally:
+                    if log is not None:
+                        log["closed"] = time.monotonic()
                     os.close(w)
             t = threading.Thread(target=write)
             t.start()
             start = time.monotonic()
+            if log is not None:
+                log["start"] = start
             try:
                 out = _read_complete(r, deadline)
             except ValueError as e:
@@ -2026,22 +2066,80 @@ def _self_test():
                 t.join()
             return out, taken
 
+        def test_m46_wait_for_time_left(self):
+            # deterministic: each wait is for the time left by the clock, not for the whole deadline (QA round 6). The
+            # clock stands still but for the waits, so the timeout each wait is given is known exactly
+            one, case = json.dumps(dict(a=1)).encode(), self
+
+            class Clock(object):
+                now = 100.0
+
+                def monotonic(self):
+                    return self.now
+
+            def waits(steps):
+                """_read_complete(r, 1.0) with wait number i given steps[i], (seconds, part): the wait records its
+                timeout, moves the clock on that many seconds, then writes part and reports the pipe ready (closes
+                the pipe for b"" and reports it ready; reports it not ready for None). More waits than steps fail
+                the test. Returns (the payload or "refused: <message>", the timeouts in order)."""
+                r, w = os.pipe()
+                os.set_blocking(r, False)  # a read with nothing to read raises BlockingIOError, it never blocks
+                clock, timeouts, ends = Clock(), [], [w]
+
+                class Select(object):
+                    def select(self, rlist, wlist, xlist, timeout):
+                        case.assertLess(len(timeouts), len(steps), "more waits than the schedule")
+                        seconds, part = steps[len(timeouts)]
+                        timeouts.append(timeout)
+                        clock.now += seconds
+                        if part is None:
+                            return [], [], []
+                        if part:
+                            os.write(w, part)
+                        else:
+                            os.close(ends.pop())
+                        return list(rlist), [], []
+                try:
+                    with patched(time=clock, select=Select()):
+                        out = _read_complete(r, 1.0)
+                except ValueError as e:
+                    out = "refused: " + str(e)
+                finally:
+                    os.close(r)
+                    for fd in ends:
+                        os.close(fd)
+                return out, timeouts
+            # the end of input does not come: the waits are for 1.0, 0.75 and 0.25 seconds, and the clock reaches
+            # the deadline at the third (a wait for the whole deadline would be given 1.0 each time)
+            self.assertEqual(waits([(0.25, one[:3]), (0.5, None), (0.25, None)]),
+                             ("refused: " + _LATE, [1.0, 0.75, 0.25]))
+            # the end of input comes in time: each wait is for what is left after the one before it
+            self.assertEqual(waits([(0.25, one[:3]), (0.25, one[3:]), (0.125, b"")]),
+                             (dict(a=1), [1.0, 0.75, 0.5]))
+
         def test_m46_input_still_open(self):
-            # a payload the input does not end after is refused at the deadline, not returned (QA round 3 mutant B);
-            # the time left is taken again after each wait, so the refusal comes at the deadline, not at the end
-            # of input 2 seconds later (a wait with a stale time left would run on to it). The last piece comes at
-            # 1.0 seconds of a 1.2-second deadline, so a wait for the whole deadline after it would refuse at 2.2
-            # seconds at the earliest (QA round 4). The 1.9-second bound keeps the ratio of round 4 (0.5, 0.6 and
-            # 0.95 seconds, doubled): the test passes a refusal up to 0.7 seconds late on a loaded host, the mutant
-            # is at least 0.3 seconds over the bound, and the input ends at 3.0 seconds, after the mutant's refusal
-            # (QA round 5)
+            # the same end to end, on a real pipe and clock (test_m46_wait_for_time_left is the deterministic check):
+            # a payload the input does not end after is refused at the deadline, not returned (QA round 3 mutant
+            # B). The last piece is written 1.0 seconds into a 1.2-second deadline, so a wait for the whole deadline
+            # after reading it would refuse 1.2 seconds after that read, over the 1.9-second bound, and the input
+            # ends 2.0 seconds after that piece, after such a refusal. That holds only for the schedule the run
+            # actually keeps, which it records: a run whose last piece was not written between 0.7 and 1.1 seconds
+            # after the reader started, or whose input ended before 1.9 seconds, cannot tell the two apart (a piece
+            # written after the deadline is never read, and the refusal comes at the deadline either way), so it is
+            # skipped as inconclusive, never passed (QA round 6)
             one = json.dumps(dict(a=1)).encode()
-            out, taken = self.feed([(0, one[:3]), (1.0, one[3:])], 1.2, close_after=2.0)
-            self.assertEqual(out, "refused: " + _LATE)
-            self.assertGreaterEqual(taken, 1.2)
-            self.assertLess(taken, 1.9)
             self.assertEqual(self.feed([(0, one)], 30, close_after=0.3)[0], dict(a=1))
             self.assertEqual(self.feed([(0, one[:5]), (0.3, one[5:])], 30)[0], dict(a=1))
+            log = {}
+            out, taken = self.feed([(0, one[:3]), (1.0, one[3:])], 1.2, close_after=2.0, log=log)
+            self.assertEqual(out, "refused: " + _LATE)
+            self.assertGreaterEqual(taken, 1.2)
+            writes = [(before - log["start"], after - log["start"]) for before, after in log["writes"]]
+            closed = log["closed"] - log["start"]
+            if len(writes) != 2 or not 0.7 <= writes[1][0] <= writes[1][1] <= 1.1 or closed < 1.9:
+                self.skipTest("INCONCLUSIVE, the writer missed its schedule: writes %r, input ended at %.3f seconds"
+                              % ([(round(a, 3), round(b, 3)) for a, b in writes], closed))
+            self.assertLess(taken, 1.9, (writes, closed))
 
         def test_m47_one_input_budget(self):
             # every byte read through the end of input counts toward the one 16 MiB budget, whether the blanks
