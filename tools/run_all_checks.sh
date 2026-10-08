@@ -72,6 +72,7 @@ run_gate "portability" python3 -I -B tools/check_portability.py
 run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
 run_gate "brief-claims-selftest" python3 -I -B tools/check_brief_claims.py --self-test
+run_gate "brief-claims-execution-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-claims-selftest
 run_gate "brief-claims" python3 -I -B tools/check_brief_claims.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "links"     python3 -I -B tools/check_links.py

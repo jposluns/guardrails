@@ -1,136 +1,123 @@
 #!/usr/bin/env python3
-"""Brief-claims lint: a dispatch brief's restatements of named review files must match those files.
+"""Brief-claims lint: a dispatch brief's generated claims block must match each named review file's trailer.
 Offline, stdlib only, fail-closed.
 
-A brief often restates what a named review file says: its verdict, a finding's id or grade, a count. When
-that restatement is carried over from text written about ANOTHER file (the template the brief was built
-from, the previous round, the other reviewer), the brief asserts what a file contains without having read
-it (read-before-characterizing, rdbchr) and hands a worker an unsound input (guard-input-soundness,
-grdinp). This lint binds each restatement to the file it describes and compares it with that file.
+A dispatch brief often restates a named review file's verdict. When that restatement is carried over from
+text about ANOTHER file (the template, the previous round, the other reviewer), the brief asserts what a
+file says without having read it (read-before-characterizing, rdbchr) and hands a worker an unsound input
+(guard-input-soundness, grdinp). This lint checks ONE structured input: a claims block that the lint's own
+--emit mode generates from the review files. Free prose is never a blocking input; it is reported only.
 
-The lint is ADOPTER-CONFIGURED: it ships NO family, file name, verdict or grade of its own. The adopter
-authors `.aiqt/brief-claims.toml`. With NO configuration the scan prints NOT APPLICABLE and exits 0; a
-present but unreadable or malformed configuration is cannot-evaluate (exit 2), never a clean pass.
+THE ONLY BLOCKING INPUT: THE CLAIMS BLOCK. A brief carries at most one block, three kinds of line, each at
+column 0, printable ASCII, matched as the WHOLE line (a final carriage return is dropped first):
 
-Configuration schema (`.aiqt/brief-claims.toml`), every key REQUIRED:
+  BEGIN BRIEF-CLAIMS 1
+  <name> VERDICT <token>          one line per named review file
+  END BRIEF-CLAIMS
+
+<name> is a file basename (no slash or space) that full-matches the configured review-file-pattern and
+resolves to a readable UTF-8 regular file inside --input-dir (a similarly named sibling is never
+substituted); <token> is one configured verdict token. Fences, quotes and markdown are NOT parsed for the
+block: a marker line anywhere in the brief counts. Cannot-evaluate (exit 2): a second block, an unclosed
+block, an END with no BEGIN, an empty block, any other line inside the block (a blank line, an extra word,
+a colon, trailing space, a lookalike or invisible character), a repeated name, and a line outside a block
+that reads as a marker after normalization and punctuation removal but is not one (an indented, BOM-
+prefixed, lower-case or wrong-version marker).
+
+THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict is read from its trailer only, and its body
+is never read. Reading upward from the last line, blank lines (empty or spaces and tabs only) and trailer
+lines (a line starting at column 0 with a configured trailer prefix) are skipped; the first other line
+must be exactly `VERDICT: <token>` for one configured token, else the file is cannot-evaluate (no trailer,
+prose or a closing fence after the record, a decorated, indented, BOM-prefixed, differently cased or
+trailing-space record, or a value that is not exactly one token). Fences are not parsed here either.
+
+COMPLETENESS. Every token in the brief's own text (outside fences, `>` lines, declared verbatim sections and
+the block) whose basename full-matches the review-file-pattern needs a block line with that basename, else
+the brief is a MISMATCH (exit 1, UNCLAIMED). This scan is a trigger only: a name it does not recognize
+loses the completeness check, but it can never make a wrong block line pass.
+
+ADVISORY PROSE (never blocking). The free-prose rules of the third QA round run on the brief's own text
+and report every result as an ADVISORY line: verdict, id, grade and count restatements bound to named
+files, verbatim excerpts, embedded verbatim sections, template carry-over (--template), and foreign item
+ids (--registry). An advisory MISMATCH or CANNOT-EVALUATE, an unreadable file named only in prose, an
+unreadable template or registry, and an adopter id-pattern over its bound never change the exit code.
+Their recall and true-negative rate are not measured.
+
+CONFIGURATION (`.aiqt/brief-claims.toml` at this file's repository root), every key REQUIRED:
 
   format-version = 1                  the exact integer 1 (true and 1.0 do not pass)
-  families = ["alpha", "beta"]        reviewer family words (unique, case-insensitive)
-  review-file-pattern = '...'         a regex (at most 512 characters) FULL-matched against a file's
-                                      basename, with the named groups item, round (digits) and family
-  verdicts = ["NO BLOCKERS", ...]     the exact verdict tokens (case-sensitive)
-  grades = ["BLOCKER", "MAJOR", ...]  finding grade words (case-insensitive)
-  grade-labels = ["Grade"]            label words of the "Label: GRADE" finding form
-  verbatim-begin = "BEGIN VERBATIM"   a line starting with this opens an embedded verbatim review; the
-                                      first family word after it is the section's declared family
-  verbatim-end = "END VERBATIM"       a line starting with this closes it
-  regrade-token = "REGRADED"          a claim segment carrying it is exempt from the verdict check (logged)
-  [aliases.<family>]                  per-family shorthand: M = "MAJOR" lets "M3" mean that family's MAJOR 3
-                                      (the table may be empty; an undeclared alias is cannot-evaluate)
+  families = ["alpha", "beta"]        reviewer family words (unique, case-insensitive; advisory binding)
+  review-file-pattern = '...'         a regex (at most 512 characters) FULL-matched against a basename, with
+                                      the named groups item, round (digits) and family
+  verdicts = ["NO BLOCKERS", ...]     the exact verdict tokens: printable ASCII words joined by single spaces
+  trailer-prefixes = ["WORKER_STATUS:"]  column-0 prefixes of the lines allowed after the VERDICT record (may
+                                      be empty; printable ASCII; none may start with VERDICT or be a prefix
+                                      of "VERDICT:")
+  grades = ["BLOCKER", "MAJOR", ...]  finding grade words (advisory)
+  grade-labels = ["Grade"]            label words of the "Label: GRADE" finding form (advisory)
+  verbatim-begin = "BEGIN VERBATIM"   opens an embedded verbatim review; the first family word after it is
+                                      the section's declared family (advisory; excluded from own text)
+  verbatim-end = "END VERBATIM"       closes it
+  regrade-token = "REGRADED"          an advisory prose segment carrying it is reported EXEMPT
+  [aliases.<family>]                  per-family shorthand (M = "MAJOR"); advisory id claims only
 
-Optional registry (`--registry PATH`, TOML, every key required): format-version = 1, target = "ITEM-7",
-aliases = [...], dependencies = [...], id-pattern = '...' (the item id shape, at most 512 characters).
-With it, an item id in the brief's own text that is not the target, a declared alias or a declared
-dependency is a MISMATCH.
+With NO configuration the check prints NOT APPLICABLE and exits 0 (exit 2 under --require-config); a
+present but unreadable, symlinked or malformed configuration is cannot-evaluate (exit 2).
 
-  check_brief_claims.py                                    validate the configuration ONLY; this is the
-                                                           shipped CI form and it examines NO brief
-  check_brief_claims.py --input-dir DIR [--template PATH] [--registry PATH] [--strict] BRIEF...
-  check_brief_claims.py --self-test                        deterministic self-test (tempdir layer)
+MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and block version 1).
 
-WHAT IT CHECKS. The brief's own text is every line outside fenced blocks, `>` lines and declared verbatim
-sections. Both sides are compared in ONE normalized form: every default-ignorable or invisible character
-(a BOM, a zero-width space, a variation selector, a combining grapheme joiner, a control character) is
-removed, every whitespace or blank-rendering character (a no-break space, a thin space, a Hangul filler,
-the blank Braille pattern) is a space, and claims and sources are NFKC-normalized (a file name is read
-without NFKC, as it is spelled on disk). Quoted
-strings are the brief's own text and are checked; to quote other text, use a fence, a `>` line or a
-verbatim section. A fence follows CommonMark: at most three spaces of indentation, three or more
-backticks or tildes, and no backtick in a backtick fence's info string (a line of inline code opens
-nothing); it closes on a line of at least as many of the same character. An unclosed fence in a brief or
-template is cannot-evaluate; in a named file it makes every claim bound to that file cannot-evaluate.
+  check_brief_claims.py [--require-config] --input-dir DIR [--template PATH] [--registry PATH] BRIEF...
+      Check each BRIEF. DIR holds the review files the block names. Exit codes:
+        0  every block line equals its file's trailer verdict and every recognized named review file has a
+           block line (or no review file is named and no block is present); NOT APPLICABLE with no
+           configuration and no --require-config
+        1  a block line's token differs from its file's trailer verdict, or a recognized named review file
+           has no block line, and nothing is cannot-evaluate
+        2  cannot evaluate: a block-named review file that is missing, unreadable, not UTF-8, a directory or
+           outside DIR; a missing or malformed trailer; a malformed block; an unreadable brief; an unclosed
+           fence or verbatim section in the brief; a malformed configuration; a missing DIR; an adopter
+           review-file-pattern over its bound; a usage error; no configuration under --require-config
+      With several briefs the exit code is the highest. A hook dispatches ONLY on exit 0 and refuses on every
+      other status, including one this list does not name (an uncaught interpreter error exits 1; a signal
+      death is negative). Output on stdout, one result per line, each starting with a fixed word:
+        BRIEF <path> sha256=<hex>
+        MATCH <name> VERDICT <token>: <path> sha256=<hex>
+        MISMATCH <name> VERDICT <token>: <path> sha256=<hex>: the trailer VERDICT is <token>
+        CANNOT-EVALUATE <subject>: <reason>
+        UNCLAIMED <name>: brief line <n> names it and the claims block has no line for it
+        ADVISORY <MATCH|WARN|CANNOT-EVALUATE|EXEMPT> <detail>   (never affects the exit code)
+        brief-claims: <path>: <counts>; exit <0|1|2>             (the last line for each brief)
+      A run-level failure (configuration, usage, DIR) prints one CANNOT-EVALUATE line instead.
 
-A named file is a token (split at whitespace, brackets, ASCII and typographic quotes, and , ; | * `)
-whose basename full-matches the review-file pattern, or an absolute path under --input-dir; each must
-resolve inside --input-dir to a readable UTF-8 regular file (a similarly named sibling is never
-substituted). Binding: a balanced parenthetical directly after a named file is split at family words.
-The text before the first family word, and a segment of that file's own family and round, bind to that
-file itself; another family's segment binds to the named file of that family, item and round. "from
-round N" rebinds a segment to round N, with or without a family word (without one, to the same family);
-a round longer than nine digits, or two different rounds, is cannot-evaluate. A family word followed by
-claims elsewhere in the brief's own text binds to
-the named file of that family. Named tokens that resolve to one path are one candidate; two or more
-candidates is ambiguous, never a choice.
+  check_brief_claims.py --emit --input-dir DIR NAME...
+      Print the claims block for the review files NAME... (basenames inside DIR, in the order given) on
+      stdout, read from each file's trailer, and exit 0. On any failure (no configuration, a repeated name,
+      a name with a slash or one that does not full-match the pattern, an unreadable file, a missing or
+      malformed trailer, a usage error) print NOTHING on stdout, one CANNOT-EVALUATE line per problem on
+      stderr, and exit 2. A pasted --emit block passes the check while the files' trailers are unchanged.
 
-Verdicts: ONE function classifies a verdict string on both sides. Each configured token matches at word
-boundaries, a space inside a token matching any run of whitespace; an occurrence lying inside a longer
-token's occurrence belongs to the longer token; occurrences of two tokens that partly overlap (NO
-BLOCKERS FOUND under NO BLOCKERS and BLOCKERS FOUND) are ambiguous. A named file's verdict is its single
-operative verdict record: a line that starts at column 0 with `VERDICT:` and whose value holds exactly one
-token. An empty value, a value with no token or several, and a second record (even an identical one) are
-cannot-evaluate. The line between a competing record and prose is a configured token: any other line that
-holds the word verdict (any case or decoration) AND a configured token is a competing record, so the file
-is cannot-evaluate (`Final VERDICT: X`, `1. VERDICT: X`, `VERDICT (revised): X`, `**Verdict:** X`, `VERDICT -
-X`, a table cell, an indented or BOM-prefixed record, `Previous verdict: X`); a verdict line with no
-configured token (`**Verdict:** the change is sound`) is prose and is ignored. On the brief side, different
-tokens joined only by "or" or "/" (an instruction: "end with VERDICT: X or VERDICT: Y") are options, not a
-claim.
+  check_brief_claims.py                 validate the configuration ONLY (the shipped CI form): it examines
+                                        NO brief
+  check_brief_claims.py --self-test     deterministic self-test over synthetic fixtures
 
-Other claims: finding ids (GRADE-n, GRADE n, ranges, declared aliases), "GRADE:" (at least one finding at
-that grade), "n GRADEs" (the graded-finding count), and "N word" and "N of M word" predicate counts. For a
-predicate count the source is split into clauses at , ; : . ! ? before whitespace and at line ends; the
-predicate word reads "N of M word" when the three words before it are exactly that, and otherwise pairs
-with the one number among the three words before it in its clause. Numbers keep their sign (- + U+2212);
-the supported number grammar is ASCII digits, optionally grouped by commas in threes, at most 18 digits,
-and any other number form on either side (a decimal, a malformed group, the sign U+00B1, another script) is
-cannot-evaluate. Two numbers in the window, a number that is itself the M of "N of M", the predicate
-paired differently in different clauses, and a bare count that equals one number of an "N of M" reading
-are ambiguous; a predicate never paired is not compared. A claim segment that is a verbatim excerpt of its
-bound file's operative text stands for its ids, grades and counts, and an excerpt of a different named
-file only is a misattribution; a verdict token in either is still judged against the verdict record, so
-no excerpt passes a contradictory verdict. Embedded verbatim sections are attributed to
-the named file holding a majority of their long lines (VERDICT lines do not vote), whose family and
-verdict must equal the section's. With --template, a parenthetical identical to the template's but
-attached to a different file, and an identical title naming a round the named inputs have moved past, are
-mismatches.
+WHAT IT DOES NOT PROVE (class c, partial). NOTHING BLOCKS UNLESS THIS RUNS AT DISPATCH: the shipped CI step
+examines no brief, and the dispatch-time hook that runs the check form on every brief is built and shipped
+outside this repository. Prose restatements, finding ids, grades, counts, template carry-over, embedded
+sections and foreign ids are advisory only, and the advisory rules miss shapes (slash-joined tokens such
+as "NO BLOCKERS/BLOCKERS FOUND respectively" read as an option list). The block compares verdict tokens only: it does not prove that
+the brief's prose agrees with the block, that a file's body agrees with its trailer, or that a file did not
+change after the check while keeping its verdict. A review file named in a form the completeness scan does
+not recognize (a name split across lines, a path whose basename does not full-match the pattern, a name
+inside a fence or quote) needs no block line. A prose path naming a same-named file in another directory
+is covered by the block line for that basename, which reads the file inside DIR.
 
 BOUNDS. The two adopter regexes (review-file-pattern, id-pattern) are capped at 512 characters and are
-matched only in a child interpreter (python -I -B) under a 20-second deadline per brief. The child runs
-under a CPU-time limit (RLIMIT_CPU, 21 seconds) and, on Linux, dies with its parent (PR_SET_PDEATHSIG), so
-it cannot outlive a killed gate; its address space is capped at 1 GiB where the platform allows. An
-overrun, a failed child, a child that writes anything to stderr, and a platform with no RLIMIT_CPU are
-cannot-evaluate (exit 2), so an adopter regex cannot hang the gate. Every other regex is built from
-escaped configured words. A round, finding number or grade count longer than nine digits is never
-converted (cannot-evaluate).
-
-TIERS. Blocking: unresolved or unreadable inputs; verdicts, including a verdict claim with no resolvable
-binding; misattributed excerpts; embedded attribution; template carry-over; foreign ids; and every
-ambiguity (a binding with several candidate files, overlapping verdict tokens, a malformed or repeated
-verdict record, an unclear predicate pairing). Advisory (printed WARN or CANNOT-EVALUATE, blocking only
-under --strict): ids, grades and counts, an undeclared alias or an over-wide range, and an id or count
-claim whose family has no named file.
-
-WHAT IT DOES NOT PROVE (class c, partial). It sees only the claim shapes above, inside one line. Outside
-it: a claim in other wording, including a verdict outside a parenthetical or family segment ("FILE: NO
-BLOCKERS", "FILE says NO BLOCKERS"), a verdict token in another case or with lookalike letters (a Cyrillic
-O, a letter with a combining mark); a round named in other wording ("round 4: NO BLOCKERS" without
-"from"); a multi-line parenthetical; a binding through a file it cannot name; and a predicate count in a
-form other than "N word" or "N of M word". A family word in an instruction that names ONE verdict token
-("ask alpha to end with VERDICT: X") binds like a claim. A source line that uses the word verdict and a
-configured token in another sense ("the verdict line must read X") makes that file cannot-evaluate.
-Verdict classification is quadratic in the occurrences in one segment. An indented code block is the
-brief's own text. Recall and the true-negative rate are not
-measured. A MATCH says the restated token occurs in the bound file, not that the brief is right. The
-configuration-only form, which is the shipped CI step, examines no brief: a brief is checked only when it
-is named on the command line.
-
-Exit convention (matches the repo's gates):
-  0  clean, NOT APPLICABLE, or advisory results only (without --strict)
-  1  a blocking MISMATCH (or, under --strict, an advisory WARN)
-  2  cannot evaluate: a missing, unreadable, non-UTF-8, directory, or escaping named file; an unreadable
-     brief, template or registry; a malformed configuration or registry; an adopter regex over its bound;
-     a blocking claim the lint cannot evaluate (or, under --strict, any cannot-evaluate). An input it
-     cannot read never reads as clean.
+matched only in a child interpreter (python -I -B) under a CPU-time limit (RLIMIT_CPU, 10 seconds, the
+first bound a CPU-bound regex reaches) and a 20-second wall-clock deadline (which bounds a child that is
+not using CPU); on Linux the child dies with its parent (PR_SET_PDEATHSIG), and its address space is capped
+at 1 GiB where the platform allows. An overrun, a failed child, a child that writes anything to stderr, and
+a platform with no RLIMIT_CPU are cannot-evaluate: exit 2 for the review-file-pattern, an advisory line for
+the id-pattern.
 """
 import sys
 
@@ -146,6 +133,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import unicodedata
@@ -160,9 +148,15 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     raise SystemExit(2)
 
 CONFIG_REL = ".aiqt/brief-claims.toml"
-CONFIG_KEYS = frozenset(("format-version", "families", "review-file-pattern", "verdicts", "grades",
-                         "grade-labels", "verbatim-begin", "verbatim-end", "regrade-token", "aliases"))
+CONFIG_KEYS = frozenset(("format-version", "families", "review-file-pattern", "verdicts", "trailer-prefixes",
+                         "grades", "grade-labels", "verbatim-begin", "verbatim-end", "regrade-token", "aliases"))
 REGISTRY_KEYS = frozenset(("format-version", "target", "aliases", "dependencies", "id-pattern"))
+BLOCK_BEGIN = "BEGIN BRIEF-CLAIMS 1"
+BLOCK_END = "END BRIEF-CLAIMS"
+MARKER_KEYS = ("beginbriefclaims", "endbriefclaims")  # a line reading as one of these is a marker or a near miss
+NAME_RE = re.compile(r"[!-.0-~]+")  # a block name: printable ASCII, no space, no slash
+VERDICT_TOKEN_RE = re.compile(r"[!-~]+(?: [!-~]+)*")
+TRAILER_PREFIX_RE = re.compile(r"[!-~][ -~]*")
 WORD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 ALIAS_KEY_RE = re.compile(r"^[A-Z]{1,2}$")
 TOKEN_RE = re.compile(r"[^\s()\[\]{}<>,;\"'`|*"
@@ -182,7 +176,7 @@ FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 VERDICT_WORD_RE = re.compile(r"(?<![A-Za-z])verdicts?(?![A-Za-z])", re.I)
 OPTION_GAP_RE = re.compile(r"[\s\"'*_:,]*(?:or|/)[\s\"'*_:,]*(?:verdict[\s*_]*:[\s\"'*_]*)?", re.I)
-# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): removed before any comparison.
+# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): removed before any advisory comparison.
 IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
              (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
              (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
@@ -195,11 +189,12 @@ MAX_RANGE = 50       # a wider id range is cannot-evaluate, never expanded
 MAX_PATTERN = 512    # an adopter regex longer than this is a malformed configuration or registry
 MAX_ROUND_DIGITS = 9  # a longer round, finding number or grade count is not parsed (cannot-evaluate)
 MAX_NUMBER_DIGITS = 18  # a predicate count with more digits is outside the supported number grammar
-REGEX_DEADLINE = 20.0  # seconds for one brief's adopter-regex matching in the child interpreter
-CHILD_CPU = int(REGEX_DEADLINE) + 1  # the child's CPU-time limit in seconds (RLIMIT_CPU), past the deadline
+REGEX_DEADLINE = 20.0  # wall-clock seconds for one adopter-regex run in the child interpreter
+CHILD_CPU = 10  # the child's CPU-time limit in seconds (RLIMIT_CPU): below the deadline, so a CPU-bound regex
+#                meets it first; the deadline bounds a child that is not using CPU
 CHILD_MEMORY = 1 << 30  # the child's address-space cap, where the platform allows one
-MATCH, MISMATCH, CANNOT, WARN, EXEMPT = "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT"
-BLOCKING, ADVISORY = "blocking", "advisory"
+MATCH, MISMATCH, CANNOT, WARN, EXEMPT, UNCLAIMED = (
+    "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT", "UNCLAIMED")
 
 
 class GateError(Exception):
@@ -294,6 +289,14 @@ def load_config(path):
     if not {"item", "round", "family"} <= set(pattern.groupindex):
         raise GateError("{}: review-file-pattern must name the groups item, round and family".format(what))
     verdicts = _str_list(data, "verdicts", what)
+    if not all(VERDICT_TOKEN_RE.fullmatch(v) for v in data["verdicts"]):
+        raise GateError("{}: every verdict token must be printable ASCII words joined by single spaces".format(
+            what))
+    trailers = _str_list(data, "trailer-prefixes", what, allow_empty=True)
+    for prefix in trailers:
+        if not TRAILER_PREFIX_RE.fullmatch(prefix) or prefix.startswith("VERDICT") or "VERDICT:".startswith(prefix):
+            raise GateError("{}: trailer prefix {!r} is not printable ASCII or would admit a VERDICT line as a "
+                            "trailer line".format(what, prefix))
     grades = [g.upper() for g in _str_list(data, "grades", what, shape=re.compile(r"^[A-Za-z]+$"))]
     labels = _str_list(data, "grade-labels", what, shape=re.compile(r"^[A-Za-z][A-Za-z ]*$"))
     aliases = data["aliases"]
@@ -312,6 +315,8 @@ def load_config(path):
     return {
         "families": families,
         "pattern": pattern,
+        "verdicts": verdicts,
+        "trailers": trailers,
         "verdict_res": [(t, re.compile(r"(?<![\w-])" + r"\s+".join(re.escape(w) for w in t.split())
                                        + r"(?![\w-])")) for t in verdicts],
         "grades": grades,
@@ -356,7 +361,6 @@ def _child_limits(parent):
     resource.setrlimit(resource.RLIMIT_CPU, (CHILD_CPU, CHILD_CPU + 1))
     if sys.platform.startswith("linux"):
         import ctypes
-        import signal
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(1, int(signal.SIGKILL), 0, 0, 0) != 0:  # 1 is PR_SET_PDEATHSIG
             raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
@@ -389,6 +393,10 @@ def bounded_regex(jobs):
                         "the bound)".format(REGEX_DEADLINE))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise GateError("the regex child could not run ({})".format(exc))
+    xcpu = getattr(signal, "SIGXCPU", None)
+    if xcpu is not None and done.returncode == -xcpu:
+        raise GateError("the regex child exceeded its {}-second CPU-time limit (an adopter regex exceeds the "
+                        "bound)".format(CHILD_CPU))
     if done.returncode != 0:
         tail = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:]
         raise GateError("the regex child failed with exit {} ({})".format(done.returncode, " ".join(tail)))
@@ -504,7 +512,7 @@ def brief_regions(text, cfg, what="brief"):
     backticks blanked)] and its declared verbatim sections. An unterminated section or fence is a
     GateError (the rest of the text cannot be read)."""
     own, sections, fence, opened, sec = [], [], None, None, None
-    for n, raw in enumerate(text.splitlines(), 1):
+    for n, raw in enumerate(raw_lines(text), 1):
         line = _clean(raw)
         s = line.strip()
         if sec is not None:
@@ -849,8 +857,8 @@ def _options(buf, hits):
     return drop
 
 
-def _res(status, tier, lineno, claim, src, detail):
-    return dict(status=status, tier=tier, lineno=lineno, claim=claim, src=src, detail=detail)
+def _res(status, lineno, claim, src, detail):
+    return dict(status=status, lineno=lineno, claim=claim, src=src, detail=detail)
 
 
 def _ids_of(kind, m, fam, cfg):
@@ -878,16 +886,16 @@ def _ids_of(kind, m, fam, cfg):
 
 def _judge_verdict(kind, claim, info, cfg, lineno, src, regrade):
     if regrade:
-        return _res(EXEMPT, BLOCKING, lineno, claim, src,
+        return _res(EXEMPT, lineno, claim, src,
                     "regrade disclosed ({}); verdict not compared".format(cfg["regrade"]))
     if kind == "verdict?":
-        return _res(CANNOT, BLOCKING, lineno, claim, src, "overlapping verdict tokens: the claim is ambiguous")
+        return _res(CANNOT, lineno, claim, src, "overlapping verdict tokens: the claim is ambiguous")
     token, why = info["verdict"]
     if why is not None:
-        return _res(CANNOT, BLOCKING, lineno, claim, src, "source: " + why)
+        return _res(CANNOT, lineno, claim, src, "source: " + why)
     if token == claim:
-        return _res(MATCH, BLOCKING, lineno, claim, src, "VERDICT: " + token)
-    return _res(MISMATCH, BLOCKING, lineno, claim, src, "source VERDICT is {!r}".format(token))
+        return _res(MATCH, lineno, claim, src, "VERDICT: " + token)
+    return _res(MISMATCH, lineno, claim, src, "source VERDICT is {!r}".format(token))
 
 
 def judge_segment(seg, files, cfg, infos):
@@ -898,8 +906,7 @@ def judge_segment(seg, files, cfg, infos):
     claims = parse_claims(seg["text"], cfg)
     if seg["token"] is None:
         for kind, claim, _ in claims:
-            hard = seg["ambiguous"] or kind in ("verdict", "verdict?")
-            out.append(_res(CANNOT, BLOCKING if hard else ADVISORY, n, claim, None,
+            out.append(_res(CANNOT, n, claim, None,
                             "no resolvable binding: " + seg["why"]))
         return out
     f, info = files[seg["token"]], infos[seg["token"]]
@@ -908,7 +915,7 @@ def judge_segment(seg, files, cfg, infos):
     long_excerpt = len(excerpt) >= MIN_EXCERPT
     if info["unclosed"] is not None:
         if claims or long_excerpt:
-            out.append(_res(CANNOT, BLOCKING, n, excerpt, src, "a fence opened at source line {} is never "
+            out.append(_res(CANNOT, n, excerpt, src, "a fence opened at source line {} is never "
                             "closed; the operative text cannot be read".format(info["unclosed"])))
         return out
     excerpt_only = False  # an excerpt stands for its ids, grades and counts, never for a verdict claim in it
@@ -916,11 +923,11 @@ def judge_segment(seg, files, cfg, infos):
         others = sorted(o["path"] for t, o in files.items() if t != seg["token"] and excerpt in infos[t]["text"])
         if excerpt in info["text"]:
             excerpt_only = True
-            out.append(_res(MATCH, BLOCKING, n, excerpt, src, "verbatim excerpt of its bound file (a verdict "
+            out.append(_res(MATCH, n, excerpt, src, "verbatim excerpt of its bound file (a verdict "
                             "claim in it is judged on its own)"))
         elif others:
             excerpt_only = True
-            out.append(_res(MISMATCH, BLOCKING, n, excerpt, src,
+            out.append(_res(MISMATCH, n, excerpt, src,
                             "misattributed: a verbatim excerpt of {}, not of its bound file".format(others[0])))
     fam = (f["groups"] or dict()).get("family")
     regrade = cfg["regrade"] in seg["text"]
@@ -930,35 +937,35 @@ def judge_segment(seg, files, cfg, infos):
         elif excerpt_only:
             continue
         elif kind != "pred" and info["bad"] is not None:
-            out.append(_res(CANNOT, ADVISORY, n, claim, src, info["bad"]))
+            out.append(_res(CANNOT, n, claim, src, info["bad"]))
         elif kind in ("id", "range", "alias"):
             try:
                 wanted = _ids_of(kind, m, fam, cfg)
             except ValueError as exc:
-                out.append(_res(CANNOT, ADVISORY, n, claim, src, str(exc)))
+                out.append(_res(CANNOT, n, claim, src, str(exc)))
                 continue
             for grade, num in wanted:
                 label = "{}-{}".format(grade, num)
                 ok = id_present(info, grade, num)
-                out.append(_res(MATCH if ok else MISMATCH, ADVISORY, n, "id " + label, src,
+                out.append(_res(MATCH if ok else MISMATCH, n, "id " + label, src,
                                 "present" if ok else "no finding {} in the source".format(label)))
         elif kind == "colon":
             have = info["counts"].get(m.group(1).upper(), 0)
-            out.append(_res(MATCH if have else MISMATCH, ADVISORY, n, claim, src,
+            out.append(_res(MATCH if have else MISMATCH, n, claim, src,
                             "{} {} finding(s) in the source".format(have, m.group(1).upper())))
         elif kind == "count":
             grade, num = m.group(2).upper(), _bounded_int(m.group(1))
             if num is None:
-                out.append(_res(CANNOT, ADVISORY, n, claim, src, "the count is longer than {} digits".format(
+                out.append(_res(CANNOT, n, claim, src, "the count is longer than {} digits".format(
                     MAX_ROUND_DIGITS)))
                 continue
             have = info["counts"].get(grade, 0)
-            out.append(_res(MATCH if have == num else MISMATCH, ADVISORY, n, claim, src,
+            out.append(_res(MATCH if have == num else MISMATCH, n, claim, src,
                             "the source grades {} finding(s) {}".format(have, grade)))
         else:
             verdict = predicate_check(m[0], m[1], info["text"])
             if verdict is not None:
-                out.append(_res(verdict[0], BLOCKING if verdict[0] == CANNOT else ADVISORY, n, claim, src,
+                out.append(_res(verdict[0], n, claim, src,
                                 verdict[1]))
     return out
 
@@ -1058,29 +1065,29 @@ def check_sections(sections, files, cfg, infos):
                 best = (token, hits)
         n, claim = sec["lineno"], "embedded section ({})".format(sec["family"])
         if best is None:
-            out.append(_res(CANNOT, BLOCKING, n, claim, None, "no named file holds a majority of its long lines"))
+            out.append(_res(CANNOT, n, claim, None, "no named file holds a majority of its long lines"))
             continue
         f = files[best[0]]
         src = (f["path"], f["sha"])
         sfam = (f["groups"] or dict()).get("family")
         if sec["family"] is None or sfam is None:
-            out.append(_res(CANNOT, BLOCKING, n, claim, src, "family not determinable"))
+            out.append(_res(CANNOT, n, claim, src, "family not determinable"))
         elif sfam != sec["family"]:
-            out.append(_res(MISMATCH, BLOCKING, n, claim, src, "the source is family {!r}".format(sfam)))
+            out.append(_res(MISMATCH, n, claim, src, "the source is family {!r}".format(sfam)))
         else:
-            out.append(_res(MATCH, BLOCKING, n, claim, src, "family attribution"))
+            out.append(_res(MATCH, n, claim, src, "family attribution"))
         lines, unclosed = operative_lines("\n".join(sec["lines"]))
         if verdict_records(lines, cfg):
             embedded, e_why = single_verdict(lines, unclosed, cfg)
             real, r_why = infos[best[0]]["verdict"]
             label = "embedded VERDICT: {}".format(embedded)
             if e_why is not None or r_why is not None:
-                out.append(_res(CANNOT, BLOCKING, n, label, src, "embedded: {}; source: {}".format(
+                out.append(_res(CANNOT, n, label, src, "embedded: {}; source: {}".format(
                     e_why or "one verdict", r_why or "one verdict")))
             elif real != embedded:
-                out.append(_res(MISMATCH, BLOCKING, n, label, src, "source VERDICT is {!r}".format(real)))
+                out.append(_res(MISMATCH, n, label, src, "source VERDICT is {!r}".format(real)))
             else:
-                out.append(_res(MATCH, BLOCKING, n, label, src, "verdict"))
+                out.append(_res(MATCH, n, label, src, "verdict"))
     return out
 
 
@@ -1105,7 +1112,7 @@ def check_template(own, refs, parens, files, t_own, t_refs):
         moved = sorted(set(b for b, c in t_parens if c == norm and b != ref["base"]))
         f = files[ref["token"]]
         if moved:
-            out.append(_res(MISMATCH, BLOCKING, ref["lineno"], "({})".format(norm), (f["path"], f["sha"]),
+            out.append(_res(MISMATCH, ref["lineno"], "({})".format(norm), (f["path"], f["sha"]),
                             "carried over: the template attaches this parenthetical to {}".format(moved[0])))
     n, title = _title(own)
     if title is not None and title == _title(t_own)[1]:
@@ -1113,10 +1120,10 @@ def check_template(own, refs, parens, files, t_own, t_refs):
         rounds = set(r["groups"]["round"] for r in refs if r["groups"] and r["groups"]["round"] is not None)
         said = _bounded_int(m.group(1)) if m else None
         if m and rounds and said is None:
-            out.append(_res(CANNOT, BLOCKING, n, title, None, "the title's round number is longer than {} "
+            out.append(_res(CANNOT, n, title, None, "the title's round number is longer than {} "
                             "digits".format(MAX_ROUND_DIGITS)))
         elif m and rounds and said not in rounds and max(rounds) > said:
-            out.append(_res(MISMATCH, BLOCKING, n, title, None,
+            out.append(_res(MISMATCH, n, title, None,
                             "title carried over from the template names round {}; the named inputs are "
                             "round {}".format(m.group(1), max(rounds))))
     return out
@@ -1128,55 +1135,180 @@ def check_foreign(own, registry, found):
     for (n, _), idents in zip(own, found):
         for ident in sorted(set(idents)):
             if ident not in registry["allowed"]:
-                out.append(_res(MISMATCH, BLOCKING, n, ident, None,
+                out.append(_res(MISMATCH, n, ident, None,
                                 "foreign item id: not the target, a declared alias or a declared dependency"))
+    return out
+# --- the blocking path: trailer records and the claims block ------------------------------------------
+
+def raw_lines(text):
+    """The lines of a text split at LF only, each with one final CR dropped: no other character ends a
+    line, so a vertical tab or U+2028 stays inside its line (and fails any exact-line grammar)."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def trailer_verdict(text, cfg):
+    """(token, line number) of a review file's trailer record, or a GateError. Reading upward from the last
+    line, blank lines (empty or spaces and tabs) and lines starting with a configured trailer prefix are
+    skipped; the first other line must be exactly `VERDICT: <token>`. The body is never read."""
+    lines = raw_lines(text)
+    records = dict(("VERDICT: " + t, t) for t in cfg["verdicts"])
+    for n in range(len(lines), 0, -1):
+        line = lines[n - 1]
+        if not line.strip(" \t") or any(line.startswith(p) for p in cfg["trailers"]):
+            continue
+        if line in records:
+            return records[line], n
+        raise GateError("no trailer record: line {}, the last line before the trailer lines, is not exactly "
+                        "'VERDICT: <token>' for a configured token ({!r})".format(n, line[:120]))
+    raise GateError("no trailer record: the file holds no line but blank and trailer lines")
+
+
+def _marker_key(line):
+    """A line's marker reading: normalized, case-folded, with every character but letters and digits
+    removed. A line reading as BEGIN BRIEF-CLAIMS or END BRIEF-CLAIMS that is not exactly a marker is a
+    near miss (an indented, BOM-prefixed, lower-case, re-spaced or wrong-version marker)."""
+    return "".join(c for c in _norm(line).casefold() if c.isalnum())
+
+
+def parse_block(lines, cfg):
+    """The claims block of a brief's raw lines: (entries [(lineno, name, token)], the set of line numbers
+    the block occupies, problems [reason]). A problem is cannot-evaluate."""
+    entry_re = re.compile(r"(" + NAME_RE.pattern + r") VERDICT (" + _alt(cfg["verdicts"]) + r")")
+    entries, used, problems, seen = [], set(), [], dict()
+    opened, blocks, inside = None, 0, 0
+    for n, line in enumerate(lines, 1):
+        if line == BLOCK_BEGIN:
+            used.add(n)
+            if opened is not None:
+                problems.append("line {}: BEGIN inside the block opened at line {}".format(n, opened))
+                continue
+            blocks += 1
+            if blocks > 1:
+                problems.append("line {}: a second claims block (a brief carries at most one)".format(n))
+            opened, inside = n, 0
+            continue
+        if line == BLOCK_END:
+            used.add(n)
+            if opened is None:
+                problems.append("line {}: END with no open block".format(n))
+            elif inside == 0:
+                problems.append("line {}: the block opened at line {} is empty".format(n, opened))
+            opened = None
+            continue
+        if opened is not None:
+            used.add(n)
+            inside += 1
+            m = entry_re.fullmatch(line)
+            if m is None:
+                problems.append("line {}: not '<name> VERDICT <token>' in printable ASCII with a configured "
+                                "token: {!r}".format(n, line[:120]))
+            elif m.group(1) in seen:
+                problems.append("line {}: {} is already claimed at line {}".format(n, m.group(1), seen[m.group(1)]))
+            else:
+                seen[m.group(1)] = n
+                entries.append((n, m.group(1), m.group(2)))
+            continue
+        key = _marker_key(line)
+        if any(key.startswith(k) for k in MARKER_KEYS):
+            problems.append("line {}: reads as a claims-block marker but is not exactly {!r} or {!r}: {!r}".format(
+                n, BLOCK_BEGIN, BLOCK_END, line[:120]))
+    if opened is not None:
+        problems.append("the block opened at line {} is never closed".format(opened))
+    return entries, used, problems
+
+
+def _file_entry(name, cfg, opts, groups_of):
+    """(path, sha256, token, trailer line) for one block or --emit name, or a GateError."""
+    if not NAME_RE.fullmatch(name):
+        raise GateError("{!r} is not a basename in printable ASCII with no space or slash".format(name))
+    if groups_of.get(name) is None:
+        raise GateError("{} does not full-match the review-file-pattern".format(name))
+    path, _, text, digest = resolve_named(name, opts["input_dir"])
+    try:
+        token, line = trailer_verdict(text, cfg)
+    except GateError as exc:
+        raise GateError("{}: {}".format(path, exc))
+    return path, digest, token, line
+
+
+def check_block(lines, own, cfg, opts, groups_of, entries, problems):
+    """The blocking results: [(status, line)]. Block problems and unreadable files are cannot-evaluate,
+    a token differing from the trailer is a MISMATCH, and a recognized named file with no block line is
+    UNCLAIMED (a mismatch)."""
+    out = [(CANNOT, "CANNOT-EVALUATE block: " + p) for p in problems]
+    for n, name, token in entries:
+        try:
+            path, digest, have, line = _file_entry(name, cfg, opts, groups_of)
+        except GateError as exc:
+            out.append((CANNOT, "CANNOT-EVALUATE {} (brief line {}): {}".format(name, n, exc)))
+            continue
+        where = "{} sha256={}".format(path, digest)
+        if have == token:
+            out.append((MATCH, "MATCH {} VERDICT {}: {}".format(name, token, where)))
+        else:
+            out.append((MISMATCH, "MISMATCH {} VERDICT {}: {}: the trailer VERDICT (line {}) is {}".format(
+                name, token, where, line, have)))
+    claimed = set(name for _, name, _ in entries)
+    first = dict()
+    for n, _, tok in _tokens(own):
+        base = tok.rsplit("/", 1)[-1]
+        if groups_of.get(base) is not None and base not in claimed:
+            first.setdefault(base, n)
+    for base in sorted(first, key=lambda b: (first[b], b)):
+        out.append((UNCLAIMED, "UNCLAIMED {}: brief line {} names it and the claims block has no line for "
+                               "it".format(base, first[base])))
     return out
 
 
-def _shown(r):
-    return WARN if r["status"] == MISMATCH and r["tier"] == ADVISORY else r["status"]
+# --- advisory prose (never blocking) ----------------------------------------------------------------
+
+def _advisory_line(r):
+    status = WARN if r["status"] == MISMATCH else r["status"]
+    src = "{} sha256={}".format(*r["src"]) if r["src"] else "(no source)"
+    return "ADVISORY {} brief line {}: {} -> {}: {}".format(status, r["lineno"], r["claim"], src, r["detail"])
 
 
-def _rc(results, strict):
-    rc = 0
-    for r in results:
-        hard = r["tier"] == BLOCKING or strict
-        if r["status"] == CANNOT and hard:
-            rc = 2
-        elif r["status"] == MISMATCH and hard:
-            rc = max(rc, 1)
-    return rc
+def advisory_prose(own, sections, cfg, opts, groups_of):
+    """The free-prose rules of QA round 3, reported only: [ADVISORY line]. Nothing here changes the exit
+    code; an input it cannot read, or a fault of its own, is one ADVISORY CANNOT-EVALUATE line."""
+    try:
+        return _advisory(own, sections, cfg, opts, groups_of)
+    except GateError as exc:
+        return ["ADVISORY CANNOT-EVALUATE prose: {}; the prose was not analyzed".format(exc)]
+    except Exception as exc:  # an advisory fault is reported, never a refusal
+        return ["ADVISORY CANNOT-EVALUATE prose: internal error {}: {}; the prose was not analyzed".format(
+            type(exc).__name__, exc)]
 
 
-def check_brief(path, cfg, opts, template_text, registry):
-    text, digest = read_text(path, "brief")
-    own, sections = brief_regions(text, cfg)
+def _advisory(own, sections, cfg, opts, groups_of):
+    out = []
+    template_text = read_text(opts["template"], "template")[0] if opts["template"] else None
+    registry = load_registry(opts["registry"]) if opts["registry"] else None
     t_own = brief_regions(template_text, cfg, "template")[0] if template_text is not None else []
-    bases = sorted(set(tok.rsplit("/", 1)[-1] for _, _, tok in _tokens(own + t_own)))
-    jobs = [(cfg["pattern"].pattern, "fullmatch", bases)]
+    t_bases = sorted(set(tok.rsplit("/", 1)[-1] for _, _, tok in _tokens(t_own)))
+    jobs = [(cfg["pattern"].pattern, "fullmatch", t_bases)]
     if registry is not None:
         jobs.append((registry["id_re"].pattern, "findall", [line for _, line in own]))
     answers = bounded_regex(jobs)
-    groups_of = dict((b, _groups(found)) for b, found in zip(bases, answers[0]) if found is not None)
+    t_groups = dict(groups_of)
+    t_groups.update((b, _groups(found)) for b, found in zip(t_bases, answers[0]) if found is not None)
     refs = named_refs(own, groups_of, opts["input_dir"])
-    files, errors = dict(), []
+    files = dict()
     for ref in refs:
         if ref["token"] in files:
             continue
         try:
             p, real, t, d = resolve_named(ref["token"], opts["input_dir"])
         except GateError as exc:
-            errors.append("brief line {}: {}".format(ref["lineno"], exc))
+            out.append("ADVISORY CANNOT-EVALUATE brief line {}: {}".format(ref["lineno"], exc))
             continue
         files[ref["token"]] = dict(path=p, real=real, text=t, sha=d, groups=ref["groups"])
-    print("BRIEF {} sha256={}".format(path, digest))
-    if errors:
-        for e in errors:
-            print("CANNOT-EVALUATE [blocking] {}; fail-closed".format(e))
-        print("brief-claims: {}: {} named file(s) could not be read; exit 2".format(path, len(errors)))
-        return 2
-    for token in sorted(files):
-        print("INPUT {} sha256={}".format(files[token]["path"], files[token]["sha"]))
+    if out:
+        return out + ["ADVISORY CANNOT-EVALUATE prose: a file named in prose could not be read; the prose "
+                      "was not analyzed"]
     infos = dict((t, analyze_source(f["text"], cfg)) for t, f in files.items())
     segs, parens = collect_segments(own, refs, cfg, files)
     results = []
@@ -1184,30 +1316,80 @@ def check_brief(path, cfg, opts, template_text, registry):
         results.extend(judge_segment(seg, files, cfg, infos))
     results.extend(check_sections(sections, files, cfg, infos))
     if template_text is not None:
-        results.extend(check_template(own, refs, parens, files, t_own, named_refs(t_own, groups_of, None)))
+        results.extend(check_template(own, refs, parens, files, t_own, named_refs(t_own, t_groups, None)))
     if registry is not None:
         results.extend(check_foreign(own, registry, answers[1]))
-    else:
-        print("foreign-id: not evaluated (no --registry)")
-    tally = dict()
-    for r in results:
-        src = "{} sha256={}".format(*r["src"]) if r["src"] else "(no source)"
-        print("{} [{}] brief line {}: {} -> {}: {}".format(_shown(r), r["tier"], r["lineno"], r["claim"], src,
-                                                           r["detail"]))
-        tally[_shown(r)] = tally.get(_shown(r), 0) + 1
-    rc = _rc(results, opts["strict"])
-    print("brief-claims: {}: {} result(s) {}; exit {}".format(
-        path, len(results), ", ".join("{} {}".format(v, k) for k, v in sorted(tally.items())) or "none", rc))
+    return [_advisory_line(r) for r in results]
+
+
+# --- driver -----------------------------------------------------------------------------------------
+
+def check_brief(path, cfg, opts):
+    """Check one brief; print its blocking results, then its advisory lines, then its summary line.
+    Returns the brief's exit code 0/1/2 (the advisory lines never change it)."""
+    results, advisory = [], []
+    try:
+        text, digest = read_text(path, "brief")
+        print("BRIEF {} sha256={}".format(path, digest))
+        lines = raw_lines(text)
+        entries, used, problems = parse_block(lines, cfg)
+        own, sections = brief_regions("\n".join("" if n in used else l for n, l in enumerate(lines, 1)), cfg)
+        names = sorted(set(tok.rsplit("/", 1)[-1] for _, _, tok in _tokens(own)) | set(e[1] for e in entries))
+        found = bounded_regex([(cfg["pattern"].pattern, "fullmatch", names)])[0]
+        groups_of = dict((b, _groups(f)) for b, f in zip(names, found) if f is not None)
+        results = check_block(lines, own, cfg, opts, groups_of, entries, problems)
+        advisory = advisory_prose(own, sections, cfg, opts, groups_of)
+    except GateError as exc:
+        results.append((CANNOT, "CANNOT-EVALUATE brief {}: {}".format(path, exc)))
+    for _, line in results:
+        print(line)
+    for line in advisory:
+        print(line)
+    statuses = [s for s, _ in results]
+    rc = 2 if CANNOT in statuses else 1 if (MISMATCH in statuses or UNCLAIMED in statuses) else 0
+    tally = ", ".join("{} {}".format(statuses.count(s), s) for s in (MATCH, MISMATCH, UNCLAIMED, CANNOT)
+                      if s in statuses) or "none"
+    print("brief-claims: {}: {} blocking result(s) ({}); {} advisory line(s); exit {}".format(
+        path, len(results), tally, len(advisory), rc))
     return rc
 
 
+def emit(cfg, opts):
+    """--emit: the claims block for the named review files on stdout (exit 0), or nothing on stdout and
+    one CANNOT-EVALUATE line per problem on stderr (exit 2)."""
+    names = opts["briefs"]
+    problems = []
+    if not names:
+        problems.append("--emit needs at least one review file name")
+    for name in sorted(set(n for n in names if names.count(n) > 1)):
+        problems.append("{} is named more than once".format(name))
+    found = bounded_regex([(cfg["pattern"].pattern, "fullmatch", sorted(set(names)))])[0]
+    groups_of = dict((b, _groups(f)) for b, f in zip(sorted(set(names)), found) if f is not None)
+    block = [BLOCK_BEGIN]
+    for name in names:
+        try:
+            block.append("{} VERDICT {}".format(name, _file_entry(name, cfg, opts, groups_of)[2]))
+        except GateError as exc:
+            problems.append(str(exc))
+    if problems:
+        for p in problems:
+            print("CANNOT-EVALUATE {}; no block emitted".format(p), file=sys.stderr)
+        return 2
+    print("\n".join(block + [BLOCK_END]))
+    return 0
+
+
 def run(root, opts):
-    """Check the named briefs under the adopter configuration at root. Returns the exit code 0/1/2."""
+    """Check the named briefs (or --emit a block) under the adopter configuration at root. Returns 0/1/2."""
     config_path = Path(root) / CONFIG_REL
+    stream = sys.stderr if opts["emit"] else sys.stdout
     try:
         try:
             st = os.lstat(config_path)
         except FileNotFoundError:
+            if opts["emit"] or opts["require_config"]:
+                raise GateError("no {} configuration; the brief-claims lint is adopter-configured".format(
+                    CONFIG_REL))
             print("NOT APPLICABLE: no {} configuration; the brief-claims lint is adopter-configured and "
                   "inert without one ({} brief(s) named, none checked)".format(CONFIG_REL, len(opts["briefs"])))
             return 0
@@ -1216,31 +1398,31 @@ def run(root, opts):
         if stat.S_ISLNK(st.st_mode):
             raise GateError("configuration {} is a symlink; it is not followed".format(CONFIG_REL))
         cfg = load_config(config_path)
-        if not opts["briefs"]:
+        if not opts["briefs"] and not opts["emit"]:
             print("PASS: configuration {} is valid; no brief named, so NO brief was examined (this "
                   "configuration-only form is the shipped CI step)".format(CONFIG_REL))
             return 0
         if opts["input_dir"] is None or not os.path.isdir(opts["input_dir"]):
-            raise GateError("--input-dir must name an existing directory when a brief is named")
-        template_text = read_text(opts["template"], "template")[0] if opts["template"] else None
-        registry = load_registry(opts["registry"]) if opts["registry"] else None
+            raise GateError("--input-dir must name an existing directory when a brief or review file is named")
+        if opts["emit"]:
+            return emit(cfg, opts)
         rc = 0
         for brief in opts["briefs"]:
-            rc = max(rc, check_brief(brief, cfg, opts, template_text, registry))
+            rc = max(rc, check_brief(brief, cfg, opts))
         return rc
     except GateError as exc:
-        print("CANNOT-EVALUATE: {}; fail-closed".format(exc))
+        print("CANNOT-EVALUATE: {}; fail-closed".format(exc), file=stream)
         return 2
 
 
 def parse_args(argv):
-    opts = dict(self_test=False, strict=False, input_dir=None, template=None, registry=None, briefs=[])
+    """The options, or None for a usage error (exit 2)."""
+    opts = dict(self_test=False, emit=False, require_config=False, input_dir=None, template=None,
+                registry=None, briefs=[])
     it = iter(argv)
     for arg in it:
-        if arg == "--self-test":
-            opts["self_test"] = True
-        elif arg == "--strict":
-            opts["strict"] = True
+        if arg in ("--self-test", "--emit", "--require-config"):
+            opts[arg[2:].replace("-", "_")] = True
         elif arg in ("--input-dir", "--template", "--registry"):
             value = next(it, None)
             if value is None:
@@ -1250,20 +1432,30 @@ def parse_args(argv):
             return None
         else:
             opts["briefs"].append(arg)
+    if opts["emit"] and (opts["template"] or opts["registry"]):
+        return None
     return opts
 
 
-
 # --- self-test --------------------------------------------------------------------------------------
-# Every vector runs the real run() over a synthetic tempdir tree. Placeholder families, items and files
-# only. No randomness, no network; the clocks are the regex child's deadline (two catastrophic-
-# backtracking vectors shorten it to two seconds), its CPU limit (one vector lowers it to one second), and
-# the Linux parent-death probe (a copy of this gate in the tempdir, killed once its child exists).
+# Every vector runs the real run() over a synthetic tempdir tree: placeholder families, items and files
+# only. No randomness, no network; the clocks are the regex child's deadline (two vectors shorten it to
+# two seconds), its CPU limit (one vector lowers it to one second), and the Linux parent-death probe (a
+# copy of this gate in the tempdir, killed once its child exists). Every check id is a literal, and the
+# executed set is reconciled with this suite's entry in tools/selftest_checks.toml (in-run here, and by
+# tools/check_selftest_execution.py --suite brief-claims-selftest).
+
+SUITE_ID = "brief-claims-selftest"
+CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
+EXECUTED = []
+FAILURES = []
+SKIPPED = []
 
 GOOD_CFG = """format-version = 1
 families = ["alpha", "beta"]
 review-file-pattern = '(?P<item>[a-z0-9]+)-r(?P<round>[0-9]+)-(?P<family>[a-z]+)\\.txt'
 verdicts = ["NO BLOCKERS", "BLOCKERS FOUND"]
+trailer-prefixes = ["QA-COMPLETE", "WORKER_STATUS:"]
 grades = ["BLOCKER", "MAJOR", "MEDIUM", "MINOR"]
 grade-labels = ["Grade", "Defect"]
 verbatim-begin = "BEGIN VERBATIM"
@@ -1298,6 +1490,20 @@ Another typo.
 VERDICT: NO BLOCKERS
 """
 
+BLOCK_OK = ("BEGIN BRIEF-CLAIMS 1\nit7-r5-alpha.txt VERDICT BLOCKERS FOUND\nit7-r5-beta.txt VERDICT NO BLOCKERS\n"
+            "END BRIEF-CLAIMS\n")
+BLOCK_SWAPPED = ("BEGIN BRIEF-CLAIMS 1\nit7-r5-alpha.txt VERDICT NO BLOCKERS\nit7-r5-beta.txt VERDICT BLOCKERS "
+                 "FOUND\nEND BRIEF-CLAIMS\n")
+BLOCK_BETA = "BEGIN BRIEF-CLAIMS 1\nit7-r5-beta.txt VERDICT NO BLOCKERS\nEND BRIEF-CLAIMS\n"
+BLOCK_ALPHA = "BEGIN BRIEF-CLAIMS 1\nit7-r5-alpha.txt VERDICT BLOCKERS FOUND\nEND BRIEF-CLAIMS\n"
+
+
+def check(check_id, ok, detail=""):
+    """The suite's one choke point: every check id it reaches is recorded for the execution report."""
+    EXECUTED.append(check_id)
+    if not ok:
+        FAILURES.append((check_id, " | ".join(str(detail).strip().splitlines()[-4:])))
+
 
 def _write(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1306,16 +1512,18 @@ def _write(path, data):
 
 
 def _quiet(root, argv):
+    """run() in process with stdout and stderr captured: (rc, stdout, stderr); a usage error is rc 2."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
-    buf = io.StringIO()
-    with redirect_stdout(buf), redirect_stderr(buf):
-        rc = run(root, parse_args(argv))
-    return rc, buf.getvalue()
+    out, err = io.StringIO(), io.StringIO()
+    opts = parse_args(argv)
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = 2 if opts is None else run(root, opts)
+    return rc, out.getvalue(), err.getvalue()
 
 
-def _scenario(base, name, brief, files=None, cfg=GOOD_CFG, args=(), extra=None):
-    """Build base/name with a configuration, an input dir and a brief; run; return (rc, output)."""
+def _tree(base, name, files=None, cfg=GOOD_CFG, extra=None):
+    """base/name with a configuration, an input dir holding files, and extra files: (root, input dir)."""
     root = os.path.join(base, name)
     indir = os.path.join(root, "in")
     os.makedirs(indir)
@@ -1327,409 +1535,390 @@ def _scenario(base, name, brief, files=None, cfg=GOOD_CFG, args=(), extra=None):
         _write(os.path.join(indir, rel), data)
     for rel, data in (extra or dict()).items():
         _write(os.path.join(root, rel), data)
+    return root, indir
+
+
+def _scenario(base, name, brief, files=None, cfg=GOOD_CFG, args=(), extra=None):
+    """Build a tree and a brief (@IN@ is the input dir), check the brief; return (rc, stdout + stderr)."""
+    root, indir = _tree(base, name, files, cfg, extra)
     brief_path = os.path.join(root, "brief.md")
     if brief is not None:
         _write(brief_path, brief.replace("@IN@", indir))
     argv = [a.replace("@ROOT@", root) for a in args]
-    return _quiet(root, ["--input-dir", indir] + argv + [brief_path])
+    rc, out, err = _quiet(root, ["--input-dir", indir] + argv + [brief_path])
+    return rc, out + err
 
 
+def _emit(base, name, names, files=None, cfg=GOOD_CFG):
+    """--emit in a fresh tree: (rc, stdout, stderr, root, input dir)."""
+    root, indir = _tree(base, name, files, cfg)
+    rc, out, err = _quiet(root, ["--emit", "--input-dir", indir] + list(names))
+    return rc, out, err, root, indir
 
-def _cases_inputs(sc, check, skipped, base):
-    """Plan step 2: configuration, inputs and exit codes."""
-    os.makedirs(os.path.join(base, "nocfg"))
-    rc, out = _quiet(os.path.join(base, "nocfg"), [])
-    check("cfg/absent-not-applicable", rc == 0 and "NOT APPLICABLE" in out, out)
-    bad = [("cfg/version-float", GOOD_CFG.replace("format-version = 1", "format-version = 1.0")),
-           ("cfg/version-bool", GOOD_CFG.replace("format-version = 1", "format-version = true")),
-           ("cfg/missing-key", GOOD_CFG.replace('regrade-token = "REGRADED"\n', "")),
-           ("cfg/duplicate-family", GOOD_CFG.replace('"alpha", "beta"]', '"alpha", "beta", "Alpha"]')),
-           ("cfg/empty-vocabulary", GOOD_CFG.replace('["NO BLOCKERS", "BLOCKERS FOUND"]', "[]")),
-           ("cfg/pattern-groups", GOOD_CFG.replace("(?P<family>[a-z]+)", "([a-z]+)")),
-           ("cfg/malformed-toml", GOOD_CFG + "[[[\n"),
-           ("cfg/alias-undeclared-grade", GOOD_CFG.replace('M = "MAJOR"', 'M = "SEVERE"')),
-           ("cfg/alias-undeclared-family", GOOD_CFG.replace("[aliases.beta]", "[aliases.gamma]")),
-           ("cfg/pattern-too-long", GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>[a-z0-9]+)" + "(?:x)?" * 90))]
-    for name, text in bad:
-        rc, out = sc(name.replace("/", "_"), "Nothing named.\n", cfg=text)
-        check(name, rc == 2, out)
+
+def _cases_config(base):
+    """Configuration, invocation and input fail-closed vectors."""
+    sc = functools.partial(_scenario, base)
+    tokens = '["NO BLOCKERS", "BLOCKERS FOUND"]'
+    for cid, text in (
+            ("cfg/version-float", GOOD_CFG.replace("format-version = 1", "format-version = 1.0")),
+            ("cfg/version-bool", GOOD_CFG.replace("format-version = 1", "format-version = true")),
+            ("cfg/missing-key", GOOD_CFG.replace('regrade-token = "REGRADED"\n', "")),
+            ("cfg/missing-trailer-prefixes", GOOD_CFG.replace('trailer-prefixes = ["QA-COMPLETE", "WORKER_STATUS:"]\n',
+                                                              "")),
+            ("cfg/duplicate-family", GOOD_CFG.replace('"alpha", "beta"]', '"alpha", "beta", "Alpha"]')),
+            ("cfg/empty-vocabulary", GOOD_CFG.replace(tokens, "[]")),
+            ("cfg/verdict-token-not-ascii", GOOD_CFG.replace(tokens, '["NO\\u00a0BLOCKERS", "BLOCKERS FOUND"]')),
+            ("cfg/verdict-token-double-space", GOOD_CFG.replace(tokens, '["NO  BLOCKERS", "BLOCKERS FOUND"]')),
+            ("cfg/trailer-prefix-starts-verdict", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"VERDICT", "WORKER')),
+            ("cfg/trailer-prefix-of-verdict-colon", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"VER", "WORKER')),
+            ("cfg/trailer-prefix-not-ascii", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"QA\\u2014DONE", "WORKER')),
+            ("cfg/pattern-groups", GOOD_CFG.replace("(?P<family>[a-z]+)", "([a-z]+)")),
+            ("cfg/malformed-toml", GOOD_CFG + "[[[\n"),
+            ("cfg/alias-undeclared-grade", GOOD_CFG.replace('M = "MAJOR"', 'M = "SEVERE"')),
+            ("cfg/alias-undeclared-family", GOOD_CFG.replace("[aliases.beta]", "[aliases.gamma]")),
+            ("cfg/pattern-too-long", GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>[a-z0-9]+)" + "(?:x)?" * 90))):
+        rc, out = sc(cid.replace("/", "_"), "Nothing named.\n", cfg=text)
+        check(cid, rc == 2 and "CANNOT-EVALUATE" in out, out)
     rc, out = sc("cfg_valid", "Nothing named here.\n")
-    check("cfg/valid-no-claims", rc == 0, out)
+    check("cfg/valid-nothing-named", rc == 0 and "0 blocking result(s)" in out, out)
+
+    nocfg = os.path.join(base, "nocfg")
+    os.makedirs(os.path.join(nocfg, "in"))
+    _write(os.path.join(nocfg, "b.md"), "Inputs: it7-r5-alpha.txt\n")
+    rc, out, _ = _quiet(nocfg, [])
+    check("cfg/absent-not-applicable", rc == 0 and "NOT APPLICABLE" in out, out)
+    rc, out, _ = _quiet(nocfg, ["--input-dir", os.path.join(nocfg, "in"), os.path.join(nocfg, "b.md")])
+    check("cfg/absent-brief-not-applicable", rc == 0 and "NOT APPLICABLE" in out, out)
+    rc, out, err = _quiet(nocfg, ["--require-config", "--input-dir", os.path.join(nocfg, "in"),
+                                  os.path.join(nocfg, "b.md")])
+    check("cfg/absent-require-config", rc == 2 and "CANNOT-EVALUATE" in out, out + err)
+    rc, out, err = _quiet(nocfg, ["--emit", "--input-dir", os.path.join(nocfg, "in"), "it7-r5-alpha.txt"])
+    check("cfg/absent-emit", rc == 2 and out == "" and "CANNOT-EVALUATE" in err, out + err)
     root = os.path.join(base, "cfglink")
     _write(os.path.join(root, "real.toml"), GOOD_CFG)
     os.makedirs(os.path.join(root, ".aiqt"))
     os.symlink(os.path.join(root, "real.toml"), os.path.join(root, CONFIG_REL))
     check("cfg/symlink", _quiet(root, [])[0] == 2)
-    root = os.path.join(base, "noindir")
+    root = os.path.join(base, "ci_form")
     _write(os.path.join(root, CONFIG_REL), GOOD_CFG)
-    _write(os.path.join(root, "b.md"), "x\n")
-    check("in/missing-input-dir", _quiet(root, [os.path.join(root, "b.md")])[0] == 2)
-    rc, out = sc("abs_missing", "Read @IN@/notes/summary.md first.\n")
-    check("in/missing-absolute-path", rc == 2 and "does not exist" in out, out)
+    rc, out, _ = _quiet(root, [])
+    check("ci/configuration-only-examines-no-brief", rc == 0 and "NO brief was examined" in out, out)
+    _write(os.path.join(root, "b.md"), BLOCK_OK)
+    rc, out, _ = _quiet(root, [os.path.join(root, "b.md")])
+    check("in/missing-input-dir", rc == 2 and "--input-dir" in out, out)
+    rc, out = sc("unreadable_brief", None)
+    check("in/unreadable-brief", rc == 2 and "CANNOT-EVALUATE brief" in out, out)
+    check("usage/strict-removed", parse_args(["--strict", "b.md"]) is None)
+    check("usage/emit-takes-no-template", parse_args(["--emit", "--template", "t.md", "x.txt"]) is None)
+    check("usage/unknown-option", _quiet(root, ["--bogus"])[0] == 2)
+
     opened = []
     me = sys.modules[__name__]
     real_read = me._read_bytes
     me._read_bytes = lambda p: opened.append(os.path.basename(p)) or real_read(p)
     try:
-        rc, out = sc("failed_sibling", "Inputs: it7-r5-alpha.txt (NO BLOCKERS).\n",
-                     files=dict([("it7-r5-alpha-FAILED.txt", ALPHA5)]))
+        rc, out = sc("failed_sibling", BLOCK_ALPHA, files=dict([("it7-r5-alpha-FAILED.txt", ALPHA5)]))
     finally:
         me._read_bytes = real_read
-    check("in/failed-sibling-not-substituted", rc == 2 and "it7-r5-alpha-FAILED.txt" not in opened, out)
-    if os.geteuid() != 0:
-        root = os.path.join(base, "mode000")
-        p = os.path.join(root, "in")
-        _write(os.path.join(p, "it7-r5-alpha.txt"), ALPHA5)
-        _write(os.path.join(root, CONFIG_REL), GOOD_CFG)
-        _write(os.path.join(root, "b.md"), "Inputs: it7-r5-alpha.txt.\n")
-        os.chmod(os.path.join(p, "it7-r5-alpha.txt"), 0)
-        try:
-            rc0 = _quiet(root, ["--input-dir", p, os.path.join(root, "b.md")])[0]
-        finally:
-            os.chmod(os.path.join(p, "it7-r5-alpha.txt"), 0o644)
-        check("in/mode-000", rc0 == 2)
-    else:
-        skipped.append("in/mode-000 (running as root, permissions do not bind)")
-    rc, out = sc("non_utf8", "Inputs: it7-r5-alpha.txt.\n", files=dict([("it7-r5-alpha.txt", b"\xff\xfe x")]))
-    check("in/non-utf8", rc == 2, out)
-    rc, out = sc("directory", "Inputs: it7-r5-alpha.txt.\n", files=dict([("it7-r5-alpha.txt/x", "x")]))
+    check("in/failed-sibling-not-substituted", rc == 2 and "it7-r5-alpha-FAILED.txt" not in opened
+          and "does not exist" in out, out)
+    rc, out = sc("missing_file", BLOCK_ALPHA, files=dict())
+    check("in/missing-file", rc == 2 and "does not exist" in out, out)
+    rc, out = sc("non_utf8", BLOCK_ALPHA, files=dict([("it7-r5-alpha.txt", b"\xff\xfeVERDICT: BLOCKERS FOUND\n")]))
+    check("in/non-utf8", rc == 2 and "not valid UTF-8" in out, out)
+    rc, out = sc("directory", BLOCK_ALPHA, files=dict([("it7-r5-alpha.txt/x", "x\n")]))
     check("in/directory", rc == 2 and "not a regular file" in out, out)
-    outside = os.path.join(base, "outside.txt")
-    _write(outside, ALPHA5)
-    root = os.path.join(base, "symesc")
-    indir = os.path.join(root, "in")
-    os.makedirs(indir)
-    os.symlink(outside, os.path.join(indir, "it7-r5-alpha.txt"))
-    _write(os.path.join(root, CONFIG_REL), GOOD_CFG)
-    _write(os.path.join(root, "b.md"), "Inputs: it7-r5-alpha.txt (BLOCKERS FOUND).\n")
-    check("in/symlink-escape", _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])[0] == 2)
-    rc, out = sc("no_brief", None)
-    check("in/unreadable-brief", rc == 2, out)
-    rc, out = sc("unterminated", "BEGIN VERBATIM alpha\nline\n")
-    check("in/unterminated-verbatim", rc == 2, out)
+    root, indir = _tree(base, "escape", files=dict())
+    _write(os.path.join(root, "outside", "it7-r5-alpha.txt"), ALPHA5)
+    os.symlink(os.path.join(root, "outside", "it7-r5-alpha.txt"), os.path.join(indir, "it7-r5-alpha.txt"))
+    _write(os.path.join(root, "b.md"), BLOCK_ALPHA)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])
+    check("in/symlink-escape", rc == 2 and "outside --input-dir" in out, out)
 
 
-
-def _cases_claims(sc, check, base):
-    """Plan steps 3 to 6: binding, verdicts, ids and grades, counts."""
-    rc, out = sc("bind_list", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (alpha MEDIUM-1; beta NO BLOCKERS)\n",
-                 args=["--strict"])
-    check("bind/list-family-segment", rc == 0 and "id MEDIUM-1 -> " + os.path.join(
-        base, "bind_list", "in", "it7-r5-alpha.txt") in out, out)
-    r9 = dict([("it7-r9-alpha.txt", ALPHA5), ("it7-r8-beta.txt", BETA5.replace("### MINOR n2", "### MINOR 7"))])
-    brief = "Inputs: it7-r9-alpha.txt (alpha MAJOR-2, beta MINOR-7 from round 8)\n"
-    rc, out = sc("bind_round_unnamed", brief, files=r9)
-    check("bind/from-round-unnamed", rc == 0 and "CANNOT-EVALUATE [advisory]" in out and "round 8" in out, out)
-    rc, out = sc("bind_round_unnamed_strict", brief, files=r9, args=["--strict"])
-    check("bind/from-round-unnamed-strict", rc == 2, out)
-    rc, out = sc("bind_round_named", "Inputs: it7-r8-beta.txt and " + brief[8:], files=r9, args=["--strict"])
-    check("bind/from-round-named", rc == 0 and "MATCH [advisory] brief line 1: id MINOR-7" in out, out)
-    hidden = [("bind/fence-not-extracted", "```\nit7-r5-alpha.txt (NO BLOCKERS)\n```\nit7-r5-alpha.txt\n"),
-              ("bind/quote-line-not-extracted", "> it7-r5-alpha.txt (NO BLOCKERS)\nit7-r5-alpha.txt\n"),
-              ("bind/verbatim-not-extracted", "it7-r5-alpha.txt\nBEGIN VERBATIM alpha\nalpha NO BLOCKERS\n"
-               "2. **Major** - the retry loop never backs off between attempts on a busy server.\nEND VERBATIM\n")]
-    for name, text in hidden:
-        rc, out = sc(name.replace("/", "_").replace("-", "_"), text, args=["--strict"])
-        check(name, rc == 0, out)
-    rc, out = sc("nested", "Inputs: it7-r5-alpha.txt (see (the log) for MAJOR-3 and BLOCKERS FOUND)\n")
-    check("bind/nested-parens", rc == 0 and "MATCH [advisory] brief line 1: id MAJOR-3" in out
-          and "MATCH [blocking] brief line 1: BLOCKERS FOUND" in out, out)
-    rc, out = sc("prose_family", "Fix the alpha MEDIUM-1 finding; it7-r5-alpha.txt is the source.\n",
-                 args=["--strict"])
-    check("bind/prose-family-claim", rc == 0 and "MATCH [advisory] brief line 1: id MEDIUM-1" in out, out)
-    rc, out = sc("prose_ambiguous", "Fix alpha MAJOR-2 now. Inputs: it7-r5-alpha.txt, it7-r4-alpha.txt.\n",
-                 files=dict([("it7-r5-alpha.txt", ALPHA5), ("it7-r4-alpha.txt", ALPHA5)]))
-    check("bind/prose-family-ambiguous", rc == 2 and "CANNOT-EVALUATE [blocking]" in out and "ambiguous" in out, out)
-
-    rc, out = sc("v_mismatch", "Inputs: it7-r5-alpha.txt (NO BLOCKERS)\n")
-    check("verdict/mismatch", rc == 1 and "MISMATCH [blocking]" in out, out)
-    rc, out = sc("v_match", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n")
-    check("verdict/match", rc == 0 and "MATCH [blocking]" in out, out)
-    rc, out = sc("v_none", "Inputs: it7-r5-alpha.txt (NO BLOCKERS)\n",
-                 files=dict([("it7-r5-alpha.txt", ALPHA5.replace("VERDICT: BLOCKERS FOUND\n", ""))]))
-    check("verdict/none", rc == 2, out)
-    fenced = "```\nVERDICT: BLOCKERS FOUND\n```\n> VERDICT: BLOCKERS FOUND\n" + BETA5
-    rc, out = sc("v_fenced", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n", files=dict([("it7-r5-beta.txt", fenced)]))
-    check("verdict/fenced-and-quoted-ignored", rc == 0, out)
-    rc, out = sc("src_quoted_id", "Inputs: it7-r5-alpha.txt (MAJOR 9)\n",
-                 files=dict([("it7-r5-alpha.txt", "> MAJOR 9 was quoted from elsewhere.\n" + ALPHA5)]))
-    check("src/quoted-id-ignored", "WARN [advisory] brief line 1: id MAJOR-9" in out, out)
-    rc, out = sc("v_two", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n",
-                 files=dict([("it7-r5-beta.txt", BETA5 + "VERDICT: BLOCKERS FOUND\n")]))
-    check("verdict/two-distinct", rc == 2, out)
-    rc, out = sc("v_severity", "Inputs: it7-r5-alpha.txt (no BLOCKER-grade finding remains)\n", args=["--strict"])
-    check("verdict/severity-wording-not-a-claim", rc == 0 and "result(s) none" in out, out)
-    rc, out = sc("v_regrade", "Inputs: it7-r5-alpha.txt (NO BLOCKERS, REGRADED after fix)\n")
-    check("verdict/regrade-exempt-logged", rc == 0 and "EXEMPT [blocking]" in out, out)
+def _cases_trailer(base):
+    """The source verdict is the trailer record, exactly; the body is never read."""
+    sc = functools.partial(_scenario, base)
+    found = BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT: BLOCKERS FOUND")
+    body = ("Round 4 verdict was BLOCKERS FOUND; this round differs.\n1. VERDICT: BLOCKERS FOUND\n"
+            "Final VERDICT: BLOCKERS FOUND\n**VER**DICT: BLOCKERS FOUND\n| VERDICT: | BLOCKERS FOUND |\n"
+            "Previous verdict: BLOCKERS FOUND\n```\nVERDICT: BLOCKERS FOUND\n")
+    for cid, source, want in (
+            ("trailer/plain-match", BETA5, 0),
+            ("trailer/skips-blank-and-trailer-lines", BETA5 + "\n \t\nQA-COMPLETE\nWORKER_STATUS: COMPLETE\n\n", 0),
+            ("trailer/crlf", BETA5.replace("\n", "\r\n"), 0),
+            ("trailer/no-final-newline", BETA5.rstrip("\n"), 0),
+            ("trailer/body-never-read", body + "```\n" + BETA5, 0),
+            ("trailer/earlier-record-not-read", "VERDICT: BLOCKERS FOUND\n" + BETA5, 0),
+            ("trailer/prefix-line-not-a-record", found + "WORKER_STATUS: VERDICT: NO BLOCKERS\n", 1),
+            ("trailer/differs", found, 1),
+            ("trailer/missing", BETA5.replace("VERDICT: NO BLOCKERS\n", ""), 2),
+            ("trailer/prose-after-record", BETA5 + "Thanks for reading.\n", 2),
+            ("trailer/closing-fence-after-record", "```\n" + BETA5 + "```\n", 2),
+            ("trailer/decorated", BETA5.replace("VERDICT: NO BLOCKERS", "**VERDICT:** NO BLOCKERS"), 2),
+            ("trailer/indented", BETA5.replace("VERDICT:", "  VERDICT:"), 2),
+            ("trailer/bom-only", "\N{ZERO WIDTH NO-BREAK SPACE}VERDICT: NO BLOCKERS\n", 2),
+            ("trailer/other-case", BETA5.replace("VERDICT:", "Verdict:"), 2),
+            ("trailer/trailing-space", BETA5.replace("NO BLOCKERS", "NO BLOCKERS "), 2),
+            ("trailer/value-with-comment", BETA5.replace("NO BLOCKERS", "NO BLOCKERS (two minors deferred)"), 2),
+            ("trailer/no-token", BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT: PASS"), 2),
+            ("trailer/overlapping-tokens", BETA5.replace("NO BLOCKERS", "NO BLOCKERS FOUND"), 2),
+            ("trailer/fullwidth-letters", BETA5.replace("NO BLOCKERS", "\N{FULLWIDTH LATIN CAPITAL LETTER N}"
+                                                        "\N{FULLWIDTH LATIN CAPITAL LETTER O} BLOCKERS"), 2),
+            ("trailer/nbsp-in-token", BETA5.replace("NO BLOCKERS", "NO\N{NO-BREAK SPACE}BLOCKERS"), 2),
+            ("trailer/zero-width-in-token", BETA5.replace("NO BLOCKERS", "NO\N{ZERO WIDTH SPACE} BLOCKERS"), 2),
+            ("trailer/line-separator", BETA5.replace("NO BLOCKERS", "NO BLOCKERS\N{LINE SEPARATOR}"), 2),
+            ("trailer/vertical-tab", BETA5.replace("NO BLOCKERS", "NO BLOCKERS\x0b"), 2),
+            ("trailer/empty-file", "", 2),
+            ("trailer/only-trailer-lines", "WORKER_STATUS: COMPLETE\n", 2)):
+        rc, out = sc(cid.replace("/", "_"), BLOCK_BETA, files=dict([("it7-r5-beta.txt", source)]))
+        check(cid, rc == want and ("no trailer record" in out if want == 2 else True), out)
 
 
-    blob = BETA5.replace("### MEDIUM 1\n", "### NOTE\naGVsbG8M1d29ybGQ=\n")
-    rc, out = sc("id_base64", "Inputs: it7-r5-beta.txt (beta M1)\n", files=dict([("it7-r5-beta.txt", blob)]))
-    check("id/base64-substring-absent", "WARN [advisory] brief line 1: id MEDIUM-1" in out, out)
-    rc, out = sc("id_whole", "Inputs: it7-r5-beta.txt (MEDIUM-1)\n",
-                 files=dict([("it7-r5-beta.txt", "Notes on MEDIUM-12 only.\nVERDICT: NO BLOCKERS\n")]))
-    check("id/whole-token", "WARN [advisory] brief line 1: id MEDIUM-1" in out, out)
-    rc, out = sc("id_alias", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (alpha M3; beta M1)\n", args=["--strict"])
-    check("id/alias-per-family", rc == 0 and "id MAJOR-3" in out and "id MEDIUM-1" in out, out)
-    rc, out = sc("id_alias_undeclared", "Inputs: it7-r5-alpha.txt (alpha X2)\n")
-    check("id/undeclared-alias", rc == 0 and "CANNOT-EVALUATE [advisory]" in out and "not declared" in out, out)
-    rc, out = sc("id_minor_n", "Inputs: it7-r5-beta.txt (2 MINOR, MINOR-2)\n", args=["--strict"])
-    check("id/minor-n-headings", rc == 0 and "MATCH [advisory] brief line 1: 2 MINOR" in out, out)
-    rc, out = sc("id_section", "Inputs: it7-r5-alpha.txt (see MEDIUM 16.1)\n", args=["--strict"])
-    check("id/section-number-not-id", rc == 0 and "result(s) none" in out, out)
-    rc, out = sc("id_absent", "Inputs: it7-r5-alpha.txt (MAJOR 9)\n")
-    rc2 = sc("id_absent_strict", "Inputs: it7-r5-alpha.txt (MAJOR 9)\n", args=["--strict"])[0]
-    check("id/absent-injected", rc == 0 and rc2 == 1 and "WARN [advisory]" in out, out)
-    rc, out = sc("id_wrong_grade", "Inputs: it7-r5-alpha.txt (alpha blocker 2)\n")
-    check("id/wrong-grade-item", "WARN [advisory] brief line 1: id BLOCKER-2" in out, out)
-    rc, out = sc("id_colon", "Inputs: it7-r5-beta.txt (beta MAJOR: the timeout)\n")
-    check("id/grade-colon-absent", "WARN [advisory] brief line 1: MAJOR:" in out, out)
-    rc, out = sc("id_range", "Inputs: it7-r5-beta.txt (MINOR-1 to MINOR-3)\n")
-    check("id/range-expands", "MATCH [advisory] brief line 1: id MINOR-2" in out
-          and "WARN [advisory] brief line 1: id MINOR-3" in out, out)
-    rc, out = sc("id_alias_range", "Inputs: it7-r5-alpha.txt (alpha M2-M4)\n")
-    check("id/alias-range-expands", "MATCH [advisory] brief line 1: id MAJOR-3" in out
-          and "WARN [advisory] brief line 1: id MAJOR-4" in out, out)
-
-    seven = dict([("it7-r5-alpha.txt", "1. **Blocker** - a.\n2. **Blocker** - b.\n3. **Major** - c.\n"
-                   "4. **Major** - d.\n5. **Major** - e.\n6. **Major** - f.\n7. **Major** - g.\n"
-                   "VERDICT: BLOCKERS FOUND\n")])
-    rc, out = sc("count_warn", "Inputs: it7-r5-alpha.txt (2 blockers, 4 majors)\n", files=seven)
-    rc2 = sc("count_warn_strict", "Inputs: it7-r5-alpha.txt (2 blockers, 4 majors)\n", files=seven,
-             args=["--strict"])[0]
-    check("count/grade-count-warn", rc == 0 and rc2 == 1 and "WARN [advisory] brief line 1: 4 majors" in out
-          and "MATCH [advisory] brief line 1: 2 blockers" in out, out)
-    pred = dict([("it7-r5-beta.txt", "Across 16,000 seeded mutations, 2,642 were accepted by the grammar.\n"
-                  "VERDICT: NO BLOCKERS\n")])
-    rc, out = sc("count_pred", "Inputs: it7-r5-beta.txt (16,000 accepted mutations)\n", files=pred)
-    check("count/predicate-mismatch", "WARN [advisory] brief line 1: 16,000 accepted" in out, out)
-    rc, out = sc("count_pred_ok", "Inputs: it7-r5-beta.txt (2,642 were accepted)\n", files=pred, args=["--strict"])
-    check("count/predicate-match", rc == 0 and "MATCH [advisory]" in out, out)
-    forms = dict([("it7-r5-beta.txt", "Item one. Grade: MAJOR\nItem two. Defect: MAJOR\n"
-                   "| Grade: MAJOR | table |\nVERDICT: NO BLOCKERS\n")])
-    rc, out = sc("count_forms", "Inputs: it7-r5-beta.txt (2 MAJORs)\n", files=forms, args=["--strict"])
-    check("count/label-forms-counted-table-skipped", rc == 0 and "MATCH [advisory] brief line 1: 2 MAJORs" in out,
-          out)
-    rc, out = sc("count_round", "Inputs: it7-r5-beta.txt (the round-7 minors stay open)\n", args=["--strict"])
-    check("count/round-prefix-not-count", rc == 0 and "result(s) none" in out, out)
-
-
-
-def _cases_template(sc, check):
-    """Plan steps 7 to 9: template carry-over, foreign ids, embedded attribution, excerpts, report."""
-    tmpl = dict([("tmpl.md", "# Fix item seven round 4\n"
-                  "Inputs: it7-r4-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n")])
-    targ = ["--template", "@ROOT@/tmpl.md"]
-    rc, out = sc("t_reattach", "# Fix item seven round 5\n"
-                 "Inputs: it7-r5-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n", extra=tmpl, args=targ)
-    check("tmpl/parenthetical-reattached", rc == 1 and "carried over" in out, out)
-    rc, out = sc("t_title", "# Fix item seven round 4\nInputs: it7-r5-alpha.txt.\n", extra=tmpl, args=targ)
-    check("tmpl/title-round-carried", rc == 1 and "title carried over" in out, out)
-    rc, out = sc("t_clean", "# Fix item seven round 5\nInputs: it7-r5-alpha.txt (alpha MEDIUM-1).\n",
-                 extra=tmpl, args=targ)
-    check("tmpl/clean", rc == 0, out)
-    reg = dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\naliases = ["ITEM-7B"]\n'
-                 'dependencies = ["ITEM-2"]\nid-pattern = \'ITEM-[0-9]+[A-Z]?\'\n')])
-    rarg = ["--registry", "@ROOT@/reg.toml"]
-    rc, out = sc("f_foreign", "TASK: finish ITEM-6 using it7-r5-alpha.txt.\n", extra=reg, args=rarg)
-    check("tmpl/foreign-id", rc == 1 and "foreign item id" in out, out)
-    rc, out = sc("f_clean", "TASK: finish ITEM-7 (alias ITEM-7B) after ITEM-2.\n> history: ITEM-6 was done\n",
-                 extra=reg, args=rarg)
-    check("tmpl/foreign-id-quoted-dependency-alias-clean", rc == 0, out)
-    rc, out = sc("f_none", "TASK: finish ITEM-6.\n")
-    check("tmpl/no-registry-not-evaluated", rc == 0 and "foreign-id: not evaluated" in out, out)
-    rc, out = sc("t_unreadable", "x\n", args=["--template", "@ROOT@/absent.md"])
-    check("tmpl/unreadable-template", rc == 2, out)
-    rc, out = sc("r_unreadable", "x\n", args=["--registry", "@ROOT@/absent.toml"])
-    check("tmpl/unreadable-registry", rc == 2, out)
-    rc, out = sc("r_malformed", "x\n", extra=dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\n')]),
-                 args=rarg)
-    check("tmpl/malformed-registry", rc == 2, out)
+def _cases_block(base):
+    """The claims block: a closed grammar; every deviation is cannot-evaluate."""
+    sc = functools.partial(_scenario, base)
+    head = "BEGIN BRIEF-CLAIMS 1\n"
+    tail = "END BRIEF-CLAIMS\n"
+    a_line = "it7-r5-alpha.txt VERDICT BLOCKERS FOUND\n"
+    named = "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n"
+    for cid, brief, want in (
+            ("block/match", named + BLOCK_OK, 0),
+            ("block/mismatch-swapped", named + BLOCK_SWAPPED, 1),
+            ("block/names-only-in-block", BLOCK_OK, 0),
+            ("block/inside-fence-read", "```\n" + BLOCK_OK + "```\n", 0),
+            ("block/inside-fence-mismatch", "```\n" + BLOCK_SWAPPED + "```\n", 1),
+            ("block/crlf", BLOCK_OK.replace("\n", "\r\n"), 0),
+            ("block/two-blocks", BLOCK_OK + BLOCK_OK, 2),
+            ("block/unclosed", head + a_line, 2),
+            ("block/end-without-begin", tail, 2),
+            ("block/empty", head + tail, 2),
+            ("block/nested-begin", head + head + a_line + tail, 2),
+            ("block/indented-marker", " " + BLOCK_ALPHA, 2),
+            ("block/bom-marker", "\N{ZERO WIDTH NO-BREAK SPACE}" + BLOCK_ALPHA, 2),
+            ("block/lower-case-marker", BLOCK_ALPHA.replace(head, head.lower()), 2),
+            ("block/wrong-version", BLOCK_ALPHA.replace(head, "BEGIN BRIEF-CLAIMS 2\n"), 2),
+            ("block/re-spaced-marker", BLOCK_ALPHA.replace(head, "BEGIN BRIEF CLAIMS 1\n"), 2),
+            ("block/marker-trailing-space", BLOCK_ALPHA.replace(tail, "END BRIEF-CLAIMS \n"), 2),
+            ("block/blank-line-inside", head + a_line + "\n" + tail, 2),
+            ("block/colon-form", head + "it7-r5-alpha.txt VERDICT: BLOCKERS FOUND\n" + tail, 2),
+            ("block/extra-word", head + "it7-r5-alpha.txt VERDICT BLOCKERS FOUND now\n" + tail, 2),
+            ("block/line-trailing-space", head + "it7-r5-alpha.txt VERDICT BLOCKERS FOUND \n" + tail, 2),
+            ("block/double-space", head + "it7-r5-alpha.txt  VERDICT BLOCKERS FOUND\n" + tail, 2),
+            ("block/tab-separator", head + "it7-r5-alpha.txt\tVERDICT BLOCKERS FOUND\n" + tail, 2),
+            ("block/unknown-token", head + "it7-r5-alpha.txt VERDICT PASS\n" + tail, 2),
+            ("block/lower-case-token", head + "it7-r5-alpha.txt VERDICT blockers found\n" + tail, 2),
+            ("block/nbsp-in-token", head + "it7-r5-beta.txt VERDICT NO\N{NO-BREAK SPACE}BLOCKERS\n" + tail, 2),
+            ("block/hangul-filler", head + "it7-r5-beta.txt VERDICT NO\N{HANGUL FILLER}BLOCKERS\n" + tail, 2),
+            ("block/zero-width-in-name", head + "it7-r5-\N{ZERO WIDTH SPACE}alpha.txt VERDICT BLOCKERS FOUND\n"
+             + tail, 2),
+            ("block/fullwidth-token", head + "it7-r5-beta.txt VERDICT \N{FULLWIDTH LATIN CAPITAL LETTER N}"
+             "\N{FULLWIDTH LATIN CAPITAL LETTER O} BLOCKERS\n" + tail, 2),
+            ("block/cyrillic-lookalike", head + "it7-r5-beta.txt VERDICT N\N{CYRILLIC CAPITAL LETTER O} BLOCKERS\n"
+             + tail, 2),
+            ("block/fullwidth-parenthesis-name", head + "it7-r5-alpha.txt\N{FULLWIDTH RIGHT PARENTHESIS} VERDICT "
+             "BLOCKERS FOUND\n" + tail, 2),
+            ("block/duplicate-name", head + a_line + a_line + tail, 2),
+            ("block/name-not-pattern", head + "notes.txt VERDICT NO BLOCKERS\n" + tail, 2),
+            ("block/name-with-slash", head + "in/it7-r5-alpha.txt VERDICT BLOCKERS FOUND\n" + tail, 2),
+            ("block/mismatch-and-cannot", head + "it7-r5-alpha.txt VERDICT NO BLOCKERS\n"
+             "it7-r9-alpha.txt VERDICT NO BLOCKERS\n" + tail, 2)):
+        rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief)
+        check(cid, rc == want, out)
 
 
-    section = ("2. **Major** - the retry loop never backs off between attempts on a busy server.\n"
-               "3. **Major** - the cache key ignores the locale and returns stale rows.\n")
-    rc, out = sc("e_swapped", "Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM beta\n" + section + "END VERBATIM\n")
-    check("emb/swapped-family", rc == 1 and "the source is family 'alpha'" in out, out)
-    rc, out = sc("e_verdict", "Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n" + section
-                 + "VERDICT: NO BLOCKERS\nEND VERBATIM\n")
-    check("emb/verdict-differs", rc == 1 and "MISMATCH [blocking]" in out, out)
-    rc, out = sc("e_ok", "Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n" + section
-                 + "VERDICT: BLOCKERS FOUND\nEND VERBATIM\n", args=["--strict"])
-    check("emb/attribution-match", rc == 0 and "MATCH [blocking]" in out, out)
-    rc, out = sc("e_nosource", "Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n"
-                 "This sentence appears in no named review file at all, anywhere.\nEND VERBATIM\n")
-    check("emb/no-source", rc == 2, out)
-    rc, out = sc("x_wrong", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (the cache key ignores the locale and returns stale rows)\n")
-    check("emb/excerpt-wrong-file", rc == 1 and "misattributed" in out, out)
-    rc, out = sc("x_own", "Inputs: it7-r5-alpha.txt (the retry loop never backs off between attempts)\n",
-                 args=["--strict"])
-    check("emb/excerpt-own-file-passes", rc == 0 and "verbatim excerpt of its bound file" in out, out)
-
-    rc, out = sc("report", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (beta NO BLOCKERS)\n")
-    digests = [hashlib.sha256(d.encode()).hexdigest() for d in (ALPHA5, BETA5)]
-    check("report/every-sha256", rc == 0 and all("sha256=" + d in out for d in digests), out)
+def _cases_completeness(base):
+    """Every recognized review-file name in the brief's own text needs a block line."""
+    sc = functools.partial(_scenario, base)
+    for cid, brief, want in (
+            ("complete/unclaimed-name", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt.\n" + BLOCK_ALPHA, 1),
+            ("complete/incident-without-block", "Review it7-r5-alpha.txt (NO BLOCKERS).\n", 1),
+            ("complete/missing-file-unclaimed", "Read it7-r9-alpha.txt.\n", 1),
+            ("complete/zero-width-name-recognized", "Inputs: \N{ZERO WIDTH SPACE}it7-r5-alpha.txt.\n", 1),
+            ("complete/nothing-named", "Fix the parser.\n", 0),
+            ("complete/name-in-fence-not-required", "```\nit7-r5-alpha.txt\n```\n", 0),
+            ("complete/name-in-quote-not-required", "> it7-r5-alpha.txt said NO BLOCKERS\n", 0),
+            ("complete/path-covered-by-basename", "Read @IN@/it7-r5-alpha.txt first.\n" + BLOCK_ALPHA, 0),
+            ("complete/unclosed-fence-cannot", "```\nInputs: it7-r5-alpha.txt\n" + BLOCK_ALPHA, 2),
+            ("complete/unclosed-verbatim-cannot", BLOCK_ALPHA + "BEGIN VERBATIM alpha\nx\n", 2)):
+        rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief)
+        check(cid, rc == want and ("UNCLAIMED" in out) == (want == 1), out)
 
 
-def _cases_round2(sc, check, base):
-    """Binding ambiguity, predicate pairing, regex bounds, verdict records, fences, names and quotes."""
-    two = dict([("a/it7-r5-alpha.txt", "VERDICT: NO BLOCKERS\n"), ("b/it7-r5-alpha.txt", "VERDICT: BLOCKERS FOUND\n")])
-    rc, out = sc("b2_adjacent", "a/it7-r5-alpha.txt\nb/it7-r5-alpha.txt (alpha NO BLOCKERS)\n", files=two,
-                 args=["--strict"])
-    check("bind/adjacent-family-binds-itself", rc == 1 and "b/it7-r5-alpha.txt sha256=" in out, out)
-    betas = dict([("it7-r5-alpha.txt", ALPHA5), ("a/it7-r5-beta.txt", BETA5), ("b/it7-r5-beta.txt", BETA5)])
-    rc, out = sc("b2_other_amb", "Inputs: a/it7-r5-beta.txt, b/it7-r5-beta.txt, it7-r5-alpha.txt (beta MEDIUM-1)\n",
-                 files=betas)
-    check("bind/other-family-ambiguous", rc == 2 and "ambiguous between" in out, out)
-    rc, out = sc("b2_same_file", "Fix the alpha MEDIUM-1 finding; it7-r5-alpha.txt and @IN@/it7-r5-alpha.txt "
-                 "are the source.\n", args=["--strict"])
-    check("bind/one-path-one-candidate", rc == 0 and "MATCH [advisory] brief line 1: id MEDIUM-1" in out, out)
-    r45 = dict([("it7-r5-alpha.txt", ALPHA5), ("it7-r4-alpha.txt", ALPHA5)])
-    rc, out = sc("b2_prose_verdict", "Inputs: it7-r5-alpha.txt, it7-r4-alpha.txt. The alpha verdict: NO BLOCKERS.\n",
-                 files=r45)
-    check("bind/prose-verdict-ambiguous", rc == 2, out)
-    rc, out = sc("b2_unnamed_verdict", "Inputs: it7-r5-beta.txt (alpha NO BLOCKERS)\n")
-    check("bind/unnamed-family-verdict", rc == 2 and "none named" in out, out)
-    rc, out = sc("b2_unbalanced", "Inputs: it7-r5-alpha.txt (NO BLOCKERS\n")
-    check("bind/unbalanced-paren-verdict", rc == 2 and "unbalanced parenthetical" in out, out)
-    r98 = dict([("it7-r9-alpha.txt", ALPHA5), ("it7-r8-alpha.txt", ALPHA5)])
-    rc, out = sc("b2_mask", "Inputs: it7-r9-alpha.txt, it7-r8-alpha.txt (alpha MAJOR-2 from round 8)\n", files=r98,
-                 args=["--strict"])
-    check("bind/parenthetical-masked-from-prose", rc == 0 and "MATCH [advisory] brief line 1: id MAJOR-2" in out, out)
+def _cases_emit(base):
+    """--emit writes the block from the trailers; a pasted block passes until a trailer changes."""
+    rc, out, err, root, indir = _emit(base, "emit_ok", ["it7-r5-alpha.txt", "it7-r5-beta.txt"])
+    check("emit/writes-block", rc == 0 and out == BLOCK_OK and err == "", out + err)
+    _write(os.path.join(root, "b.md"), "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n" + out)
+    rc2, out2, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])
+    check("emit/round-trip-passes", rc2 == 0 and "2 MATCH" in out2, out2)
+    _write(os.path.join(indir, "it7-r5-beta.txt"), BETA5.replace("NO BLOCKERS", "BLOCKERS FOUND"))
+    rc3, out3, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])
+    check("emit/then-trailer-changes", rc3 == 1 and "MISMATCH it7-r5-beta.txt" in out3, out3)
+    os.unlink(os.path.join(indir, "it7-r5-beta.txt"))
+    rc4, out4, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])
+    check("emit/then-file-removed", rc4 == 2 and "does not exist" in out4, out4)
+    rc, out, err, _, _ = _emit(base, "emit_order", ["it7-r5-beta.txt", "it7-r5-alpha.txt"])
+    check("emit/keeps-order", rc == 0 and out.splitlines()[1:3] == ["it7-r5-beta.txt VERDICT NO BLOCKERS",
+                                                                    "it7-r5-alpha.txt VERDICT BLOCKERS FOUND"], out)
+    for cid, names, files in (
+            ("emit/malformed-trailer", ["it7-r5-beta.txt"], dict([("it7-r5-beta.txt", BETA5 + "Thanks.\n")])),
+            ("emit/missing-file", ["it7-r9-beta.txt"], None),
+            ("emit/name-not-pattern", ["notes.txt"], dict([("notes.txt", BETA5)])),
+            ("emit/name-with-slash", ["in/it7-r5-beta.txt"], None),
+            ("emit/duplicate-name", ["it7-r5-beta.txt", "it7-r5-beta.txt"], None),
+            ("emit/no-names", [], None),
+            ("emit/one-bad-name-emits-nothing", ["it7-r5-alpha.txt", "it7-r9-beta.txt"], None)):
+        rc, out, err, _, _ = _emit(base, cid.replace("/", "_").replace("-", "_"), names, files)
+        check(cid, rc == 2 and out == "" and "CANNOT-EVALUATE" in err, out + err)
+    root, indir = _tree(base, "emit_nodir")
+    rc, out, err = _quiet(root, ["--emit", "it7-r5-beta.txt"])
+    check("emit/missing-input-dir", rc == 2 and out == "" and "--input-dir" in err, out + err)
 
-    def pred(name, source, claim, args=()):
-        return sc(name, "Inputs: it7-r5-beta.txt ({})\n".format(claim),
-                  files=dict([("it7-r5-beta.txt", source + "VERDICT: NO BLOCKERS\n")]), args=list(args))
-    rc, out = pred("p2_cross", "20 seeded, 10 accepted.\n", "20 accepted", ["--strict"])
-    check("pred/no-crossing-mismatch", rc == 1 and "binds 'accepted' to 10" in out, out)
-    rc, out = pred("p2_right", "20 seeded, 10 accepted.\n", "10 accepted", ["--strict"])
-    check("pred/no-crossing-match", rc == 0 and "MATCH [advisory] brief line 1: 10 accepted" in out, out)
-    rc, out = pred("p2_window", "10 of 20 accepted.\n", "10 accepted")
-    check("pred/two-numbers-ambiguous", rc == 2 and "more than one number" in out, out)
-    rc, out = pred("p2_runon", "20 seeded 10 accepted\n", "20 accepted")
-    check("pred/run-on-ambiguous", rc == 2, out)
-    rc, out = pred("p2_clauses", "10 accepted in round one; 12 accepted in round two.\n", "10 accepted")
-    check("pred/clauses-disagree", rc == 2 and "different numbers" in out, out)
 
+def _cases_advisory(base):
+    """QA rounds 1 to 3 on the prose side: every prose result is an ADVISORY line, and the exit code is
+    decided by the block alone (here a correct block, so 0). The round 3 "respectively" swap is a recall
+    miss of the prose rules (slash-joined tokens read as an option list); the block decides that case
+    (block/mismatch-swapped)."""
+    sc = functools.partial(_scenario, base)
+    named = "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n"
+    sweep = dict([("it7-r5-alpha.txt", "20 seeded, 10 accepted. Sweep: 41 of 42 mutants killed; 2 of 3 MAJORs "
+                   "fixed; latency 2 seconds.\nVERDICT: BLOCKERS FOUND\n"), ("it7-r5-beta.txt", BETA5)])
+    reg = dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\naliases = []\ndependencies = []\n'
+                 "id-pattern = 'ITEM-[0-9]+'\n"), ("tmpl.md", "# Fix item seven round 4\n"
+                 "Inputs: it7-r4-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n")])
+    for cid, brief, files, args, needle in (
+            ("advisory/prose-verdict-contradiction", "Inputs: it7-r5-alpha.txt (NO BLOCKERS).\n", None, (),
+             "ADVISORY WARN"),
+            ("advisory/option-list-instruction", "alpha leg: end with VERDICT: BLOCKERS FOUND or VERDICT: NO "
+             "BLOCKERS\n", None, (), "blocking result(s)"),
+            ("advisory/respectively-swap-missed", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (NO BLOCKERS/BLOCKERS "
+             "FOUND respectively)\n", None, (), "(2 MATCH); 0 advisory line(s)"),
+            ("advisory/predicate-crossing", "Inputs: it7-r5-alpha.txt (20 accepted)\n", sweep, (), "ADVISORY WARN"),
+            ("advisory/n-of-m-restated", "Inputs: it7-r5-alpha.txt (41 of 42 mutants killed)\n", sweep, (),
+             "ADVISORY MATCH"),
+            ("advisory/n-of-m-grades", "Inputs: it7-r5-alpha.txt (1 of 3 MAJORs fixed)\n", sweep, (), "ADVISORY"),
+            ("advisory/decimal-latency", "Inputs: it7-r5-alpha.txt (latency 1.5 seconds)\n", sweep, (), "ADVISORY"),
+            ("advisory/fullwidth-parentheses", "Inputs: it7-r5-alpha.txt \N{FULLWIDTH LEFT PARENTHESIS}NO "
+             "BLOCKERS\N{FULLWIDTH RIGHT PARENTHESIS}\n", None, (), "blocking result(s)"),
+            ("advisory/nbsp-before-parenthetical", "Inputs: it7-r5-alpha.txt\N{NO-BREAK SPACE}(NO BLOCKERS)\n", None,
+             (), "ADVISORY WARN"),
+            ("advisory/hangul-filler-prose", "Inputs: it7-r5-alpha.txt (NO\N{HANGUL FILLER} BLOCKERS)\n", None, (),
+             "ADVISORY WARN"),
+            ("advisory/not-regraded", "Inputs: it7-r5-alpha.txt (not REGRADED, NO BLOCKERS)\n", None, (),
+             "ADVISORY EXEMPT"),
+            ("advisory/unreadable-prose-path", "Read @IN@/notes/summary.md first.\n", None, (),
+             "ADVISORY CANNOT-EVALUATE"),
+            ("advisory/template-carry-over", "# Fix item seven round 5\nInputs: it7-r5-alpha.txt (alpha MEDIUM-1 "
+             "and MAJOR-2 remain open)\n", None, ("--template", "@ROOT@/tmpl.md"), "carried over"),
+            ("advisory/template-unreadable", named, None, ("--template", "@ROOT@/none.md"),
+             "ADVISORY CANNOT-EVALUATE"),
+            ("advisory/registry-foreign-id", "TASK: ITEM-9.\n", None, ("--registry", "@ROOT@/reg.toml"),
+             "foreign item id"),
+            ("advisory/registry-malformed", named, None, ("--registry", "@ROOT@/tmpl.md"),
+             "ADVISORY CANNOT-EVALUATE"),
+            ("advisory/embedded-swapped-family", named + "BEGIN VERBATIM beta\n3. **Major** - the cache key "
+             "ignores the locale and returns stale rows.\nEND VERBATIM\n", None, (), "the source is family")):
+        rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief + BLOCK_OK, files=files, args=args, extra=reg)
+        check(cid, rc == 0 and needle in out, out)
     me = sys.modules[__name__]
-    saved = me.REGEX_DEADLINE
+    real = me._advisory
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic advisory fault")
+    me._advisory = broken
+    try:
+        rc, out = sc("adv_fault", named + BLOCK_OK)
+    finally:
+        me._advisory = real
+    check("advisory/internal-fault-reported-not-refused", rc == 0 and "internal error RuntimeError" in out, out)
+    rc, out = sc("adv_block_wins", "Inputs: it7-r5-alpha.txt (BLOCKERS FOUND).\n" + BLOCK_SWAPPED)
+    check("advisory/prose-match-does-not-rescue-block", rc == 1 and "MISMATCH it7-r5-alpha.txt" in out, out)
+
+
+def _cases_regex(base):
+    """The adopter regex child: bounded, isolated, fail-closed for the blocking pattern."""
+    sc = functools.partial(_scenario, base)
+    me = sys.modules[__name__]
+    slow = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>(a+)+)")
+    saved = (me.REGEX_DEADLINE, me.CHILD_CPU)
     me.REGEX_DEADLINE = 2.0
     try:
-        slow = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>(a+)+)")
-        rc, out = sc("r2_pattern", "Inputs: " + "a" * 40 + "x\n", cfg=slow)
+        rc, out = sc("rx_deadline", "Inputs: " + "a" * 40 + "x\n", cfg=slow)
         check("regex/review-file-pattern-deadline", rc == 2 and "deadline" in out, out)
         reg = dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\naliases = []\ndependencies = []\n'
                      "id-pattern = '(a+)+b'\n")])
-        rc, out = sc("r2_idpat", "TASK: " + "a" * 40 + "c\n", extra=reg, args=["--registry", "@ROOT@/reg.toml"])
-        check("regex/id-pattern-deadline", rc == 2 and "deadline" in out, out)
+        rc, out = sc("rx_idpat", "TASK: " + "a" * 40 + "c\n" + BLOCK_OK, extra=reg,
+                     args=["--registry", "@ROOT@/reg.toml"])
+        check("regex/id-pattern-deadline-advisory", rc == 0 and "ADVISORY CANNOT-EVALUATE" in out
+              and "deadline" in out, out)
     finally:
-        me.REGEX_DEADLINE = saved
+        me.REGEX_DEADLINE, me.CHILD_CPU = saved
+    me.REGEX_DEADLINE, me.CHILD_CPU = 60.0, 1
+    try:
+        rc, out = sc("rx_cpu", "Inputs: " + "a" * 40 + "x\n", cfg=slow)
+    finally:
+        me.REGEX_DEADLINE, me.CHILD_CPU = saved
+    check("regex/child-cpu-limit", rc == 2 and "CPU-time limit" in out and "deadline" not in out, out)
     real_run = me.subprocess.run
 
     def refuse(*args, **kwargs):
         raise ValueError("preexec_fn is not supported on this platform")
+
+    def noisy(*args, **kwargs):
+        done = real_run(*args, **kwargs)
+        return subprocess.CompletedProcess(done.args, done.returncode, done.stdout, b"Warning: noise\n")
     me.subprocess.run = refuse
     try:
-        rc, out = sc("r2_child", "Inputs: it7-r5-alpha.txt (NO BLOCKERS)\n")
+        rc, out = sc("rx_start", BLOCK_OK)
     finally:
         me.subprocess.run = real_run
     check("regex/child-start-failure", rc == 2 and "could not run" in out, out)
-    long_reg = dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\naliases = []\ndependencies = []\n'
-                      "id-pattern = 'ITEM-[0-9]+" + "(?:x)?" * 90 + "'\n")])
-    rc, out = sc("r2_idlong", "TASK: ITEM-7.\n", extra=long_reg, args=["--registry", "@ROOT@/reg.toml"])
-    check("regex/id-pattern-too-long", rc == 2 and "longer than" in out, out)
+    me.subprocess.run = noisy
+    try:
+        rc, out = sc("rx_stderr", BLOCK_OK)
+    finally:
+        me.subprocess.run = real_run
+    check("regex/child-stderr-fails-closed", rc == 2 and "wrote to stderr" in out, out)
+    planted = os.path.join(base, "planted")
+    _write(os.path.join(planted, "hashlib.py"), "raise SystemExit(7)\n")
+    saved_env = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = planted
+    try:
+        rc, out = sc("rx_isolated", BLOCK_SWAPPED)
+    finally:
+        if saved_env is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = saved_env
+    check("regex/child-isolated", rc == 1 and "MISMATCH it7-r5-alpha.txt" in out, out)
+    if sys.platform.startswith("linux"):
+        ok, detail = _orphan_probe(base)
+    else:
+        ok, detail = True, "not run"
+        SKIPPED.append("regex/child-dies-with-parent (Linux only)")
+    check("regex/child-dies-with-parent", ok, detail)
 
-    records = [("src-verdict/empty-second", BETA5 + "VERDICT:\n"),
-               ("src-verdict/indented-second", BETA5 + " VERDICT: BLOCKERS FOUND\n"),
-               ("src-verdict/bom-first", "\ufeffVERDICT: BLOCKERS FOUND\nVERDICT: NO BLOCKERS\n"),
-               ("src-verdict/duplicate-identical", BETA5 + "VERDICT: NO BLOCKERS\n"),
-               ("src-verdict/indented-only", BETA5.replace("VERDICT:", "  VERDICT:")),
-               ("src-verdict/bom-only", "\ufeffVERDICT: NO BLOCKERS\n"),
-               ("src-verdict/decorated", BETA5.replace("VERDICT: NO BLOCKERS", "**VERDICT:** NO BLOCKERS")),
-               ("src-verdict/other-case", BETA5.replace("VERDICT:", "Verdict:")),
-               ("src-verdict/no-token", BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT: PASS")),
-               ("src-verdict/empty-only", BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT:")),
-               ("src-verdict/overlap", BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT: NO BLOCKERS FOUND")),
-               ("fence/unclosed-source", "```\n" + BETA5)]
-    for name, text in records:
-        rc, out = sc(name.replace("/", "_").replace("-", "_"), "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n",
-                     files=dict([("it7-r5-beta.txt", text)]))
-        check(name, rc == 2, out)
-    tail = BETA5.replace("VERDICT: NO BLOCKERS", "VERDICT: NO BLOCKERS (two minors deferred)")
-    rc, out = sc("v2_trailing", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n", files=dict([("it7-r5-beta.txt", tail)]),
-                 args=["--strict"])
-    check("src-verdict/value-classified-by-shared-function", rc == 0 and "MATCH [blocking]" in out, out)
-    rc, out = sc("v2_brief_overlap", "Inputs: it7-r5-alpha.txt (NO BLOCKERS FOUND)\n")
-    check("verdict/brief-overlap-ambiguous", rc == 2 and "ambiguous" in out, out)
-    rc, out = sc("v2_nbsp", "Inputs: it7-r5-alpha.txt (NO\u00a0BLOCKERS)\n")
-    check("verdict/nbsp-inside-token", rc == 1, out)
-    nested = GOOD_CFG.replace('["NO BLOCKERS", "BLOCKERS FOUND"]', '["NO BLOCKERS", "BLOCKERS FOUND", "BLOCKERS"]')
-    rc, out = sc("v2_contained", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n", cfg=nested, args=["--strict"])
-    check("verdict/contained-token-belongs-to-longer", rc == 0 and "MATCH [blocking]" in out, out)
 
-    rc, out = sc("f2_inline", "```make test``` runs the suite.\nInputs: it7-r9-alpha.txt (NO BLOCKERS)\n")
-    check("fence/inline-code-opens-nothing", rc == 2 and "does not exist" in out, out)
-    rc, out = sc("f2_indented", "    ```\nInputs: it7-r9-alpha.txt (NO BLOCKERS)\n")
-    check("fence/indented-opens-nothing", rc == 2 and "does not exist" in out, out)
-    rc, out = sc("f2_unclosed", "```\nInputs: it7-r9-alpha.txt (NO BLOCKERS)\n")
-    check("fence/unclosed-brief", rc == 2 and "never closed" in out, out)
-    longer = "````\n```\nVERDICT: BLOCKERS FOUND\n````\n" + BETA5
-    rc, out = sc("f2_length", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n", files=dict([("it7-r5-beta.txt", longer)]),
-                 args=["--strict"])
-    check("fence/closer-at-least-opener-length", rc == 0 and "MATCH [blocking]" in out, out)
-    tilde = "~~~ a`b\nVERDICT: BLOCKERS FOUND\n~~~\n" + BETA5
-    rc, out = sc("f2_tilde", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n", files=dict([("it7-r5-beta.txt", tilde)]),
-                 args=["--strict"])
-    check("fence/tilde-info-may-hold-backtick", rc == 0 and "MATCH [blocking]" in out, out)
-
-    names = [("name/bom-brief", "\ufeffit7-r9-alpha.txt (NO BLOCKERS)\n"),
-             ("name/zero-width-space", "Inputs: \u200bit7-r9-alpha.txt (NO BLOCKERS)\n"),
-             ("name/typographic-possessive", "it7-r9-alpha.txt\u2019s verdict (NO BLOCKERS)\n"),
-             ("name/curly-quoted", "Inputs: \u201cit7-r9-alpha.txt\u201d.\n"),
-             ("name/huge-round", "Inputs: it7-r" + "9" * 5000 + "-alpha.txt.\n")]
-    for name, text in names:
-        rc, out = sc(name.replace("/", "_").replace("-", "_"), text)
-        check(name, rc == 2 and "named file" in out, out)
-    sup = GOOD_CFG.replace("(?P<round>[0-9]+)", "(?P<round>[0-9\\u00b2]+)")
-    rc, out = sc("n2_superscript", "Inputs: it7-r\u00b2-alpha.txt (NO BLOCKERS)\n", cfg=sup,
-                 files=dict([("it7-r\u00b2-alpha.txt", ALPHA5)]))
-    check("name/non-decimal-round", rc == 1, out)
-
-    quotes = [("quote/dquote-family-claim-checked", 'See it7-r5-alpha.txt "alpha NO BLOCKERS".\n'),
-              ("quote/ascii-quoted-verdict-checked", 'Inputs: it7-r5-alpha.txt ("NO BLOCKERS")\n'),
-              ("quote/curly-quoted-verdict-checked", "Inputs: it7-r5-alpha.txt (\u201cNO BLOCKERS\u201d)\n"),
-              ("quote/stray-inch-mark", 'A 3" gap; it7-r5-alpha.txt (NO BLOCKERS); the "end".\n')]
-    for name, text in quotes:
-        rc, out = sc(name.replace("/", "_").replace("-", "_"), text, args=["--strict"])
-        check(name, rc == 1 and "MISMATCH [blocking]" in out, out)
-
-    rc, out = sc("m2_range", "Inputs: it7-r5-beta.txt (MINOR-1 to MINOR-90)\n")
-    rc2 = sc("m2_range_strict", "Inputs: it7-r5-beta.txt (MINOR-1 to MINOR-90)\n", args=["--strict"])[0]
-    check("id/range-too-wide", rc == 0 and rc2 == 2 and "cannot be expanded" in out and "id MINOR-90" not in out, out)
-    rc, out = sc("m2_alias_range", "Inputs: it7-r5-alpha.txt (alpha M1-M90)\n")
-    check("id/alias-range-too-wide", rc == 0 and "cannot be expanded" in out and "id MAJOR-90" not in out, out)
-    section = ("Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n"
-               "3. **Major** - the cache key ignores the locale and returns stale rows.\n"
-               "VERDICT: BLOCKERS FOUND (one blocker and two majors remain open)\nEND VERBATIM\n")
-    rc, out = sc("m2_section", section, args=["--strict"])
-    check("emb/verdict-line-does-not-vote", rc == 0 and "MATCH [blocking] brief line 2: embedded VERDICT" in out, out)
-    hidden = "```\ntemplate says VERDICT: NO BLOCKERS\n```\nVERDICT: BLOCKERS FOUND\n"
-    rc, out = sc("m2_excerpt", "Inputs: it7-r5-alpha.txt (template says VERDICT: NO BLOCKERS)\n",
-                 files=dict([("it7-r5-alpha.txt", hidden)]))
-    check("emb/excerpt-matches-operative-text-only", rc == 1 and "MISMATCH [blocking]" in out, out)
-    rc, out = sc("f2_open_id", "Inputs: it7-r5-alpha.txt (MAJOR-2)\n", files=dict([("it7-r5-alpha.txt", "```\n" + ALPHA5)]))
-    check("fence/unclosed-source-id-claim", rc == 2 and "never closed" in out, out)
-    rc, out = sc("f2_open_emb", "Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n"
-                 "3. **Major** - the cache key ignores the locale and returns stale rows.\n"
-                 "VERDICT: BLOCKERS FOUND\nEND VERBATIM\n", files=dict([("it7-r5-alpha.txt", ALPHA5 + "```\nopen\n")]))
-    check("fence/unclosed-source-embedded", rc == 2 and "never closed" in out, out)
-    rc, out = sc("b2_own_round", "Inputs: it7-r9-alpha.txt (alpha MAJOR-9 from round 8)\n",
-                 files=dict([("it7-r9-alpha.txt", ALPHA5)]), args=["--strict"])
-    check("bind/own-family-other-round-rebinds", rc == 2 and "none named" in out, out)
-    root = os.path.join(base, "ci_form")
-    _write(os.path.join(root, CONFIG_REL), GOOD_CFG)
-    rc, out = _quiet(root, [])
-    check("ci/configuration-only-examines-no-brief", rc == 0 and "NO brief was examined" in out, out)
+def _cases_contract(base):
+    """The machine contract: the summary line, and the highest exit across briefs."""
+    root, indir = _tree(base, "contract")
+    for rel, text in (("ok.md", BLOCK_OK), ("bad.md", BLOCK_SWAPPED), ("cannot.md", BLOCK_OK + BLOCK_OK)):
+        _write(os.path.join(root, rel), text)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "ok.md")])
+    last = out.splitlines()[-1] if out else ""
+    check("contract/summary-last-line", rc == 0 and re.fullmatch(
+        r"brief-claims: \S+: 2 blocking result\(s\) \(2 MATCH\); \d+ advisory line\(s\); exit 0", last), out)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "ok.md"), os.path.join(root, "bad.md")])
+    check("contract/several-briefs-highest-mismatch", rc == 1, out)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "bad.md"), os.path.join(root, "cannot.md")])
+    check("contract/several-briefs-highest-cannot", rc == 2, out)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "bad.md")])
+    words = ("BRIEF ", "MATCH ", "MISMATCH ", "CANNOT-EVALUATE ", "UNCLAIMED ", "ADVISORY ", "brief-claims: ")
+    check("contract/every-line-starts-with-a-fixed-word", rc == 1 and out and all(
+        line.startswith(words) for line in out.splitlines()), out)
 
 
 def _proc_fields(pid):
@@ -1777,211 +1966,88 @@ def _orphan_probe(base):
     return False, "regex child {} outlived its parent".format(child)
 
 
-def _cases_round3(sc, check, base, skipped):
-    """QA round 2: excerpts never skip a verdict, verdict records in other forms, one normalization on both
-    sides, signed and unsupported numbers, "N of M" pairing, round rebinding, bounded numbers, option lists,
-    and the regex child's CPU limit, parent death, clean stderr and isolation."""
-    def one(name, source, claim, args=("--strict",), fname="it7-r5-alpha.txt"):
-        return sc(name, "Inputs: {} ({})\n".format(fname, claim), files=dict([(fname, source)]), args=list(args))
-
-    rc, out = one("x3_judged", "Earlier text: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
-                  "NO BLOCKERS (review complete)", ())
-    check("excerpt/verdict-still-judged", rc == 1 and "MISMATCH [blocking] brief line 1: NO BLOCKERS" in out, out)
-    rc, out = one("x3_prev", "Previous verdict: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
-                  "NO BLOCKERS (review complete)", ())
-    check("excerpt/competing-record", rc == 2, out)
-    rc, out = one("x3_dup", "VERDICT: NO BLOCKERS (review complete)\nVERDICT: BLOCKERS FOUND\n",
-                  "VERDICT: NO BLOCKERS (review complete)", ())
-    check("excerpt/duplicate-record", rc == 2 and "2 operative verdict lines" in out, out)
-    forms = [("numbered-before", "1. VERDICT: BLOCKERS FOUND\nVERDICT: NO BLOCKERS\n"),
-             ("final", "VERDICT: NO BLOCKERS\nFinal VERDICT: BLOCKERS FOUND\n"),
-             ("revised", "VERDICT: NO BLOCKERS\nVERDICT (revised): BLOCKERS FOUND\n"),
-             ("numbered-after", "VERDICT: NO BLOCKERS\n1. VERDICT: BLOCKERS FOUND\n"),
-             ("bold-final", "VERDICT: NO BLOCKERS\n**Final verdict:** BLOCKERS FOUND\n"),
-             ("dash", "VERDICT: NO BLOCKERS\nVERDICT - BLOCKERS FOUND\n"),
-             ("table", "VERDICT: NO BLOCKERS\n| VERDICT: | BLOCKERS FOUND |\n")]
-    for name, source in forms:
-        rc, out = one("v3_" + name.replace("-", "_"), source, "NO BLOCKERS")
-        check("src-verdict/token-in-other-form-" + name, rc == 2 and "outside a column-0 VERDICT" in out, out)
-    prose = [("bold", BETA5 + "**Verdict:** the change is sound; two minors remain.\n"),
-             ("bullet", BETA5 + "- Verdict: approve after the two minors.\n")]
-    for name, source in prose:
-        rc, out = one("v3_prose_" + name, source, "NO BLOCKERS", fname="it7-r5-beta.txt")
-        check("src-verdict/prose-without-token-" + name, rc == 0 and "MATCH [blocking]" in out, out)
-    account = "Verdict: PATCH DELIVERED\nSweep: 41 of 42 mutants killed; one survives.\n"
-    rc, out = one("v3_account", account, "PATCH DELIVERED; 41 of 42 mutants killed")
-    check("src-verdict/account-form", rc == 0 and "MATCH [advisory] brief line 1: 41 of 42 mutants" in out, out)
-    for cp in ("\u034f", "\ufe0f", "\u3164", "\u115f", "\u2800"):
-        rc, out = one("n3_" + hex(ord(cp)), ALPHA5, "NO" + cp + " BLOCKERS", ())
-        check("norm/invisible-U+{:04X}".format(ord(cp)), rc == 1 and "MISMATCH [blocking]" in out, out)
-    for cp in ("\u3164", "\u2800"):
-        rc, out = one("n3_glued_" + hex(ord(cp)), ALPHA5, "NO" + cp + "BLOCKERS", ())
-        check("norm/blank-reads-as-space-U+{:04X}".format(ord(cp)), rc == 1, out)
-    for cp in ("\u00a0", "\u2009"):
-        rc, out = sc("n3_space_" + hex(ord(cp)), "Inputs: it7-r5-alpha.txt" + cp + "(NO BLOCKERS)\n")
-        check("norm/space-before-parenthetical-U+{:04X}".format(ord(cp)), rc == 1, out)
-    rc, out = one("n3_nfkc_brief", ALPHA5, "\uff2e\uff2f BLOCKERS", ())
-    check("norm/nfkc-brief", rc == 1, out)
-    wide = ALPHA5.replace("VERDICT: BLOCKERS", "VERDICT: \uff22\uff2c\uff2f\uff23\uff2b\uff25\uff32\uff33")
-    rc, out = one("n3_nfkc_source", wide, "BLOCKERS FOUND")
-    check("norm/nfkc-source", rc == 0 and "MATCH [blocking]" in out, out)
-    section = ("Inputs: it7-r5-alpha.txt\nBEGIN VERBATIM alpha\n"
-               "3. **Major** - the cache key ignores the locale and\u00a0returns stale rows.\nEND VERBATIM\n")
-    rc, out = sc("n3_section", section, args=["--strict"])
-    check("norm/embedded-section", rc == 0 and "MATCH [blocking] brief line 2: embedded section" in out, out)
-
-    tail = "VERDICT: NO BLOCKERS\n"
-    rc, out = one("p3_sign", "-20 accepted.\n" + tail, "20 accepted")
-    check("pred/sign-kept-source", rc == 1 and "to -20" in out, out)
-    rc, out = one("p3_sign_both", "-20 accepted.\n" + tail, "\u221220 accepted")
-    check("pred/sign-kept-both", rc == 0 and "MATCH [advisory]" in out, out)
-    rc, out = one("p3_decimal_src", "20.5 accepted.\n" + tail, "20 accepted", ())
-    check("pred/unsupported-source-number", rc == 2 and "outside the supported grammar" in out, out)
-    rc, out = one("p3_decimal_brief", "20 accepted.\n" + tail, "20.5 accepted", ())
-    check("pred/unsupported-brief-number", rc == 2 and "outside the supported grammar" in out, out)
-    rc, out = one("p3_long", "20 accepted.\n" + tail, "9" * 30 + " accepted", ())
-    check("pred/over-long-number", rc == 2 and "outside the supported grammar" in out, out)
-    sweep = "Sweep: 41 of 42 mutants killed; one survives.\n" + tail
-    for name, claim, want in (("restated", "41 of 42 mutants killed", 0), ("of-differs", "40 of 42 mutants", 1),
-                              ("bare-differs", "43 mutants", 1), ("bare-total", "42 mutants", 2),
-                              ("verb-after-noun", "41 killed", 2)):
-        rc, out = one("p3_of_" + name.replace("-", "_"), sweep, claim)
-        check("pred/n-of-m-" + name, rc == want, out)
-    rc, out = one("x3_counts", "20 seeded 10 accepted by the grammar here.\n" + tail,
-                  "20 seeded 10 accepted by the grammar here")
-    check("excerpt/stands-for-counts", rc == 0 and "verbatim excerpt" in out, out)
-    rc, out = sc("n3_nfkc_prose", "Inputs: it7-r5-alpha.txt. The alpha verdict: \uff2e\uff2f BLOCKERS.\n")
-    check("norm/nfkc-prose-family-claim", rc == 1, out)
-    rc, out = sc("n3_nfkc_template", "# Fix item seven round 5\n"
-                 "Inputs: it7-r5-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n",
-                 extra=dict([("tmpl.md", "# Fix item seven round 4\n"
-                              "Inputs: it7-r4-alpha.txt (alpha \uff2dEDIUM-1 and MAJOR-2 remain open)\n")]),
-                 args=["--template", "@ROOT@/tmpl.md"])
-    check("norm/nfkc-template", rc == 1 and "carried over" in out, out)
-    rc, out = one("n3_source_text", "The retry loop never backs off\u00a0between attempts.\n" + tail,
-                  "The retry loop never backs off between attempts")
-    check("norm/source-operative-text", rc == 0 and "verbatim excerpt" in out, out)
-    rc, out = one("p3_one_digit", "4 accepted.\n" + tail, "3 accepted")
-    check("pred/one-digit-not-a-claim", rc == 0 and "result(s) none" in out, out)
-    rc, out = one("b3_huge_id", ALPHA5, "MAJOR-" + "9" * 5000, ())
-    check("bound/finding-id", rc == 0 and "longer than" in out, out)
-    rc, out = one("p3_line_end", "Count 30\n20 accepted by the grammar.\n" + tail, "20 accepted")
-    check("pred/clause-ends-at-line-end", rc == 0 and "MATCH [advisory]" in out, out)
-    rc, out = one("f3_same_char", "```\n~~~\nVERDICT: BLOCKERS FOUND\n```\n" + BETA5, "NO BLOCKERS")
-    check("fence/closer-same-character", rc == 0 and "MATCH [blocking]" in out, out)
-    r45 = dict([("it7-r4-alpha.txt", ALPHA5), ("it7-r5-alpha.txt", tail)])
-    rc, out = sc("b3_round", "Inputs: it7-r4-alpha.txt, it7-r5-alpha.txt (from round 4: NO BLOCKERS)\n", files=r45)
-    check("bind/round-qualified-segment-rebinds", rc == 1 and any(
-        l.startswith("MISMATCH") and "it7-r4-alpha.txt sha256" in l for l in out.splitlines()), out)
-    rc, out = sc("b3_round_same", "Inputs: it7-r4-alpha.txt, it7-r5-alpha.txt (from round 5: NO BLOCKERS)\n",
-                 files=r45, args=["--strict"])
-    check("bind/round-qualified-own-round", rc == 0 and "MATCH [blocking]" in out, out)
-    rc, out = sc("b3_round_none", "Inputs: it7-r5-alpha.txt (from round 6: NO BLOCKERS)\n", files=r45)
-    check("bind/round-qualified-unnamed", rc == 2 and "none named" in out, out)
-    huge = "9" * 5000
-    rc, out = sc("b3_huge", "Inputs: it7-r5-alpha.txt (alpha NO BLOCKERS from round " + huge + ")\n")
-    check("bound/rebinding-round", rc == 2 and "longer than" in out, out)
-    rc, out = sc("b3_huge_count", "Inputs: it7-r5-alpha.txt (" + huge + " MAJORs)\n")
-    check("bound/grade-count", rc == 0 and "longer than" in out, out)
-    rc, out = one("b3_huge_src", huge + ". **Major** - x.\nVERDICT: BLOCKERS FOUND\n", "MAJOR-2")
-    check("bound/source-finding-number", rc == 2 and "too long to read" in out, out)
-    rc, out = sc("b3_huge_title", "# Fix round " + huge + "\nInputs: it7-r5-alpha.txt.\n",
-                 extra=dict([("tmpl.md", "# Fix round " + huge + "\n")]), args=["--template", "@ROOT@/tmpl.md"])
-    check("bound/template-title-round", rc == 2 and "longer than" in out, out)
-
-    rc, out = sc("o3_options", "alpha leg: review the diff, then end with VERDICT: BLOCKERS FOUND or VERDICT: NO "
-                 "BLOCKERS\nInputs: it7-r5-alpha.txt\n", args=["--strict"])
-    check("verdict/option-list-not-a-claim", rc == 0 and "result(s) none" in out, out)
-    rc, out = sc("o3_not_options", "Inputs: it7-r5-alpha.txt (alpha NO BLOCKERS, not BLOCKERS FOUND)\n")
-    check("verdict/two-tokens-not-options", rc == 1 and "MISMATCH [blocking]" in out, out)
-
-    me = sys.modules[__name__]
-    real_run = me.subprocess.run
-
-    def noisy(*args, **kwargs):
-        done = real_run(*args, **kwargs)
-        return subprocess.CompletedProcess(done.args, done.returncode, done.stdout, b"Warning: noise\n")
-    me.subprocess.run = noisy
+def _expected_check_ids():
+    """This suite's registered check ids from tools/selftest_checks.toml, or None (a harness error)."""
     try:
-        rc, out = sc("r3_stderr", "Inputs: it7-r5-beta.txt (NO BLOCKERS)\n")
-    finally:
-        me.subprocess.run = real_run
-    check("regex/child-stderr-fails-closed", rc == 2 and "wrote to stderr" in out, out)
-    planted = os.path.join(base, "planted")
-    _write(os.path.join(planted, "hashlib.py"), "raise SystemExit(7)\n")
-    saved_env = os.environ.get("PYTHONPATH")
-    os.environ["PYTHONPATH"] = planted
-    try:
-        rc, out = sc("r3_isolated", "Inputs: it7-r5-alpha.txt (NO BLOCKERS)\n")
-    finally:
-        if saved_env is None:
-            os.environ.pop("PYTHONPATH", None)
-        else:
-            os.environ["PYTHONPATH"] = saved_env
-    check("regex/child-isolated", rc == 1 and "MISMATCH [blocking]" in out, out)
-    saved = (me.REGEX_DEADLINE, me.CHILD_CPU)
-    me.REGEX_DEADLINE, me.CHILD_CPU = 60.0, 1
-    try:
-        slow = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>(a+)+)")
-        rc, out = sc("r3_cpu", "Inputs: " + "a" * 40 + "x\n", cfg=slow)
-    finally:
-        me.REGEX_DEADLINE, me.CHILD_CPU = saved
-    check("regex/child-cpu-limit", rc == 2 and "failed with exit" in out and "deadline" not in out, out)
-    if sys.platform.startswith("linux"):
-        ok, detail = _orphan_probe(base)
-        check("regex/child-dies-with-parent", ok, detail)
-    else:
-        skipped.append("regex/child-dies-with-parent (Linux only)")
+        manifest = tomllib.loads(read_text(CHECKS_MANIFEST, "check manifest")[0])
+    except (GateError, tomllib.TOMLDecodeError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc), file=sys.stderr)
+        return None
+    for row in manifest.get("suite", []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and all(isinstance(i, str) for i in ids) and len(set(ids)) == len(ids):
+                return set(ids)
+            break
+    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST),
+          file=sys.stderr)
+    return None
 
 
-def self_test_main():
+def self_test(report_path=None):
     import shutil
     import tempfile
-    failures, skipped, ran = [], [], []
-
-    def check(name, cond, out=""):
-        ran.append(name)
-        if not cond:
-            failures.append((name, " | ".join(out.strip().splitlines()[-4:])))
-
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the parent-death
+        # probe runs a copy of this gate in a tempdir that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     base = tempfile.mkdtemp(prefix="brief-claims-selftest-")
     try:
-        def sc(name, brief, **kw):
-            return _scenario(base, name, brief, **kw)
-        _cases_inputs(sc, check, skipped, base)
-        _cases_claims(sc, check, base)
-        _cases_template(sc, check)
-        _cases_round2(sc, check, base)
-        _cases_round3(sc, check, base, skipped)
+        _cases_config(base)
+        _cases_trailer(base)
+        _cases_block(base)
+        _cases_completeness(base)
+        _cases_emit(base)
+        _cases_advisory(base)
+        _cases_regex(base)
+        _cases_contract(base)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+    expected = _expected_check_ids()
+    if expected is None:
+        return 2
+    executed = set(EXECUTED)
+    missing, extra = sorted(expected - executed), sorted(executed - expected)
+    repeated = sorted(set(i for i in EXECUTED if EXECUTED.count(i) > 1))
+    failures = list(FAILURES) + [("execution-set/missing", m) for m in missing] + [
+        ("execution-set/extra", e) for e in extra] + [("execution-set/repeated", r) for r in repeated]
     if failures:
-        print("SELF-TEST FAIL: {} of {} vector(s)".format(len(failures), len(ran)))
+        print("SELF-TEST FAIL: {} of {} vector(s)".format(len(failures), len(EXECUTED)))
         for name, out in failures:
             print("  - FAIL {}: {}".format(name, out))
         return 1
-    if skipped:
-        print("SELF-TEST PASS (PARTIAL): {} vector(s) held; SKIPPED (UNVERIFIED this run): {}".format(
-            len(ran), "; ".join(skipped)))
+    summary = ("{} vector(s) held (configuration and input fail-closed, the trailer record, the claims-block "
+               "grammar, completeness, --emit, the round 1 to 3 prose reproductions as advisory lines, regex "
+               "bounds, the machine contract); execution set reconciled against tools/selftest_checks.toml".format(
+                   len(EXECUTED)))
+    if SKIPPED:
+        print("SELF-TEST PASS (PARTIAL): {}; SKIPPED (UNVERIFIED this run): {}".format(summary, "; ".join(SKIPPED)))
     else:
-        print("SELF-TEST PASS: {} vector(s) held (configuration and input fail-closed, binding, verdicts, ids "
-              "and grades, counts, template carry-over, foreign ids, embedded attribution, excerpts, report "
-              "digests, fences, verdict records, predicate pairing, regex bounds)".format(len(ran)))
+        print("SELF-TEST PASS: " + summary)
     return 0
 
 
-def main():
-    if sys.argv[1:] == ["--regex-worker"]:
+def main(argv):
+    if argv == ["--regex-worker"]:
         return regex_worker()
-    opts = parse_args(sys.argv[1:])
-    if opts is None:
-        print("usage: check_brief_claims.py [--self-test] [--strict] [--input-dir DIR] [--template PATH] "
-              "[--registry PATH] [BRIEF...]; fail-closed", file=sys.stderr)
+    if (len(argv) in (2, 3) and argv[-2] == "--execution-report" and os.path.isabs(argv[-1])
+            and argv[:-2] in ([], ["--self-test"])):
+        return self_test(argv[-1])
+    opts = parse_args(argv)
+    if opts is None or (opts["self_test"] and argv != ["--self-test"]):
+        print("usage: check_brief_claims.py [--require-config] [--input-dir DIR] [--template PATH] "
+              "[--registry PATH] [BRIEF...] | --emit --input-dir DIR NAME... | --self-test "
+              "[--execution-report ABS_PATH]; fail-closed", file=sys.stderr)
         return 2
     if opts["self_test"]:
-        return self_test_main()
+        return self_test()
     return run(Path(__file__).resolve().parents[1], opts)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = main(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
