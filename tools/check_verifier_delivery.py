@@ -23,29 +23,47 @@ by the whole-tree cat-file --batch, is re-hashed (SHA-1 of its git blob header a
 the tree lists, so a rewritten object file is CANNOT_EVALUATE, never read as the pinned content. An
 unreadable, oversized, non-regular or non-UTF-8 input file, a missing or ambiguous BRIEF-PIN, a brief
 with no numbered question, an unresolvable SHA or one that names no commit, a delivery outside the
-closed shape below, an unclosed fenced block, an indented code block, more than MAX_QUOTES quotes, a
-blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
+closed shape below, a construct that can hide text from rendered view, a line that reads as an answer
+marker without being one, an unclosed fenced block, an indented code block, more than MAX_QUOTES quotes,
+a blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
 
 THE CLOSED DELIVERY SHAPE. Answer and finding boundaries are never inferred from free text; the
 question-list template fixes them:
-  * WORKER_STATUS lines (transport) may come first; the first other line is exactly the pinned SHA
-    (surrounding whitespace aside). A differing or malformed SHA line is CANNOT_EVALUATE.
+  * Line 1 is exactly the pinned SHA (surrounding whitespace aside), or exactly the harness's status
+    line "WORKER_STATUS: <WORD> (account=<v>, rc=<v>, family=<v>, model=<v>, effort=<v>)" (each <v> a
+    run without whitespace, commas or parentheses) with the SHA line as line 2. A differing or
+    malformed SHA line is CANNOT_EVALUATE.
   * Then, for each of the brief's m numbered questions in order, a line starting at column 0 with
-    "QN." (N = 1 to m, each once, ascending; the "QN." ends the line or is followed by a space or tab)
-    opens the answer to question N; the answer runs to the next such line, the findings line or the
-    VERDICT line, and may start on its "QN." line. Only blank lines come between the SHA line and Q1.
-    (a WORKER_STATUS line outside a fenced block is transport wherever it stands, never content).
+    "QN." (N = 1 to m in ASCII digits, each once, ascending; the "QN." ends the line or is followed by
+    a space or tab) opens the answer to question N; the answer runs to the next such line, the
+    findings line or the VERDICT line, and may start on its "QN." line. Only blank lines come between
+    the SHA line and Q1.
   * Optionally, after the last answer, one line exactly "## Findings" (trailing spaces or tabs aside)
     opens the findings section, which runs to the VERDICT line. No line in it opens an answer.
   * Then one VERDICT line ("VERDICT:", "**VERDICT:**" or "**VERDICT**:", any case, leading spaces or
     tabs allowed; its value is the rest of the line), then, after blank lines only, a line
-    "QA-COMPLETE"; after it only blank and WORKER_STATUS lines.
+    "QA-COMPLETE". After it come only blank lines and, optionally, as the delivery's last non-blank
+    line, the harness's closing line exactly "WORKER_STATUS: COMPLETE".
   Anything else is CANNOT_EVALUATE naming the line: text before Q1., a missing, repeated or out-of-order
-  "QN.", a "QN." past Q{m}., a "QN." inside the findings section, a column-0 "QN." inside a fenced block,
-  a second findings line, a VERDICT or QA-COMPLETE line out of place, text after QA-COMPLETE, and a
-  delivery that ends early. Inside an answer or the findings section every other line (a numbered
-  list, a heading, a grade word such as MAJOR, a WORKER_STATUS line aside) is content and moves no
-  boundary.
+  "QN.", a "QN." past Q{m}., a "QN." inside the findings section, a "QN." inside a fenced block, a
+  second findings line, a VERDICT or QA-COMPLETE line out of place (a line starting "Verdict:" inside an
+  answer is the VERDICT line), text after QA-COMPLETE (a second harness line, or one that is not
+  exact, included), and a delivery that ends early. Inside an answer or the findings section every
+  other line (a numbered list, a heading, a grade word such as MAJOR, a line starting WORKER_STATUS) is
+  content: it moves no boundary and its quotes and file references are checked like any other.
+  Also CANNOT_EVALUATE naming the line, anywhere in the body:
+  * A line that reads as an answer marker but is not one: past leading whitespace, emphasis, heading,
+    quote and list marks and invisible format characters, a Q (or a lookalike letter), digits of any
+    script and a full stop (or a lookalike), compared after NFKC normalisation, then whitespace or the
+    line's end; so "Q\uff11.", "Q\u0663.", a zero-width character inside "Q4.", "  Q4.", "- Q4." and
+    "**Q4.**" are refused, in answers, findings, blockquotes and fenced blocks alike.
+  * A construct that can hide text from rendered view, outside fenced blocks, inline code spans and
+    blockquote lines: raw HTML ("<" then "!", "?", or an optional "/" and a tag name ending at
+    whitespace, "/", ">" or the line's end, which opens a comment, an HTML block or inline HTML; an
+    autolink such as "<https://...>" is not one), a link reference definition marker "]:", an image
+    "![", an inline link "](" whose destination or title may run past its line, and a character
+    reference that renders as a double quote mark ("&quot;"). A fenced block opened four or more
+    columns in may render as text, so its content is scanned too.
 
 Rules:
   C1 coverage. A verdict of any kind (VERDICT: NO BLOCKERS, VERDICT: BLOCKERS FOUND or another) is
@@ -79,7 +97,8 @@ Rules:
      A named path with a slash binds exactly; a bare file name (no slash) binds to every file of the
      pinned tree with that basename, root or not (a root README.md and .preview/README.md are both
      named by "README.md"), and the result's found_in names the file that matched. Names never widen:
-     a file reference that resolves to no blob of the pinned tree is held, not dropped, so a quote found
+     a file reference (as the grammar below defines it; a token that is none, such as a directory of the
+     tree, binds nothing) that resolves to no blob of the pinned tree is held, not dropped, so a quote found
      in none of the present named files fails, naming the absent one, and when every name is absent
      every quote under it fails. An answer's own file reference that resolves to no blob fails the
      answer outright, quote or not (reason named), unless its question names the same reference (an
@@ -97,18 +116,27 @@ The grammar read (a declared subset of Markdown, not a general parser; every sca
 line, with no backtracking pattern):
   * Lines are split at LF; one trailing CR per line is the delivery's transport, not quote content.
   * A fenced block opens on a line of three or more backticks or tildes after any number of spaces (a
-    list item's fence included; a backtick fence's info string holds no backtick; a tab before the
-    fence is not read as indentation, so such a line is answer text), and closes on a line of the same
-    character, at least as long, with nothing after it but spaces or tabs. Every fenced block with a
-    non-blank line is a quote, whatever its info string: a command or output shown in a fence is held
-    to the same rule as a quote. A line indented four or more columns after a blank line (an indented
-    code block, or a list continuation paragraph) is CANNOT_EVALUATE: its reading depends on list
-    nesting this grammar does not track.
+    list item's continuation fence included; a backtick fence's info string holds no backtick), and
+    closes on a line of the same character, at least as long, with nothing after it but spaces or
+    tabs and exactly the opening fence's indentation before it; a line of that shape indented
+    otherwise (a tab included) is CANNOT_EVALUATE, since whether it closes depends on list nesting.
+    A fence marker after a list marker ("- ```") or a tab is CANNOT_EVALUATE for the same reason.
+    Every fenced block with a non-blank line is a quote, whatever its info string: a command or output
+    shown in a fence is held to the same rule as a quote. A line indented four or more columns where
+    no paragraph is open (after a blank line, a fenced block, an ATX heading, a thematic break or a
+    setext underline, or at the start of the body) is CANNOT_EVALUATE: it is an indented code block or
+    a list continuation paragraph, depending on list nesting this grammar does not track.
   * A blockquote run is consecutive lines starting with ">" (at most three spaces before it); one
-    space after the ">" is removed and the run's lines are joined with LF into one quote.
+    space after the ">" is removed and the run's lines are joined with LF into one quote. The line
+    after a run is blank: a non-blank line there (a fence or a "QN." line included) is CANNOT_EVALUATE,
+    since CommonMark reads a paragraph line there into the quote (a lazy continuation).
+  * An inline code span is a run of n backticks closed by the next run of exactly n on the same line.
+    That per-line reading is exact only while every backtick run of the paragraph so far closes on its
+    own line and no backtick is backslash-escaped; from a line that breaks this to the next blank or
+    blockquote line, no code span is masked when hidden constructs are sought.
   * An inline quote is the text between a straight double quote and the next one on the same line,
-    or between a left and a right curly double quote, outside inline code spans (a run of n backticks
-    closed by the next run of exactly n) and outside a parenthetical example: "(e.g." or "(for example"
+    or between a left and a right curly double quote, outside inline code spans and outside a
+    parenthetical example: "(e.g." or "(for example"
     up to and including the next ")" (an example word is not a quote of the tree). An example opener
     with no ")" after it masks nothing, and "(i.e." opens no example (a restatement is a claim). A
     straight double quote right after a digit (an inch mark) opens nothing. A quote that does not close
@@ -145,12 +173,16 @@ answer is not linked to that answer; runtime claims (that a name exists, or does
 of scope here (a later rule). A Gemini-family verifier's actual read path is undeclared, so a verbatim
 quote proves the text is in the tree, not that the verifier read it there. False PASS: inline code
 spans, single-quoted text and text in other quotation marks (guillemets, low-9 quotes) are not read as
-quotes, so a fabricated quote presented only that way passes unseen; a double-quoted span that breaks
-across lines is not read; a quote cut at a line edge passes (above); an answer naming several files
+quotes, so a fabricated quote presented only that way passes unseen; so is text in a parenthetical
+example ("(e.g. "...")"), and a straight double quote right after a digit is an inch mark, so in
+'line 4"text"' no quote is read; a double-quoted span that breaks across lines or does not close on
+its line is not read; a quote cut at a line edge passes (above); a token that is no file reference (a
+directory of the tree, a path without an extension whose first part is no directory of the tree, a
+URL, a glob or placeholder path) binds nothing, so an answer naming only such tokens binds like one
+naming none, and with a question naming none its quotes match anywhere in the tree; an answer naming several files
 accepts a match in any one of them, and the findings section is one unit, so a finding's quote may
 match a file another finding names; a findings section naming no file is checked against the whole
-tree; a glob or placeholder path is not a reference, so an answer naming only such a path binds like
-one naming none; findings written after the last answer without the exact "## Findings" line (a
+tree; findings written after the last answer without the exact "## Findings" line (a
 bulleted "- MAJOR:", "### Findings" or "Findings:") are read as text of the last answer, so their words
 can answer a question that does not ask for a quote and their quotes can answer one that does (each
 quote still held to that answer's files); an answer word need not answer the question (only an exact restatement is caught). False FAIL: a
@@ -160,7 +192,12 @@ file absent from the tree its question does not name (a placeholder path without
 character, a file outside the repository, or a product name such as "Node.js" when some blob carries a
 .js extension) fails. Fail closed: a delivery outside the closed shape (answers numbered "1." or
 "**Q1.**", answers in a table, a leading blank line, a byte-order mark or a "REVIEWED: <sha>" line
-before the SHA) is CANNOT_EVALUATE; the UNVERIFIABLE and quote-question tests are word tests, so a stray
+before the SHA, a harness status line in another form) is CANNOT_EVALUATE, and so is a delivery whose
+rendered view is safe but whose text this grammar cannot prove safe: a "<" then a letter in prose
+("List<String>", "a<b c"), a "]:" in prose ("items[0]: x"), a line beginning with a question
+reference in marker form ("- Q2. missed"), a fence right after a blockquote line, a closing fence
+indented otherwise than its opening fence, and a raw-HTML-shaped text inside a multi-line code span;
+the UNVERIFIABLE and quote-question tests are word tests, so a stray
 mention moves an answer toward NO_VOTE, never toward a pass. Object reads: commit and tree objects are
 not re-hashed (only blobs are), so a rewritten loose tree or commit object could list other existing
 blob ids; a shallow file cuts only parent lists, which no read here uses. git is resolved through PATH,
@@ -173,13 +210,22 @@ content, a quote question needs a quote, findings evidence is no answer), C2 (ve
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
-the closed shape (a heading inside a fence, the fence-close length), the question marker, pin matching,
-repeated pins, commit-only pins, strict decoding, CRLF transport, indented code blocks, ambient GIT_
-variables, replace refs, blob re-hashing on both read paths, the pinned tree and both runtime scanners.
-These have a fixture but no flip/ check, since they sit inside the parser's loop or another guard also
-refuses the same input: each closed-shape refusal (missing, repeated, out-of-order and extra answers,
-text before Q1., a heading in the findings section, a second findings line, VERDICT and QA-COMPLETE
-placement), the unmatched-opener rule of the inline scanner, the non-regular-file check and
+the closed shape (a heading inside a fence, the fence-close length and indentation, the harness's
+first and last lines, a WORKER_STATUS-prefixed line read as content), hidden text (raw HTML, inline
+code spans read across lines, the content of a fence indented four or more columns, link reference
+definitions, images, link titles that run on, quote-mark character references), answer-marker
+lookalikes, lazy blockquote continuation, indented code after a fence or a heading, a fence after a
+list marker, the question marker, pin matching, repeated pins, commit-only pins, strict decoding, CRLF
+transport, indented code blocks, ambient GIT_ variables, replace refs, blob re-hashing on both read
+paths, the pinned tree and both runtime scanners. These have a fixture but no flip/ check, since they
+sit inside the parser's loop or another guard also refuses the same input: each closed-shape refusal
+(missing, repeated, out-of-order and extra answers, text before Q1., a heading in the findings
+section, a second findings line, VERDICT and QA-COMPLETE placement, a "Verdict:" line inside an
+answer, a second harness status line, a closing harness line that is not the last), raw HTML tags, a
+fence after a tab and a closing fence after a tab, the other marker forms (non-ASCII digits, a
+zero-width character, indentation, bold, a lookalike in a fence), a "QN." line right after a quote,
+the exemption of an absent reference its question names, the unmatched-opener rule of the inline
+scanner, the non-regular-file check and
 O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input), git exit status (the type
 and listing checks also refuse), the --batch truncation check (blob re-hashing also refuses), the
 backtick info-string rule and the stop of the question run. The --no-replace-objects option and
@@ -198,12 +244,14 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import hashlib
+import html
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
+import unicodedata
 import zlib
 from pathlib import Path
 
@@ -215,8 +263,13 @@ MAX_QUOTES = 500
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 PIN_LINE_RE = re.compile(r"BRIEF-PIN:(.*)")
 STATUS_PREFIX = "WORKER_STATUS"
+HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]++, rc=[^\s,()]++, family=[^\s,()]++, "
+                              r"model=[^\s,()]++, effort=[^\s,()]++\)")
+HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
 ANSWER_HEAD_RE = re.compile(r"Q([0-9]+)\.(?=[ \t]|$)")
+MARKER_DECORATION = " \t*_#>+-\\"
+MARKER_RE = re.compile(r"[\s*_#>+\\-]*+[Qq\u024a\u024b\u051a\u051b]\d++[.\u06d4\u3002\uff61](?=[\s*_]|$)")
 FINDINGS_HEADING = "## Findings"
 COMPLETE_LINE = "QA-COMPLETE"
 QUESTION_RE = re.compile(r"(#{1,6}[ \t]+)?(?:\*\*)?(?:Q|Item[ \t]+|Question[ \t]+)?(\d{1,3})[.):](?:\*\*)?(?=[ \t]|$)",
@@ -226,7 +279,13 @@ QUOTE_WORD_RE = re.compile(r"\bquot(?:e|es|ed|ing)\b", re.I)
 UNVERIFIABLE_RE = re.compile(r"\bUNVERIFIABLE\b")
 FENCE_RE = re.compile(r"( *)(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r" *(`{3,}|~{3,})[ \t]*")
+FENCE_SHAPE_RE = re.compile(r"[ \t]*+(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]++)*+(`{3,}+|~{3,}+)(.*)")
+BLOCK_END_RE = re.compile(r" {0,3}(?:#{1,6}(?:[ \t]|$)|(?:(?:\*[ \t]*+){3,}|(?:_[ \t]*+){3,}|(?:-[ \t]*+)++|=++[ \t]*+)$)")
 BLOCKQUOTE_RE = re.compile(r" {0,3}>[ ]?(.*)$")
+HTML_START_RE = re.compile(r"<(?:[!?]|/?[A-Za-z][A-Za-z0-9-]*+(?=[\s/>]|$))")
+LINK_DEFINITION_RE = re.compile(r"\]:")
+IMAGE_RE = re.compile(r"!\[")
+ENTITY_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
 BACKTICK_RUN_RE = re.compile(r"`+")
 EXAMPLE_OPEN_RE = re.compile(r"\((?:e\.g\.|for example)", re.I)
 INLINE_QUOTE_PAIRS = (('"', '"'), ("\u201c", "\u201d"))
@@ -410,19 +469,22 @@ def _pin_matches(delivered, pin):
 
 
 def _delivery_body(text, pin):
-    """The delivery's lines after its SHA line, once that line is proven to be the pin."""
+    """The delivery's lines after its SHA line, once that line is proven to be the pin. The SHA line is
+    line 1, or line 2 when line 1 is exactly the harness's status line (HARNESS_FIRST_RE); no other
+    line is skipped."""
     lines = _lines(text)
-    for index, (number, line) in enumerate(lines):
-        if line.startswith(STATUS_PREFIX):
-            continue
-        candidate = line.strip()
-        if not SHA_RE.fullmatch(candidate):
-            raise CannotEvaluate("delivery line {} (its first non-WORKER_STATUS line) is not a full "
-                                 "40-hex SHA".format(number))
-        if not _pin_matches(candidate, pin):
-            raise CannotEvaluate("delivery SHA {} differs from BRIEF-PIN {}".format(candidate, pin))
-        return lines[index + 1:]
-    raise CannotEvaluate("the delivery has no SHA line")
+    index = 1 if HARNESS_FIRST_RE.fullmatch(lines[0][1]) else 0
+    if index >= len(lines):
+        raise CannotEvaluate("the delivery has no SHA line")
+    number, line = lines[index]
+    candidate = line.strip()
+    if not SHA_RE.fullmatch(candidate):
+        raise CannotEvaluate("delivery line {} is not a full 40-hex SHA (the SHA line is line 1, or line 2 after "
+                             "the harness status line \"WORKER_STATUS: <word> (account=..., rc=..., family=..., "
+                             "model=..., effort=...)\")".format(number))
+    if not _pin_matches(candidate, pin):
+        raise CannotEvaluate("delivery SHA {} differs from BRIEF-PIN {}".format(candidate, pin))
+    return lines[index + 1:]
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -437,9 +499,11 @@ def _fence_content_line(line, indent):
     return line[count:]
 
 
-def _segments(lines):
-    """("line", number, text) for each line outside a fence and ("fence", number, content lines) for
-    each fenced block; an unclosed fence is CannotEvaluate."""
+def _segments(lines, strict=False):
+    """("line", number, text, 0) for each line outside a fence and ("fence", number, content lines, the
+    opening fence's indentation) for each fenced block; an unclosed fence is CannotEvaluate. When
+    strict (a delivery), a line inside a fence shaped as its closing fence but indented otherwise than
+    the opening fence is CannotEvaluate: whether it closes depends on list nesting."""
     out = []
     fence = None
     for number, line in lines:
@@ -448,18 +512,28 @@ def _segments(lines):
             if match and not (match.group(2)[0] == "`" and "`" in match.group(3)):
                 fence = (number, len(match.group(1)), match.group(2), [])
                 continue
-            out.append(("line", number, line))
+            out.append(("line", number, line, 0))
             continue
         start, indent, marker, content = fence
-        close = FENCE_CLOSE_RE.fullmatch(line)
+        stripped = line.lstrip(" \t")
+        close = FENCE_CLOSE_RE.fullmatch(stripped if strict else line)
         if close and _fence_closes(close, marker):
-            out.append(("fence", start, content))
+            if strict and not _close_indent_matches(line[:len(line) - len(stripped)], indent):
+                raise CannotEvaluate("delivery line {}: a closing fence indented otherwise than the fence opened at "
+                                     "line {} (its reading depends on list nesting; indent both alike)"
+                                     .format(number, start))
+            out.append(("fence", start, content, indent))
             fence = None
             continue
         content.append(_fence_content_line(line, indent))
     if fence is not None:
         raise CannotEvaluate("unclosed fenced block opened at line {}".format(fence[0]))
     return out
+
+
+def _close_indent_matches(leading, indent):
+    """Whether a closing fence's leading whitespace is exactly its opening fence's indentation."""
+    return leading == " " * indent
 
 
 def _fence_closes(close, marker):
@@ -508,6 +582,162 @@ def _inline_quotes(line, spans=None):
             if line[start + 1:end - 1].strip()]
 
 
+def _blanked(line, masks):
+    """line with each (start, end) span of masks (they may overlap) replaced by as many NUL characters."""
+    if not masks:
+        return line
+    pieces, at = [], 0
+    for start, end in sorted(masks):
+        if end <= at:
+            continue
+        start = max(start, at)
+        pieces.append(line[at:start])
+        pieces.append("\0" * (end - start))
+        at = end
+    pieces.append(line[at:])
+    return "".join(pieces)
+
+
+def _code_masks(line, carried):
+    """(the inline code spans of line that are code in rendered view, whether the rest of its
+    paragraph must be read with no code span masked). The per-line pairing of _code_spans is the
+    paragraph's own only while every backtick run of the paragraph so far closes on its line and no
+    backtick is backslash-escaped; from a line that breaks this to the paragraph's end (a blank line or
+    a blockquote line), nothing is masked, so more text is read as raw (fail closed)."""
+    if "`" not in line:
+        return [], carried
+    if carried or "\\`" in line:
+        return [], True
+    spans = _code_spans(line)
+    inside = 0
+    for match in BACKTICK_RUN_RE.finditer(line):
+        while inside < len(spans) and spans[inside][1] <= match.start():
+            inside += 1
+        if inside == len(spans) or match.start() < spans[inside][0]:
+            return spans, True
+    return spans, False
+
+
+def _link_runs_on(line):
+    """Whether an inline link opened on this line ("](") may carry its destination or title past the
+    line's end, where a title spanning lines is hidden from rendered view. Fail closed: a destination
+    reaching the line's end or opening with "<" and a backslash in a destination or title count as
+    running on. Linear: each search moves forward, and a title's closer is searched for again only
+    once the scan has passed it."""
+    at = line.find("](")
+    end, following, closed = len(line), {}, {}
+
+    def next_of(char, start):
+        found = following.get(char, -2)
+        if found == -2 or 0 <= found < start:
+            found = following[char] = line.find(char, start)
+        return found
+
+    while at >= 0:
+        pos, depth = at + 2, 0
+        if pos < end and line[pos] == "<":
+            return True
+        while pos < end and line[pos] not in " \t":
+            char = line[pos]
+            if char == "\\":
+                return True
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            pos += 1
+        if pos >= end:
+            return True
+        if line[pos] == ")":
+            at = line.find("](", pos + 1)
+            continue
+        while pos < end and line[pos] in " \t":
+            pos += 1
+        if pos >= end:
+            return True
+        closer = {'"': '"', "'": "'", "(": ")"}.get(line[pos])
+        if closer is None:
+            at = line.find("](", pos)
+            continue
+        close = next_of(closer, pos + 1)
+        if close < 0:
+            return True
+        if 0 <= next_of("\\", pos + 1) < close:
+            return True
+        if close not in closed:
+            rest = close + 1
+            while rest < end and line[rest] in " \t":
+                rest += 1
+            closed[close] = rest < end and line[rest] == ")"
+        # A title closed by ")" ends the link; otherwise it is no link, and a "](" inside it is read.
+        at = line.find("](", close + 1 if closed[close] else pos + 1)
+    return False
+
+
+QUOTE_MARKS = frozenset('"\u201c\u201d')
+
+
+def _hidden_construct(masked):
+    """What in one line (its code spans blanked) can hide text from rendered view or render a double
+    quote mark the inline scanner does not read, or None: raw HTML (a comment, tag, declaration or
+    processing instruction, which can open an HTML block or an inline comment running over later
+    lines), a link reference definition marker "]:" (a definition and its title, which may span
+    lines, are not rendered), an image "![" (its alt text is not shown), an inline link that may run
+    past its line, and a character reference that renders as a double quote mark."""
+    match = HTML_START_RE.search(masked)
+    if match:
+        return "raw HTML {!r}".format(masked[match.start():match.start() + 12])
+    if LINK_DEFINITION_RE.search(masked):
+        return 'a link reference definition marker "]:"'
+    if IMAGE_RE.search(masked):
+        return 'an image "!["'
+    if _link_runs_on(masked):
+        return "an inline link whose destination or title may run past its line"
+    for match in ENTITY_RE.finditer(masked):
+        if html.unescape(match.group(0)) in QUOTE_MARKS:
+            return "the character reference {} (it renders as a quote mark)".format(match.group(0))
+    return None
+
+
+def _marker_candidate(line):
+    """Whether line reads as an answer marker "QN." to an eye on the rendered text: past leading
+    whitespace of any script, emphasis, heading, quote and list marks, backslashes and invisible
+    format characters (category Cf), a Q or a letter that looks like one, digits of any script and a
+    full stop or one that looks like one, read after NFKC normalisation (so fullwidth and
+    mathematical forms count), then whitespace, emphasis or the line's end."""
+    rest = line.lstrip(MARKER_DECORATION)
+    if not rest or (rest[0] < "\x80" and rest[0] not in "Qq"):
+        return False
+    at = len(line) - len(rest)
+    while at < len(line) and (line[at].isspace() or unicodedata.category(line[at]) == "Cf"):
+        at += 1
+    head = "".join(char for char in line[at:at + 256] if unicodedata.category(char) != "Cf")
+    return bool(MARKER_RE.match(unicodedata.normalize("NFKC", head)))
+
+
+def _unread_fence(line):
+    """Whether line holds a fence marker this grammar does not open but CommonMark may: one after a
+    list marker ("- ```", "1. ~~~") or after a tab. Its reading depends on list nesting."""
+    match = FENCE_SHAPE_RE.match(line)
+    return bool(match) and bool(line[:match.start(1)].strip(" ")) \
+        and not (match.group(1)[0] == "`" and "`" in match.group(2))
+
+
+def _lazy_continuation(after_quote, line):
+    """Whether a line directly after a blockquote line is no blockquote line yet not blank: CommonMark
+    reads it into the quote (a lazy continuation), or ends the quote, as this grammar cannot tell."""
+    return after_quote and bool(line.strip())
+
+
+def _fence_may_be_text(indent):
+    """Whether a fence opened at this indentation may render as text (an indented line after a
+    paragraph line is its continuation, not a fence, outside a list): its content is then scanned
+    for constructs that hide text."""
+    return indent >= 4
+
+
 def _inline_quote_spans(line):
     """(start, end) of each double-quoted span of one line, its quote marks included, read outside its
     inline code spans and outside a parenthetical example opened by "(e.g." or "(for example" and closed
@@ -516,19 +746,7 @@ def _inline_quote_spans(line):
     quote of the other kind. Linear: each search moves forward."""
     if '"' not in line and "\u201c" not in line:
         return []
-    masks = _code_spans(line) + _example_spans(line)
-    masked = line
-    if masks:
-        pieces, at = [], 0
-        for start, end in sorted(masks):
-            if end <= at:
-                continue
-            start = max(start, at)
-            pieces.append(line[at:start])
-            pieces.append("\0" * (end - start))
-            at = end
-        pieces.append(line[at:])
-        masked = "".join(pieces)
+    masked = _blanked(line, _code_spans(line) + _example_spans(line))
     closers = dict(INLINE_QUOTE_PAIRS)
     following = {opener: -1 for opener in closers}
     spans = []
@@ -577,12 +795,17 @@ def _verdict_of(line):
     return rest.strip(" \t")
 
 
+def _after_block_end(previous):
+    """Whether no paragraph is open before a line: at the start of the body or after a fenced block
+    (previous None), a blank line, an ATX heading, a thematic break or a setext underline."""
+    return previous is None or not previous.strip() or bool(BLOCK_END_RE.match(previous))
+
+
 def _indented_code_start(previous, line):
-    """Whether line opens an indented code block: four or more columns of leading space after a blank
-    line or at the start of the body. Its CommonMark reading (code, or a list item's continuation
+    """Whether line opens an indented code block: four or more columns of leading space where no
+    paragraph is open (_after_block_end). Its CommonMark reading (code, or a list item's continuation
     paragraph) depends on list nesting this grammar does not track, so it is refused, not guessed."""
-    return previous is not None and not previous.strip() and line[:4].expandtabs(4).startswith("    ") \
-        and bool(line.strip())
+    return _after_block_end(previous) and line[:4].expandtabs(4).startswith("    ") and bool(line.strip())
 
 
 def _new_item(number, line, heading, kind="item"):
@@ -605,8 +828,17 @@ def _names_text(line, spans):
 
 
 def _fenced_answer_head(content):
-    """The index of the first line of a fenced block's content that is shaped as an answer heading."""
-    return next((index for index, text in enumerate(content) if ANSWER_HEAD_RE.match(text)), None)
+    """The index of the first line of a fenced block's content that is shaped as an answer heading or
+    reads as one (_marker_candidate)."""
+    return next((index for index, text in enumerate(content) if ANSWER_HEAD_RE.match(text) or _marker_candidate(text)),
+                None)
+
+
+def _harness_line(payload, number, last, phase):
+    """Whether a body line is the harness's closing status line: exactly HARNESS_LAST_LINE, the last
+    non-blank line of the delivery, after QA-COMPLETE. Any other line starting WORKER_STATUS is
+    content."""
+    return phase == "complete" and number == last and payload == HARNESS_LAST_LINE
 
 
 def _is_findings_heading(line):
@@ -617,9 +849,12 @@ def _parse_delivery(lines, question_count):
     """(answers, findings sections, verdict line) of the delivery body, read in the closed shape: for
     each question in order a column-0 line "QN." (N = 1 to question_count, each once, ascending) opening
     its answer; optionally one line "## Findings" opening a findings section, in which no line opens an
-    answer; one VERDICT line; then a QA-COMPLETE line. Blank and WORKER_STATUS lines may follow it.
-    Any other shape is CannotEvaluate naming the line: a boundary is never inferred from free text."""
-    segments = _segments(lines)
+    answer; one VERDICT line; then a QA-COMPLETE line, after which come only blank lines and, as the
+    delivery's last non-blank line, the harness line exactly. Any other shape, and any construct that
+    can hide text from rendered view or reads as a marker without being one, is CannotEvaluate naming
+    the line: a boundary is never inferred from free text."""
+    segments = _segments(lines, strict=True)
+    last = next((number for number, text in reversed(lines) if text.strip()), None)
     answers, sections = [], []
     current = None
     verdict = None
@@ -644,29 +879,62 @@ def _parse_delivery(lines, question_count):
             add({"kind": "blockquote", "line": quote_run[0][0], "text": "\n".join(text for _, text in quote_run)})
         quote_run.clear()
 
-    previous = ""
-    for kind, number, payload in segments:
+    previous = None
+    after_quote = carried = False
+    for kind, number, payload, indent in segments:
         if kind == "fence":
             flush()
+            if _lazy_continuation(after_quote, "```"):
+                refuse(number, "a fenced block directly after a blockquote line (leave a blank line after a quote)")
             inner = _fenced_answer_head(payload)
             if inner is not None:
-                refuse(number + inner + 1, "an answer heading inside the fenced block opened at line {}".format(number))
+                refuse(number + inner + 1, "an answer heading inside the fenced block opened at line {} (or a line "
+                                           "that reads as one)".format(number))
             if phase not in ("answers", "findings") or current is None:
                 refuse(number, "a fenced block outside an answer or the findings section")
+            if _fence_may_be_text(indent):
+                for offset, text in enumerate(payload, 1):
+                    hidden = _hidden_construct(text)
+                    if hidden:
+                        refuse(number + offset, "{} inside a fenced block indented four or more columns, which may "
+                                                "render as text".format(hidden))
+                carried = True
             if any(text.strip() for text in payload):
                 add({"kind": "fenced", "line": number, "text": "\n".join(payload)})
             previous = None
+            after_quote = False
             continue
         if _indented_code_start(previous, payload):
-            raise CannotEvaluate("delivery line {} opens an indented block after a blank line; an indented "
-                                 "code block is outside the declared grammar (fence the quote)".format(number))
+            raise CannotEvaluate("delivery line {} opens an indented block where no paragraph is open (after a "
+                                 "blank line, a fenced block or a heading); an indented code block is outside the "
+                                 "declared grammar (fence the quote)".format(number))
         previous = payload
         quoted = BLOCKQUOTE_RE.match(payload)
+        if not quoted and _lazy_continuation(after_quote, payload):
+            refuse(number, "a line directly after a blockquote line that is not one (CommonMark reads it into the "
+                           "quote; leave a blank line after a quote)")
+        after_quote = False
+        if not (payload.startswith("Q") and ANSWER_HEAD_RE.match(payload)) and _marker_candidate(payload):
+            refuse(number, "a line that reads as an answer marker but is not \"QN.\" in ASCII at column 0 "
+                           "(lookalike or non-ASCII characters, indentation or marks before it)")
+        if _unread_fence(payload):
+            refuse(number, "a fence marker after a list marker or a tab (its reading depends on list nesting; "
+                           "open the fence at the start of its line)")
         if quoted and phase in ("answers", "findings") and current is not None:
             quote_run.append((number, quoted.group(1)))
+            after_quote = True
+            carried = False
             continue
         flush()
-        if payload.startswith(STATUS_PREFIX) or (phase in ("closed", "complete") and not payload.strip()):
+        if not payload.strip():
+            carried = False
+        else:
+            masks, carried = _code_masks(payload, carried)
+            hidden = _hidden_construct(_blanked(payload, masks))
+            if hidden:
+                refuse(number, "{} outside a fenced block, code span or blockquote, which can hide text from "
+                               "rendered view".format(hidden))
+        if _harness_line(payload, number, last, phase) or (phase in ("closed", "complete") and not payload.strip()):
             continue
         if phase == "complete":
             refuse(number, "text after the {} line".format(COMPLETE_LINE))
@@ -691,7 +959,9 @@ def _parse_delivery(lines, question_count):
             expected += 1
         elif value is not None or _is_findings_heading(payload) or payload.rstrip(" \t") == COMPLETE_LINE:
             if expected <= question_count:
-                refuse(number, "Q{}. is missing before this line".format(expected))
+                refuse(number, "Q{}. is missing before this line{}".format(
+                    expected, " (a line starting \"Verdict:\" is the VERDICT line, inside an answer too)"
+                    if value is not None else ""))
             if value is None and _is_findings_heading(payload) and phase == "answers":
                 current = _new_item(None, number, payload, "finding")
                 sections.append(current)
@@ -725,7 +995,7 @@ def _parse_delivery(lines, question_count):
 
 def _parse_questions(lines):
     """The brief's numbered questions: its first run of column-0 numbered lines counting from 1."""
-    text_lines = [(number, text) for kind, number, text in _segments(lines) if kind == "line"]
+    text_lines = [(number, text) for kind, number, text, _ in _segments(lines) if kind == "line"]
     start = 0
     for index, (_, text) in enumerate(text_lines):
         if QUESTIONS_MARKER_RE.fullmatch(text.strip()):
@@ -1152,6 +1422,7 @@ A1 = 'Q1. docs/alpha.md reads "The first rule is plain."'
 A2 = "Q2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
 A3 = 'Q3. docs/gamma.md says "Only gamma carries this exact sentence."'
 A4 = 'Q4. Yes: "    return 0" ends beta().'
+HARNESS_LEAD = "WORKER_STATUS: PASS (account=fixture, rc=0, family=fixture, model=fixture, effort=low)\n"
 
 
 def check(name, got, want):
@@ -1256,7 +1527,7 @@ def _self_test_cases(fx):
     check("flip/c1-all-unverifiable",
           verdict(_patched("_rule_all_unverifiable", lambda *a: None, lambda: fx.run(all_unverifiable))),
           "PASS")
-    one = fx.run(_mixed(sha, {3: _unverifiable(3)}, lead="WORKER_STATUS: RUNNING\n"))
+    one = fx.run(_mixed(sha, {3: _unverifiable(3)}, lead=HARNESS_LEAD))
     check("c1/one-unverifiable-passes", (verdict(one), one["coverage"]["text"]), ("PASS", "3/4"))
     no_quotes = _delivery(sha, *("Q{}. Confirmed after reading the file.".format(n) for n in range(1, 5)))
     report = fx.run(no_quotes, BRIEF_QUOTE_ONLY)
@@ -1293,7 +1564,8 @@ def _self_test_cases(fx):
     check("shape/second-verdict-cannot-evaluate", refusal(fx.run(
         _mixed(sha, {4: A4 + "\n\nVERDICT: BLOCKERS"})), "between the VERDICT line"), refused)
     check("shape/missing-qa-complete-cannot-evaluate", refusal(fx.run(
-        _mixed(sha).replace("\n{}\n".format(COMPLETE_LINE), "\n")), "no QA-COMPLETE line"), refused)
+        _mixed(sha).replace("\n{}\n\n{}\n".format(COMPLETE_LINE, HARNESS_LAST_LINE), "\n")), "no QA-COMPLETE line"),
+        refused)
     check("shape/text-after-qa-complete-cannot-evaluate", refusal(fx.run(
         _mixed(sha).replace("WORKER_STATUS: COMPLETE", "A late note.")), "after the QA-COMPLETE line"), refused)
     check("shape/text-before-first-answer-cannot-evaluate", refusal(fx.run(
@@ -1330,6 +1602,116 @@ def _self_test_cases(fx):
     same_char = lambda close, marker: close.group(1)[0] == marker[0]
     check("flip/shape-fence-close-length",
           verdict(_patched("_fence_closes", same_char, lambda: fx.run(short_close, BRIEF_ONE))), "PASS")
+    misclosed = _mixed(sha, {2: "Q2. src/beta.py:\n```\n    if ready:\n  ```"})
+    check("shape/fence-close-indent-mismatch-cannot-evaluate", refusal(fx.run(misclosed), "indented otherwise"), refused)
+    check("flip/shape-fence-close-indent",
+          verdict(_patched("_close_indent_matches", lambda *a: True, lambda: fx.run(misclosed))), "PASS")
+    check("shape/tab-close-inside-fence-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {2: "Q2. src/beta.py:\n```\n    if ready:\n\t```\n```"})), "indented otherwise"), refused)
+    check("shape/verdict-line-inside-answer-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {2: A2 + "\nVerdict: the guard holds."})), "is the VERDICT line"), refused)
+
+    # Harness lines: only line 1 and the last line, each exact; any other WORKER_STATUS line is content
+    check("shape/harness-first-line-passes", verdict(fx.run(_mixed(sha, lead=HARNESS_LEAD))), "PASS")
+    fake_lead = _mixed(sha, lead='WORKER_STATUS_FAKE tools/absent_xyz.py "fabricated sentinel"\n')
+    check("shape/status-lookalike-first-line-cannot-evaluate", refusal(fx.run(fake_lead), "is not a full 40-hex SHA"),
+          refused)
+    check("flip/shape-harness-first-line",
+          verdict(_patched("HARNESS_FIRST_RE", re.compile(r"WORKER_STATUS.*"), lambda: fx.run(fake_lead))), "PASS")
+    check("shape/second-status-line-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, lead=HARNESS_LEAD + "WORKER_STATUS: RUNNING\n")), "is not a full 40-hex SHA"), refused)
+    status_content = _mixed(sha, {4: A4 + '\nWORKER_STATUS_FAKE src/beta.py reads "return FABRICATED"'})
+    check("c2/status-prefixed-content-checked-fails", verdict(fx.run(status_content)), "FAIL")
+    anywhere = lambda payload, *rest: payload.startswith(STATUS_PREFIX)
+    check("flip/c2-status-prefixed-content",
+          verdict(_patched("_harness_line", anywhere, lambda: fx.run(status_content))), "PASS")
+    trailing = _mixed(sha).replace("WORKER_STATUS: COMPLETE", "WORKER_STATUS_FAKE arbitrary content")
+    check("shape/status-lookalike-last-line-cannot-evaluate", refusal(fx.run(trailing), "after the QA-COMPLETE line"),
+          refused)
+    check("flip/shape-harness-last-line", verdict(_patched("_harness_line", anywhere, lambda: fx.run(trailing))), "PASS")
+    check("shape/harness-line-not-last-cannot-evaluate", refusal(fx.run(
+        _mixed(sha) + "WORKER_STATUS: COMPLETE\n"), "after the QA-COMPLETE line"), refused)
+
+    # Text hidden from rendered view: raw HTML, link definitions, images, link titles that run on
+    hide = lambda opener, closer: _mixed(sha, {3: A3 + "\n" + opener, 4: "Q4. Yes, src/beta.py returns 0.\n" + closer})
+    comment = hide("<!--", "-->")
+    at_line = comment.split("\n").index("<!--") + 1
+    check("shape/html-comment-hides-answer-cannot-evaluate",
+          refusal(fx.run(comment), "delivery line {}: raw HTML".format(at_line)), refused)
+    report = _patched("HTML_START_RE", never, lambda: fx.run(comment))
+    check("flip/shape-raw-html", (verdict(report), report["coverage"]["text"]), ("PASS", "4/4"))
+    check("shape/html-tag-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {4: A4 + "\n<details>\nhidden\n</details>"})), "raw HTML"), refused)
+    check("shape/html-in-code-span-passes",
+          verdict(fx.run(_mixed(sha, {4: A4 + "\nThe marker `<!--` opens a comment."}))), "PASS")
+    check("shape/autolink-passes", verdict(fx.run(_mixed(sha, {4: A4 + "\nSee <https://example.invalid/beta>."}))),
+          "PASS")
+    carry = hide("The tick ` opens a span\n`<!--` closes it", "-->")
+    check("shape/code-span-across-lines-cannot-evaluate", refusal(fx.run(carry), "raw HTML"), refused)
+    check("flip/shape-code-span-carry", verdict(_patched(
+        "_code_masks", lambda line, carried: (_code_spans(line), False), lambda: fx.run(carry))), "PASS")
+    text_fence = hide("    ```\n    <!--\n    ```", "-->")
+    check("shape/indented-fence-content-scanned-cannot-evaluate", refusal(fx.run(text_fence), "may render as text"),
+          refused)
+    check("flip/shape-indented-fence-content",
+          verdict(_patched("_fence_may_be_text", lambda indent: False, lambda: fx.run(text_fence))), "FAIL")
+    definition = hide("\n[note]: https://example.invalid/n '", "'")
+    check("shape/link-definition-hides-answer-cannot-evaluate", refusal(fx.run(definition), "link reference"), refused)
+    check("flip/shape-link-definition",
+          verdict(_patched("LINK_DEFINITION_RE", never, lambda: fx.run(definition))), "PASS")
+    image = hide("![", "](https://example.invalid/b.png)")
+    check("shape/image-alt-hides-answer-cannot-evaluate", refusal(fx.run(image), "an image"), refused)
+    check("flip/shape-image", verdict(_patched("IMAGE_RE", never, lambda: fx.run(image))), "PASS")
+    title = hide("See [the notes](https://example.invalid/n 'opened", "')")
+    check("shape/link-title-hides-answer-cannot-evaluate", refusal(fx.run(title), "inline link"), refused)
+    check("flip/shape-link-title", verdict(_patched("_link_runs_on", lambda line: False, lambda: fx.run(title))), "PASS")
+    check("c2/closed-inline-link-passes", verdict(fx.run(_mixed(
+        sha, {1: "Q1. [docs/alpha.md](docs/alpha.md 'the notes') reads \"The first rule is plain.\""}))), "PASS")
+    entity = _mixed(sha, {4: "Q4. src/beta.py: yes, &quot;return FABRICATED&quot;."})
+    check("shape/quote-entity-cannot-evaluate", refusal(fx.run(entity), "character reference"), refused)
+    check("flip/shape-quote-entity", verdict(_patched("ENTITY_RE", never, lambda: fx.run(entity))), "PASS")
+
+    # Answer markers: only "QN." in ASCII at column 0; a line that reads as one otherwise is refused
+    lookalike = _mixed(sha, findings="Q\uff11. Smuggled answer")
+    check("shape/lookalike-marker-in-findings-cannot-evaluate",
+          refusal(fx.run(lookalike), "reads as an answer marker"), refused)
+    check("flip/shape-marker-candidates",
+          verdict(_patched("_marker_candidate", lambda line: False, lambda: fx.run(lookalike))), "PASS")
+    for check_id, line in (("shape/non-ascii-digit-marker-cannot-evaluate", "Q\u0663. Smuggled answer"),
+                           ("shape/zero-width-marker-cannot-evaluate", "Q\N{ZERO WIDTH SPACE}4. Smuggled answer"),
+                           ("shape/indented-marker-cannot-evaluate", "  Q4. Smuggled answer"),
+                           ("shape/bold-marker-cannot-evaluate", "**Q4.** Smuggled answer")):
+        check(check_id, refusal(fx.run(_mixed(sha, {4: A4 + "\n" + line})), "reads as an answer marker"), refused)
+    check("shape/lookalike-marker-in-fence-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {2: A2.replace("```python\n", "```python\nQ\uff12.\n")})), "inside the fenced block"), refused)
+
+    # Quote and code forms CommonMark reads that this grammar does not: refused, never read as prose
+    lazy = _mixed(sha, {1: "Q1. docs/alpha.md:\n> The first rule is plain.\nunless the caller overrides it, which is "
+                           "fabricated."})
+    check("c2/lazy-quote-continuation-cannot-evaluate", refusal(fx.run(lazy), "directly after a blockquote line"),
+          refused)
+    check("flip/c2-lazy-quote-continuation",
+          verdict(_patched("_lazy_continuation", lambda *a: False, lambda: fx.run(lazy))), "PASS")
+    check("shape/answer-heading-after-quote-cannot-evaluate", refusal(fx.run(_delivery(
+        sha, A1, A2, "Q3. docs/gamma.md:\n> Only gamma carries this exact sentence.\n" + A4)),
+        "directly after a blockquote line"), refused)
+    old_boundary = lambda previous: previous is not None and not previous.strip()
+    after_fence = _mixed(sha, {2: "Q2. src/beta.py:\n```\n    if ready:\n```\n        return FABRICATED"})
+    check("items/indented-code-after-fence-cannot-evaluate", refusal(fx.run(after_fence), "no paragraph is open"),
+          refused)
+    check("flip/items-indented-code-after-fence",
+          verdict(_patched("_after_block_end", old_boundary, lambda: fx.run(after_fence))), "PASS")
+    after_heading = _mixed(sha, findings="    fabricated_call(ready=FABRICATED)")
+    check("items/indented-code-after-heading-cannot-evaluate", refusal(fx.run(after_heading), "no paragraph is open"),
+          refused)
+    check("flip/items-indented-code-after-heading",
+          verdict(_patched("_after_block_end", old_boundary, lambda: fx.run(after_heading))), "PASS")
+    list_fence = _mixed(sha, {4: "Q4. src/beta.py: yes, it reads\n- ```\n  return FABRICATED"})
+    check("shape/list-marker-fence-cannot-evaluate", refusal(fx.run(list_fence), "after a list marker"), refused)
+    check("flip/shape-list-marker-fence",
+          verdict(_patched("_unread_fence", lambda line: False, lambda: fx.run(list_fence))), "PASS")
+    check("shape/tab-fence-cannot-evaluate", refusal(fx.run(
+        _mixed(sha, {4: A4 + "\n\t```\n\treturn FABRICATED"})), "after a list marker or a tab"), refused)
 
     # Findings: after the last answer, under one "## Findings" line, never an answer
     unrelated = _delivery(sha, "Q1. src/beta.py: yes.", "Q2. docs/alpha.md: yes.",
@@ -1491,7 +1873,7 @@ def _self_test_cases(fx):
         _delivery(sha, "Q1. No: docs/retired/alpha.md is absent from the pinned tree."), BRIEF_ABSENT_ASKED)), "PASS")
     check("c2/non-file-tokens-pass", verdict(fx.run(_delivery(
         sha, 'Q1. **docs/alpha.md:1**: yes, and/or `PinnedTree.read`, e.g. 2/2 or 1/2.5 of src/gen_*.py at '
-             '<clone>/src/x.py, see https://example.invalid/a.py; "The first rule is plain."'), BRIEF_OPEN)), "PASS")
+             '`<clone>/src/x.py`, see https://example.invalid/a.py; "The first rule is plain."'), BRIEF_OPEN)), "PASS")
     check("c2/bold-name-binds-fails", verdict(fx.run(
         _delivery(sha, 'Q1. **docs/gamma.md**: "The first rule is plain."'), BRIEF_OPEN)), "FAIL")
     check("c2/bare-root-name-binds-fails", verdict(fx.run(
@@ -1813,6 +2195,12 @@ GRAMMAR_PROBES = (
     ("EXAMPLE_OPEN_RE", "(e.g. x)", True), ("EXAMPLE_OPEN_RE", "(For example x)", True),
     ("EXAMPLE_OPEN_RE", "(i.e. x)", False), ("_is_findings_heading", "## Findings", True),
     ("_is_findings_heading", "### Findings", False), ("_is_findings_heading", "## Findings:", False),
+    ("HARNESS_FIRST_RE", "WORKER_STATUS: PASS (account=a, rc=0, family=b, model=c, effort=d)", True),
+    ("HARNESS_FIRST_RE", "WORKER_STATUS_FAKE (account=a, rc=0, family=b, model=c, effort=d)", False),
+    ("HTML_START_RE", "<!-- x", True), ("HTML_START_RE", "<details>", True), ("HTML_START_RE", "<https://x.invalid>", False),
+    ("_marker_candidate", "Q\uff11. x", True), ("_marker_candidate", "  **Q4.** x", True),
+    ("_marker_candidate", "Q1.5 x", False), ("_marker_candidate", "Quote 1. x", False),
+    ("_unread_fence", "- ```", True), ("_unread_fence", "```", False),
 )
 
 
