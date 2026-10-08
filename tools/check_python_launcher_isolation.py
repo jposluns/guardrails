@@ -25,33 +25,24 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
     re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
     sanctioned sibling-import form is sys.path.append.
 
-SETTINGS SCOPE. A settings.json hook command is in scope only when it is a candidate python launcher:
-one of its WORDS, once its quote characters, backslashes and line continuations are removed, is a
-python interpreter name, ends in ``/`` plus one, or names the core hook launcher (a python substring
-inside a longer word, ``--python-version``, or inside a quoted multi-word argument, ``echo "python3
-done"``, makes no candidate); or one of its possible command words can hide a python word, which is a
-cannot-evaluate (exit 2) naming the construct. Which words are possible command words is decided by
-PROOF, never by an enumerated position list: a word is a proven ARGUMENT only when every word before
-it in its segment is a plain literal that is not a shell reserved word, not an assignment
-(``NAME=...``, ``NAME+=...``, ``NAME[...]=...``), not an option (it starts with ``-``) and not a name
-on the EXEC-WRAPPER list (env, time, exec, command, builtin, nohup, sudo, doas, xargs, nice, ionice,
-timeout, stdbuf, chrt, taskset, setsid, flock, eval, source, ``.``, coproc, watch, unbuffer); EVERY
-word that is not a proven argument is a possible command word and is checked. Segments are
-over-approximated: ``;``, ``&``, ``|``, a newline, a parenthesis, ``{``, ``}``, ``!`` and every shell
-reserved word (if then else elif fi do done while until for in case esac select function coproc time
-``[[`` ``]]``) start one; a redirection's target and a heredoc's delimiter are never command words; a
-heredoc body is NOT scanned for command words (each ``<<``/``<<-`` delimiter, quoted or not, is
-tracked to its terminator line, and a python word in a body still makes the command a candidate, which
-the grammar refuses: fail-closed); and the operands of a leading ``[`` or ``[[`` test word are its arguments to the end
-of their segment. A possible command word can hide a python word when its file name (the part after
-its last literal ``/``) holds an expansion or a ``~``, or holds a glob or brace that can match a name
-in the DECISION SET (python, python2, python2.7, python3, python3.9 through python3.15, pythonw;
-braces are expanded first, and a brace the scan cannot expand is itself a hazard), or when its
-directory holds an expansion that word splitting can break apart (an unquoted or non-simple one); a
-command or process substitution, a backtick and an unbalanced quote anywhere in the command count too,
-because the scan does not read inside them. Any other settings hook command is out of scope (neither
-pass nor fail), its redirections, ``~`` paths, groups, globs and heredocs included, and
-``"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`` with them.
+SETTINGS SCOPE (the literal-scope ruling). A settings.json hook command is in scope only when it is a
+CANDIDATE python launcher, decided without a shell lexer: in its text with every line continuation and
+backslash removed, or in that text with its quote characters removed as well, a python interpreter
+name (``python``, or ``python`` followed by digits, digits.digits or ``w``: ``python2``, ``python3``,
+``python3.12``, ``pythonw``) or the core hook launcher's name (aiqt_hooks_launch.py) appears as a token
+bounded on the left by the start of the text, whitespace, a quote or one of ``/ ; | & ( ) { } ` = , <
+> *`` (so ``$(`` too) and on the right by the end of the text, whitespace, a quote or one of ``; | & ( )
+{ } ` , < > [ * ? $``. A ``-`` is no boundary, so an option name (``--python-version``, ``--python
+3.12``) makes no candidate, and neither does a longer name (``xpython3``, ``python3x``) or a path through
+the name (``python3/x``); ``PY=python3``, ``{x,python3}``, ``python3<x.py`` and ``python3$X`` each make
+one, as do a name split by quotes (``pyt"hon"3``) and a python word in a heredoc body, inside ``$(...)``
+or inside a quoted argument (``echo "python3 done"``). A candidate is parsed only inside
+the allow-listed shell grammar below. ANY other settings hook command is OUT OF SCOPE (exit 0) and is
+not lexed at all, its expansions, substitutions, redirections, ``~`` paths, groups, globs and heredocs
+included: a python launch disguised by shell expansion, globbing, quoting, eval or watch re-parsing or
+similar inside a command that names neither a python interpreter nor the core hook launcher (``"$PY"
+x.py``, ``eval "$CMD"``, ``/usr/bin/pyth?n3 x.py``) is the disclosed literal-scope residual; only the
+repository's own settings author can write such a command.
 
 SHELL GRAMMAR (an allow-list). A candidate settings.json hook command, and a CI shell line the gate
 parses, is PARSED only if it lies entirely inside this grammar: words of the characters ``A-Z a-z 0-9 _ . / - + = ,
@@ -67,8 +58,9 @@ string, a process substitution ``<(`` or ``>(``, a parenthesis or brace, an unqu
 (``*``, ``?``, ``[``, ``]``), ``!``, ``~``, any other operator such as ``|&``, an unbalanced quote, and any
 other character. A settings hook command also admits a double-quoted ``$NAME`` or ``${NAME}`` (a plain
 name, no operator) as the leading path segment of the script operand or of a word after it; a word at
-or before the command word, an interpreter option, an option's value and a separate ``-c``/``-m``
-operand are refused. The quote opens the word, the expansion follows it
+or before the command word, an interpreter option, an option's value and a ``-c``/``-m`` operand (the
+token after a separate ``-c``/``-m`` or after a cluster ending in ``c`` or ``m``, ``-Ic``, ``-BIm``) are
+refused. The quote opens the word, the expansion follows it
 directly, and a ``/`` follows the expansion (``python3 -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/
 aiqt_hooks_launch.py``, the form Claude Code's hook documentation shows), so the basename the rules read
 stays literal; one per word, and any other expansion stays a cannot-evaluate. A CI shell line differs in
@@ -147,8 +139,7 @@ EXIT CONVENTION: 0 every recognized launcher is isolated (and each core hook lau
 the site module); 1 at least one recognized launcher is not isolated, or a core hook launcher runs with
 the site module; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
 parse error; a candidate settings hook command, or a parsed CI shell line, outside the allow-listed
-shell grammar; a settings hook command with a possible command word that can hide a python word;
-a shell line carrying a python token whose command-word position cannot be established; a
+shell grammar; a shell line carrying a python token whose command-word position cannot be established; a
 hook entry with a missing type/command or a non-list args; an args-form hook entry whose argv carries a
 python word that is not its command word, such as ``/usr/bin/env`` with ``python3`` in args, exactly as
 a settings shell-string with such a word is; or the gate's own interpreter not isolated).
@@ -158,9 +149,8 @@ DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``
 a ``.sh`` re-launcher), ``$PYTHON`` and shell aliases or functions, a dynamically assembled argv, the
 programmatic ``subprocess`` children in the tools and the ``regenerate`` strings in .aiqt/gensrc.json
 (a separate follow-up), a python launched through a script's shebang (a settings hook command
-``"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py``, or the core hook launcher's own path run directly), an
-expansion outside every command word that a wrapper or a callee later runs (``exec "$PY"``, ``xargs
-"$PY"``), the value of an admitted leading-path expansion (a value that begins with ``-`` is read by the
+``"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py``, or the core hook launcher's own path run directly), the
+value of an admitted leading-path expansion (a value that begins with ``-`` is read by the
 interpreter as an option; the gate credits only the literal options before it), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
@@ -177,17 +167,12 @@ those locations. The no-site rule matches the launcher's name, not executable id
 symlink, an alternate-case name on a case-insensitive filesystem, a ``.pyc`` or stdin-fed source passes
 without ``-S``), and a ``-h``, ``-?`` or ``-V`` letter in the
 registered cluster (``-ISh``) prints help or the version and exits 0 without running the hook. A
-``python3`` token embedded in a quoted multi-word argument is not a candidate word, so a wrapper that
-executes that argument (``env -S'python3 x.py'``, ``bash -c 'python3 x.py'``) passes unexamined; a
-command whose argument words only a wrapper OUTSIDE the EXEC-WRAPPER list executes (``bash -c``,
-``ssh``, a project script that execs its arguments) is likewise not caught: the gate cannot know which
-commands run their arguments, so only the listed wrapper names keep every later word a possible
-command word. A glob or brace command word whose expansion matches an interpreter name outside the
-decision set (``python3.16``, ``pypy3``) is not caught; a settings heredoc body is not scanned for
-command words (a literal python word in one still makes the command a candidate, which the grammar
-refuses, but a body a wrapper executes whose python is reached through an expansion, ``bash <<EOF``
-with ``"$PY"`` inside, is the same wrapper residual); and
-the lines of a heredoc body in run_all_checks.sh or a ``run:`` block are scanned as shell lines,
+settings hook command that names neither a python interpreter nor the core hook launcher is out of scope
+(the literal-scope residual): a python launch disguised there by shell expansion, globbing, quoting,
+eval or watch re-parsing, or a wrapper (``"$PY" x.py``, ``eval "$CMD"``, ``pyt${E}hon3``,
+``/usr/bin/pyth?n3``) is not caught. Inside a candidate, a wrapper that executes a quoted argument
+(``env -S'python3 x.py'``, ``bash -c 'python3 x.py'``) parses as one argument word and passes
+unexamined; and the lines of a heredoc body in run_all_checks.sh or a ``run:`` block are scanned as shell lines,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
   check_python_launcher_isolation.py             scan the declared surfaces
@@ -219,8 +204,7 @@ if not _interpreter_isolated(sys.flags):
                      "otherwise shadow a stdlib import and neuter this gate)\n")
     raise SystemExit(2)
 
-import fnmatch  # noqa: E402  imported only after the isolation guard above
-import json  # noqa: E402
+import json  # noqa: E402  imported only after the isolation guard above
 import os  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
@@ -350,12 +334,13 @@ def _option_scan(after_interpreter):
     with no script operand: it is an unknown option (exit 2; an `=VALUE` form included, which CPython
     does not accept, and `-help` and `-version`) or one of `-help-all`, `-help-env` and
     `-help-xoptions` (help printed, exit 0). A third value is the index of the first token that is
-    neither an interpreter option, an option's value nor a separate `-c`/`-m` operand: the script
-    operand, the token after a separate `-c CMD`/`-m MOD` pair (the operand itself is inside the
-    protected span, so an admitted expansion can never be a separate `-c`/`-m` operand), the token
-    after one that carries `-c`/`-m` attached or mid-cluster (whose operand is inside that same token),
-    or the token count when the scan stops at an unrecognized long option or runs out of tokens (every
-    token is then read as an option)."""
+    neither an interpreter option, an option's value nor a `-c`/`-m` operand: the script
+    operand, the token after a `-c CMD`/`-m MOD` pair whose `c` or `m` ends its token, separate or at
+    the end of a cluster (`-Ic CMD`, `-BIm MOD`; the operand itself is inside the protected span, so an
+    admitted expansion can never be that operand), the token after one that carries its `-c`/`-m`
+    operand attached (`-cCMD`, `-IcCMD`, whose operand is inside that same token), or the token count
+    when the scan stops at an unrecognized long option or runs out of tokens (every token is then read
+    as an option)."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
@@ -404,7 +389,10 @@ def _option_scan(after_interpreter):
                 flags.add(letter)        # a valueless flag: credit it (e.g. -PEs -> P, E, s)
                 j += 1
             if terminate:
-                return flags, None, i + 1
+                # A `c` or `m` that ENDS its cluster (`-Ic`, `-Im`, `-BIc`) takes the next token as its
+                # operand, exactly as a separate `-c`/`-m` does, so that token is in the protected span;
+                # an attached operand (`-cCMD`, `-IcCMD`) is inside this token.
+                return flags, None, i + (2 if j == len(tok) - 1 else 1)
             i += 2 if skip_next else 1
             continue
         return flags, i, i               # the script/program token: options end here
@@ -643,41 +631,28 @@ def _shell_split(s, expansions=False):
     return tokens
 
 
-# The SCOPE of a settings hook command. Only a candidate python launcher is parsed with the allow-listed
-# grammar: one of whose words, once its quotes, backslashes and line continuations are removed, is a
-# python interpreter name, ends in `/` plus one, or names a NO_SITE_SCRIPTS launcher (_words_candidate);
-# a command one of whose POSSIBLE COMMAND WORDS can hide a python word is a cannot-evaluate
-# (_command_word_hazard, the proven-argument rule). Any other settings hook command is out of scope, its
-# redirections, groups, globs, heredocs and `~` paths included.
-SCAN_LITERAL, SCAN_SIMPLE, SCAN_EXPANSION, SCAN_PATTERN = "lit", "dq-name", "expansion", "pattern"
-# Every shell reserved word (bash's list, plus `coproc`, `function` and `time`): each starts a new
-# over-approximated segment for _command_word_hazard, so the word after it is a possible command word,
-# never a proven argument.
-RESERVED_WORDS = frozenset((
-    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "in", "case", "esac",
-    "select", "function", "coproc", "time", "[[", "]]", "{", "}", "!"))
-# Commands that execute one of their argument words as a command: after one, no later word in the
-# segment is a proven argument. A wrapper OUTSIDE this list (bash -c, ssh, a project script that execs
-# its arguments) is the disclosed wrapper residual: the gate cannot know which commands run their
-# arguments, so only these names keep the later words possible command words.
-EXEC_WRAPPERS = frozenset((
-    "env", "time", "exec", "command", "builtin", "nohup", "sudo", "doas", "xargs", "nice", "ionice",
-    "timeout", "stdbuf", "chrt", "taskset", "setsid", "flock", "eval", "source", ".", "coproc",
-    "watch", "unbuffer"))
-# The DECISION SET for a glob or brace in a possible command word's file name: the word is a hazard iff
-# its file-name pattern (braces expanded) can fnmatch one of these python interpreter names. A pattern
-# matching only an interpreter name outside this set (python3.16, pypy3) is the disclosed residual.
-GLOB_DECISION_SET = frozenset(
-    ("python", "python2", "python2.7", "python3", "pythonw")
-    + tuple("python3.{}".format(minor) for minor in range(9, 16)))
-BRACE_VARIANT_CAP = 64   # brace variants per word before the expansion is undecidable (a hazard)
-# A command word that is the test builtin or keyword: its operands, to the end of their segment, are
-# its arguments (a lone `[` is no bracket expression; `[[ ... ]]` operands are never commands).
-TEST_WORDS = {"[", "[["}
-NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# A shell assignment prefix for the proven-argument rule: NAME=, NAME+=, NAME[subscript]= (the text up
-# to and including the first `=`).
-ASSIGN_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^][]*\])?\+?=$")
+# The SCOPE of a settings hook command (the literal-scope ruling). Only a CANDIDATE is checked: a command
+# whose text LITERALLY names a python interpreter or a NO_SITE_SCRIPTS launcher (_is_candidate). A
+# candidate is parsed only inside the allow-listed grammar (_shell_split). Any other settings hook command
+# is out of scope (exit 0) and is never lexed: a python launch disguised by shell expansion, globbing,
+# quoting or re-parsing (eval, watch, a wrapper) inside a command that names neither is the disclosed
+# literal-scope residual.
+# A python interpreter name (python, or python followed by digits, digits.digits or w: python2, python3,
+# python3.12, pythonw) or a NO_SITE_SCRIPTS name, as a token: on its left the start of the text,
+# whitespace, a quote or a CANDIDATE_LEFT character (so `$(` too); on its right the end of the text,
+# whitespace, a quote or a CANDIDATE_RIGHT character. A `-` on either side is no boundary, so an option
+# name (`--python-version`, `--python 3.12`) makes no candidate, and neither does a longer name
+# (`xpython3`, `python3x`, `python3.x`) or a path through the name (`python3/x`). Beyond the separators
+# and groups, `=` `,` `<` `>` `*` and `$` keep a literal name a candidate where an assignment, a brace
+# list, a redirection, a glob or an expansion sits beside it (`PY=python3`, `{x,python3}`, `python3<x.py`,
+# `*python3`, `python3*`, `python3$X`).
+CANDIDATE_LEFT = "/;|&(){}`=,<>*"
+CANDIDATE_RIGHT = ";|&(){}`,<>[*?$"
+CANDIDATE_RE = re.compile(
+    r"(?:^|(?<=[\s'\"" + re.escape(CANDIDATE_LEFT) + r"]))"
+    r"(?:python(?:[0-9]+(?:\.[0-9]+)?|w)?|"
+    + "|".join(re.escape(name) for name in sorted(NO_SITE_SCRIPTS)) + r")"
+    r"(?=$|[\s'\"" + re.escape(CANDIDATE_RIGHT) + r"])")
 
 
 def _unquoted_text(s):
@@ -687,350 +662,15 @@ def _unquoted_text(s):
     return s.replace("\\\n", "").replace("\\", "").translate(QUOTES)
 
 
-def _is_candidate_text(s):
-    """True iff the settings hook command s holds a python word or a NO_SITE_SCRIPTS name once its
-    quoting is removed (the CI-line prefilter, extended to the core hook launcher's name). This is the
-    FALLBACK candidate test, used only when the lenient lexer refuses the command: it over-approximates
-    (a python substring anywhere counts), so a refused command is routed to the strict grammar, whose
-    cannot-evaluate names the construct; the word-level test is _words_candidate."""
-    text = _unquoted_text(s)
-    return bool(PY_TOKEN_RE.search(text)) or any(name in text for name in NO_SITE_SCRIPTS)
-
-
-def _dollar_construct(s, j, quoted):
-    """Read the `$` construct at s[j] for _command_word_hazard. Return (kind, end): a `$NAME` or
-    `${NAME}` (SCAN_SIMPLE inside double quotes, else SCAN_EXPANSION, which word splitting can break
-    apart), a special parameter, an operator-free `${...}`, ANSI-C `$'...'` or a locale `$"` prefix
-    (SCAN_EXPANSION), or a lone `$` (SCAN_LITERAL). Return a str naming a construct the scan does not
-    read: a command substitution or arithmetic expansion, or a `${...}` holding a quote, a backslash,
-    a brace or another expansion."""
-    m = DQ_EXPANSION_RE.match(s, j)
-    if m:
-        return (SCAN_SIMPLE if quoted else SCAN_EXPANSION), m.end()
-    nxt = s[j + 1:j + 2]
-    if nxt == "(":
-        return "a command substitution or arithmetic expansion $(...)"
-    if nxt == "{":
-        close = s.find("}", j + 2)
-        if close < 0 or any(ch in s[j + 2:close] for ch in "\"'$`\\{"):
-            return "a ${...} expansion the command-word scan does not read"
-        return SCAN_EXPANSION, close + 1
-    if nxt and nxt in "@*#?-$!0123456789":
-        return SCAN_EXPANSION, j + 2
-    if not quoted and nxt == "'":
-        k = j + 2
-        while k < len(s) and s[k] != "'":
-            k += 2 if s[k] == "\\" else 1
-        if k >= len(s):
-            return "an unbalanced ANSI-C quote $'"
-        return SCAN_EXPANSION, k + 1
-    if not quoted and nxt == '"':
-        return SCAN_EXPANSION, j + 1        # a locale $"...": the string after it is read as usual
-    return SCAN_LITERAL, j + 1
-
-
-def _word_text(atoms):
-    return "".join(text for text, _ in atoms)
-
-
-def _brace_variants(atoms):
-    """Expand one word's unquoted braces into its brace-expansion variants (lists of atoms), or None
-    when the scan cannot expand them, which makes the word undecidable (a hazard): nested or unmatched
-    braces, a comma-less group ({abc}, which a shell reads literally, and the {a..z} sequence form,
-    which this scan does not enumerate), an expansion inside a group, or over BRACE_VARIANT_CAP
-    variants. A group is split at every literal `,` (a quoted comma over-splits, which can only
-    over-read: a python interpreter name holds no comma, so no real alternative is missed)."""
-    open_at = next((k for k, (text, kind) in enumerate(atoms)
-                    if text == "{" and kind == SCAN_PATTERN), None)
-    if open_at is None:
-        return [atoms]
-    close_at = None
-    for k in range(open_at + 1, len(atoms)):
-        text, kind = atoms[k]
-        if kind == SCAN_PATTERN and text == "{":
-            return None                  # a nested group
-        if kind == SCAN_PATTERN and text == "}":
-            close_at = k
-            break
-    if close_at is None:
-        return None                      # an unmatched brace
-    inner = atoms[open_at + 1:close_at]
-    if any(kind not in (SCAN_LITERAL, SCAN_PATTERN) for _, kind in inner):
-        return None                      # an expansion inside the group
-    inner_text = _word_text(inner)
-    if ".." in inner_text or "," not in inner_text:
-        return None                      # a sequence form, or a comma-less group
-    alternatives, cur = [], []
-    for atom in inner:
-        if atom[0] == "," and atom[1] == SCAN_LITERAL:
-            alternatives.append(cur)
-            cur = []
-        else:
-            cur.append(atom)
-    alternatives.append(cur)
-    variants = []
-    for alt in alternatives:
-        tails = _brace_variants(atoms[:open_at] + alt + atoms[close_at + 1:])
-        if tails is None:
-            return None
-        variants.extend(tails)
-        if len(variants) > BRACE_VARIANT_CAP:
-            return None
-    return variants
-
-
-def _matches_decision_set(base_atoms):
-    """True iff the file-name pattern (unquoted glob characters kept, literal characters escaped) can
-    fnmatch a GLOB_DECISION_SET interpreter name."""
-    pieces = []
-    for text, kind in base_atoms:
-        if kind == SCAN_PATTERN:
-            pieces.append(text)
-        else:
-            pieces.append("".join("[" + ch + "]" if ch in "*?[" else ch for ch in text))
-    pattern = "".join(pieces)
-    return any(fnmatch.fnmatchcase(name, pattern) for name in GLOB_DECISION_SET)
-
-
-def _file_name_hazard(atoms):
-    """For one POSSIBLE COMMAND WORD (its atoms, each (text, kind)): None when no expansion of the word
-    can name a python interpreter; otherwise a str naming the hazard. The file name, the part after the
-    word's last literal `/`, is where an interpreter name would live: an expansion or a `~` there is
-    undecidable, so a hazard; a glob or brace there is DECIDED, position-independently: braces are
-    expanded (_brace_variants; a brace the scan cannot expand is a hazard) and a file-name pattern is a
-    hazard iff it can fnmatch a GLOB_DECISION_SET name (_matches_decision_set; a pattern matching only
-    an interpreter name outside that set is the disclosed decision-set residual). An unquoted or
-    non-simple expansion in the directory is a hazard too (word splitting can break it into a python
-    command word); a double-quoted `$NAME` there cannot change the literal file name."""
-    variants = _brace_variants(atoms)
-    if variants is None:
-        return "a brace expansion the scan cannot expand in a command word, where a python word could hide"
-    braced = len(variants) > 1
-    for watoms in variants:
-        slash = max((k for k, (text, kind) in enumerate(watoms)
-                     if text == "/" and kind == SCAN_LITERAL), default=-1)
-        base = watoms[slash + 1:]
-        if any(kind in (SCAN_EXPANSION, SCAN_SIMPLE) for _, kind in base):
-            return "an expansion in a command word's file name, where a python word could hide"
-        if any(kind == SCAN_PATTERN and text == "~" for text, kind in base):
-            return "a ~ expansion in a command word's file name, where a python word could hide"
-        if any(kind == SCAN_PATTERN for _, kind in base):
-            if _matches_decision_set(base):
-                return ("a glob or brace in a command word's file name that can match a python "
-                        "interpreter name in the decision set")
-        elif braced and _word_text(base) in GLOB_DECISION_SET:
-            return "a brace expansion in a command word's file name that spells a python interpreter name"
-        if any(kind == SCAN_EXPANSION for _, kind in watoms[:slash + 1]):
-            return ("an unquoted or non-simple expansion in a command word's directory, which word "
-                    "splitting can break into a python command word")
-    return None
-
-
-def _is_assignment(atoms):
-    """True iff the word is a shell assignment (NAME=..., NAME+=..., NAME[subscript]=...): the prefix
-    up to and including its first literal `=` is literal text (the subscript's unquoted brackets
-    allowed) matching ASSIGN_PREFIX_RE. The value is never a command word, so an assignment word is not
-    checked; it still BLOCKS the proven-argument rule (after `X=1` the command word is still open)."""
-    for k, (text, kind) in enumerate(atoms):
-        if text == "=" and kind == SCAN_LITERAL:
-            prefix = atoms[:k + 1]
-            if all(kind2 == SCAN_LITERAL or (kind2 == SCAN_PATTERN and text2 in "[]")
-                   for text2, kind2 in prefix):
-                return bool(ASSIGN_PREFIX_RE.match(_word_text(prefix)))
-            return False
-    return False
-
-
-def _words_candidate(items):
-    """True iff one of the lexed words (_lenient_lex; redirect targets and heredoc delimiters included,
-    heredoc bodies excluded) is a candidate python launcher word once its quotes, backslashes and line
-    continuations are removed: a python interpreter name, a word ending in `/` plus one, or a word
-    naming a NO_SITE_SCRIPTS launcher. A python substring inside a longer word (`--python-version`,
-    `--python`) or inside a quoted multi-word argument (`echo "python3 done"`) makes no candidate: such
-    a word can neither be nor hide a python command word, and _command_word_hazard checks every word
-    that could. A heredoc BODY item is the exception: its raw text is read by substring (a python word
-    or a launcher name anywhere makes the command a candidate, which the grammar then refuses:
-    fail-closed, because a wrapper can execute the body)."""
-    for item in items:
-        if item is None:
-            continue
-        atoms, role = item
-        text = _word_text(atoms).replace("\\", "")
-        if role == "body":
-            if PY_TOKEN_RE.search(text.translate(QUOTES)) or any(
-                    name in text for name in NO_SITE_SCRIPTS):
-                return True
-            continue
-        if _is_py_word(text) or any(name in text for name in NO_SITE_SCRIPTS):
-            return True
-    return False
-
-
-def _lenient_lex(s):
-    """Lex a settings hook command LENIENTLY (this is not the allow-listed grammar): quotes, escapes
-    and line continuations are resolved, redirections, heredocs and expansions are read only far enough
-    to tell the words apart, and each word keeps per-character provenance. Returns a list of items:
-    None (a segment boundary: `;`, `&`, `|`, a newline, a parenthesis) or (atoms, role), atoms a list
-    of (text, kind) and role "word", "target" (a redirection's target) or "delim" (a heredoc's
-    delimiter). A heredoc body is NOT lexed: each pending `<<`/`<<-` delimiter, quoted or not, is
-    tracked from the newline after it to its terminator line (`<<-` also strips the terminator's
-    leading tabs), and the body lines in between are yielded as "body" items, which candidate
-    detection reads by raw text (fail-closed) and which are never command words. Returns a str naming a construct the
-    lexer does not read (the command is then a cannot-evaluate): a command or process substitution, a
-    backtick, a `${...}` holding a quote, a backslash, a brace or a `$`, and an unbalanced quote."""
-    items = []
-    atoms, started, target, delim, strip_tabs = [], False, False, False, False
-    pending = []                  # (delimiter text, strip-tabs) heredocs awaiting their body's newline
-    i, n = 0, len(s)
-    while i < n:
-        c = s[i]
-        if c in " \t\n;&|()<>":
-            if started:
-                if delim:
-                    items.append((atoms, "delim"))
-                    pending.append((_word_text(atoms), strip_tabs))
-                    delim = False
-                elif c in "<>" and all(k == SCAN_LITERAL and ch.isdigit() for ch, k in atoms):
-                    pass                 # a digit word glued to `<`/`>` is its file descriptor
-                else:
-                    items.append((atoms, "target" if target else "word"))
-                    target = False
-                atoms, started = [], False
-            if c in "<>":
-                if s.startswith("(", i + 1):
-                    return "a process substitution"
-                j = i
-                while j < n and s[j] in "<>&|":
-                    j += 1
-                if s[i:j] == "<<":
-                    strip_tabs = s.startswith("-", j)
-                    if strip_tabs:
-                        j += 1
-                    target, delim = False, True
-                else:
-                    target, delim = True, False
-                i = j
-                continue
-            if c == "\n":
-                items.append(None)
-                target = delim = False
-                i += 1
-                while pending:
-                    delim_text, strip = pending.pop(0)
-                    while i < n:
-                        eol = s.find("\n", i)
-                        line = s[i:eol] if eol >= 0 else s[i:]
-                        i = eol + 1 if eol >= 0 else n
-                        if (line.lstrip("\t") if strip else line) == delim_text:
-                            break
-                        items.append(([(line, SCAN_LITERAL)], "body"))
-                continue
-            if c not in " \t":
-                items.append(None)
-                target = delim = False
-            i += 1
-            continue
-        if c == "#" and not started:
-            end = s.find("\n", i)
-            i = n if end < 0 else end
-            continue
-        if c == "\\":
-            if not s.startswith("\n", i + 1):
-                atoms.append((s[i + 1:i + 2] or c, SCAN_LITERAL))
-                started = True
-            i += 2
-            continue
-        if c == "'":
-            close = s.find("'", i + 1)
-            if close < 0:
-                return "an unbalanced single quote"
-            atoms.extend((ch, SCAN_LITERAL) for ch in s[i + 1:close])
-            started, i = True, close + 1
-            continue
-        if c == '"':
-            j = i + 1
-            while j < n and s[j] != '"':
-                if s[j] == "\\" and j + 1 < n and s[j + 1] in '$`"\\\n':
-                    if s[j + 1] != "\n":
-                        atoms.append((s[j + 1], SCAN_LITERAL))
-                    j += 2
-                    continue
-                if s[j] == "`":
-                    return "a backtick command substitution"
-                if s[j] == "$":
-                    read = _dollar_construct(s, j, True)
-                    if isinstance(read, str):
-                        return read
-                    atoms.append((s[j:read[1]], read[0]))
-                    j = read[1]
-                    continue
-                atoms.append((s[j], SCAN_LITERAL))
-                j += 1
-            if j >= n:
-                return "an unbalanced double quote"
-            started, i = True, j + 1
-            continue
-        if c == "`":
-            return "a backtick command substitution"
-        if c == "$":
-            read = _dollar_construct(s, i, False)
-            if isinstance(read, str):
-                return read
-            atoms.append((s[i:read[1]], read[0]))
-            started, i = True, read[1]
-            continue
-        if c in "*?[{}" or (c == "~" and not started):
-            atoms.append((c, SCAN_PATTERN))
-        else:
-            atoms.append((c, SCAN_LITERAL))
-        started = True
-        i += 1
-    if started:
-        if delim:
-            items.append((atoms, "delim"))
-        else:
-            items.append((atoms, "target" if target else "word"))
-    return items
-
-
-def _command_word_hazard(items):
-    """The PROVEN-ARGUMENT rule over lexed items (_lenient_lex), for a settings hook command that is
-    not a candidate by its words (_words_candidate): None when no possible command word can hide a
-    python word, else a str naming the construct that can (the command is then a cannot-evaluate). A
-    word is a proven ARGUMENT only when EVERY word before it in its segment is a plain literal that is
-    not a RESERVED_WORDS word, not an assignment (_is_assignment), not an option (it starts with `-`)
-    and not an EXEC_WRAPPERS name; every word that is not a proven argument is a possible command word
-    and is checked (_file_name_hazard). Segment boundaries are over-approximated: the lexer's
-    separators and every RESERVED_WORDS word start one. A redirection's target and a heredoc's
-    delimiter are never command words, an assignment word is never one (it still blocks the proof), and
-    the operands of a leading `[` or `[[` (TEST_WORDS) are its arguments to the end of their segment."""
-    plain, count, test = True, 0, False
-    for item in items:
-        if item is None:
-            plain, count, test = True, 0, False
-            continue
-        atoms, role = item
-        if role != "word" or test:
-            continue
-        text = _word_text(atoms)
-        kinds = {kind for _, kind in atoms}
-        if kinds <= {SCAN_LITERAL, SCAN_PATTERN}:
-            if text in TEST_WORDS:
-                test = True
-                continue
-            if text in RESERVED_WORDS:
-                plain, count = True, 0
-                continue
-        assignment = _is_assignment(atoms)
-        if not assignment and not (plain and count):
-            hazard = _file_name_hazard(atoms)
-            if hazard:
-                return "{} ({!r})".format(hazard, text)
-        count += 1
-        if (assignment or kinds != {SCAN_LITERAL}
-                or text.startswith("-") or text in EXEC_WRAPPERS):
-            plain = False
-    return None
+def _is_candidate(s):
+    """True iff the settings hook command s is a CANDIDATE python launcher: CANDIDATE_RE finds a token in
+    s with its line continuations and backslashes removed, or in that text with its quote characters
+    removed as well (_unquoted_text). The first reading keeps a quote as a boundary (`env -S'python3
+    x.py'`), the second joins a quote-split name (`pyt"hon"3`). No shell lexing: a heredoc body, a
+    `$(...)` or a quoted argument that names python makes a candidate, which the grammar then refuses or
+    parses (fail-closed)."""
+    kept = s.replace("\\\n", "").replace("\\", "")
+    return bool(CANDIDATE_RE.search(kept) or CANDIDATE_RE.search(_unquoted_text(s)))
 
 
 def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures, launch_surface):
@@ -1044,8 +684,9 @@ def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures
     launcher after its interpreter options: on a CI line only after the script operand (where no rule
     reads it), in a settings hook command from the script operand on (where it is a leading path
     segment, so the basename the rules read is literal). At or before the command word, among the
-    interpreter options and their values, or as a separate -c/-m operand (inside the protected span),
-    it is a cannot-evaluate."""
+    interpreter options and their values, or as a -c/-m operand (inside the protected span: the token
+    after a separate `-c`/`-m` or after a cluster ending in `c` or `m`, `-Ic`, `-BIm`), it is a
+    cannot-evaluate."""
     py_word_count = sum(1 for t in tokens if _is_py_word(t))
     launchers = []
     for seg in _segments(tokens):
@@ -1211,27 +852,15 @@ def _check_hooks_json(rel, text, errors, failures):
                 else:
                     # The settings form: a shell string that may chain commands (e.g. `prep && python3
                     # x.py`), so segment-split and check every launcher segment, not just the first.
-                    # Only a candidate python launcher is in scope: one of its lexed words is a python
-                    # interpreter name, ends in `/` plus one, or names the core hook launcher
-                    # (_words_candidate); when the lenient lexer refuses the string, candidacy falls
-                    # back to the quote-stripped text (_is_candidate_text, an over-approximation). A
-                    # candidate is parsed only inside the allow-listed grammar (_shell_split, with a
-                    # double-quoted `$NAME` admitted as a leading path segment): anything else, a `$`
-                    # expansion elsewhere, a backtick, a backslash, a `#`, a newline, a redirection
-                    # included, is a cannot-evaluate naming the construct. A non-candidate is scanned
-                    # for possible command words that can hide a python word (_command_word_hazard,
-                    # the proven-argument rule): a hazard is a cannot-evaluate, anything else is out
-                    # of scope.
-                    lexed = _lenient_lex(command)
-                    refused = isinstance(lexed, str)
-                    candidate = (_is_candidate_text(command) if refused
-                                 else _words_candidate(lexed))
-                    if not candidate:
-                        hazard = lexed if refused else _command_word_hazard(lexed)
-                        if hazard is not None:
-                            errors.append((rel, 0, hloc, "command string: a command word that may hide a "
-                                           "python launcher; fail-closed: {}".format(hazard)))
-                        continue             # no candidate word and no hidden one: out of scope
+                    # Only a candidate python launcher is in scope: its text literally names a python
+                    # interpreter or the core hook launcher (_is_candidate, no shell lexing). Any other
+                    # command is out of scope (the literal-scope residual). A candidate is parsed only
+                    # inside the allow-listed grammar (_shell_split, with a double-quoted `$NAME` admitted
+                    # as a leading path segment): anything else, a `$` expansion elsewhere, a backtick, a
+                    # backslash, a `#`, a newline, a redirection included, is a cannot-evaluate naming
+                    # the construct.
+                    if not _is_candidate(command):
+                        continue             # names no python interpreter and no core hook launcher
                     try:
                         tokens = _shell_split(command, expansions=LEADING_PATH)
                     except ValueError as exc:
@@ -1469,6 +1098,11 @@ def main():
 #      settings-command cannot-evaluate (exit 2) naming it; plain compliant commands pass (exit 0) and
 #      plain non-compliant ones fail (exit 1); on a CI line a double-quoted `$NAME` after the script
 #      operand passes and one at the command word, in the options or in the script operand is exit 2.
+#  42. the literal SCOPE: every candidate reproduction keeps its exit, and the documented leading-path
+#      script operand is admitted; 43. a command naming no python interpreter and no core hook launcher
+#      is out of scope (exit 0): the disclosed literal-scope residual and the adopter table; 44. every
+#      candidacy boundary and non-boundary; 45. a -c/-m that ends a cluster (-Ic, -Im, -BIc) protects
+#      the next token exactly like a separate -c/-m.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -2139,6 +1773,14 @@ def self_test_main():
             ("tilde", "python3 -I -B ~/" + gen_hooks.LAUNCHER_NAME, 2, "a tilde"),
             ("dq-backslash", 'python3 -I -B "/p/aiqt_hooks_\\launch.py"', 2, "a backslash escape inside"),
             ("dq-bang", 'echo "a!b" && python3 -I -B ' + launch_arg, 2, "a ! (history expansion) inside"),
+            ("open-paren", "python3 -I -B /p/x.py (", 2, "a parenthesis"),
+            ("close-paren", "python3 -I -B /p/x.py )", 2, "a parenthesis"),
+            ("open-brace", "python3 -I -B /p/x.py x{", 2, "a brace"),
+            ("close-brace", "python3 -I -B /p/x.py x}", 2, "a brace"),
+            ("close-bracket", "python3 -I -B /p/x.py x]", 2, "glob character ]"),
+            ("dq-backtick", 'python3 -I -B "`id`" ' + launch_arg, 2, "a backtick command substitution inside"),
+            ("dq-newline", 'python3 -I -B "a\nb" ' + launch_arg, 2, "a newline inside a command inside"),
+            ("sq-newline", "python3 -I -B 'a\nb' " + launch_arg, 2, "a newline inside a command"),
             ("pipe-amp", "echo a |& python3 -I -B " + launch_arg, 2, "not a listed separator"),
             ("unbalanced-squote", "python3 -I -B 'x " + launch_arg, 2, "an unbalanced single quote"),
             ("unbalanced-dquote", 'python3 -I -B "x ' + launch_arg, 2, "an unbalanced double quote"),
@@ -2173,30 +1815,15 @@ def self_test_main():
                 failures.append("allow-listed grammar: the run_all_checks.sh line {} {!r} expected exit {}"
                                 .format(label, line, want))
 
-        # 42. SCOPE, and the leading path segment. A settings hook command none of whose words is a
-        #     python interpreter name, ends in `/` plus one, or names the core hook launcher (quotes,
-        #     backslashes and line continuations removed; a heredoc body counts by raw text) is out of
-        #     scope (exit 0), its redirections, `~` paths, groups, globs and heredoc bodies included,
-        #     unless a POSSIBLE COMMAND WORD can hide a python word: every word is one except a proven
-        #     argument (every word before it in its segment a plain literal that is no reserved word,
-        #     assignment, option or EXEC_WRAPPERS name), a redirect target, a heredoc delimiter and a
-        #     test-word operand; a hidden python word (an expansion or `~` in the file name, a glob or
-        #     brace that can match a GLOB_DECISION_SET interpreter name, an unquoted expansion in the
-        #     directory, a command or process substitution or a backtick anywhere) is a cannot-evaluate
-        #     (exit 2). Inside a candidate the form Claude Code's hook documentation shows, a
-        #     double-quoted `$NAME` or `${NAME}` as the leading path segment of the script operand,
-        #     is admitted (compliant 0, non-compliant 1, the basename read literally), and an expansion at
-        #     or before the command word, among the interpreter options, their values and their separate
-        #     -c/-m operands, or anywhere but a leading path segment is a cannot-evaluate (exit 2). A
-        #     backslash- or line-continuation-
-        #     spelled python word makes a command a candidate, which the grammar then refuses (exit 2).
-        #     Every round-20 reviewer reproduction is a row below: the env option values, time options,
-        #     coproc, function NAME and X+=1 positions the old enumerated list missed (each exit 2), the
-        #     heredoc bodies that must stay out of scope (exit 0) or stay candidates (exit 2), the
-        #     mutant-killing rows (special parameters, mid-word `#`, a non-digit word before a redirect,
-        #     keywords, newline/|/& separators, `${...}` interiors, a double-quoted backtick, an
-        #     unbalanced quote), the -c/-m operand expansions (exit 2), the three non-candidate python
-        #     substrings (exit 0), the wrapper residuals (exit 0) and the glob decision set.
+        # 42. SCOPE (the literal-scope ruling), and the leading path segment. A CANDIDATE settings hook
+        #     command (_is_candidate: its text, line continuations and backslashes removed, with or
+        #     without its quote characters, names a python interpreter or the core hook launcher as a
+        #     bounded token) is parsed in the allow-listed grammar; inside it the form Claude Code's hook
+        #     documentation shows, a double-quoted `$NAME` or `${NAME}` as the leading path segment of the
+        #     script operand, is admitted (compliant 0, non-compliant 1, the basename read literally), and
+        #     an expansion at or before the command word, among the interpreter options, their values and
+        #     their -c/-m operands, or anywhere but a leading path segment is a cannot-evaluate (exit 2).
+        #     Every round 18-21 reproduction that names python or the launcher literally keeps its exit.
         scope_rows = (
             ('python3 -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 0),
             ('python3 -I -S -B "$CLAUDE_PROJECT_DIR/.claude/hooks/aiqt_hooks_launch.py" h_one', 0),
@@ -2209,8 +1836,6 @@ def self_test_main():
             ('python3 -S "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 1),
             ('"$PY" -I -S -B /p/aiqt_hooks_launch.py h_one', 2),
             ('"$PY" -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 2),
-            ('"${PY}" -I -S -B /p/x.py', 2),
-            ('"$PY" -I -S -B /p/x.py', 2),
             ('"$CLAUDE_PROJECT_DIR"/bin/python3 -I -S -B /p/aiqt_hooks_launch.py', 2),
             ('python3 -I -W "$W"/x -S -B /p/aiqt_hooks_launch.py h_one', 2),
             ('python3 -I -X "$D"/importtime -S -B /p/aiqt_hooks_launch.py', 2),
@@ -2225,81 +1850,14 @@ def self_test_main():
             ('python3 -I -S -B "${D:-/x}"/aiqt_hooks_launch.py', 2),
             ('python3 -I -S -B "$1"/aiqt_hooks_launch.py', 2),
             ('python3 -I -S -B "x$D"/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B x"$D"/aiqt_hooks_launch.py', 2),
             ('python3 -I -S -B /p/aiqt_hooks_launch.py "$X"', 2),
             ('python3 -I -S -B "$D"/aiqt_hooks_launch.py 2>/dev/null', 2),
             ('pyt\\hon3 -B x.py', 2),
             ('pyth\\\non3 -B x.py', 2),
             ('pyt"hon"3 -B x.py', 1),
             ('"$D"/aiqt_hooks_launch.py h_one', 2),
-            ('"$CLAUDE_PROJECT_DIR"/.claude/hooks/check-style.sh', 0),
-            ('"${CLAUDE_PROJECT_DIR}/.claude/hooks/check-style.sh" 2>/dev/null', 0),
-            ('~/bin/notify.sh >> ~/.claude/notify.log 2>&1', 0),
-            ('{ jq -r .tool_input.command; echo; } >> /tmp/claude-commands.log', 0),
-            ('(cd "$CLAUDE_PROJECT_DIR" && npx prettier --write src/*.ts) || true', 0),
-            ('rm -f /tmp/*.lock; echo done > /dev/null', 0),
-            ("jq -r '.tool_input.file_path' | xargs -r npx eslint --fix", 0),
-            ('if [ -f .env ]; then echo "found"; fi', 0),
-            ('[ -n "$CI" ] || ./scripts/hook.sh', 0),
-            ('[[ -n "$CI" ]] && echo ci', 0),
-            ('for f in *.md; do echo "$f"; done', 0),
-            ('npm run lint -- --fix 2>&1 | tee /tmp/lint.log', 0),
-            ('"$HOME"/.claude/hooks/x.sh', 0),
-            ('bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh', 0),
-            ('X=1 Y="$Z" ./hook.sh < /dev/null', 0),
-            ('env -i FOO=1 ./hook.sh', 0),
-            ('echo "${X:-default}" >> log', 0),
-            ('cat <<EOF\nhello\nEOF', 0),
-            ('"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py', 0),
-            ('echo "$(date)" >> ~/log', 2),
-            ('$HOME/.claude/hooks/x.sh', 2),
-            ('"$HOOK"', 2),
-            ('"$D"/pyth?n3 x.py', 2),
-            ('/usr/bin/pyth{o,}n3 x.py', 2),
-            ('X=1 "$PY" x.py', 2),
-            ('env -i "$PY" x.py', 2),
-            ('! "$PY" x.py', 2),
-            ('echo a; "$PY" x.py', 2),
-            ("$'pyth\\x6fn3' x.py", 2),
-            ('~x', 2),
-            ('echo `id`', 2),
-            ('cat <(echo x)', 2),
-            ("echo 'unbalanced", 2),
-            ('"$PY"x x.py', 2),
-            ('${PY} x.py', 2),
-            ('"$D"$E/x.sh', 2),
-            ('"$D"/~x/y.sh', 0),
-            ('if true; then "$PY" x.py; fi', 2),
-            ('{ "$PY" x.py; }', 2),
-            ('( "$PY" x.py )', 2),
-            ('env -u HOME "$PY" x.py', 2),
-            ('env -iu HOME "$PY" x.py', 2),
-            ('env --unset HOME "$PY" x.py', 2),
-            ('env -C /tmp "$PY" x.py', 2),
-            ('time -p "$PY" x.py', 2),
-            ('time -- "$PY" x.py', 2),
-            ('time "$PY" x.py', 2),
-            ("time -p pyt${E}hon3 -B -c 'import sys; print(sys.flags.isolated)'", 2),
-            ('coproc "$PY" x.py', 2),
-            ('coproc NAME { "$PY" x.py; }', 2),
-            ("coproc pyt${E}hon3 -B -c 'import sys; print(sys.flags.isolated)'", 2),
-            ('function f { "$PY" x.py; }; f', 2),
-            ('X+=1 "$PY" x.py', 2),
-            ('while "$PY" x.py; do echo x; done', 2),
-            ('until "$PY" x.py; do echo x; done', 2),
-            ('while true; do "$PY" x.py; done', 2),
-            ('$1 x.py', 2),
-            ('x#y; "$PY" x.py', 2),
-            ('"$PY"<in x.py', 2),
-            ('echo a\n"$PY" x.py', 2),
-            ('echo a | "$PY" x.py', 2),
-            ('echo a & "$PY" x.py', 2),
-            ('echo ${X:-$("$PY" x.py)}', 2),
-            ('echo "`"$PY" x.py`"', 2),
-            ('echo "x', 2),
-            ("cat <<'EOF'\n*\nEOF", 0),
-            ('cat <<-EOF\n\t*\n\tEOF', 0),
             ('cat <<EOF\npython3 x.py\nEOF', 2),
-            ('bash <<EOF\n"$PY" x.py\nEOF', 0),
             ('python3 -I -c "$D"/x', 2),
             ('python3 -I -m "$D"/x', 2),
             ('python3 -I -B -c "$D"/x', 2),
@@ -2309,26 +1867,128 @@ def self_test_main():
             ('python3 -I-check-hash-based-pycs "$D"/x', 2),
             ('X="$D"/a env python3 -I -S -B /p/aiqt_hooks_launch.py', 2),
             ('echo a;"$D"/python3 x.py', 2),
-            ('mypy --python-version 3.12 src/ > /tmp/mypy.log 2>&1', 0),
-            ('uv run --python 3.12 ruff check . 2>&1 | head -20', 0),
-            ('echo "python3 done" >> ~/log', 0),
             ('python3 -I -S -B /p/aiqt_hooks_launch.py h && "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh',
              2),
             ("env -S'python3 x.py'", 0),
             ("bash -c 'python3 x.py'", 0),
-            ('grep -r pat /src/*.c', 0),
-            ('env ./pyth*', 2),
-            ('env ./x{a,b}.sh', 0),
-            ('env ./p{a..z}.sh', 2),
-            ('env pytho?3.16 x.py', 0),
+            ('echo "python3 done"', 0),
+            ('echo "python3 done" >> ~/log', 2),
             ('python2 x.py', 0),
+            ('pythonw x.py', 0),
+            ('python3.12 x.py', 1),
+            ('python3.12 -I x.py', 0),
+            # Round 21's constructs with python named literally: each is a candidate the grammar refuses.
+            ('cat <<EOF\n$(python3 x.py)\nEOF', 2),
+            ('echo $((1<<2)); python3 -I x.py', 2),
+            ('eval python3 x.py', 2),
+            ('eval "python3 x.py"', 0),
+            ('watch -n 1 python3 x.py', 2),
+            ('exec python3 x.py', 2),
+            ('[ -n x ] && python3 -I x.py', 2),
+            ('test -n x && python3 -I x.py', 0),
+            ('test -n x && python3 x.py', 1),
+            ('PY=python3; "$PY" x.py', 2),
+            ('/usr/bin/{x,python3} x.py', 2),
+            ('python3<x.py', 2),
+            ('python3* x.py', 2),
+            ('${X}python3 x.py', 2),
+            ('python3$X x.py', 2),
+            ('echo "$(python3 x.py)"', 2),
         )
-        for k, (cmd, want) in enumerate(scope_rows):
+        # 43. OUT OF SCOPE: a settings hook command that names neither a python interpreter nor the core
+        #     hook launcher is exit 0 and is never lexed. These rows pin the DISCLOSED literal-scope
+        #     residual: each round 18-21 reproduction that reaches a python only through an expansion, a
+        #     glob, a brace, quoting, a substitution, a heredoc, eval or watch re-parsing or a wrapper
+        #     (several were exit 2 before the ruling) is exit 0. The ADOPTER TABLE follows: ordinary hook
+        #     commands, all exit 0.
+        out_of_scope_rows = (
+            '"${PY}" -I -S -B /p/x.py', '"$PY" -I -S -B /p/x.py', 'echo "$(date)" >> ~/log',
+            '$HOME/.claude/hooks/x.sh', '"$HOOK"', '"$D"/pyth?n3 x.py', '/usr/bin/pyth{o,}n3 x.py',
+            'X=1 "$PY" x.py', 'env -i "$PY" x.py', '! "$PY" x.py', 'echo a; "$PY" x.py',
+            "$'pyth\\x6fn3' x.py", '~x', 'echo `id`', 'cat <(echo x)', "echo 'unbalanced", '"$PY"x x.py',
+            '${PY} x.py', '"$D"$E/x.sh', '"$D"/~x/y.sh', 'if true; then "$PY" x.py; fi', '{ "$PY" x.py; }',
+            '( "$PY" x.py )', 'env -u HOME "$PY" x.py', 'env -iu HOME "$PY" x.py',
+            'env --unset HOME "$PY" x.py', 'env -C /tmp "$PY" x.py', 'time -p "$PY" x.py',
+            'time -- "$PY" x.py', 'time "$PY" x.py',
+            "time -p pyt${E}hon3 -B -c 'import sys; print(sys.flags.isolated)'", 'coproc "$PY" x.py',
+            'coproc NAME { "$PY" x.py; }', "coproc pyt${E}hon3 -B -c 'import sys; print(sys.flags.isolated)'",
+            'function f { "$PY" x.py; }; f', 'X+=1 "$PY" x.py', 'while "$PY" x.py; do echo x; done',
+            'until "$PY" x.py; do echo x; done', 'while true; do "$PY" x.py; done', '$1 x.py',
+            'x#y; "$PY" x.py', '"$PY"<in x.py', 'echo a\n"$PY" x.py', 'echo a | "$PY" x.py',
+            'echo a & "$PY" x.py', 'echo ${X:-$("$PY" x.py)}', 'echo "`"$PY" x.py`"', 'echo "x',
+            "cat <<'EOF'\n*\nEOF", 'cat <<-EOF\n\t*\n\tEOF', 'bash <<EOF\n"$PY" x.py\nEOF',
+            'env ./pyth*', 'env ./x{a,b}.sh', 'env ./p{a..z}.sh', 'env pytho?3.16 x.py',
+            'cat <<EOF\n$("$PY" x.py)\nEOF', 'echo $((1<<2)); "$PY" x.py', '/usr/bin/[p]ython3 x.py',
+            '[ "$PY" x.py ]; "$PY" x.py', '[[ -n "$X" ]] && "$PY" x.py', 'eval "$PY" x.py',
+            'eval "$CMD"', 'eval pyt${E}hon3 x.py', 'watch -n 1 "$PY" x.py', 'exec "$PY"',
+            'xargs "$PY"', 'bash -c "$PY x.py"', "pyt$'h'on3 x.py",
+        )
+        adopter_rows = (
+            '"$CLAUDE_PROJECT_DIR"/.claude/hooks/check-style.sh',
+            '"${CLAUDE_PROJECT_DIR}/.claude/hooks/check-style.sh" 2>/dev/null',
+            '~/bin/notify.sh >> ~/.claude/notify.log 2>&1',
+            '{ jq -r .tool_input.command; echo; } >> /tmp/claude-commands.log',
+            '(cd "$CLAUDE_PROJECT_DIR" && npx prettier --write src/*.ts) || true',
+            'rm -f /tmp/*.lock; echo done > /dev/null',
+            "jq -r '.tool_input.file_path' | xargs -r npx eslint --fix",
+            'if [ -f .env ]; then echo "found"; fi', '[ -n "$CI" ] || ./scripts/hook.sh',
+            '[[ -n "$CI" ]] && echo ci', 'for f in *.md; do echo "$f"; done',
+            'npm run lint -- --fix 2>&1 | tee /tmp/lint.log', '"$HOME"/.claude/hooks/x.sh',
+            'bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh', 'X=1 Y="$Z" ./hook.sh < /dev/null',
+            'env -i FOO=1 ./hook.sh', 'echo "${X:-default}" >> log', 'cat <<EOF\nhello\nEOF',
+            '"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py', 'grep -r pat /src/*.c',
+            'npx prettier --write "$FILE_PATH"', 'rm -f "$TMPFILE"', 'git -C "$CLAUDE_PROJECT_DIR" status',
+            'notify-send -u low "$MSG"', 'test -f "$F" && echo y', 'for f in $FILES; do echo "$f"; done',
+            'for a in "$@"; do echo "$a"; done', 'echo done "$MSG"',
+            'mypy --python-version 3.12 src/ > /tmp/mypy.log 2>&1',
+            'uv run --python 3.12 ruff check . 2>&1 | head -20',
+            'uv run --python=3.12 ruff check "$FILE_PATH"', 'cat <<EOF\n$FILE_PATH done\nEOF',
+            "cat <<'EOF' > /tmp/x\nrun $X\nEOF",
+        )
+        # 44. CANDIDACY boundaries, each in a row that the grammar refuses when it is a candidate (the
+        #     double-quoted "$V" is no leading path segment): exit 2 pins a candidate, exit 0 pins a
+        #     non-candidate. One row per CANDIDATE_LEFT and CANDIDATE_RIGHT character (spelled out here,
+        #     not read from the constants, so dropping a character fails its row), per quote, per
+        #     interpreter-name form, per reading (quotes kept: env -S'python3 x.py'; quotes removed:
+        #     pyt"hon"3), the backslash and line-continuation removals, and the non-boundaries.
+        candidacy_rows = [(': "$V" X{}python3'.format(ch), 2) for ch in "/;|&(){}`=,<>*"]
+        candidacy_rows += [('python3{}X "$V"'.format(ch), 2) for ch in ";|&(){}`,<>[*?$"]
+        candidacy_rows += [
+            ('python3 "$V"', 2), (': "$V" python3', 2), (': "$V"\tpython3\t:', 2), (': "$V"\npython3', 2),
+            (": \"$V\" 'python3 x'", 2), (': "$V" "python3 x"', 2), (": \"$V\" 'x python3'", 2),
+            (': "$V" "x python3"', 2), (": \"$V\" python3'x'", 2), (': "$V" python3"x"', 2),
+            ("env -S'python3 x.py' \"$V\"", 2), ('pyt"hon"3 "$V"', 2), ("py'th'on3 \"$V\"", 2),
+            ('pyt\\hon3 "$V"', 2), ('pyth\\\non3 "$V"', 2),
+            (': "$V" python', 2), (': "$V" python2', 2), (': "$V" python3', 2), (': "$V" python3.12', 2),
+            (': "$V" python2.7', 2), (': "$V" pythonw', 2), (': "$V" /p/aiqt_hooks_launch.py', 2),
+            (': "$V" --python-version 3.12', 0), (': "$V" --python 3.12', 0), (': "$V" --python=3.12', 0),
+            (': "$V" -python3', 0), (': "$V" xpython3', 0), (': "$V" $python3', 0), (': "$V" :python3', 0),
+            (': "$V" python3x', 0), (': "$V" python3-x', 0), (': "$V" python3/x', 0),
+            (': "$V" python3.x', 0), (': "$V" python3:', 0), (': "$V" pythonx', 0),
+            (': "$V" aiqt_hooks_launch.pyc', 0), (': "$V" xaiqt_hooks_launch.py', 0),
+            (': "$V" /p/aiqt_hooks_launch.py.bak', 0),
+        ]
+        # 45. A CLUSTERED -c/-m protects the following operand exactly like a separate one: an admitted
+        #     leading-path expansion after `-Ic`, `-Im`, `-BIc` or `-ISc` is inside the protected span
+        #     (exit 2), while after an attached operand (`-IcX`) the next word is the command's argument,
+        #     where the admission still holds.
+        cluster_rows = (
+            ('python3 -Ic "$D"/x', 2), ('python3 -Im "$D"/x', 2), ('python3 -BIc "$D"/x', 2),
+            ('python3 -ISc "$D"/aiqt_hooks_launch.py', 2), ('python3 -I -Bc "$D"/x', 2),
+            ('python3 -IcX "$D"/x', 0), ('python3 -I -c X "$D"/x', 0),
+        )
+        rows = ([(cmd, want, "scope") for cmd, want in scope_rows]
+                + [(cmd, 0, "out-of-scope") for cmd in out_of_scope_rows]
+                + [(cmd, 0, "adopter") for cmd in adopter_rows]
+                + [(cmd, want, "candidacy") for cmd, want in candidacy_rows]
+                + [(cmd, want, "cluster") for cmd, want in cluster_rows])
+        for k, (cmd, want, kind) in enumerate(rows):
             errs, fails = scan(settings_tree("scope-{}".format(k), cmd))
             got = 2 if errs else (1 if fails else 0)
             if got != want:
-                failures.append("scope: the settings command {!r} expected exit {} (got exit {}, "
-                                "errs={!r}, fails={!r})".format(cmd, want, got, errs, fails))
+                failures.append("{}: the settings command {!r} expected exit {} (got exit {}, "
+                                "errs={!r}, fails={!r})".format(kind, cmd, want, got, errs, fails))
+        settings_rows = len(grammar_rows) + len(rows)
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -2382,15 +2042,15 @@ def self_test_main():
           "token to the script operand, confirmed against a real interpreter; a second mention of the "
           "launcher after a compliant operand passes; every reviewer reproduction and every other construct "
           "outside the allow-listed shell grammar is a cannot-evaluate (exit 2) naming it while plain "
-          "compliant commands pass and plain non-compliant ones fail; a settings hook command with no "
-          "candidate word (a python interpreter name, a word ending in `/` plus one, or the core hook "
-          "launcher's name; a heredoc body by raw text) is out of scope (exit 0) with its redirections, "
-          "`~` paths, groups, globs and heredoc bodies, unless a possible command word under the "
-          "proven-argument rule can hide a python word (exit 2), and the documented "
-          "`\"$CLAUDE_PROJECT_DIR\"/...` script operand passes compliant (exit 0) and fails non-compliant "
-          "(exit 1) while an expansion at the command word or among the options is exit 2; and the gate "
-          "refuses to run non-"
-          "isolated (exit 2)"
+          "compliant commands pass and plain non-compliant ones fail; a settings hook command whose text "
+          "names no python interpreter and no core hook launcher as a bounded token is out of scope "
+          "(exit 0, the literal-scope residual, the adopter table included), a candidate is parsed in the "
+          "grammar (pyt\"hon\"3, a heredoc body or a $(...) naming python3 included), each candidacy "
+          "boundary and non-boundary is pinned, the documented `\"$CLAUDE_PROJECT_DIR\"/...` script operand "
+          "passes compliant (exit 0) and fails non-compliant (exit 1) while an expansion at the command "
+          "word, among the options or after a -c/-m, separate or ending a cluster (-Ic, -Im, -BIc), is "
+          "exit 2 ({} settings-command scope and grammar rows); and the gate refuses to run non-"
+          "isolated (exit 2)".format(settings_rows)
           + note)
     return 0
 
