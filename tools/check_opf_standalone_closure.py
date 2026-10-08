@@ -30,14 +30,17 @@ Exit convention (matches the repo's gates):
      finding.
 
 --self-test runs in two stages. First the preflight: the registration cases and the stubbed cases (no
-subset member runs), each run on its own so that a case that could not be set up never hides another
-case's refutation. When any preflight case was refuted the self-test exits 1; otherwise, when one could
-not be set up (for example with no opf/ subtree, or a scratch directory or copy that could not be
-made), it exits 2. In both of those outcomes the closure legs never run. Then the two closure legs:
+subset member runs), each run on its own so that a case that could not be evaluated never hides another
+case's refutation. Attribution: a failure of the harness (no opf/ subtree, or a scratch directory, copy
+or fixture that could not be made at any point in a case, or any other ordinary exception raised by a
+case's own code) is cannot-evaluate; once a case's fixture is built, a crash or a wrong result of the
+code under test is a refutation. When any preflight case was refuted the self-test exits 1; otherwise,
+when one could not be evaluated, it exits 2. In both of those outcomes the closure legs never run.
+Then the two closure legs:
 exit 0 (both legs held), 1 (a leg was refuted: the real opf/ did not verify, or the flipped copy was
 not caught for the intended reason; failure-first, whatever else could not be evaluated) or 2 (no leg
 was refuted but one could not be evaluated: run() returned 2, the flipped copy timed out or could not
-be launched, or its scratch directory or copy could not be made).
+be launched, its scratch directory or copy could not be made, or its _opf_store.py is not UTF-8 text).
 """
 import sys
 
@@ -132,14 +135,14 @@ def _check_pack_manifest_registration(subset):
 
 
 def _pack_manifest_registration_self_test():
-    _check_pack_manifest_registration(_SUBSET)
+    _attributed("closure/pack-manifest-registration", lambda: _check_pack_manifest_registration(_SUBSET))
     print("PASS closure/pack-manifest-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
     changed.remove(("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]))
     try:
-        _check_pack_manifest_registration(changed)
+        _attributed("closure/pack-manifest-registration", lambda: _check_pack_manifest_registration(changed))
     except AssertionError as exc:
         if str(exc) != "closure/pack-manifest-registration":
             raise
@@ -162,14 +165,14 @@ def _check_adopt_observe_registration(subset):
 
 
 def _adopt_observe_registration_self_test():
-    _check_adopt_observe_registration(_SUBSET)
+    _attributed("closure/adopt-observe-registration", lambda: _check_adopt_observe_registration(_SUBSET))
     print("PASS closure/adopt-observe-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
     changed.remove(("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]))
     try:
-        _check_adopt_observe_registration(changed)
+        _attributed("closure/adopt-observe-registration", lambda: _check_adopt_observe_registration(changed))
     except AssertionError as exc:
         if str(exc) != "closure/adopt-observe-registration":
             raise
@@ -192,13 +195,13 @@ def _check_member_timeout_rows(subset, table):
 
 
 def _member_timeout_rows_self_test():
-    _check_member_timeout_rows(_SUBSET, _MEMBER_TIMEOUT_S)
+    _attributed("closure/member-timeout-rows", lambda: _check_member_timeout_rows(_SUBSET, _MEMBER_TIMEOUT_S))
     print("PASS closure/member-timeout-rows")
     # Mutate a COPY of the real table: a row naming no member must go red.
     changed = dict(_MEMBER_TIMEOUT_S)
     changed["no-such-member"] = 60
     try:
-        _check_member_timeout_rows(_SUBSET, changed)
+        _attributed("closure/member-timeout-rows", lambda: _check_member_timeout_rows(_SUBSET, changed))
     except AssertionError as exc:
         if not str(exc).startswith("closure/member-timeout-rows"):
             raise
@@ -210,7 +213,7 @@ def _member_timeout_rows_self_test():
         changed = dict(_MEMBER_TIMEOUT_S)
         changed["opf-tooling-selftest"] = bad
         try:
-            _check_member_timeout_rows(_SUBSET, changed)
+            _attributed("closure/member-timeout-rows", lambda: _check_member_timeout_rows(_SUBSET, changed))
         except AssertionError as exc:
             if str(exc) != "closure/member-timeout-rows: opf-tooling-selftest":
                 raise
@@ -420,7 +423,10 @@ def _closure_legs(root):
         try:
             text = store.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            # A malformed fixture is not a refuted leg: the flip was never made, so nothing was observed.
+            # Malformed input (the exit-2 convention): bytes that are not UTF-8 text cannot be flipped at
+            # all, so nothing was observed. A UTF-8 store without the _semver import is well-formed input
+            # the flip no longer matches: that is fixture drift, a failure below, because the negative leg
+            # has lost the edge it exists to re-introduce and must be updated.
             cannot.append(_NEG_DECODE_ERROR + str(exc))
             return failures, cannot
         flipped = text.replace("from _semver import _parse",
@@ -493,20 +499,75 @@ def _stub_member_runner(calls, outcomes):
 
 
 class _CannotEvaluate(Exception):
-    """A stubbed self-test case could not be set up (no opf/ subtree, a copy or scratch directory that
-    could not be made): a harness error, never a refuted leg, so the self-test exits 2."""
+    """A self-test case could not be evaluated: a failure of the harness (no opf/ subtree, or a scratch
+    directory, copy or fixture that could not be made), never a refuted leg, so the self-test exits 2."""
+
+
+def _harness_watch(broke):
+    """Stand-ins for tempfile and _materialize that delegate to the ones bound now and append to `broke`
+    every scratch allocation or copy that raised. Such a failure is the harness's (the fixture was not
+    built); it is told apart from the code under test's own result by observing the primitive itself,
+    never by reading a message the code under test produced."""
+    inner_tempfile, inner_materialize = tempfile, _materialize
+
+    def mkdtemp(*args, **kwargs):
+        try:
+            return inner_tempfile.mkdtemp(*args, **kwargs)
+        except Exception as exc:
+            broke.append("scratch allocation failed: {}".format(exc))
+            raise
+
+    def materialize(opf_src, dest):
+        try:
+            return inner_materialize(opf_src, dest)
+        except Exception as exc:
+            broke.append("copy failed: {}".format(exc))
+            raise
+    return dict(tempfile=types.SimpleNamespace(mkdtemp=mkdtemp), _materialize=materialize)
+
+
+def _attributed(label, call, injected=None):
+    """call() runs the code under test under a _harness_watch of the scratch allocation and copy bound
+    now, with `injected` (the case's own stubs and stubbed failures, which are its fixture, not a
+    harness failure) patched over the watch. It applies _preflight_exit's attribution rule. When the
+    harness failed, the outcome is cannot-evaluate whatever call() then did. Otherwise call()'s result
+    is returned, its AssertionError or _CannotEvaluate passes through, and any other Exception (a
+    crash of the code under test) becomes an AssertionError naming it."""
+    broke = []
+    with _patched(**_harness_watch(broke)), _patched(**(injected or {})):
+        try:
+            result = call()
+        except Exception as exc:
+            if broke:
+                raise _CannotEvaluate("{}: harness failure: {}".format(label, " | ".join(broke))) from exc
+            if isinstance(exc, (AssertionError, _CannotEvaluate)):
+                raise
+            raise AssertionError("{}: the code under test raised {}: {}".format(
+                label, type(exc).__name__, exc)) from exc
+    if broke:
+        raise _CannotEvaluate("{}: harness failure: {}".format(label, " | ".join(broke)))
+    return result
 
 
 def _stubbed_run(root, outcomes):
-    """run(root) with _run_one stubbed by outcomes; returns (rc, stdout, stderr, calls). Raises
-    _CannotEvaluate, naming run()'s own error, when run() exited before any subset member ran (opf/
-    absent, its copy or scratch directory not made): the case then observed nothing."""
-    calls = []
-    with _patched(_run_one=_stub_member_runner(calls, outcomes)):
-        rc, out, err = _captured(run, root)
+    """run(root) with _run_one stubbed by outcomes, through _attributed; returns (rc, stdout, stderr,
+    calls). Cannot-evaluate, naming run()'s own error, when root has no opf/ subtree or the scratch
+    directory or copy could not be made (the case then observed nothing). A run() that crashed, or
+    exited before any subset member ran although its copy was built, is refuted."""
+    _require_subtree(root)
+    calls, seen = [], []
+    try:
+        _attributed("closure/stubbed-run", lambda: seen.append(_captured(run, root)),
+                    injected=dict(_run_one=_stub_member_runner(calls, outcomes)))
+    except _CannotEvaluate as exc:
+        if not seen:
+            raise
+        raise _CannotEvaluate("{}: run() exited {}: {}".format(
+            exc, seen[0][0], seen[0][2].strip().replace("\n", " | "))) from exc
+    rc, out, err = seen[0]
     if not calls:
-        raise _CannotEvaluate("closure/stubbed-run: run() exited {} before any subset member ran: {}".format(
-            rc, err.strip().replace("\n", " | ")))
+        raise AssertionError("closure/stubbed-run: run() exited {} before any subset member ran, with "
+                             "its copy built: {}".format(rc, err.strip().replace("\n", " | ")))
     return rc, out, err, calls
 
 
@@ -548,12 +609,14 @@ def _check_harness_mapping(root):
             for name, body, _want in children:
                 (tmp / "tools" / name).write_text(
                     "import sys\nE = {!r}\n{}sys.exit(1)\n".format(_FLIP_EVIDENCE, body), encoding="utf-8")
-        except OSError as exc:
+        except Exception as exc:
             raise _CannotEvaluate("closure/harness-scratch: could not build the harness fixture: {}".format(exc))
-        rc, _text, why = _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env())
+        rc, _text, why = _attributed("closure/harness-missing-script",
+                                     lambda: _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env()))
         if (rc, why) != (2, _HARNESS):
             raise AssertionError("closure/harness-missing-script: {!r}".format((rc, why)))
-        rc, _text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env(), timeout_s=1)
+        rc, _text, why = _attributed("closure/run-one-timeout",
+                                     lambda: _run_one(tmp, "sleeper.py", [], tmp, _isolated_env(), timeout_s=1))
         if (rc, why) != (2, _TIMEOUT):
             raise AssertionError("closure/run-one-timeout: {!r}".format((rc, why)))
 
@@ -561,17 +624,18 @@ def _check_harness_mapping(root):
             raise OSError("no interpreter (stubbed)")
         no_launch = types.SimpleNamespace(run=refuse, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
                                           TimeoutExpired=subprocess.TimeoutExpired)
-        with _patched(subprocess=no_launch):
-            rc, text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env())
+        rc, text, why = _attributed("closure/harness-launch",
+                                    lambda: _run_one(tmp, "sleeper.py", [], tmp, _isolated_env()),
+                                    injected=dict(subprocess=no_launch))
         if (rc, why) != (2, _HARNESS) or "could not launch the interpreter" not in text:
             raise AssertionError("closure/harness-launch: {!r}".format((rc, why, text)))
         for name, _body, want in children:
-            rc, text, why = _run_one(tmp, name, [], tmp, _isolated_env(), timeout_s=120,
-                                     separate_streams=True)
+            rc, text, why = _attributed("closure/evidence-streams", lambda: _run_one(
+                tmp, name, [], tmp, _isolated_env(), timeout_s=120, separate_streams=True))
             if why is not None:
                 raise _CannotEvaluate("closure/evidence-streams: {} did not run to completion ({}): {}".format(
                     name, why, text))
-            got = _negative_leg_verdict(rc, text, why)[0]
+            got = _attributed("closure/evidence-streams", lambda: _negative_leg_verdict(rc, text, why))[0]
             if got != want:
                 raise AssertionError("closure/evidence-streams: {} gave {}, expected {}".format(name, got, want))
     finally:
@@ -647,11 +711,11 @@ def _check_verdict_tables():
         ((2, ("timed out after 1800s", ""), _TIMEOUT), "cannot"),
     ]
     for args, want in cases:
-        got = _negative_leg_verdict(*args)[0]
+        got = _attributed("closure/negative-verdict", lambda: _negative_leg_verdict(*args))[0]
         if got != want:
             raise AssertionError("closure/negative-verdict: {!r} gave {}, expected {}".format(args, got, want))
     for rc, want in ((0, "ok"), (1, "fail"), (2, "cannot")):
-        got = _positive_leg_verdict(rc)[0]
+        got = _attributed("closure/positive-verdict", lambda: _positive_leg_verdict(rc))[0]
         if got != want:
             raise AssertionError("closure/positive-verdict: rc {} gave {}, expected {}".format(rc, got, want))
 
@@ -676,22 +740,42 @@ def _check_leg_wiring(root):
         (0, (1, ("", _FLIP_EVIDENCE + "\n"), None), 0),
         (0, (1, (_FLIP_EVIDENCE[:20], _FLIP_EVIDENCE[20:] + "\n"), None), 1),
     ]
+    _require_subtree(root)
     for run_rc, neg, want in wiring:
         calls = []
         stub_run = (lambda rc: (lambda _root: rc))(run_rc)
-        with _patched(run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg})):
-            failures, cannot = _closure_legs(root)
-        if not calls and any(c.startswith((_NEG_SCRATCH_ERROR, _NEG_COPY_ERROR, _NEG_DECODE_ERROR))
-                             for c in cannot):
+        failures, cannot = _attributed("closure/self-test-exit", lambda: _closure_legs(root), injected=dict(
+            run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg})))
+        # A store that is not UTF-8 text (judged here, not from the leg's message) is malformed input:
+        # the flip cannot be made, so the case is cannot-evaluate, naming the leg's own message.
+        if not calls and _not_utf8(Path(root) / "opf" / "tools" / "_opf_store.py"):
             raise _CannotEvaluate("closure/self-test-exit: the flipped copy could not be built: {}".format(
                 " | ".join(cannot)))
         # The negative leg's own bound lookup: the flipped opf.py --self-test runs under its row.
         if calls != [("opf-tooling-selftest", 1800)]:
             raise AssertionError("closure/negative-bound-lookup: {!r}".format(calls))
-        got = _captured(_self_test_exit, failures, cannot)[0]
+        got = _attributed("closure/self-test-exit", lambda: _captured(_self_test_exit, failures, cannot))[0]
         if got != want:
             raise AssertionError("closure/self-test-exit: run()={} flipped={!r} gave {}, expected {}".format(
                 run_rc, neg, got, want))
+
+
+def _not_utf8(path):
+    """True when the bytes at path are not UTF-8 text, judged independently of the code under test."""
+    try:
+        path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _expect_negative_cannot(label, failures, cannot, calls, prefix):
+    """The negative leg's result: exactly one cannot-evaluate message, starting with `prefix`, no
+    member run, and a self-test exit of 2 over it. Anything else refutes `label`."""
+    if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
+        raise AssertionError("{}: {!r}".format(label, (failures, cannot, calls)))
+    if _attributed(label, lambda: _captured(_self_test_exit, failures, cannot))[0] != 2:
+        raise AssertionError("{}-exit: {!r}".format(label, cannot))
 
 
 def _require_subtree(root):
@@ -702,53 +786,49 @@ def _require_subtree(root):
 
 
 def _check_scratch_and_copy_errors(root):
-    """A scratch directory that cannot be allocated, or a broken copy that cannot be built, is
-    cannot-evaluate, never a traceback and never a refuted leg: in run() (exit 2, no member runs), in
-    the negative leg (one cannot-evaluate message, self-test exit 2) and in the harness fixture. When
-    the host itself cannot allocate a scratch directory, the broken-copy case is cannot-evaluate. The
-    harness-fixture sub-check needs no opf/ subtree, so it runs before the subtree is required."""
+    """A scratch directory that cannot be allocated is cannot-evaluate, never a traceback and never a
+    refuted leg: in the harness fixture, in the negative leg (one cannot-evaluate message, self-test
+    exit 2) and in run() (exit 2, no member runs). The stubbed refusal is this case's fixture, so it
+    needs no scratch directory of the host's. The first two sub-checks need no opf/ subtree (the
+    negative leg's run() is stubbed and its allocation is refused before anything is copied), so they
+    run before the subtree is required; only the run() sub-check needs it. The broken copy needs a
+    scratch directory but no subtree, so it is its own case (_check_negative_copy_error)."""
     def no_mkdtemp(*_args, **_kwargs):
         raise OSError("no scratch directory (stubbed)")
     no_scratch = types.SimpleNamespace(mkdtemp=no_mkdtemp)
-    with _patched(tempfile=no_scratch):
-        try:
-            _check_harness_mapping(root)
-        except _CannotEvaluate as exc:
-            if not str(exc).startswith("closure/harness-scratch"):
-                raise AssertionError("closure/scratch-harness: {}".format(exc))
-        except OSError as exc:
-            raise AssertionError("closure/scratch-harness: raised {!r} instead of cannot-evaluate".format(exc))
-        else:
-            raise AssertionError("closure/scratch-harness: no cannot-evaluate without a scratch directory")
+    try:
+        _attributed("closure/scratch-harness", lambda: _check_harness_mapping(root),
+                    injected=dict(tempfile=no_scratch))
+    except _CannotEvaluate as exc:
+        if not str(exc).startswith("closure/harness-scratch"):
+            raise AssertionError("closure/scratch-harness: {}".format(exc))
+    else:
+        raise AssertionError("closure/scratch-harness: no cannot-evaluate without a scratch directory")
+
+    calls = []
+    failures, cannot = _attributed("closure/negative-harness", lambda: _closure_legs(root), injected=dict(
+        run=lambda _root: 0, _run_one=_stub_member_runner(calls, {}), tempfile=no_scratch))
+    _expect_negative_cannot("closure/negative-harness", failures, cannot, calls, _NEG_SCRATCH_ERROR)
 
     _require_subtree(root)
     calls = []
-    with _patched(tempfile=no_scratch, _run_one=_stub_member_runner(calls, {})):
-        try:
-            rc, _out, err = _captured(run, root)
-        except OSError as exc:
-            raise AssertionError("closure/scratch-run: run() raised {!r} instead of exiting 2".format(exc))
+    rc, _out, err = _attributed("closure/scratch-run", lambda: _captured(run, root), injected=dict(
+        tempfile=no_scratch, _run_one=_stub_member_runner(calls, {})))
     if rc != 2 or calls or "could not allocate a scratch directory" not in err:
         raise AssertionError("closure/scratch-run: run() gave {} with {!r}".format(rc, calls))
 
+
+def _check_negative_copy_error(root):
+    """A broken copy the negative leg cannot build is one cannot-evaluate message (self-test exit 2),
+    never a traceback and never a refuted leg. The stubbed copy refuses before reading anything, so
+    this needs no opf/ subtree; it needs a scratch directory, and when the host cannot allocate one
+    (a harness failure, observed by _attributed) the case is cannot-evaluate."""
     def broken_copy(_src, _dest):
         raise OSError("copy refused (stubbed)")
-    for patches, prefix in ((dict(tempfile=no_scratch), _NEG_SCRATCH_ERROR),
-                            (dict(_materialize=broken_copy), _NEG_COPY_ERROR)):
-        calls = []
-        with _patched(run=lambda _root: 0, _run_one=_stub_member_runner(calls, {}), **patches):
-            try:
-                failures, cannot = _closure_legs(root)
-            except OSError as exc:
-                raise AssertionError("closure/negative-harness: _closure_legs raised {!r}".format(exc))
-        if (prefix == _NEG_COPY_ERROR and not failures and not calls and len(cannot) == 1
-                and cannot[0].startswith(_NEG_SCRATCH_ERROR)):
-            raise _CannotEvaluate("closure/negative-harness: no scratch directory for the broken-copy "
-                                  "case: {}".format(cannot[0]))
-        if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
-            raise AssertionError("closure/negative-harness: {!r}".format((failures, cannot, calls)))
-        if _captured(_self_test_exit, failures, cannot)[0] != 2:
-            raise AssertionError("closure/negative-harness-exit: {!r}".format(cannot))
+    calls = []
+    failures, cannot = _attributed("closure/negative-harness", lambda: _closure_legs(root), injected=dict(
+        run=lambda _root: 0, _run_one=_stub_member_runner(calls, {}), _materialize=broken_copy))
+    _expect_negative_cannot("closure/negative-harness", failures, cannot, calls, _NEG_COPY_ERROR)
 
 
 def _expect_cannot(check, root, cause, label):
@@ -768,12 +848,14 @@ def _expect_cannot(check, root, cause, label):
 
 def _check_absent_subtree(root):
     """With no opf/ subtree under the root, or a copy that fails before any member runs, each stubbed
-    case is cannot-evaluate naming the real cause (never a refuted leg)."""
+    case is cannot-evaluate naming the real cause (never a refuted leg). Conversely, a run() that exits
+    before any member runs although its copy was built (here a refused registration check) is a
+    wrong result of the code under test: a refutation, never cannot-evaluate."""
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-absent-"))
-        except OSError as exc:
+        except Exception as exc:
             raise _CannotEvaluate("closure/absent-subtree-scratch: {}".format(exc))
         absent = tmp / "no-opf-root"
         for check in (_check_timeout_mapping, _check_harness_mapping, _check_failure_first,
@@ -790,12 +872,32 @@ def _check_absent_subtree(root):
     with _patched(_materialize=broken_copy):
         _expect_cannot(_check_timeout_mapping, root, "could not materialize", "closure/copy-before-members")
 
+    def refused_rows(_subset, _table):
+        raise AssertionError("closure/member-timeout-rows: stubbed")
+    host = []
+    with _patched(**_harness_watch(host)), _patched(_check_member_timeout_rows=refused_rows):
+        try:
+            _check_timeout_mapping(root)
+        except Exception as exc:
+            got = exc
+        else:
+            got = None
+    if host:
+        raise _CannotEvaluate("closure/members-never-ran: harness failure: {}".format(" | ".join(host)))
+    if type(got) is not AssertionError or not str(got).startswith(
+            "closure/stubbed-run: run() exited 1 before any subset member ran"):
+        raise AssertionError("closure/members-never-ran: a run() that ran no member with its copy built "
+                             "gave {!r}".format(got))
+
 
 def _check_undecodable_fixture(_root):
     """A copied _opf_store.py that is not UTF-8 text is cannot-evaluate at the read boundary: the
     negative leg gives one cannot-evaluate message (never a traceback, never a refuted leg, self-test
     exit 2), and the leg-wiring case is cannot-evaluate naming that cause. Builds its own fixture tree,
-    so it needs no opf/ subtree under the root."""
+    so it needs no opf/ subtree under the root. Attribution (see _preflight_exit): a failure to build
+    the fixture, or a scratch allocation or copy that fails inside either sub-check, is cannot-evaluate;
+    once the fixture is built, a crash or a wrong result of _closure_legs or _check_leg_wiring is a
+    refutation (_check_undecodable_attribution pins both directions)."""
     tmp = None
     try:
         try:
@@ -804,21 +906,110 @@ def _check_undecodable_fixture(_root):
             (fixture / "opf" / "tools").mkdir(parents=True)
             (fixture / "opf" / "tools" / "opf.py").write_text("", encoding="utf-8")
             (fixture / "opf" / "tools" / "_opf_store.py").write_bytes(b"\xff")
-        except OSError as exc:
+        except Exception as exc:
             raise _CannotEvaluate("closure/undecodable-scratch: could not build the fixture: {}".format(exc))
         calls = []
-        with _patched(run=lambda _root: 0, _run_one=_stub_member_runner(calls, {})):
+        failures, cannot = _attributed("closure/undecodable-fixture", lambda: _closure_legs(fixture),
+                                       injected=dict(run=lambda _root: 0, _run_one=_stub_member_runner(calls, {})))
+        _expect_negative_cannot("closure/undecodable-fixture", failures, cannot, calls, _NEG_DECODE_ERROR)
+        _attributed("closure/undecodable-wiring", lambda: _expect_cannot(
+            _check_leg_wiring, fixture, _NEG_DECODE_ERROR, "closure/undecodable-wiring"))
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _failing_harness(scratch_at=None, copy_at=None):
+    """Stand-ins for tempfile and _materialize that delegate to the ones bound now, except that the
+    scratch_at-th allocation or the copy_at-th copy (1-based, counted from now) raises an injected
+    OSError: a selective harness failure, after the steps before it succeeded."""
+    inner_tempfile, inner_materialize = tempfile, _materialize
+    count = {"scratch": 0, "copy": 0}
+
+    def mkdtemp(*args, **kwargs):
+        count["scratch"] += 1
+        if count["scratch"] == scratch_at:
+            raise OSError("injected allocation failure #{}".format(scratch_at))
+        return inner_tempfile.mkdtemp(*args, **kwargs)
+
+    def materialize(opf_src, dest):
+        count["copy"] += 1
+        if count["copy"] == copy_at:
+            raise OSError("injected copy failure #{}".format(copy_at))
+        return inner_materialize(opf_src, dest)
+    return dict(tempfile=types.SimpleNamespace(mkdtemp=mkdtemp), _materialize=materialize)
+
+
+def _check_undecodable_attribution(_root):
+    """Pins _check_undecodable_fixture's attribution in both directions. A selective harness failure
+    (the fixture's own allocation, then the broken copy's allocation or copy in the negative-leg
+    sub-check, then the same in the leg-wiring sub-check) is cannot-evaluate naming the injected
+    failure, never a refutation. With the harness intact, a crash of _closure_legs or of the
+    leg-wiring check, or a wrong result (a copy-error message where nothing failed to copy), is a
+    refutation naming it, never cannot-evaluate; the same wrong result through the leg-wiring check
+    over a UTF-8 store is refuted too, because that check reads a harness failure from the scratch
+    allocation and copy themselves, not from the leg's message. A real scratch or copy failure of
+    the host is observed apart from the injected ones and makes this case cannot-evaluate."""
+    def crash(_root):
+        raise UnboundLocalError("stubbed crash")
+
+    def wrong_result(_root):
+        return [], [_NEG_COPY_ERROR + "stubbed, although nothing failed to copy"]
+
+    def wiring_crash(_root):
+        raise RuntimeError("stubbed wiring crash")
+    # Each run's patches are built only once the host watch is bound, so an injected failure sits
+    # over the watch and a real one under it is still observed.
+    runs = [
+        ("scratch_at=1", lambda: _failing_harness(scratch_at=1), _CannotEvaluate, "injected"),
+        ("scratch_at=2", lambda: _failing_harness(scratch_at=2), _CannotEvaluate, "injected"),
+        ("copy_at=1", lambda: _failing_harness(copy_at=1), _CannotEvaluate, "injected"),
+        ("scratch_at=3", lambda: _failing_harness(scratch_at=3), _CannotEvaluate, "injected"),
+        ("copy_at=2", lambda: _failing_harness(copy_at=2), _CannotEvaluate, "injected"),
+        ("crash", lambda: dict(_closure_legs=crash), AssertionError,
+         "closure/undecodable-fixture: the code under test raised UnboundLocalError: stubbed crash"),
+        ("wrong-result", lambda: dict(_closure_legs=wrong_result), AssertionError,
+         "closure/undecodable-fixture: "),
+        ("wiring-crash", lambda: dict(_check_leg_wiring=wiring_crash), AssertionError,
+         "closure/undecodable-wiring: the code under test raised RuntimeError: stubbed wiring crash"),
+    ]
+    for name, patches, want_type, want_text in runs:
+        host = []
+        with _patched(**_harness_watch(host)), _patched(**patches()):
             try:
-                failures, cannot = _closure_legs(fixture)
-            except ValueError as exc:
-                raise AssertionError("closure/undecodable-fixture: _closure_legs raised {!r}".format(exc))
-        if (failures or calls or len(cannot) != 1 or not cannot[0].startswith(_NEG_DECODE_ERROR)
-                or _captured(_self_test_exit, failures, cannot)[0] != 2):
-            raise AssertionError("closure/undecodable-fixture: {!r}".format((failures, cannot, calls)))
+                _check_undecodable_fixture(None)
+            except Exception as exc:
+                got = exc
+            else:
+                got = None
+        if host:
+            raise _CannotEvaluate("closure/undecodable-attribution: harness failure: {}".format(" | ".join(host)))
+        if type(got) is not want_type or want_text not in str(got):
+            raise AssertionError("closure/undecodable-attribution: {} gave {!r}, expected {} naming {!r}".format(
+                name, got, want_type.__name__, want_text))
+
+    tmp = None
+    try:
         try:
-            _expect_cannot(_check_leg_wiring, fixture, _NEG_DECODE_ERROR, "closure/undecodable-wiring")
-        except ValueError as exc:
-            raise AssertionError("closure/undecodable-wiring: _check_leg_wiring raised {!r}".format(exc))
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-utf8-"))
+            (tmp / "opf" / "tools").mkdir(parents=True)
+            (tmp / "opf" / "tools" / "opf.py").write_text("", encoding="utf-8")
+            (tmp / "opf" / "tools" / "_opf_store.py").write_text("", encoding="utf-8")
+        except Exception as exc:
+            raise _CannotEvaluate("closure/undecodable-attribution: could not build the UTF-8 fixture: {}".format(
+                exc))
+        with _patched(_closure_legs=wrong_result):
+            try:
+                _check_leg_wiring(tmp)
+            except AssertionError as exc:
+                if not str(exc).startswith("closure/negative-bound-lookup"):
+                    raise AssertionError("closure/undecodable-attribution: wiring wrong-result gave {}".format(
+                        exc))
+            except _CannotEvaluate as exc:
+                raise AssertionError("closure/undecodable-attribution: wiring read a wrong result as "
+                                     "cannot-evaluate: {}".format(exc))
+            else:
+                raise AssertionError("closure/undecodable-attribution: wiring passed a wrong result")
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -827,9 +1018,10 @@ def _check_undecodable_fixture(_root):
 def _check_preflight_collection():
     """_preflight_exit runs every case whatever an earlier case did: a _CannotEvaluate, or any other
     ordinary exception (here a RuntimeError and a decode failure), is that case's cannot-evaluate, the
-    latter naming the case (a _rootless case by its function's name) and the exception; only an
-    AssertionError is a refutation; the exit is failure-first over everything collected. Pure: no
-    scratch directory and no opf/ subtree."""
+    latter naming the case (by its label, or by its function's name when the label is None) and the
+    exception; only an AssertionError is a refutation; the exit is failure-first over everything
+    collected. A KeyboardInterrupt or SystemExit stops the collection: it re-raises and no later case
+    runs. Pure: no scratch directory and no opf/ subtree."""
     ran = []
 
     def _cannot_case(_root):
@@ -852,6 +1044,8 @@ def _check_preflight_collection():
         (((None, _cannot_case), sentinel), 2, ["closure/stubbed-run: stubbed"], ["sentinel"]),
         (((None, _rootless(_boom_case)), sentinel), 2,
          ["closure/preflight-error: _boom_case raised RuntimeError: boom (stubbed)"], ["sentinel"]),
+        ((("closure/stubbed-label", _rootless(_boom_case)), sentinel), 2,
+         ["closure/preflight-error: closure/stubbed-label raised RuntimeError: boom (stubbed)"], ["sentinel"]),
         (((None, _undecodable_case), (None, _refuting_case), sentinel), 1,
          ["closure/preflight-error: _undecodable_case raised UnicodeDecodeError: "], ["refute", "sentinel"]),
     )
@@ -870,6 +1064,22 @@ def _check_preflight_collection():
                 or not all(got.startswith(want) for got, want in zip(unevaluated, want_cannot))
                 or refuted != (["SELF-TEST FAIL: closure/stubbed-refutation"] if want_rc == 1 else [])):
             raise AssertionError("closure/preflight-collection: gave {} after {!r}: {!r}".format(rc, ran, lines))
+    for stop in (KeyboardInterrupt, SystemExit):
+        def _stop_case(_root, stop=stop):
+            raise stop("stubbed")
+        del ran[:]
+        with _patched(_PREFLIGHT_CASES=((None, _stop_case), sentinel)):
+            try:
+                _captured(_preflight_exit, None)
+            except stop:
+                pass
+            except BaseException as exc:
+                raise AssertionError("closure/preflight-stop: {} became {!r}".format(stop.__name__, exc))
+            else:
+                raise AssertionError("closure/preflight-stop: {} did not stop the collection".format(
+                    stop.__name__))
+        if ran:
+            raise AssertionError("closure/preflight-stop: {} ran {!r} after the stop".format(stop.__name__, ran))
 
 
 def _check_preflight_failure_first(root):
@@ -945,7 +1155,8 @@ def _rootless(fn):
 
 # The self-test's preflight: the registration cases and the in-process stubbed cases (no subset member
 # runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first five need
-# no scratch directory and no opf/ subtree; the rest build fixtures or stub run() over the real subtree.
+# no scratch directory and no opf/ subtree; the rest build fixtures or stub run() over the real subtree,
+# each ordered by the setup its sub-checks need (see _preflight_exit).
 _PREFLIGHT_CASES = (
     (None, _rootless(_pack_manifest_registration_self_test)),
     (None, _rootless(_adopt_observe_registration_self_test)),
@@ -957,8 +1168,10 @@ _PREFLIGHT_CASES = (
     ("closure/failure-first", _check_failure_first),
     ("closure/self-test-leg-wiring", _check_leg_wiring),
     ("closure/scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors),
+    ("closure/negative-copy-cannot-evaluate", _check_negative_copy_error),
     ("closure/absent-subtree-cannot-evaluate", _check_absent_subtree),
     ("closure/undecodable-fixture-cannot-evaluate", _check_undecodable_fixture),
+    ("closure/undecodable-attribution", _check_undecodable_attribution),
     ("closure/preflight-failure-first", _check_preflight_failure_first),
     (None, _red_bound_lookup),
 )
@@ -966,15 +1179,28 @@ _PREFLIGHT_CASES = (
 
 def _preflight_exit(root):
     """Run every _PREFLIGHT_CASES case on its own, collecting each outcome, so no case's outcome stops a
-    later case. An AssertionError is that case's refutation (SELF-TEST FAIL). A _CannotEvaluate, or any
-    other Exception (a decode failure, an OSError, a RuntimeError), is that case's cannot-evaluate
-    (SELF-TEST CANNOT EVALUATE; for any other Exception the line names the case and the exception).
-    Only a BaseException that is not an Exception (KeyboardInterrupt, SystemExit) stops the collection.
-    Failure-first, the same rule as run() and _self_test_exit: 1 when any case was refuted, else 2 when
-    any could not be evaluated, else None (every case held). Within ONE case the first sub-check that
-    cannot be evaluated ends that case: its later sub-checks do not run, so a refutation they would give
-    stays unobserved (the case reads as cannot-evaluate) until that case can be set up. A sub-check that
-    needs no fixture is therefore its own case (the pure ones) or runs before its case's fixture setup."""
+    later case.
+
+    The attribution rule, which every case follows: a failure of the HARNESS (allocating a scratch
+    directory, copying, building a fixture, at any point, including a failure of one step inside a
+    case after others succeeded) is cannot-evaluate; once a case's fixture is built, a crash or a
+    wrong result of the CODE UNDER TEST is a refutation. Each case calls the code under test through
+    _attributed, which observes the scratch allocation and copy themselves (not the code's messages)
+    to tell a harness failure apart, and turns any Exception the code under test raises into an
+    AssertionError naming it.
+
+    So an AssertionError is that case's refutation (SELF-TEST FAIL). A _CannotEvaluate, or any other
+    Exception (one that escaped the case's own harness code: a decode failure, an OSError, a
+    RuntimeError), is that case's cannot-evaluate (SELF-TEST CANNOT EVALUATE; for any other Exception
+    the line names the case, by its label or else its function's name, and the exception). Only a
+    BaseException that is not an Exception (KeyboardInterrupt, SystemExit) stops the collection: it
+    re-raises. Failure-first, the same rule as run() and _self_test_exit: 1 when any case was refuted,
+    else 2 when any could not be evaluated, else None (every case held). Within ONE case the first
+    sub-check that cannot be evaluated ends that case: its later sub-checks do not run, so a refutation
+    they would give stays unobserved (the case reads as cannot-evaluate) until that case can be set up.
+    Each sub-check therefore runs before every setup it does not need, or is its own case when two
+    sub-checks each need a setup the other does not (the pure cases need none;
+    _check_negative_copy_error needs a scratch directory but no opf/ subtree)."""
     failures, cannot = [], []
     for label, check in _PREFLIGHT_CASES:
         try:
@@ -1002,12 +1228,16 @@ def self_test_main():
     the pre-move upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT's `check_versions` instead
     of the extracted `_semver`); with no AIQT tree reachable that import fails, and the flipped copy counts as
     caught only when it exits non-zero WITH opf.py's import-refusal line. A gate that passed the
-    deliberately-broken copy would provide no coverage. The preflight (_preflight_exit) runs first: when
-    any of its cases was refuted the self-test exits 1, otherwise when one could not be set up (or raised
-    any other ordinary exception) it exits 2, and in both outcomes the legs never run. Otherwise the legs decide, failure-first: 1 when either leg
-    was refuted, whatever else could not be evaluated; 2 when neither was refuted but one could not be
-    evaluated (run() exit 2, or the flipped copy timed out, could not launch, or its scratch directory
-    or copy could not be made); 0 only when both held, never PASS on a leg that was not evaluated."""
+    deliberately-broken copy would provide no coverage. The preflight (_preflight_exit) runs first and
+    follows its attribution rule: when any of its cases was refuted (a wrong result, or a crash of the
+    code under test once the case's fixture was built) the self-test exits 1; otherwise, when one could
+    not be evaluated (a harness failure: no opf/ subtree, or a scratch directory, copy or fixture that
+    could not be made, or any other ordinary exception raised by the case's own code) it exits 2; in
+    both outcomes the legs never run. Otherwise the legs decide, failure-first: 1 when either leg was
+    refuted, whatever else could not be evaluated; 2 when neither was refuted but one could not be
+    evaluated (run() exit 2, or the flipped copy timed out, could not launch, its scratch directory or
+    copy could not be made, or its _opf_store.py is not UTF-8 text); 0 only when both held, never PASS
+    on a leg that was not evaluated."""
     root = repo_root()
     rc = _preflight_exit(root)
     if rc is not None:
