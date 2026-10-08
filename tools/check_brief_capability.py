@@ -18,14 +18,24 @@ RULES (each runs on one sentence; a sentence ends at `.`, `!` or `?` before a ca
 `;`). A CLAUSE START is the start of a sentence, or the point just after a colon, a comma, a
 parenthesis, `and`, `then`, `but`, or `so`, once markup (list markers, emphasis, `Step N -`) is
 skipped, and again once at most six lead-in words are skipped (please, also, now, first, do, do not,
-never, must, can you, could you, you need to, make sure to, go ahead and, ...). A verb is NEGATED when
+never, must, can you, could you, you need to, make sure to, go ahead and, ...). NOUN USES open no
+clause: a parenthesis that holds only one word or a list of single words joined by commas, slashes,
+`or` or `and` (each optionally led by an article, determiner or possessive: "(execute)", "a stalled
+(TIMED-OUT) run", "(a lint, gate, test, build or self-test)") is not a clause, so neither its
+parentheses nor the breaks inside it are clause starts; and in a list of at least three single words
+joined by commas and closed by `or` and a last word, either before punctuation ("lint, gate, test,
+build or self-test.") or, when an article, determiner or possessive leads the list, before a word that
+is not an article, determiner or pronoun ("each lint, gate, build or self-test writes a log"), no comma
+or word after the first is a clause start. A verb is NEGATED when
 `not`, `never`, `no`, `nothing`, `without`, `cannot`, `nor`, or an `n't` form, found in the whole
 sentence, ends at most 60 characters before the verb begins with no HARD BREAK between them, or
 `nothing` follows the verb. A hard break is a colon, a parenthesis, `then`, `but`, or the comma that
 closes an opening clause led by if, once, when, after, before, unless, until, while, since, as soon
 as, or without; a plain comma or `and` is not one, so "do not run, build or install" stays negated.
 
-  R1 imperative    An execution verb (run, re-run, execute, invoke, launch, build, compile, install,
+  R1 imperative    Not read in a Markdown heading (a `#` line is a title, not a request; a heading
+                   still sets scope where SCOPE says so). An execution verb (run, re-run, execute,
+                   invoke, launch, build, compile, install,
                    reproduce, benchmark, profile, measure, inject, trigger, fuzz, bisect, clone,
                    deploy, `check out` before a branch, commit, revision, tag or code span, `time the
                    ...`, and observe in a sentence that also injects) at a clause start, outside a code
@@ -67,9 +77,25 @@ as, or without; a plain comma or `and` is not one, so "do not run, build or inst
                    green, or a closing green or red, unless the outcome opens a relative clause (right
                    after that, which, who, or an opening parenthesis). Hard when the subject names a
                    tool (a `.py` or `.sh` file or one of those flags); otherwise INFO.
+  R7 git fact      A fact only git or a run can establish: a commit's parents, SHA, hash or id ("the
+                   merge commit's parents", "the parents of the commit", "the SHA of the merge
+                   commit", "the parent commit"), which or what commit or revision did something
+                   ("which commit added", "in which revision"), a diff between commits or revisions,
+                   changed lines (or lines added, removed or touched by a commit, diff or change), an
+                   observed or actual exit code or one of a run ("the exit code of the run"), or test
+                   counts ("how many tests passed"), outside a code span and not negated, in a sentence
+                   that asks for something (a question ending with `?`, or at a clause start quote,
+                   find, cite, name, list, give, report, state, identify, tell, show, say, determine,
+                   establish, confirm, verify, check (not check out), answer, print, paste, record,
+                   write, look up, work out, compute, or a wh-word). Hard, even in a Quote clause and
+                   even when the sentence names a static source ("as the file headers list them" does
+                   not make a commit's parents readable), unless the item (every block of the same
+                   numbered item, or the paragraph or list item itself) is marked
+                   `orchestrator-answered` or "answered by the orchestrator".
   QUOTE DEMOTION   A clause that opens with Quote, Find, or Cite, or the clause holding "quote the",
                    "quote every", or "quote each", asks for source text: R1, R3, and R6 hits inside that
-                   clause (up to the next clause break) are dropped. R2 and R5 are never demoted.
+                   clause (up to the next clause break; a noun use opens none, so the clause runs on
+                   through "(execute)" or a noun list) are dropped. R2, R5 and R7 are never demoted.
 
 SCOPE (skipped with --unscoped). Only an OPERATIVE marker assigns text to a family: `<family> leg:`
 (any family in the table) at the start of a line once markup is skipped, a heading `## <family> leg`,
@@ -106,7 +132,12 @@ words, so free English always has phrasings they miss: an implicit request ("eac
 fails without it"); a verb outside the list ("see what happens when you feed it a FIFO"); adversarial
 wording; a request split across sentences; a gerund other than after try, start by or begin by ("by
 running `t.py`"); a request inside a Find, Quote or Cite clause ("find the test by running it"); a
-passive other than must, need to or has to ("should be run", "is to be executed"); an indented code
+passive other than must, need to or has to ("should be run", "is to be executed"); a request in a
+Markdown heading ("# Run the suite"); a one-word or word-list parenthesis meant as an imperative
+("(build)", "(build and run)"), or an `or`-closed word list of imperatives ("lint, test, build or
+deploy."); a git or run fact phrased outside the R7 list ("the hash HEAD points to", "the author of the
+change", "what the self-test prints"); an `orchestrator-answered` marker is lexical, so an item marked
+answered with no answer supplied passes; an indented code
 block of commands with no fence; a fence tagged with a programming language (python, toml) that holds
 shell commands; a command fence whose first line is not a listed command (`make test`, `go test`); a
 result sentence that also names a static source ("report the exit code of `x.py` run on the code in
@@ -371,6 +402,19 @@ SUBORDINATE_RE = re.compile(r"(?:if|once|when|whenever|after|before|unless|until
 NEGATION_RE = re.compile(r"\b(?:not|never|no|nothing|without|cannot|nor)\b|n't\b", re.I)
 NEGATED_AFTER_RE = re.compile(r"\s+nothing\b", re.I)
 BACKTICKS_RE = re.compile(r"`+")
+NOUN_WORD = r"[A-Za-z][\w-]*+"
+DETERMINER = r"(?:a|an|the|its|their|his|her|our|your|my|this|that|these|those|each|every|any|some|no|either)"
+NOUN_PARENTHESIS_RE = re.compile(r"\(\s*(?:(?:or|and)\s+)?(?:" + DETERMINER + r"\s+)?" + NOUN_WORD
+                                 + r"(?:\s*(?:,|/|\bor\b|\band\b)\s*(?:" + DETERMINER + r"\s+)?" + NOUN_WORD
+                                 + r")*+\s*\)", re.I)
+NOUN_WORD_RE = re.compile(NOUN_WORD)
+WORD_RUN_RE = re.compile(NOUN_WORD + r"(?:\s*,\s*" + NOUN_WORD + r")++")
+NOUN_LIST_TAIL_RE = re.compile(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s*(?:[)\].;:!?]|\Z))", re.I)
+# a list led by a determiner is a noun list also before a word that is not an object ("each lint, gate,
+# build or self-test writes a log"; not "the diff, build or run the parser")
+LED_LIST_TAIL_RE = re.compile(r"\s*,?\s+or\s+" + NOUN_WORD + r"(?=\s+(?!(?:" + DETERMINER
+                              + r"|it|them|all|both)\b)[A-Za-z])", re.I)
+LEADING_DETERMINER_RE = re.compile(r"(?<![\w-])" + DETERMINER + r"\s+\Z", re.I)
 
 
 def sentences(text):
@@ -381,6 +425,27 @@ def sentences(text):
         start = found.end()
     out.append((start, text[start:]))
     return [(offset, sentence) for offset, sentence in out if sentence.strip()]
+
+
+def noun_ranges(sentence):
+    """Sorted, disjoint [start, end) ranges of noun uses, which open no clause: a parenthesis holding one
+    word or a list of single words (both parentheses included), and the part after the first word of an
+    `or`-closed list of at least three single words that ends the clause or, led by a determiner, comes
+    before a word that is not an object."""
+    ranges = [found.span() for found in NOUN_PARENTHESIS_RE.finditer(sentence)]
+    for run in WORD_RUN_RE.finditer(sentence):
+        tail = NOUN_LIST_TAIL_RE.match(sentence, run.end())
+        if not tail and LEADING_DETERMINER_RE.search(sentence, max(0, run.start() - 24), run.start()):
+            tail = LED_LIST_TAIL_RE.match(sentence, run.end())
+        if tail:
+            ranges.append((NOUN_WORD_RE.match(sentence, run.start()).end(), tail.end()))
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def code_spans(sentence):
@@ -408,7 +473,15 @@ class Sentence:
 
     def __init__(self, text):
         self.text = text
-        found = list(CLAUSE_BREAK_RE.finditer(text))
+        nouns = noun_ranges(text)
+        noun_starts = [start for start, _ in nouns]
+
+        def noun_use(position):
+            index = bisect.bisect_right(noun_starts, position) - 1
+            return index >= 0 and position < nouns[index][1]
+
+        # a break inside a noun use ("(execute)", "lint, gate, build or self-test") opens no clause
+        found = [match for match in CLAUSE_BREAK_RE.finditer(text) if not noun_use(match.start())]
         self.breaks = [match.start() for match in found]
         starts = set()
         for position in [0] + [match.end() for match in found]:
@@ -695,6 +768,34 @@ QUESTION_END_RE = re.compile(r"\?[\s*_\"')\]]*\Z")
 QUOTE_START_RE = re.compile(r"(?:quote|find|cite)\b", re.I)
 QUOTE_DIRECTIVE_RE = re.compile(r"\bquote\s+(?:the|every|each)\b", re.I)
 INJECT_RE = re.compile(r"\binject", re.I)
+R7_THE = r"(?:(?:the|this|that|a|an|each|every|its|their|your|two|both|these|those)\s+)*+"
+R7_FACT_RE = re.compile(
+    r"\b(?:commit|revision)(?:'s|\u2019s|s')\s+(?:parents?|SHAs?|hash(?:es)?|ids?|identity)\b"
+    r"|\bparents?\s+(?:of|for)\s+" + R7_THE + r"(?:[\w-]+\s+)?(?:commits?|revisions?|merges?|HEAD)\b"
+    r"|\bparent\s+(?:commits?|revisions?|SHAs?|hash(?:es)?)\b"
+    r"|\b(?:in\s+)?(?:which|what)\s+(?:commits?|revisions?|merge)\s+(?:(?:first|last|originally|actually)\s+)?"
+    r"(?:added|introduced|removed|deleted|changed|touched|modified|fixed|broke|landed|merged|reverted|created|"
+    r"made|moved|renamed|is|was|holds|contains|did|does)\b"
+    r"|\bin\s+(?:which|what)\s+(?:commits?|revisions?)\b"
+    r"|\b(?:SHAs?|hash(?:es)?|ids?|identity)\s+of\s+" + R7_THE
+    + r"(?:[\w-]+\s+)?(?:commits?|revisions?|merges?|HEAD|tip)\b"
+    r"|\bdiff\s+(?:between|of\s+" + R7_THE + r"(?:commits|revisions))\b"
+    r"|\b(?:what|which\s+[\w-]+)\s+changed\s+between\b"
+    r"|\bchanges?\s+between\s+" + R7_THE + r"(?:commits|revisions|[0-9a-f]{7,40}\b)"
+    r"|\bchanged\s+lines\b|\blines\s+(?:that\s+)?(?:were\s+)?changed\b"
+    r"|\blines\s+(?:that\s+)?(?:were\s+)?(?:added|removed|deleted|modified|touched)\s+(?:by|in|between|since)\s+"
+    + R7_THE + r"(?:[\w-]+\s+)?(?:commits?|revisions?|merges?|diff|change|patch|PR|pull\s+request)\b"
+    r"|\b(?:observed|actual)\s+(?:exit\s+(?:codes?|status(?:es)?)|return\s*codes?|returncodes?)\b"
+    r"|\b(?:exit\s+(?:codes?|status(?:es)?)|return\s*codes?|returncodes?)\s+(?:of|from)\s+" + R7_THE
+    + r"(?:runs?|running|invocations?|executions?|command\s+you\s+ran|(?:self-)?test\s+runs?)\b"
+    r"|\btest\s+counts?\b"
+    r"|\bhow\s+many\s+tests?\s+(?:pass|passed|fail|failed|ran|were\s+run)\b"
+    r"|\bnumber\s+of\s+(?:passing|failing|passed|failed)\s+tests\b"
+    r"|\bnumber\s+of\s+tests\s+(?:that\s+)?(?:pass|passed|fail|failed|ran)\b", re.I)
+R7_REQUEST_RE = re.compile(r"(?:quote|find|cite|name|list|give|report|state|identify|tell|show|say|determine|"
+                           r"establish|confirm|verify|check(?!\s+out\b)|answer|print|paste|record|write|look\s+up|"
+                           r"work\s+out|compute|what|which|who|when|where|how)\b", re.I)
+ANSWERED_RE = re.compile(r"\borchestrator[- ]answered\b|\banswered\s+by\s+the\s+orchestrator\b", re.I)
 
 
 def rule_r1(sentence):
@@ -715,6 +816,28 @@ def rule_r1(sentence):
             if not sentence.in_span(found.start()) and not sentence.negated(found.start(), found.end()):
                 hits.append((found.start(), found.group(0)))
     return hits
+
+
+def r1_applies(block):
+    """Whether R1 reads a prose block: a Markdown heading is a title, never a clause start."""
+    return not block.heading
+
+
+def _asks(sentence):
+    """Whether a sentence asks for something: a question, or a request verb or wh-word at a clause start."""
+    if QUESTION_END_RE.search(sentence.text):
+        return True
+    return any(R7_REQUEST_RE.match(sentence.text, start) for start in sentence.starts)
+
+
+def rule_r7(sentence):
+    """[(offset, fact)]: a fact only git or a run can establish, outside a code span and not negated, in a
+    sentence that asks for something."""
+    hits = []
+    for found in R7_FACT_RE.finditer(sentence.text):
+        if not sentence.in_span(found.start()) and not sentence.negated(found.start(), found.end()):
+            hits.append((found.start(), found.group(0)))
+    return hits if hits and _asks(sentence) else []
 
 
 def rule_r2(block):
@@ -813,22 +936,27 @@ def _outside(hits, ranges):
     return kept
 
 
-def lint_sentence(raw, line):
-    """[(rule, severity, line, message, excerpt)] for one sentence."""
+def lint_sentence(raw, line, read_r1=True, answered=False):
+    """[(rule, severity, line, message, excerpt)] for one sentence; `read_r1` is false in a heading, and
+    `answered` is true in an item marked orchestrator-answered."""
     sentence = Sentence(raw)
     ranges = quote_ranges(sentence)
-    r1 = _outside(rule_r1(sentence), ranges)
+    r1 = _outside(rule_r1(sentence), ranges) if read_r1 else []
     r5 = rule_r5(sentence)
+    r7 = [] if answered else rule_r7(sentence)
     r6 = _outside(rule_r6(sentence), ranges)
     r3 = _outside(rule_r3(sentence), ranges)
     bare = bool(r3) and bool(BARE_COMMAND_RE.match(raw))   # a line that is only a command in a code span
-    request = bool(r1 or r5 or bare or any(named for _, named in r6))
+    request = bool(r1 or r5 or r7 or bare or any(named for _, named in r6))
     excerpt = _excerpt(raw)
     findings = []
     for _, verb in r1:
         findings.append(("R1", "HARD", line, "execution request {!r} at a clause start".format(verb), excerpt))
     for _, verb in r5:
         findings.append(("R5", "HARD", line, "asks to {} an execution result".format(verb.lower()), excerpt))
+    for _, fact in r7:
+        findings.append(("R7", "HARD", line, "asks for {!r}, which only git or a run can establish".format(fact),
+                         excerpt))
     for _, named in r6:
         findings.append(("R6", "HARD" if named else "INFO", line,
                          "asks for a test outcome" + (" of a named tool" if named else ""), excerpt))
@@ -870,6 +998,9 @@ def evaluate(data, family, table, scoped=True):
     blocks = parse_blocks(text)
     if scoped:
         blocks = apply_scope(blocks, family, set(table))
+    # an item marked orchestrator-answered in any of its blocks is answered in all of them
+    answered = set(block.item for block in blocks if block.kind == "prose" and block.item is not None
+                   and ANSWERED_RE.search(_masked_text(block)))
     findings, previous = [], None
     for block in blocks:
         if block.kind == "fence":
@@ -885,9 +1016,11 @@ def evaluate(data, family, table, scoped=True):
         for _, line in block.lines:
             line_starts.append(offset)
             offset += len(line) + 1
-        for start, sentence in sentences(_masked_text(block).replace("\n", " ")):
+        text = _masked_text(block)
+        marked = block.item in answered if block.item is not None else bool(ANSWERED_RE.search(text))
+        for start, sentence in sentences(text.replace("\n", " ")):
             line = block.lines[bisect.bisect_right(line_starts, start) - 1][0]
-            findings.extend(lint_sentence(sentence, line))
+            findings.extend(lint_sentence(sentence, line, r1_applies(block), marked))
     hard = any(severity == "HARD" for _, severity, _, _, _ in findings)
     return (EXIT_REFUSE if hard else EXIT_OK), findings
 
@@ -1097,6 +1230,14 @@ RELATIVE = "Does `a.py` have a case that fails without the fix?\n"
 STATIC_RESULT = "Report the exit codes the docstring documents.\n"
 REFERENCE_FENCE = "The README shows this; do not run it:\n\n```bash\npython3 t.py\n```\n"
 BARE_COMMAND = "Steps:\n- `python3 -I -B t.py --self-test`\n"
+HEADING_NOUN = "# Notes (source only): parser train, rebuild 3; copy and launch wiring\n\nQuote the helper.\n"
+PAREN_NOUN = "Quote the sentence naming the read (execute) flag.\n"
+ADJECTIVE_NOUN = "Quote the code that turns a stalled (TIMED-OUT) run into the row's verdict.\n"
+OR_LIST = "Each lint, gate, test, build or self-test writes a log.\n"
+PUNCTUATED_LIST = "Name the stage: lint, gate, test, build or self-test.\n"
+GIT_PARENTS = "1. Quote the parents of the merge commit as the file headers list them.\n"
+ANSWERED = "1. Quote the parents of the merge commit (orchestrator-answered).\n"
+GIT_STATEMENT = "The merge commit's parents are listed in the notes.\n"
 
 
 class _EveryWordSentence(Sentence):
@@ -1205,6 +1346,15 @@ def self_test(report_path=None):
     check("r1/label-colon-ok", _outcome("Run: the second pass of the parser.\n"), (0, []))
     check("r1/file-name-ok", _outcome("Read the hook and install.sh from source.\n"), (0, []))
     check("r1/verb-in-code-span-ok", _outcome("See the `build and run` target.\n"), (0, []))
+    check("r1/heading-not-a-clause-ok", _outcome(HEADING_NOUN), (0, []))
+    check("r1/parenthesis-noun-ok", _outcome(PAREN_NOUN), (0, []))
+    check("r1/adjective-parenthesis-noun-ok", _outcome(ADJECTIVE_NOUN), (0, []))
+    check("r1/parenthesised-noun-list-ok",
+          _outcome("Note: when a hook runs a check (a lint, gate, test, build or self-test) it keeps the log.\n"),
+          (0, []))
+    check("r1/or-noun-list-ok", _outcome(OR_LIST), (0, []))
+    check("r1/clause-parenthesis-refused", _outcome("Read the helper (run it first).\n"), (1, [("R1", "HARD")]))
+    check("r1/verb-list-refused", _outcome("Read the diff, build and run the parser.\n"), (1, [("R1", "HARD")]))
     check("negation/slice-edge-refused", _outcome(SLICE_EDGE), (1, [("R1", "HARD")]))
     check("negation/window-near-ok", _outcome(NEAR_NEGATION), (0, []))
     check("negation/window-far-refused", _outcome(FAR_NEGATION), (1, [("R1", "HARD")]))
@@ -1252,6 +1402,24 @@ def self_test(report_path=None):
     check("r6/confirm-refused", _outcome("Confirm that `a.py --check` passes.\n"),
           (1, [("R3", "HARD"), ("R6", "HARD")]))
     check("r6/relative-clause-ok", _outcome(RELATIVE), (0, []))
+    check("r7/commit-parents-refused", _outcome(GIT_PARENTS), (1, [("R7", "HARD")]))
+    check("r7/which-commit-refused", _outcome("Which commit added the helper?\n"), (1, [("R7", "HARD")]))
+    check("r7/diff-refused", _outcome("Give the diff between the two commits.\n"), (1, [("R7", "HARD")]))
+    check("r7/changed-lines-refused", _outcome("List the changed lines of the parser.\n"), (1, [("R7", "HARD")]))
+    check("r7/run-exit-code-refused", _outcome("Quote the exit code of the run.\n"), (1, [("R7", "HARD")]))
+    check("r7/test-count-refused", _outcome("Quote how many tests passed.\n"), (1, [("R7", "HARD")]))
+    check("r7/answered-ok", _outcome(ANSWERED), (0, []))
+    check("r7/answered-other-block-ok",
+          _outcome("1. Which commit added the helper?\n\n   Answered by the orchestrator: see the notes.\n"), (0, []))
+    check("r7/answered-is-item-scoped-refused", _outcome(ANSWERED + "2. Which commit added the helper?\n"),
+          (1, [("R7", "HARD")]))
+    check("r7/statement-ok", _outcome(GIT_STATEMENT), (0, []))
+    check("r7/negated-ok", _outcome("Do not report which commit added the helper.\n"), (0, []))
+    check("r7/static-exit-code-ok", _outcome("Quote the line that maps the exit code of a helper to its own.\n"),
+          (0, []))
+    check("r7/history-verb-needed-ok", _outcome("Quote which revision a release tags.\n"), (0, []))
+    check("r7/executing-family-ok", (_outcome(GIT_PARENTS, "alpha"), _outcome(GIT_PARENTS, "beta")),
+          ((0, []), (0, [])))
     # ---------- scope ----------
     check("scope/answer-only-ok", _outcome(SCOPED), (0, []))
     check("scope/answer-only-unscoped-refused", _outcome(SCOPED, scoped=False),
@@ -1345,6 +1513,16 @@ def self_test(report_path=None):
         HARD_BREAK_RE=never, SUBORDINATE_RE=never))
     check("revert/r1-clause-start-red", *flip(
         [lambda: _outcome(CLAUSE_MID)[0]], [1], Sentence=_EveryWordSentence))
+    check("revert/r1-heading-red", *flip(
+        [lambda: _outcome(HEADING_NOUN)[0]], [1], r1_applies=lambda block: True))
+    check("revert/noun-parenthesis-red", *flip(
+        [lambda: _outcome(PAREN_NOUN)[0], lambda: _outcome(ADJECTIVE_NOUN)[0]], [1, 1], NOUN_PARENTHESIS_RE=never))
+    check("revert/noun-list-red", *flip(
+        [lambda: _outcome(OR_LIST)[0], lambda: _outcome(PUNCTUATED_LIST)[0]], [1, 1],
+        NOUN_LIST_TAIL_RE=never, LED_LIST_TAIL_RE=never))
+    check("revert/r7-red", *flip([lambda: _outcome(GIT_PARENTS)[0]], [0], rule_r7=nothing))
+    check("revert/r7-request-red", *flip([lambda: _outcome(GIT_STATEMENT)[0]], [1], _asks=lambda sentence: True))
+    check("revert/r7-answered-red", *flip([lambda: _outcome(ANSWERED)[0]], [1], ANSWERED_RE=never))
     check("revert/r1-code-span-red", *flip(
         [lambda: _outcome("See the `build and run` target.\n")[0]], [1], code_spans=nothing))
     check("revert/list-structure-red", *flip([lambda: _outcome(DASH_LIST)[0]], [0], LIST_LINE_RE=never))
@@ -1395,7 +1573,7 @@ def self_test(report_path=None):
     check("revert/capability-gate-red", *flip(
         [lambda: _outcome(RUN_ITEM, "alpha")[0], lambda: _outcome(RUN_ITEM, "beta")[0]], [1, 1],
         can_execute=lambda row: False))
-    check("revert/every-flip-ran", len(flipped), 28)
+    check("revert/every-flip-ran", len(flipped), 34)
 
     expected = _expected_check_ids()
     if expected is None:
@@ -1410,12 +1588,13 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("PASS: check_brief_capability self-test: {} unique checks executed (the shipped table loads and a "
-          "malformed table exits 2; every list item starts a clause; R1, R2, R3, R5 and R6 fire on synthetic "
-          "fixtures and stay quiet on negated, mid-clause, quoted, labelled, noun-phrase, static-source and "
-          "code-span text; scope keeps and drops numbered items, other families' legs, sections and tail "
-          "markers, and ignores markers in code spans, quotes or mid-line; undecodable, blank, oversized, "
-          "missing, non-regular, backwards-range and unknown-family input exits 2; every rule patched out "
-          "flips its fixture); execution set reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
+          "malformed table exits 2; every list item starts a clause; R1, R2, R3, R5, R6 and R7 fire on "
+          "synthetic fixtures and stay quiet on negated, mid-clause, quoted, labelled, noun-phrase, heading, "
+          "noun-use, static-source, statement, orchestrator-answered and code-span text; scope keeps and "
+          "drops numbered items, other families' legs, sections and tail markers, and ignores markers in code "
+          "spans, quotes or mid-line; undecodable, blank, oversized, missing, non-regular, backwards-range and "
+          "unknown-family input exits 2; every rule patched out flips its fixture); execution set reconciled "
+          "against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 
