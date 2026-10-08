@@ -5,7 +5,7 @@ A Python launcher puts its own script directory first on the interpreter's modul
 written beside the launched script (a tool-authored ``json.py`` next to a hook dispatcher, an ``os.py``
 next to a gate) can shadow a standard-library import and silently neuter the control. Python's isolated
 mode (``-I``, or the complete ``-P -E -s`` equivalent) removes the script directory from that path and
-ignores the ambient environment, so a sibling can no longer shadow. This gate scans the launcher
+ignores the ``PYTHON*`` environment variables, so a sibling can no longer shadow. This gate scans the launcher
 configuration this repo ships and runs, and fails any direct ``python3`` launcher that is not isolated.
 
 BOOTSTRAP SELF-GUARD. The gate's own first executable statements import only ``sys`` and refuse to run
@@ -24,6 +24,44 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
     tools/check_internal_names.py (required), scanned for a sys.path insertion at index 0 that would
     re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
     sanctioned sibling-import form is sys.path.append.
+
+SETTINGS SCOPE. A settings.json hook command is in scope only when it is a candidate python launcher:
+it holds a python word or the core hook launcher's name once its quote characters, backslashes and
+line continuations are removed (the CI-line prefilter, extended to that name), or one of its command
+words can hide a python word, which is a cannot-evaluate (exit 2) naming the construct. A command word
+can hide one when its file name (the part after its last literal ``/``) holds an expansion, a glob, a
+brace or a ``~``, or its directory holds an expansion that word splitting can break apart (an unquoted
+or non-simple one); a command or process substitution, a backtick and an unbalanced quote anywhere in
+the command count too, because the scan that finds command words does not read inside them. That scan
+over-reads command-word positions (the first word after ``;``, ``&``, ``|``, a newline, a parenthesis, a
+shell keyword, ``{``, ``!``, ``VAR=val`` and ``env`` with its options). Any other settings hook command
+is out of scope (neither pass nor fail), its redirections, ``~`` paths, groups and globs included, and
+``"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh`` with them.
+
+SHELL GRAMMAR (an allow-list). A candidate settings.json hook command, and a CI shell line the gate
+parses, is PARSED only if it lies entirely inside this grammar: words of the characters ``A-Z a-z 0-9 _ . / - + = ,
+: @ %``, single-quoted strings, and double-quoted strings that contain no ``$``, backtick, backslash or
+``!``, glued as a shell glues them; spaces and tabs between words; and the unquoted operators ``;``,
+``;;``, ``|``, ``||``, ``&&`` and ``&`` (SEPARATORS), each of which ends a simple command. Inside it a shell
+removes quotes and nothing else, so the words and the operator provenance the gate reads are the ones
+the shell uses. ANY other construct makes that command a cannot-evaluate (exit 2) whose message names
+it, never a parse by guesswork: a ``$`` anywhere outside single quotes (a parameter expansion, a command
+or arithmetic substitution, ANSI-C ``$'`` or locale ``$"`` quoting), a backtick, a backslash (an escape or
+a line continuation), an unquoted ``#``, a newline inside a command, a redirection, a heredoc or here-
+string, a process substitution ``<(`` or ``>(``, a parenthesis or brace, an unquoted glob character
+(``*``, ``?``, ``[``, ``]``), ``!``, ``~``, any other operator such as ``|&``, an unbalanced quote, and any
+other character. A settings hook command also admits a double-quoted ``$NAME`` or ``${NAME}`` (a plain
+name, no operator) as the leading path segment of a word that is neither the command word, nor before
+it, nor an interpreter option or an option's value: the quote opens the word, the expansion follows it
+directly, and a ``/`` follows the expansion (``python3 -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/
+aiqt_hooks_launch.py``, the form Claude Code's hook documentation shows), so the basename the rules read
+stays literal; one per word, and any other expansion stays a cannot-evaluate. A CI shell line differs in
+three ways: a trailing or whole-line comment is cut first
+(exact inside the grammar: a ``#`` inside quotes leaves an open quote, which is refused); a double-quoted
+``$NAME`` or ``${NAME}`` is also admitted, but only where no rule reads its value, after the script
+operand of a python launcher or after the command word of another command (anywhere else it is a
+cannot-evaluate); and a line is parsed only when it has a backslash or a ``python`` word once its quote
+characters are removed (a line with neither holds no python launcher inside the grammar).
 
 LAUNCHER PREDICATE. In a scanned command, a leading ``env`` and any ``VAR=val`` assignments are skipped;
 the command word's basename must then match ``^python(3(\\.\\d+)?)?$`` to be a launcher (a non-python
@@ -70,28 +108,31 @@ mention anywhere else (``python3 -I -B -m py_compile <launcher>``, a hashing or 
 launcher as its argument) is not held to it. Without ``-S`` the site module runs before the launcher's
 first line, and with it every .pth file in the interpreter's site-packages (a PATH-selected project
 virtual environment's included), sitecustomize and usercustomize, any of which can install a line trace
-that ends a blocking hook with exit 0. ``-I`` does not exclude them. No option excludes the files CPython
-reads to compute its startup configuration and module search path before the launcher's first line (the
-environment, which ``-I`` excludes, aside): the interpreter binary and the directory it sits in, a ._pth
-file there (``python3._pth`` beside the ``python3`` PATH selects replaces the module search path and,
-with an ``import site`` line, turns the site module back on), a pyvenv.cfg beside the binary or in the
-directory above it and the home it names, and the standard library and zip locations those resolve to
-(examples, not an exhaustive list). That stays with whoever can write those locations, not with this rule.
+that ends a blocking hook with exit 0. ``-I`` does not exclude them. No option excludes the files
+CPython reads to compute its startup configuration and module search path before the launcher's first
+line (the ``PYTHON*`` environment variables, which ``-I`` ignores, aside): the interpreter binary and
+the directory it sits in, a ._pth file there (``python3._pth`` beside the ``python3`` PATH selects
+replaces the module search path and, with an ``import site`` line, turns the site module back on), a
+pyvenv.cfg beside the binary or in the directory above it and the home it names, and the standard
+library and zip locations those resolve to (examples, not an exhaustive list). That stays with whoever
+can write those locations, not with this rule.
 
 NAME, NOT IDENTITY. The rule matches the core hook launcher's NAME in the configured argv; it does not
 establish which file the interpreter executes. A renamed copy or a symlink of the launcher under another
-name, a glob (``aiqt_hooks_launc?.py``), an ANSI-C quoted name that spells a letter as an escape, an
-alternate-case name on a case-insensitive filesystem, a compiled ``.pyc`` of it, and its source fed on
-stdin by another command (``cat <launcher> | python3 -I -B - x``) each pass without ``-S``, and a launcher
-that names no core hook launcher is not held to this rule. A ``-h``, ``-?`` or ``-V`` letter, alone or in
-a cluster (``-ISh <launcher>``), makes CPython print help or its version and exit 0 without running the
-hook, so a blocking hook registered that way is silently allowed; the option scan credits such a cluster
-and this rule does not catch it.
+name (a glob such as ``aiqt_hooks_launc?.py`` or an ANSI-C quoted name in a shell string is outside the
+shell grammar, so a cannot-evaluate), an alternate-case name on a case-insensitive filesystem, a
+compiled ``.pyc`` of it, and its source fed on stdin by another command (``cat <launcher> | python3 -I
+-B - x``) each pass without ``-S``, and a launcher that names no core hook launcher is not held to this
+rule. A ``-h``, ``-?`` or ``-V`` letter, alone or in a cluster (``-ISh <launcher>``), makes CPython
+print help or its version and exit 0 without running the hook, so a blocking hook registered that way is
+silently allowed; the option scan credits such a cluster and this rule does not catch it.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated (and each core hook launcher also runs without
 the site module); 1 at least one recognized launcher is not isolated, or a core hook launcher runs with
 the site module; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
-parse error; a shell line carrying a python token whose command-word position cannot be established; a
+parse error; a candidate settings hook command, or a parsed CI shell line, outside the allow-listed
+shell grammar; a settings hook command with a command word that can hide a python word;
+a shell line carrying a python token whose command-word position cannot be established; a
 hook entry with a missing type/command or a non-list args; an args-form hook entry whose argv carries a
 python word that is not its command word, such as ``/usr/bin/env`` with ``python3`` in args, exactly as
 a settings shell-string with such a word is; or the gate's own interpreter not isolated).
@@ -100,20 +141,28 @@ Diagnostics are deterministic, sorted by relative path then line then location.
 DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``bash -c "python3 ..."``,
 a ``.sh`` re-launcher), ``$PYTHON`` and shell aliases or functions, a dynamically assembled argv, the
 programmatic ``subprocess`` children in the tools and the ``regenerate`` strings in .aiqt/gensrc.json
-(a separate follow-up), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
+(a separate follow-up), a python launched through a script's shebang (a settings hook command
+``"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py``, or the core hook launcher's own path run directly), an
+expansion outside every command word that a wrapper or a callee later runs (``exec "$PY"``, ``xargs
+"$PY"``), the value of an admitted leading-path expansion (a value that begins with ``-`` is read by the
+interpreter as an option; the gate credits only the literal options before it), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
 three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
-YAML or shell constructs beyond the supported line grammar, and the PATH provenance of ``python3``
+YAML constructs beyond the supported line grammar (a multi-line quoted scalar, for example), a CI shell line
+the prefilter skips (no backslash and no ``python`` word once its quotes are removed) that assembles a
+python word through a construct outside the shell grammar (``pyt${E}hon3``, a command substitution, a glob
+or a brace expansion), and the PATH provenance of ``python3``
 itself, and every file CPython reads to compute its startup configuration and module search path
 before the launcher's first line (the interpreter binary and its directory, a ._pth file there, a
 pyvenv.cfg beside the binary or in the directory above it and the home it names, and the standard library
 and zip locations those resolve to; examples, not an exhaustive list), which stays with whoever can write
 those locations. The no-site rule matches the launcher's name, not executable identity (a renamed copy or
-symlink, a glob, an ANSI-C quoted name, an alternate-case name on a case-insensitive filesystem, a
-``.pyc`` or stdin-fed source passes without ``-S``), and a ``-h``, ``-?`` or ``-V`` letter in the
+symlink, an alternate-case name on a case-insensitive filesystem, a ``.pyc`` or stdin-fed source passes
+without ``-S``), and a ``-h``, ``-?`` or ``-V`` letter in the
 registered cluster (``-ISh``) prints help or the version and exits 0 without running the hook. A
-``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
+``python3`` token embedded in a quoted argument may be miscounted (a cannot-evaluate, never a pass), and
+the lines of a heredoc body in run_all_checks.sh or a ``run:`` block are scanned as shell lines,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
   check_python_launcher_isolation.py             scan the declared surfaces
@@ -185,22 +234,17 @@ SYS_PATH_FRONT_INSERT_RE = re.compile(r"sys\.path\.insert\(\s*0\b")
 
 PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a python interpreter name
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
-QUOTE_OR_ESCAPE_RE = re.compile(r"""['"\\]""")       # a quote or backslash that could obfuscate a launcher name
+QUOTES = str.maketrans("", "", "'\"")               # removes the quote characters a shell strips from a word
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # a shell VAR=val inline assignment
 # YAML `run:` key, optionally under a `- ` sequence dash; captures the leading indent and the scalar value.
 RUN_RE = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:(?:[ \t]+(?P<val>.*))?$")
 BLOCK_INDICATORS = {"|", ">", "|-", ">-", "|+", ">+"}
-# Shell separators that end one simple command and begin the next, when the token was an unquoted,
-# unescaped operator in the source (a _ShellOperator); the same text quoted or escaped is an argument.
+# The only shell operators the allow-listed grammar (_shell_split) admits: each ends one simple command
+# and begins the next when it was unquoted in the source (a _ShellOperator); the same text quoted is an
+# argument. A maximal unquoted run of `;`, `|` and `&` that is not one of these is outside the grammar.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
-# Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
-# `&&`, and `||` win over their single-character prefixes. shlex.split leaves an operator glued to a
-# word as one token (`prep;python3`, `(python3`), which would hide a launcher after a punctuation-
-# adjacent operator; separating them first makes tokenization segment as a real shell does.
-SHELL_OPERATORS = (";;", "&&", "||", ";", "|", "&", "(", ")")
 # Shell control keywords that may lead a simple command; skipped so the command word after them is found.
-LEADING_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "time",
-                    "!", "{", "}", "(", ")"}
+LEADING_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "time"}
 
 
 def _exists(path):
@@ -263,7 +307,7 @@ VALUE_LONG_OPTS = frozenset({"--check-hash-based-pycs"})  # long options that ta
 NAME_COMPONENT_SPLIT_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 
 
-def _option_letters(after_interpreter):
+def _option_scan(after_interpreter):
     """Collect the interpreter option letters from the tokens after the command word, stopping at the
     first non-option, `-m`, `-c`, `--`, or an unrecognized long `--option`, and expanding a single-dash
     cluster letter by letter. A value-taking option (`-W`/`-X`, attached or separate, and the long
@@ -279,21 +323,25 @@ def _option_letters(after_interpreter):
     (the letters before the `-` still count). Any other long option inside a cluster stops the scan
     with no script operand: it is an unknown option (exit 2; an `=VALUE` form included, which CPython
     does not accept, and `-help` and `-version`) or one of `-help-all`, `-help-env` and
-    `-help-xoptions` (help printed, exit 0)."""
+    `-help-xoptions` (help printed, exit 0). A third value is the index of the first token that is
+    neither an interpreter option nor an option's value: the script operand, the token after a separate
+    `-c`/`-m` or after one that carries `-c`/`-m` (its operand or first argument), or the token count
+    when the scan stops at an unrecognized long option or runs out of tokens (every token is then read
+    as an option)."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok == "--":
-            return flags, (i + 1 if i + 1 < len(tokens) else None)
+            return flags, (i + 1 if i + 1 < len(tokens) else None), i + 1
         if tok in ("-m", "-c"):
-            return flags, None
+            return flags, None, i + 1
         if tok in VALUE_LONG_OPTS:
             i += 2                       # skip the long option and its separate value token
             continue
         if tok.startswith("--"):
-            return flags, None           # an unrecognized long interpreter option: not a flag we credit
+            return flags, None, len(tokens)  # an unrecognized long interpreter option: not credited
         if tok.startswith("-") and len(tok) > 1:
             j = 1
             skip_next = False
@@ -308,11 +356,11 @@ def _option_letters(after_interpreter):
                     # script takes the next token as its value; anything else is an unknown option
                     # (exit 2) or a help option (`-help-all`, exit 0), so no script operand is reached.
                     if j == len(tok) - 1:
-                        return flags, (i + 1 if i + 1 < len(tokens) else None)
+                        return flags, (i + 1 if i + 1 < len(tokens) else None), i + 1
                     if tok[j + 1:] in (opt[2:] for opt in VALUE_LONG_OPTS):
                         skip_next = True
                         break
-                    return flags, None
+                    return flags, None, len(tokens)
                 if letter in ("c", "m"):
                     # -c/-m end interpreter-option scanning even mid-cluster or attached (-cCMD,
                     # -mMOD, -Ic...): the rest of this token, and every following token, is the
@@ -328,11 +376,16 @@ def _option_letters(after_interpreter):
                 flags.add(letter)        # a valueless flag: credit it (e.g. -PEs -> P, E, s)
                 j += 1
             if terminate:
-                return flags, None
+                return flags, None, i + 1
             i += 2 if skip_next else 1
             continue
-        return flags, i                  # the script/program token: options end here
-    return flags, None
+        return flags, i, i               # the script/program token: options end here
+    return flags, None, len(tokens)
+
+
+def _option_letters(after_interpreter):
+    """(the option letters, the script operand index) of _option_scan."""
+    return _option_scan(after_interpreter)[:2]
 
 
 def _flags_isolated(after_interpreter):
@@ -383,9 +436,9 @@ def check_argv(argv):
 
 def _segments(tokens):
     """Split a token list into simple-command segments at shell separator tokens. Only a token that was
-    an UNQUOTED, unescaped operator in the source (a _ShellOperator from _shell_split) separates: a quoted
-    or escaped `;`, `;;`, `|`, `||`, `&&` or `&` is an ordinary argument of the command it sits in, as a
-    real shell reads it, so it can never cut a launcher off from the arguments after it."""
+    an UNQUOTED operator in the source (a _ShellOperator from _shell_split) separates: a quoted `;`,
+    `;;`, `|`, `||`, `&&` or `&` is an ordinary argument of the command it sits in, as a real shell reads
+    it, so it can never cut a launcher off from the arguments after it."""
     segments, cur = [], []
     for tok in tokens:
         if isinstance(tok, _ShellOperator) and tok in SEPARATORS:
@@ -400,9 +453,12 @@ def _segments(tokens):
 
 
 def _strip_comment(line):
-    """Drop a shell trailing comment (a space- or tab-preceded `#`) and a whole-line comment, the
-    conservative lexical cut the enforceability roster scan uses. This does not parse the shell, so a `#`
-    inside a quoted string may be over-trimmed; the residual is disclosed."""
+    """Drop a shell trailing comment (a space- or tab-preceded `#`) and a whole-line comment from a CI
+    shell line, the lexical cut the enforceability roster scan uses. For a line inside the allow-listed
+    grammar (_shell_split, which has no escape) the cut is exact: a `#` after a space or tab outside
+    quotes starts a comment, and one inside quotes leaves the kept text ending inside an open quote,
+    which _shell_split refuses as an unbalanced quote (cannot-evaluate), never parses. A settings hook
+    command is not cut: an unquoted `#` there is outside the grammar."""
     code = re.split(r"[ \t]#", line, maxsplit=1)[0]
     if code.lstrip().startswith("#"):
         return ""
@@ -410,107 +466,348 @@ def _strip_comment(line):
 
 
 class _ShellOperator(str):
-    """A token that was an UNQUOTED, unescaped shell operator in the source line. Only _shell_split makes
-    one, and only one of these ends a simple command (_segments): after shlex removes quoting, a quoted
-    `';'` and a real `;` are the same text, so the provenance travels with the token instead."""
+    """A token that was an UNQUOTED shell operator in the source line. Only _shell_split makes one, and
+    only one of these ends a simple command (_segments): after the quoting is removed, a quoted `';'`
+    and a real `;` are the same text, so the provenance travels with the token instead."""
     __slots__ = ()
 
 
-def _shell_operator_pieces(s):
-    """Cut the line at every UNQUOTED, UNESCAPED shell operator, returning the text between operators as
-    plain strings and each operator as a _ShellOperator, in order, so an operator glued to an adjacent
-    word (`prep;python3`, `(python3`) is still its own token, matching how a real shell segments. An
-    operator inside single or double quotes, or preceded by a backslash escape, stays inside its text
-    piece. Quote and escape state are tracked exactly so a `;` or `&` inside a string is never mistaken
-    for a separator; each text piece ends outside any quote or escape, so shlex then removes the quoting
-    of each piece as it would of the whole line.
+class _ExpandedWord(str):
+    """A word holding a double-quoted parameter expansion (`"$NAME"`, `"${NAME}"`), admitted on a CI
+    shell line only (_shell_split with expansions=True). Its value is unknown to the gate, so the word
+    keeps its source spelling and _scan_command_tokens accepts it only where no rule reads it: after
+    the script operand of a python launcher, or after the command word of any other command."""
+    __slots__ = ()
 
-    The `&` split is REDIRECTION-AWARE: an `&` that is part of a redirect operator, not a control
-    operator, does NOT separate commands and is left glued to its redirect. That is an `&` that
-    immediately follows an unquoted, unescaped `>` or `<` (the `>&`, `<&`, `N>&`, `N<&`, `>&WORD`,
-    `>&-` fd-dup / merge / close forms; a leading fd number sits before the `>`/`<`, so the `&` still
-    immediately follows it), or immediately precedes an unquoted `>` (the `&>`, `&>>` forms). Only a
-    standalone background `&` and logical `&&` remain separators, so a redirect whose target is a
-    filename like `python3` (`... >&python3`) is not mis-split into a fabricated bare launcher. A
-    redirect target given as a SEPARATE, space-separated token that is itself a launcher name
-    (`>& python3`) is not glued and is left to the caller, where it surfaces as a cannot-evaluate
-    rather than a fabricated failure or a silent pass."""
-    pieces, out = [], []
+
+class _OutsideGrammar(ValueError):
+    """A shell string that does not lie entirely inside the allow-listed grammar (_shell_split). The
+    message names the construct; the caller reports it as a cannot-evaluate, never a parse by guess."""
+
+
+# The allow-listed shell grammar (_shell_split). A word is a run of WORD_CHARS, single-quoted strings
+# and double-quoted strings, glued together; nothing else is a word character.
+WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-+=,:@%")
+OPERATOR_CHARS = frozenset(";|&")
+# A double-quoted parameter expansion admitted on a CI shell line: `$NAME` or `${NAME}`, nothing more.
+DQ_EXPANSION_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+# The _shell_split expansions mode of a settings hook command: a double-quoted `$NAME` or `${NAME}` is
+# admitted only as the leading path segment of a word (`"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py`).
+LEADING_PATH = "leading-path"
+# The construct an unquoted character outside the grammar starts, named in the cannot-evaluate message.
+OUTSIDE_GRAMMAR_NAMES = (
+    ("$'", "ANSI-C quoting $'...'"), ('$"', 'locale quoting $"..."'),
+    ("$((", "an arithmetic expansion $((...))"), ("$(", "a command substitution $(...)"),
+    ("${", "a parameter expansion ${...}"), ("$", "a $ expansion"),
+    ("`", "a backtick command substitution"), ("\\\n", "a backslash-newline line continuation"),
+    ("\\", "a backslash escape"), ("\n", "a newline inside a command"), ("#", "an unquoted # (a comment)"),
+    ("<(", "a process substitution <(...)"), (">(", "a process substitution >(...)"),
+    ("<<<", "a here-string <<<"), ("<<", "a heredoc <<"), ("<", "a redirection"), (">", "a redirection"),
+    ("(", "a parenthesis (a subshell or group)"), (")", "a parenthesis (a subshell or group)"),
+    ("{", "a brace (a group or brace expansion)"), ("}", "a brace (a group or brace expansion)"),
+    ("*", "an unquoted glob character *"), ("?", "an unquoted glob character ?"),
+    ("[", "an unquoted glob character ["), ("]", "an unquoted glob character ]"),
+    ("!", "an unquoted ! (negation or history expansion)"), ("~", "a tilde expansion"))
+
+
+def _outside(s, i, what=None):
+    """Raise _OutsideGrammar naming the construct that starts at s[i]."""
+    if what is None:
+        what = next((name for lead, name in OUTSIDE_GRAMMAR_NAMES if s.startswith(lead, i)),
+                    "the character {!r}".format(s[i]))
+    raise _OutsideGrammar("outside the allow-listed shell grammar: {} at offset {}".format(what, i))
+
+
+def _leads_path(s, quote, at, end, in_word):
+    """True iff the double-quoted expansion s[at:end] opens its word (the word starts at the opening
+    quote s[quote] and the expansion follows that quote directly) and a `/` follows it, inside the same
+    quotes or straight after the closing quote: a leading path segment, so the rest of the word, its
+    basename included, is literal."""
+    return (not in_word and at == quote + 1
+            and (s.startswith("/", end) or s.startswith('"/', end)))
+
+
+def _shell_split(s, expansions=False):
+    """Split a shell string into words and operators ONLY when it lies entirely inside an ALLOW-LISTED
+    grammar; raise _OutsideGrammar (a ValueError) naming the first construct outside it. The grammar:
+    words made of WORD_CHARS (letters, digits and `_ . / - + = , : @ %`), single-quoted strings, and
+    double-quoted strings that contain no `$`, backtick, backslash or `!`, glued into one word as a
+    shell glues them; spaces and tabs between words; and the unquoted operators in SEPARATORS (a
+    maximal run of `;`, `|` and `&` must be one of them). Each operator is returned as a
+    _ShellOperator, each word with its quoting removed. ANY other construct is refused, never parsed by
+    guesswork: a `$` outside single quotes (an expansion, a substitution, ANSI-C `$'` or locale `$"`
+    quoting), a backtick, a backslash (an escape or a line continuation), an unquoted `#`, a newline,
+    a redirection, a heredoc or here-string, a process substitution, a parenthesis or brace, an
+    unquoted glob character (`*`, `?`, `[`, `]`), `!`, `~`, an unbalanced quote, or any other
+    character. Inside the grammar a shell removes quotes and nothing else, so the words and the
+    operator provenance returned are the ones the shell uses. With expansions=True (a CI shell line) a
+    double-quoted `$NAME` or `${NAME}` is also admitted, and with expansions=LEADING_PATH (a settings
+    hook command) one is admitted only as the leading path segment of a word (_leads_path, at most one
+    per word); either way the word holding it is returned as an _ExpandedWord for the caller to place."""
+    tokens = []
+    word, in_word, expanded = [], False, False
     i, n = 0, len(s)
-    quote = None  # None, "'", or '"'
-    prev_redirect = False  # the char just emitted was an unquoted, unescaped `>` or `<`
     while i < n:
         c = s[i]
-        if quote == "'":
-            out.append(c)                # single quotes: everything literal until the next '
-            if c == "'":
-                quote = None
+        if c in (" ", "\t"):
+            if in_word:
+                tokens.append((_ExpandedWord if expanded else str)("".join(word)))
+                word, in_word, expanded = [], False, False
             i += 1
-            prev_redirect = False
             continue
-        if quote == '"':
-            out.append(c)                # double quotes: a backslash escapes the next char
-            if c == "\\" and i + 1 < n:
-                out.append(s[i + 1])
-                i += 2
-                prev_redirect = False
-                continue
-            if c == '"':
-                quote = None
-            i += 1
-            prev_redirect = False
+        if c in OPERATOR_CHARS:
+            if in_word:
+                tokens.append((_ExpandedWord if expanded else str)("".join(word)))
+                word, in_word, expanded = [], False, False
+            j = i
+            while j < n and s[j] in OPERATOR_CHARS:
+                j += 1
+            if s[i:j] not in SEPARATORS:
+                _outside(s, i, "the operator {!r}, which is not a listed separator".format(s[i:j]))
+            tokens.append(_ShellOperator(s[i:j]))
+            i = j
             continue
-        if c == "\\":                    # unquoted backslash: the next char is literal, not an operator
-            out.append(c)
-            if i + 1 < n:
-                out.append(s[i + 1])
-                i += 2
-            else:
-                i += 1
-            prev_redirect = False        # an escaped `>`/`<` is a literal char, not a redirect operator
+        if c == "'":
+            close = s.find("'", i + 1)
+            if close < 0:
+                _outside(s, i, "an unbalanced single quote")
+            if "\n" in s[i + 1:close]:
+                _outside(s, s.index("\n", i + 1))
+            word.append(s[i + 1:close])
+            in_word = True
+            i = close + 1
             continue
-        if c == "'" or c == '"':
-            quote = c
-            out.append(c)
-            i += 1
-            prev_redirect = False
+        if c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                if s[j] == "$" and expansions:
+                    m = DQ_EXPANSION_RE.match(s, j)
+                    if m and (expansions != LEADING_PATH or _leads_path(s, i, j, m.end(), in_word)):
+                        word.append(m.group(0))
+                        expanded = True
+                        j = m.end()
+                        continue
+                if s[j] in "$`\\!\n":
+                    leads = ("$((", "$(", "${", "`", "\\\n", "\\", "\n") if s[j] != "!" else ()
+                    what = next((name for lead, name in OUTSIDE_GRAMMAR_NAMES
+                                 if lead in leads and s.startswith(lead, j)),
+                                "a $ expansion" if s[j] == "$" else "a ! (history expansion)")
+                    if s[j] == "$" and expansions == LEADING_PATH:
+                        what += (" inside double quotes (a settings hook command admits a double-quoted "
+                                 "$NAME or ${NAME} only as the leading path segment of a word)")
+                    else:
+                        what += " inside double quotes"
+                    _outside(s, j, what)
+                word.append(s[j])
+                j += 1
+            if j >= n:
+                _outside(s, i, "an unbalanced double quote")
+            in_word = True
+            i = j + 1
             continue
-        matched = next((op for op in SHELL_OPERATORS if s.startswith(op, i)), None)
-        if matched:
-            if matched == "&" and (prev_redirect or (i + 1 < n and s[i + 1] == ">")):
-                # A single `&` that belongs to a redirect operator (it follows an unquoted `>`/`<`,
-                # or precedes an unquoted `>`), not a control operator: leave it glued so it is not
-                # spaced into a standalone separator token. `&&` matches longer above and is unaffected.
-                out.append("&")
-                i += 1
-                prev_redirect = False
-                continue
-            pieces.append("".join(out))
-            pieces.append(_ShellOperator(matched))
-            out = []
-            i += len(matched)
-            prev_redirect = False
-            continue
-        out.append(c)
-        prev_redirect = c in "<>"
+        if c not in WORD_CHARS:
+            _outside(s, i)
+        word.append(c)
+        in_word = True
         i += 1
-    pieces.append("".join(out))
-    return pieces
-
-
-def _shell_split(s):
-    """shlex.split each text piece between the unquoted shell operators (_shell_operator_pieces), with
-    each such operator kept as its own _ShellOperator token, so an operator glued to a word
-    (`prep;python3`, `(python3`) tokenizes as a real shell would and a quoted or escaped operator stays
-    a plain argument. Raises ValueError on an unbalanced quote exactly as shlex.split does, so callers
-    surface it as a parse failure."""
-    tokens = []
-    for piece in _shell_operator_pieces(s):
-        if isinstance(piece, _ShellOperator):
-            tokens.append(piece)
-        else:
-            tokens.extend(shlex.split(piece, comments=False, posix=True))
+    if in_word:
+        tokens.append((_ExpandedWord if expanded else str)("".join(word)))
     return tokens
+
+
+# The SCOPE of a settings hook command. Only a candidate python launcher is parsed with the allow-listed
+# grammar: one holding a python word or a NO_SITE_SCRIPTS name once its quoting is removed
+# (_unquoted_text), or one whose command word can hide a python word (_command_word_hazard, a
+# cannot-evaluate). Any other settings hook command is out of scope, its redirections, groups, globs and
+# `~` paths included.
+SCAN_LITERAL, SCAN_SIMPLE, SCAN_EXPANSION, SCAN_PATTERN = "lit", "dq-name", "expansion", "pattern"
+# The words after which the next word is still in a command-word position for _command_word_hazard: the
+# shell keywords the launcher predicate skips, the group and negation words, and `env`.
+COMMAND_POSITION_WORDS = LEADING_KEYWORDS | {"{", "}", "!", "env"}
+# A command word that is the test builtin: a lone `[` is no bracket expression, so it is literal.
+TEST_WORDS = {"[", "[["}
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _unquoted_text(s):
+    """s with every line continuation, backslash and quote character removed: a python word or a
+    NO_SITE_SCRIPTS name spelled with quotes or escapes (`pyt"hon"3`, `pyt\\hon3`, `pyt\\<newline>hon3`)
+    reads here as the shell reads it once its quoting is removed."""
+    return s.replace("\\\n", "").replace("\\", "").translate(QUOTES)
+
+
+def _is_candidate_text(s):
+    """True iff the settings hook command s holds a python word or a NO_SITE_SCRIPTS name once its
+    quoting is removed (the CI-line prefilter, extended to the core hook launcher's name)."""
+    text = _unquoted_text(s)
+    return bool(PY_TOKEN_RE.search(text)) or any(name in text for name in NO_SITE_SCRIPTS)
+
+
+def _dollar_construct(s, j, quoted):
+    """Read the `$` construct at s[j] for _command_word_hazard. Return (kind, end): a `$NAME` or
+    `${NAME}` (SCAN_SIMPLE inside double quotes, else SCAN_EXPANSION, which word splitting can break
+    apart), a special parameter, an operator-free `${...}`, ANSI-C `$'...'` or a locale `$"` prefix
+    (SCAN_EXPANSION), or a lone `$` (SCAN_LITERAL). Return a str naming a construct the scan does not
+    read: a command substitution or arithmetic expansion, or a `${...}` holding a quote, a backslash,
+    a brace or another expansion."""
+    m = DQ_EXPANSION_RE.match(s, j)
+    if m:
+        return (SCAN_SIMPLE if quoted else SCAN_EXPANSION), m.end()
+    nxt = s[j + 1:j + 2]
+    if nxt == "(":
+        return "a command substitution or arithmetic expansion $(...)"
+    if nxt == "{":
+        close = s.find("}", j + 2)
+        if close < 0 or any(ch in s[j + 2:close] for ch in "\"'$`\\{"):
+            return "a ${...} expansion the command-word scan does not read"
+        return SCAN_EXPANSION, close + 1
+    if nxt and nxt in "@*#?-$!0123456789":
+        return SCAN_EXPANSION, j + 2
+    if not quoted and nxt == "'":
+        k = j + 2
+        while k < len(s) and s[k] != "'":
+            k += 2 if s[k] == "\\" else 1
+        if k >= len(s):
+            return "an unbalanced ANSI-C quote $'"
+        return SCAN_EXPANSION, k + 1
+    if not quoted and nxt == '"':
+        return SCAN_EXPANSION, j + 1        # a locale $"...": the string after it is read as usual
+    return SCAN_LITERAL, j + 1
+
+
+def _file_name_hazard(atoms):
+    """For one command word (its atoms, each (text, kind)): None when its file name, the part after its
+    last literal `/`, is wholly literal and its directory holds no expansion that word splitting can
+    break apart; otherwise a str naming the hazard. A double-quoted `$NAME`, a glob, a brace or a leading
+    `~` in the directory cannot change the literal file name, so a python word cannot hide there."""
+    slash = max((k for k, (t, kind) in enumerate(atoms) if t == "/" and kind == SCAN_LITERAL), default=-1)
+    if any(kind != SCAN_LITERAL for _, kind in atoms[slash + 1:]):
+        return "an expansion, glob, brace or ~ in a command word's file name, where a python word could hide"
+    if any(kind == SCAN_EXPANSION for _, kind in atoms[:slash + 1]):
+        return ("an unquoted or non-simple expansion in a command word's directory, which word splitting "
+                "can break into a python command word")
+    return None
+
+
+def _command_word_hazard(s):
+    """For a settings hook command that is not a candidate by its text (_is_candidate_text), return None
+    when none of its command words can hide a python word, else a str naming the construct that can (the
+    command is then a candidate, and a cannot-evaluate). A lenient lexer, NOT the allow-listed grammar: it
+    reads redirections, groups, globs, `~` and expansions only far enough to find each command word, and
+    it over-reads command-word positions rather than under-reads them (the first word after `;`, `&`,
+    `|`, a newline, a parenthesis, a shell keyword, `{`, `!`, an assignment, or `env` and its options;
+    a redirection's target is never one). A command word is a hazard per _file_name_hazard. A construct
+    the lexer does not read is a hazard wherever it is: a command or process substitution, a backtick, a
+    `${...}` holding a quote, a backslash, a brace or a `$`, and an unbalanced quote."""
+    tokens = []                             # a word as (atoms, is_redirect_target); None ends a command
+    atoms, started, target = [], False, False
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in " \t\n;&|()<>":
+            if started:
+                if not (c in "<>" and all(k == SCAN_LITERAL and t.isdigit() for t, k in atoms)):
+                    tokens.append((atoms, target))   # (a digit word before `<`/`>` is its descriptor)
+                    target = False
+                atoms, started = [], False
+            if c in "<>":
+                if s.startswith("(", i + 1):
+                    return "a process substitution"
+                j = i
+                while j < n and s[j] in "<>&|":
+                    j += 1
+                if s.startswith("-", j) and s[i:j] == "<<":
+                    j += 1
+                target, i = True, j
+                continue
+            if c not in " \t":
+                tokens.append(None)
+                target = False
+            i += 1
+            continue
+        if c == "#" and not started:
+            end = s.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        if c == "\\":
+            if not s.startswith("\n", i + 1):
+                atoms.append((s[i + 1:i + 2] or c, SCAN_LITERAL))
+                started = True
+            i += 2
+            continue
+        if c == "'":
+            close = s.find("'", i + 1)
+            if close < 0:
+                return "an unbalanced single quote"
+            atoms.extend((ch, SCAN_LITERAL) for ch in s[i + 1:close])
+            started, i = True, close + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                if s[j] == "\\" and j + 1 < n and s[j + 1] in '$`"\\\n':
+                    if s[j + 1] != "\n":
+                        atoms.append((s[j + 1], SCAN_LITERAL))
+                    j += 2
+                    continue
+                if s[j] == "`":
+                    return "a backtick command substitution"
+                if s[j] == "$":
+                    read = _dollar_construct(s, j, True)
+                    if isinstance(read, str):
+                        return read
+                    atoms.append((s[j:read[1]], read[0]))
+                    j = read[1]
+                    continue
+                atoms.append((s[j], SCAN_LITERAL))
+                j += 1
+            if j >= n:
+                return "an unbalanced double quote"
+            started, i = True, j + 1
+            continue
+        if c == "`":
+            return "a backtick command substitution"
+        if c == "$":
+            read = _dollar_construct(s, i, False)
+            if isinstance(read, str):
+                return read
+            atoms.append((s[i:read[1]], read[0]))
+            started, i = True, read[1]
+            continue
+        if c in "*?[{}" or (c == "~" and not started):
+            atoms.append((c, SCAN_PATTERN))
+        else:
+            atoms.append((c, SCAN_LITERAL))
+        started = True
+        i += 1
+    if started:
+        tokens.append((atoms, target))
+    expect, after_env = True, False         # the next word is in a command-word position
+    for tok in tokens:
+        if tok is None:
+            expect, after_env = True, False
+            continue
+        word, is_target = tok
+        if is_target or not expect:
+            continue
+        text = "".join(t for t, _ in word)
+        kinds = {kind for _, kind in word}
+        if text in COMMAND_POSITION_WORDS and kinds <= {SCAN_LITERAL, SCAN_PATTERN}:
+            after_env = text == "env"
+            continue
+        if after_env and kinds == {SCAN_LITERAL} and text.startswith("-"):
+            continue
+        eq = next((k for k, (t, kind) in enumerate(word) if t == "=" and kind == SCAN_LITERAL), 0)
+        if (eq and all(kind == SCAN_LITERAL for _, kind in word[:eq])
+                and NAME_RE.match("".join(t for t, _ in word[:eq]))):
+            continue                         # a VAR=val assignment: the command word comes after it
+        expect, after_env = False, False
+        if text in TEST_WORDS and kinds <= {SCAN_LITERAL, SCAN_PATTERN}:
+            continue
+        hazard = _file_name_hazard(word)
+        if hazard:
+            return "{} ({!r})".format(hazard, text)
+    return None
 
 
 def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures, launch_surface):
@@ -519,12 +816,30 @@ def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures
     words present, a launcher is hidden in an unexpected construct and this is a cannot-evaluate, so it is
     never silently passed. Each recognized launcher that is not isolated is a failure, and so is one the
     NO-SITE RULE refuses (launch_surface: True for a settings.json hook command, False for a CI shell
-    line, where only the script operand is read)."""
+    line, where only the script operand is read). An _ExpandedWord (a double-quoted `$NAME` admitted by
+    _shell_split) is accepted only after the command word of a non-python command, or in a python
+    launcher after its interpreter options: on a CI line only after the script operand (where no rule
+    reads it), in a settings hook command from the script operand on (where it is a leading path
+    segment, so the basename the rules read is literal). At or before the command word, or among the
+    interpreter options and their values, it is a cannot-evaluate."""
     py_word_count = sum(1 for t in tokens if _is_py_word(t))
     launchers = []
     for seg in _segments(tokens):
         rest = _strip_launcher_prefix(seg)
+        expanded = [k for k, t in enumerate(seg) if isinstance(t, _ExpandedWord)]
+        if expanded and expanded[0] <= len(seg) - len(rest):
+            errors.append((rel, lineno, loc, "a parameter expansion at or before the command word, whose "
+                           "value the gate cannot know: {!r}".format(source_repr)))
+            return
         if rest and _is_py_word(rest[0]):
+            _, at, end = _option_scan(rest[1:])
+            first = len(seg) - len(rest) + 1   # the index in seg of the first token after the command word
+            if expanded and (expanded[0] < first + end if launch_surface
+                             else at is None or expanded[0] <= first + at):
+                errors.append((rel, lineno, loc, "a parameter expansion among the interpreter options{}, "
+                               "whose value the gate cannot know: {!r}".format(
+                                   "" if launch_surface else " or in the script operand", source_repr)))
+                return
             launchers.append(rest)
     if len(launchers) != py_word_count:
         errors.append((rel, lineno, loc, "a python token is not in a resolvable command-word position: "
@@ -540,25 +855,29 @@ def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures
 
 def _check_shell_line(rel, lineno, line, errors, failures):
     """Scan one shell line (from run_all_checks.sh or a workflow `run:` scalar) for python launchers.
-    The decision is made on the DECODED command words, exactly as the settings path does via the shared
-    `_scan_command_tokens`, so a quote/escape-obfuscated launcher NAME that bash resolves to a real
-    interpreter (`pyt\\hon3`, `pyt"hon"3`, `py'thon'3`) is caught. Fail-closed: a line that may carry a
-    python launcher but cannot be parsed, or one whose python token cannot be resolved to a command
-    word, is a cannot-evaluate, so a launcher hidden in an unexpected construct is never silently passed.
+    The line is PARSED only when it lies entirely inside the allow-listed grammar (_shell_split, with a
+    double-quoted `$NAME` or `${NAME}` also admitted where no rule reads it); any other construct is a
+    cannot-evaluate naming it. The decision is made on the DECODED command words, exactly as the
+    settings path does via the shared `_scan_command_tokens`, so a quote-obfuscated launcher NAME that
+    bash resolves to a real interpreter (`pyt"hon"3`, `py'thon'3`) is caught, and a backslash-spelled one
+    (`pyt\\hon3`) is refused. Fail-closed: a line whose python token cannot be resolved to a command word
+    is a cannot-evaluate too.
 
-    The raw prefilter remains ONLY as a cheap early-accept that can never cause a miss: bash decoding
-    strips quote/backslash characters and never inserts letters, so a decoded `python` launcher must
-    leave in the raw line either its contiguous substring (matched by PY_TOKEN_RE) or a quote/backslash
-    that broke that substring. A line carrying neither provably contains no launcher after decoding and
-    is skipped; anything else is tokenized and decided on the decoded words."""
+    The raw prefilter decides which lines are parsed: a line is skipped only when it has no backslash
+    and no `python` word once its quote characters are removed. Inside the grammar a shell removes
+    quotes and nothing else, so a skipped line holds no python launcher there; a backslash (which can
+    split a name across a line continuation) always sends the line to the parser, which refuses it. A
+    skipped line that would assemble a python word through a construct outside the grammar (a parameter
+    expansion such as `pyt${E}hon3`, a command substitution, a glob, a brace expansion) is not refused:
+    that is the disclosed CI-line residual."""
     code = _strip_comment(line)
-    if not PY_TOKEN_RE.search(code) and not QUOTE_OR_ESCAPE_RE.search(code):
+    if "\\" not in code and not PY_TOKEN_RE.search(code.translate(QUOTES)):
         return
     try:
-        tokens = _shell_split(code)
+        tokens = _shell_split(code, expansions=True)
     except ValueError as exc:
-        errors.append((rel, lineno, "", "shell line may carry a python launcher but does not parse; "
-                       "fail-closed: {}".format(exc)))
+        errors.append((rel, lineno, "", "shell line may carry a python launcher; fail-closed: {}"
+                       .format(exc)))
         return
     _scan_command_tokens(rel, lineno, "", tokens, code.strip(), errors, failures, False)
 
@@ -667,10 +986,22 @@ def _check_hooks_json(rel, text, errors, failures):
                 else:
                     # The settings form: a shell string that may chain commands (e.g. `prep && python3
                     # x.py`), so segment-split and check every launcher segment, not just the first.
+                    # Only a candidate python launcher is in scope (_is_candidate_text, or a command
+                    # word that can hide a python word, which is a cannot-evaluate). A candidate is
+                    # parsed only inside the allow-listed grammar (_shell_split, with a double-quoted
+                    # `$NAME` admitted as a leading path segment): anything else, a `$` expansion
+                    # elsewhere, a backtick, a backslash, a `#`, a newline, a redirection included, is
+                    # a cannot-evaluate naming the construct.
+                    if not _is_candidate_text(command):
+                        hazard = _command_word_hazard(command)
+                        if hazard is not None:
+                            errors.append((rel, 0, hloc, "command string: a command word that may hide a "
+                                           "python launcher; fail-closed: {}".format(hazard)))
+                        continue             # no python word and no hidden one: out of scope
                     try:
-                        tokens = _shell_split(command)
+                        tokens = _shell_split(command, expansions=LEADING_PATH)
                     except ValueError as exc:
-                        errors.append((rel, 0, hloc, "command string does not parse: {}".format(exc)))
+                        errors.append((rel, 0, hloc, "command string: {}".format(exc)))
                         continue
                     _scan_command_tokens(rel, 0, hloc, tokens, command, errors, failures, True)
 
@@ -841,28 +1172,25 @@ def main():
 #  14. a settings.json shell-string that chains commands catches a launcher in a later segment,
 #  15-18. a required surface that is non-regular (/dev/null) or non-UTF-8, and a PRESENT optional
 #      settings file that is non-regular or non-UTF-8, each fail closed (exit 2),
-#  19-21. a launcher glued to a punctuation-adjacent operator (`echo prep;python3`, `&& (python3`),
-#      unspaced, is still segmented and caught in both a settings shell-string and a run_all_checks.sh
-#      shell line (exit 1), matching real bash where shlex alone would miss it,
+#  19-21. a launcher glued to a `;` (`echo prep;python3`), unspaced, is still segmented and caught in
+#      both a settings shell-string and a run_all_checks.sh shell line (exit 1), and one glued to a
+#      subshell `(` is outside the allow-listed grammar (exit 2),
 #  22-23. a PRESENT-but-dangling optional settings symlink fails closed (exit 2) while a truly-absent
 #      optional settings file stays a clean skip (exit 0),
 #  24. an attached -m/-c operand (-mIfoo, -cIbar) terminates option scanning so its letters never
 #      forge isolation (exit 1), confirmed against a real interpreter for the -c case,
-#  25-27. an `&`-carrying REDIRECT (`>&python3`, `2>&1`, `>&2`, `&>/dev/null`) is not mis-split into a
-#      fabricated bare launcher: an isolated launcher with such a redirect passes (exit 0), and a
-#      non-isolated one fails once on the REAL launcher, never on the redirect target,
+#  25-27. an `&`-carrying REDIRECT (`>&python3`, `2>&1`, `>&2`, `&>/dev/null`) is outside the allow-listed
+#      grammar: a launcher line carrying one is a cannot-evaluate naming the redirection (exit 2),
 #  28. the genuine separators are not loosened: a non-isolated launcher after a real `&&` or a real
 #      background `&` is still segmented and caught (exit 1),
-#  29. real bash confirms `>&python3` is a redirect to a file named python3, run isolated (the
-#      fail-to-pass witness for the redirect-aware `&` split).
-#  30. a quote/escape-obfuscated launcher NAME in a run_all_checks.sh shell line (`pyt\hon3`,
-#      `pyt"hon"3`, `py'thon'3`), which bash resolves to a real non-isolated python, is caught
-#      (exit 1), its isolated `pyt\hon3 -I` form passes (exit 0), and a plain `echo hello` line stays
-#      clean; this is the shell-line-path bug the fix closes (the raw prefilter used to miss it).
-#  31. the same obfuscated NAMES in a settings.json shell-string are caught (exit 1): a regression
-#      guard proving the settings path (which already decoded first) still agrees with the shell path.
-#  32. real bash confirms the obfuscated names `pyt\hon3`, `pyt"hon"3`, `py'thon'3` all resolve to the
-#      token `python3` (the fail-to-pass witness for the decode-then-decide shell-line fix).
+#  29. a runtime witness, not a gate regression: real bash reads `>&python3` as a redirect to a file
+#      named python3 (why a redirection is refused rather than parsed).
+#  30. a quote-obfuscated launcher NAME in a run_all_checks.sh shell line (`pyt"hon"3`, `py'thon'3`),
+#      which bash resolves to a real non-isolated python, is caught (exit 1), the backslash-spelled
+#      `pyt\hon3` is outside the grammar (exit 2), and the isolated `pyt"hon"3 -I` form passes (exit 0).
+#  31. the same obfuscated NAMES in a settings.json shell-string give the same exits.
+#  32. a runtime witness, not a gate regression: real bash resolves `pyt\hon3`, `pyt"hon"3` and
+#      `py'thon'3` to the token `python3`.
 #  34. the NO-SITE RULE: the core hook launcher registered with -I alone, or with -S after the script,
 #      fails (exit 1) in the plugin hooks.json and in a settings.json shell-string; -I -S -B, the -IS
 #      cluster and the shell-string -I -S -B form pass (exit 0); another script with -I alone passes;
@@ -883,21 +1211,30 @@ def main():
 #      (exit 0); an args-form `/usr/bin/env` command word with `python3` in args fails closed (exit 2),
 #      as the settings shell-string does; and a real interpreter confirms CPython's reading of those
 #      spellings (a `-` in a cluster starts the long option, the `=VALUE` form is refused with exit 2).
-#  37. only an UNQUOTED, unescaped shell operator separates: for every member of SEPARATORS, the
-#      reproduction `python3 -I -B -v -c <runpy of sys.argv[2]> '<op>' <launcher>` fails (exit 1) in a
-#      settings.json hook command, single-quoted, double-quoted and backslash-escaped, and in the
-#      hooks.json args form; the unquoted controls still split (`echo a <op> python3 -I -S -B <launcher>`
-#      passes, `echo a <op> python3 /p/x.py` fails); real bash confirms the quoted operator is an argument
-#      and the runpy operand runs a launcher-named probe with the site module.
+#  37. only an UNQUOTED shell operator separates: for every member of SEPARATORS, the reproduction
+#      `python3 -I -B -v -c <runpy of sys.argv[2]> '<op>' <launcher>` fails (exit 1) in a settings.json
+#      hook command, single-quoted and double-quoted, and is outside the grammar backslash-escaped
+#      (exit 2); the six hooks.json args-form cases are CONTROLS (the args form never reaches the
+#      splitter, and they failed before it changed); the unquoted controls still split (`echo a <op>
+#      python3 -I -S -B <launcher>` passes, `echo a <op> python3 /p/x.py` fails); 37b, a runtime witness,
+#      not a gate regression: real bash confirms the quoted operator is an argument and the runpy
+#      operand runs a launcher-named probe with the site module.
 #  38. the categorical rule is scoped to the hook-launching surfaces: a CI line that compiles or hashes
 #      the launcher passes (exit 0) in run_all_checks.sh and in a workflow run: line, the same line as a
 #      settings.json hook command fails (exit 1), and a CI line running the launcher still needs -S.
 #  39. a bare trailing `-` in a cluster ends the options and the next token is the script operand
 #      (`-I -S- <launcher>` and `-IS- <launcher>` pass, `-I- <launcher>` and `-I- -S <launcher>` fail),
-#      and a real interpreter confirms that reading, the cluster help and unknown long options, and that
-#      `-ISh <script>` prints help and exits 0 without running the script.
+#      and (39b, a runtime witness, not a gate regression) a real interpreter confirms that reading, the
+#      cluster help and unknown long options, and that `-ISh <script>` prints help and exits 0 without
+#      running the script.
 #  40. a second mention of the launcher after a compliant script operand is its own argument: it passes
 #      with -S (exit 0) and fails without it (exit 1), in both forms.
+#  41. the ALLOW-LISTED SHELL GRAMMAR: every reviewer reproduction (a nested $( ) holding a quoted `;`,
+#      a backslash-newline inside the launcher name and inside the interpreter name, ANSI-C quoting, a
+#      `#` comment before a newline, backticks) and every other construct outside the grammar is a
+#      settings-command cannot-evaluate (exit 2) naming it; plain compliant commands pass (exit 0) and
+#      plain non-compliant ones fail (exit 1); on a CI line a double-quoted `$NAME` after the script
+#      operand passes and one at the command word, in the options or in the script operand is exit 2.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1146,26 +1483,26 @@ def self_test_main():
             failures.append("a semicolon-glued settings launcher (echo prep;python3) expected exit 1")
 
         # 20. A settings shell-string with a launcher inside a subshell glued to `(` (`echo a &&
-        #     (python3 ...)`, no space after `(`) is segmented and caught (exit 1).
+        #     (python3 ...)`) is outside the allow-listed grammar, so it is a cannot-evaluate (exit 2).
         glue_paren = _build(tmp / "settings-glue-paren")
         sp = glue_paren / ".claude" / "settings.json"
         sp.parent.mkdir(parents=True)
         sp.write_text('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", '
                       '"command": "echo a && (python3 tools/x.py)"}]}]}}\n', encoding="utf-8")
-        if run_quiet(glue_paren) != 1:
-            failures.append("a subshell-glued settings launcher (&& (python3 ...)) expected exit 1")
+        if run_quiet(glue_paren) != 2:
+            failures.append("a subshell-glued settings launcher (&& (python3 ...)) expected exit 2")
 
         # 21. The same punctuation-adjacent forms in a run_all_checks.sh shell line (which shares the
-        #     segment logic) are segmented and caught: a `;`-glued and a `(`-glued bare launcher
-        #     (exit 1).
+        #     segment logic): a `;`-glued bare launcher is segmented and caught (exit 1), and a
+        #     `(`-glued one is outside the grammar (exit 2).
         glue_sh = _build(tmp / "runall-glue-semi",
                          run_all='#!/usr/bin/env bash\necho prep;python3 tools/alpha.py\n')
         if run_quiet(glue_sh) != 1:
             failures.append("a semicolon-glued launcher in run_all_checks.sh expected exit 1")
         glue_sh_paren = _build(tmp / "runall-glue-paren",
                                run_all='#!/usr/bin/env bash\necho a && (python3 tools/alpha.py)\n')
-        if run_quiet(glue_sh_paren) != 1:
-            failures.append("a subshell-glued launcher in run_all_checks.sh expected exit 1")
+        if run_quiet(glue_sh_paren) != 2:
+            failures.append("a subshell-glued launcher in run_all_checks.sh expected exit 2")
 
         # 22. A PRESENT-but-dangling optional settings symlink (a filesystem entry whose target is
         #     gone) is present-but-unusable -> cannot-evaluate (exit 2), NOT the clean skip a truly-
@@ -1201,38 +1538,18 @@ def self_test_main():
             failures.append("real python3 -c with an attached I-command should run non-isolated "
                             "(got rc={}, out={!r})".format(attached.returncode, attached.stdout))
 
-        # 25. A redirect whose TARGET is a filename like `python3` (`... >&python3`) is NOT mis-split
-        #     into a fabricated bare launcher: the `&` belongs to the `>&` redirect, not a control
-        #     operator. An ISOLATED launcher with that redirect passes (exit 0). Without the redirect-
-        #     aware `&` split the target `python3` becomes a fabricated non-isolated launcher (exit 1).
-        redir_iso = _build(tmp / "redir-iso",
-                           run_all="#!/usr/bin/env bash\npython3 -I -B tools/alpha.py >&python3\n")
-        if run_quiet(redir_iso) != 0:
-            failures.append("an isolated launcher with a `>&python3` redirect expected exit 0 "
-                            "(the redirect target must not be read as a launcher)")
-
-        # 26. A NON-isolated launcher with a `>&python3` redirect fails on the REAL launcher, not on a
-        #     fabricated redirect-target launcher: exactly one failure, it names the real launcher, and
-        #     none of them is a bare `python3`. Without the fix this reports two failures (the real
-        #     launcher and a fabricated bare `python3`).
-        redir_noniso = _build(tmp / "redir-noniso",
-                              run_all="#!/usr/bin/env bash\npython3 tools/alpha.py >&python3\n")
-        errs, fails = scan(redir_noniso)
-        if (errs or len(fails) != 1 or "tools/alpha.py" not in fails[0][3]
-                or any("launcher 'python3';" in f[3] for f in fails)):
-            failures.append("a non-isolated `>&python3` launcher must fail once on the real launcher, "
-                            "never fabricate a redirect-target launcher (errs={!r}, fails={!r})"
-                            .format(errs, fails))
-
-        # 27. The other `&`-carrying redirect forms around an ISOLATED launcher (`2>&1`, `>&2`,
-        #     `&>/dev/null`) do not fabricate a launcher: all pass (exit 0).
-        redir_forms = _build(tmp / "redir-forms",
-                             run_all="#!/usr/bin/env bash\n"
-                                     "python3 -I -B tools/a.py 2>&1\n"
-                                     "python3 -I -B tools/b.py >&2\n"
-                                     "python3 -I -B tools/c.py &>/dev/null\n")
-        if run_quiet(redir_forms) != 0:
-            failures.append("isolated launchers with 2>&1 / >&2 / &>/dev/null redirects expected exit 0")
+        # 25-27. A redirection is outside the allow-listed grammar, so a launcher line carrying one is a
+        #     cannot-evaluate (exit 2) naming it, never a parse by guess: `>&python3` (a redirect to a FILE
+        #     named python3, which a hand-written splitter once read as a second launcher), `2>&1`,
+        #     `>&2` and `&>/dev/null`, each around an isolated and a non-isolated launcher.
+        for k, redirect in enumerate((">&python3", "2>&1", ">&2", "&>/dev/null")):
+            for opts in ("-I -B ", ""):
+                run_all = "#!/usr/bin/env bash\npython3 {}tools/alpha.py {}\n".format(opts, redirect)
+                tree = _build(tmp / "redir-{}-{}".format(k, len(opts)), run_all=run_all)
+                errs, fails = scan(tree)
+                if not any("a redirection" in e[3] for e in errs):
+                    failures.append("a {!r} redirect on a launcher line expected a cannot-evaluate naming "
+                                    "the redirection (errs={!r}, fails={!r})".format(redirect, errs, fails))
 
         # 28. The genuine separators are NOT loosened: a non-isolated launcher after a real logical
         #     `&&` and after a real background `&` is still segmented and caught (exit 1 in each case).
@@ -1246,10 +1563,10 @@ def self_test_main():
             failures.append("a non-isolated launcher after a genuine background `&` must still be "
                             "caught (exit 1)")
 
-        # 29. Confirm against REAL bash that `>&python3` is a redirect to a file named `python3` (not a
-        #     command): the launcher runs ISOLATED (sys.flags.isolated == 1) and a file `python3` holds
-        #     its output. This is the fail-to-pass witness for the class the gate's model above now
-        #     matches. Skipped where bash is unavailable.
+        # 29. A RUNTIME WITNESS (it exercises bash, not the gate): REAL bash reads `>&python3` as a
+        #     redirect to a file named `python3`, not a command; the launcher runs ISOLATED
+        #     (sys.flags.isolated == 1) and the file holds its output. It records why a redirection is
+        #     refused (rows 25-27) rather than parsed. Skipped where bash is unavailable.
         bash_bin = shutil.which("bash")
         if bash_bin is None:
             skipped.append("29 real-bash-redirect (bash unavailable)")
@@ -1268,41 +1585,40 @@ def self_test_main():
                 failures.append("real bash: `python3 -I ... >&python3` should run isolated (file held "
                                 "{!r})".format(rb_out.read_text(encoding="utf-8")))
 
-        # 30. A quote/escape-obfuscated launcher NAME in a run_all_checks.sh shell line is resolved by
-        #     bash to a real interpreter, so the gate must decide on the DECODED command word, not the
-        #     raw text. Each obfuscated bare launcher fails (exit 1); the isolated `pyt\hon3 -I` form,
-        #     alongside a plain `echo hello`, passes (exit 0). Before the fix the raw prefilter never saw
-        #     `python3` in these lines and reported them CLEAN (the shell-line-path miss this fix closes).
-        for label, sh_line in (("backslash", r"pyt\hon3 tools/alpha.py"),
-                               ("dquote", 'pyt"hon"3 tools/alpha.py'),
-                               ("squote", "py'thon'3 tools/alpha.py")):
+        # 30. A quote-obfuscated launcher NAME in a run_all_checks.sh shell line is resolved by bash to a
+        #     real interpreter, so the gate must decide on the DECODED command word, not the raw text.
+        #     Each quote-obfuscated bare launcher fails (exit 1) and the backslash-spelled one is outside
+        #     the grammar (exit 2); the isolated `pyt"hon"3 -I` form, alongside a plain `echo hello`,
+        #     passes (exit 0).
+        for label, sh_line, want in (("backslash", r"pyt\hon3 tools/alpha.py", 2),
+                                     ("dquote", 'pyt"hon"3 tools/alpha.py', 1),
+                                     ("squote", "py'thon'3 tools/alpha.py", 1)):
             run_all = "#!/usr/bin/env bash\n{}\n".format(sh_line)
-            if run_quiet(_build(tmp / ("obf-" + label), run_all=run_all)) != 1:
-                failures.append("an obfuscated launcher name ({}) in run_all_checks.sh must be caught "
-                                "(expected exit 1)".format(label))
-        iso_obf = "#!/usr/bin/env bash\npyt\\hon3 -I tools/alpha.py\necho hello\n"
+            if run_quiet(_build(tmp / ("obf-" + label), run_all=run_all)) != want:
+                failures.append("an obfuscated launcher name ({}) in run_all_checks.sh expected exit {}"
+                                .format(label, want))
+        iso_obf = '#!/usr/bin/env bash\npyt"hon"3 -I tools/alpha.py\necho hello\n'
         if run_quiet(_build(tmp / "obf-iso", run_all=iso_obf)) != 0:
-            failures.append("an isolated obfuscated launcher (pyt\\hon3 -I) plus a plain line expected "
+            failures.append('an isolated obfuscated launcher (pyt"hon"3 -I) plus a plain line expected '
                             "exit 0")
 
-        # 31. The same obfuscated NAMES in a settings.json shell-string are caught (exit 1): a
-        #     regression guard proving the settings path (which already decoded first) still agrees
-        #     with the now-fixed shell-line path. json.dumps builds the command so the backslash and
-        #     quotes survive into the JSON string exactly.
-        for label, cmd in (("backslash", r"pyt\hon3 tools/x.py"),
-                           ("dquote", 'pyt"hon"3 tools/x.py'),
-                           ("squote", "py'thon'3 tools/x.py")):
+        # 31. The same obfuscated NAMES in a settings.json shell-string agree with the shell-line path:
+        #     the quoted ones are caught (exit 1) and the backslash one is outside the grammar (exit 2).
+        #     json.dumps builds the command so the backslash and quotes survive into the JSON string.
+        for label, cmd, want in (("backslash", r"pyt\hon3 tools/x.py", 2),
+                                 ("dquote", 'pyt"hon"3 tools/x.py', 1),
+                                 ("squote", "py'thon'3 tools/x.py", 1)):
             obf = _build(tmp / ("settings-obf-" + label))
             sp = obf / ".claude" / "settings.json"
             sp.parent.mkdir(parents=True)
             sp.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
                 {"type": "command", "command": cmd}]}]}}) + "\n", encoding="utf-8")
-            if run_quiet(obf) != 1:
-                failures.append("an obfuscated launcher name ({}) in settings.json must be caught "
-                                "(expected exit 1)".format(label))
+            if run_quiet(obf) != want:
+                failures.append("an obfuscated launcher name ({}) in settings.json expected exit {}"
+                                .format(label, want))
 
-        # 32. Real bash resolves each obfuscated NAME to the token `python3` (the fail-to-pass witness
-        #     for the decode-then-decide shell-line fix). Skipped where bash is unavailable.
+        # 32. A RUNTIME WITNESS (it exercises bash, not the gate): real bash resolves each obfuscated
+        #     NAME to the token `python3`. Skipped where bash is unavailable.
         if bash_bin is None:
             skipped.append("32 real-bash-obfuscated-name (bash unavailable)")
         else:
@@ -1434,15 +1750,17 @@ def self_test_main():
             failures.append("no-site rule: a real interpreter should import site under -I and not under "
                             "-I -S -B (got {!r})".format(site_seen))
 
-        # 37. Only an UNQUOTED, unescaped shell operator separates. The reproduction is a settings.json
-        #     hook command whose -c runpy operand runs sys.argv[2], with a quoted separator as sys.argv[1]
-        #     and the core hook launcher as sys.argv[2]: a real shell passes both as arguments, so the
-        #     launcher runs with the site module. For every member of SEPARATORS, single-quoted,
-        #     double-quoted and backslash-escaped, it FAILs (exit 1), and so does the same argv in the
-        #     hooks.json args form. Splitting at the quoted operator cut the launcher off into a
-        #     non-python segment and passed (exit 0). The unquoted controls still split: `echo a <op>
-        #     python3 -I -S -B <launcher> x` passes (exit 0, one compliant launcher after the operator;
-        #     no split reads it as exit 2) and `echo a <op> python3 /p/x.py` fails (exit 1).
+        # 37. Only an UNQUOTED shell operator separates. The reproduction is a settings.json hook command
+        #     whose -c runpy operand runs sys.argv[2], with a quoted separator as sys.argv[1] and the core
+        #     hook launcher as sys.argv[2]: a real shell passes both as arguments, so the launcher runs
+        #     with the site module. For every member of SEPARATORS, single-quoted and double-quoted, it
+        #     FAILs (exit 1); backslash-escaped, it is outside the allow-listed grammar (exit 2).
+        #     Splitting at the quoted operator cut the launcher off into a non-python segment and passed
+        #     (exit 0). CONTROLS, which never reach the splitter: the same argv in the hooks.json args
+        #     form fails (exit 1), as it did before the splitter changed (-c stops the option scan). The
+        #     unquoted controls still split: `echo a <op> python3 -I -S -B <launcher> x` passes (exit 0,
+        #     one compliant launcher after the operator; no split reads it as exit 2) and `echo a <op>
+        #     python3 /p/x.py` fails (exit 1).
         def settings_tree(label, cmd):
             tree = _build(tmp / label)
             sp = tree / ".claude" / "settings.json"
@@ -1453,23 +1771,24 @@ def self_test_main():
 
         runpy_code = 'import runpy,sys;runpy.run_path(sys.argv[2],run_name="__main__")'
         for k, op in enumerate(sorted(SEPARATORS)):
-            spellings = (("squote", shlex.quote(op)), ("dquote", '"' + op + '"'),
-                         ("escaped", "".join("\\" + ch for ch in op)))
-            for style, spelled_op in spellings:
+            spellings = (("squote", shlex.quote(op), 1), ("dquote", '"' + op + '"', 1),
+                         ("escaped", "".join("\\" + ch for ch in op), 2))
+            for style, spelled_op, want in spellings:
                 cmd = "python3 -I -B -v -c {} {} {}".format(shlex.quote(runpy_code), spelled_op, launch_arg)
-                if run_quiet(settings_tree("quoted-op-{}-{}".format(k, style), cmd)) != 1:
+                if run_quiet(settings_tree("quoted-op-{}-{}".format(k, style), cmd)) != want:
                     failures.append("no-site rule: a {!r} argument ({}) must not split a settings hook "
-                                    "command (expected exit 1): {!r}".format(op, style, cmd))
+                                    "command (expected exit {}): {!r}".format(op, style, want, cmd))
             args = ("-I", "-B", "-v", "-c", runpy_code, op, launch_arg)
             if run_quiet(_build(tmp / "quoted-op-args-{}".format(k), hooks_args=args)) != 1:
-                failures.append("no-site rule: the {!r} argument in the hooks.json args form expected "
+                failures.append("control: the {!r} argument in the hooks.json args form expected "
                                 "exit 1".format(op))
             for want, after in ((0, "python3 -I -S -B {} x".format(launch_arg)), (1, "python3 /p/x.py")):
                 cmd = "echo a {} {}".format(op, after)
                 if run_quiet(settings_tree("unquoted-op-{}-{}".format(k, want), cmd)) != want:
                     failures.append("an unquoted {!r} must still split a settings hook command (expected "
                                     "exit {}): {!r}".format(op, want, cmd))
-        # 37b. Real bash runs the reproduction: for each quoted separator, the -c runpy operand reaches
+        # 37b. A RUNTIME WITNESS (it exercises bash and CPython, not the gate): real bash runs the
+        #      reproduction: for each quoted separator, the -c runpy operand reaches
         #      a scratch file named like the core hook launcher, which reports that the site module is
         #      loaded (stdout "1"). Skipped where bash is unavailable.
         if bash_bin is None:
@@ -1527,7 +1846,8 @@ def self_test_main():
             cmd = " ".join(["python3"] + [shlex.quote(a) for a in args])
             if run_quiet(settings_tree("dash-settings-" + label, cmd)) != want:
                 failures.append("no-site rule: the settings {} form expected exit {}".format(label, want))
-        # 39b. A real interpreter confirms that reading: `-I- <probe>` runs the probe with site, `-IS-
+        # 39b. A RUNTIME WITNESS (it exercises CPython, not the gate): a real interpreter confirms that
+        #      reading: `-I- <probe>` runs the probe with site, `-IS-
         #      <probe>` without it, both after "Expected long option"; `-I- -S <probe>` takes `-S` as the
         #      script (exit 2); in a cluster `-help-all` prints help (exit 0) and `-version` is an unknown
         #      option (exit 2); and `-ISh <probe>` prints help and exits 0 without running the probe (the
@@ -1549,6 +1869,168 @@ def self_test_main():
                             "-help-all as help, -version as unknown, and -ISh as help without running the "
                             "script (got {!r})".format([(p.returncode, p.stdout[:40], p.stderr[-80:])
                                                        for p in dash_runs]))
+
+        # 41. The ALLOW-LISTED GRAMMAR. Every reviewer reproduction, as a settings.json hook command, is a
+        #     cannot-evaluate (exit 2) whose message names the construct: a nested $( ) holding a quoted
+        #     `;`, a backslash-newline inside the launcher name and inside the interpreter name, ANSI-C
+        #     quoting, a `#` comment before a newline, and backticks; so is every other construct outside
+        #     the grammar. Plain compliant commands still pass (exit 0) and plain non-compliant ones
+        #     still fail (exit 1). On a CI line a double-quoted `$NAME` or `${NAME}` after the script
+        #     operand passes (exit 0), and one at the command word, among the interpreter options or in
+        #     the script operand is a cannot-evaluate (exit 2); a backslash-newline on a CI line that
+        #     joins `pyth` and `on3` is a cannot-evaluate (exit 2).
+        grammar_rows = (
+            ("nested-subst", 'python3 -I -B -c {} "$(printf "%s;" x)" {}'.format(shlex.quote(runpy_code),
+                                                                             launch_arg),
+             2, "a command substitution"),
+            ("bsnl-launcher", "python3 -I -B /p/aiqt_hooks_\\\nlaunch.py", 2, "a backslash-newline"),
+            ("bsnl-interpreter", "pyth\\\non3 -I -B " + launch_arg, 2, "a backslash-newline"),
+            ("ansi-c", "echo $'\\'' ; python3 -I -B {} # '".format(launch_arg), 2, "ANSI-C quoting"),
+            ("comment", "echo hi # don't\npython3 -I -B {}\n#'".format(launch_arg), 2, "an unquoted #"),
+            ("backtick", "out=`python3 -I -B {}`; rc=$?; printf %s \"$out\"; exit $rc".format(launch_arg), 2,
+             "a backtick"),
+            ("newline", "echo a\npython3 -I -B " + launch_arg, 2, "a newline"),
+            ("dollar-var", "python3 -I -B $L", 2, "a $ expansion"),
+            ("dq-dollar", 'python3 -I -S -B "$CLAUDE_PROJECT_DIR"', 2, "a $ expansion inside double"),
+            ("locale", 'python3 -I -B $"x" ' + launch_arg, 2, "locale quoting"),
+            ("process-subst", "python3 -I -S -B {} <(echo x)".format(launch_arg), 2, "a process substitution"),
+            ("heredoc", "python3 -I -B - <<EOF", 2, "a heredoc"),
+            ("here-string", "python3 -I -B - <<< x", 2, "a here-string"),
+            ("redirect", "python3 -I -S -B {} 2>/dev/null".format(launch_arg), 2, "a redirection"),
+            ("subshell", "(python3 -I -B {})".format(launch_arg), 2, "a parenthesis"),
+            ("brace", "{ python3 -I -B " + launch_arg + "; }", 2, "a brace"),
+            ("glob-launcher", "python3 -I -B /p/aiqt_hooks_launc?.py", 2, "glob character ?"),
+            ("glob-python", "pytho[n]3 -I -B " + launch_arg, 2, "glob character ["),
+            ("bang", "! python3 -I -B " + launch_arg, 2, "an unquoted !"),
+            ("tilde", "python3 -I -B ~/" + gen_hooks.LAUNCHER_NAME, 2, "a tilde"),
+            ("dq-backslash", 'python3 -I -B "/p/aiqt_hooks_\\launch.py"', 2, "a backslash escape inside"),
+            ("dq-bang", 'echo "a!b" && python3 -I -B ' + launch_arg, 2, "a ! (history expansion) inside"),
+            ("pipe-amp", "echo a |& python3 -I -B " + launch_arg, 2, "not a listed separator"),
+            ("unbalanced-squote", "python3 -I -B 'x " + launch_arg, 2, "an unbalanced single quote"),
+            ("unbalanced-dquote", 'python3 -I -B "x ' + launch_arg, 2, "an unbalanced double quote"),
+            ("control-char", "python3 -I -B\r" + launch_arg, 2, "the character"),
+            ("compliant", "python3 -I -S -B {} h_one".format(launch_arg), 0, ""),
+            ("compliant-chain", "echo a && python3 -I -S -B '{}' \"h one\"; true".format(launch_arg), 0, ""),
+            ("compliant-or", "python3 -I -S -B {} h_one || true".format(launch_arg), 0, ""),
+            ("plain-no-S", "python3 -I -B {} h_one".format(launch_arg), 1, ""),
+            ("plain-bare", "python3 tools/x.py", 1, ""),
+            ("plain-chained", "echo a;python3 -B tools/x.py", 1, ""))
+        for label, cmd, want, construct in grammar_rows:
+            tree = settings_tree("grammar-" + label, cmd)
+            errs, fails = scan(tree)
+            got = 2 if errs else (1 if fails else 0)
+            if got != want or (construct and not any(construct in e[3] for e in errs)):
+                failures.append("allow-listed grammar: the settings command {} {!r} expected exit {} naming "
+                                "{!r} (got exit {}, errs={!r})".format(label, cmd, want, construct, got, errs))
+        ci_rows = (
+            ("after-script", 'python3 -I -B tools/a.py --base "origin/${GITHUB_BASE_REF}" --head "$SHA"', 0),
+            ("non-python-arg", 'echo "$X" && python3 -I -B tools/a.py', 0),
+            ("command-word", '"$PY" -I -B tools/a.py python3', 2),
+            ("assignment", 'X="$Y" python3 -I -B tools/a.py', 2),
+            ("option", 'python3 "$OPT" tools/a.py', 2),
+            ("script-operand", 'python3 -I -S -B "$L"', 2),
+            ("after-c", 'python3 -I -B -c "$CODE"', 2),
+            ("unquoted", "python3 -I -B tools/a.py $X", 2),
+            ("braced-default", 'python3 -I -B tools/a.py "${X:-y}"', 2),
+            ("bsnl-start", "pyth\\", 2))
+        for label, line, want in ci_rows:
+            run_all = "#!/usr/bin/env bash\n{}\non3 tools/a.py\n".format(line)
+            if run_quiet(_build(tmp / ("grammar-ci-" + label), run_all=run_all)) != want:
+                failures.append("allow-listed grammar: the run_all_checks.sh line {} {!r} expected exit {}"
+                                .format(label, line, want))
+
+        # 42. SCOPE, and the leading path segment. A settings hook command with no python word and no
+        #     core hook launcher name once its quoting is removed is out of scope (exit 0), its
+        #     redirections, `~` paths, groups and globs included, unless a command word can hide a python
+        #     word (an expansion, glob, brace or `~` in its file name, an unquoted expansion in its
+        #     directory, a command or process substitution or a backtick anywhere): that is a
+        #     cannot-evaluate (exit 2). Inside a candidate the form Claude Code's hook documentation shows,
+        #     a double-quoted `$NAME` or `${NAME}` as the leading path segment of the script operand,
+        #     is admitted (compliant 0, non-compliant 1, the basename read literally), and an expansion at
+        #     or before the command word, among the interpreter options and their values, or anywhere but
+        #     a leading path segment is a cannot-evaluate (exit 2). A backslash- or line-continuation-
+        #     spelled python word makes a command a candidate, which the grammar then refuses (exit 2).
+        scope_rows = (
+            ('python3 -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 0),
+            ('python3 -I -S -B "$CLAUDE_PROJECT_DIR/.claude/hooks/aiqt_hooks_launch.py" h_one', 0),
+            ('python3 -I -S -B "${CLAUDE_PROJECT_DIR}"/.claude/hooks/aiqt_hooks_launch.py h_one', 0),
+            ('python3 -I -S -B -- "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 0),
+            ('cd "$CLAUDE_PROJECT_DIR"/x && python3 -I -S -B /p/aiqt_hooks_launch.py h_one', 0),
+            ('python3 -I -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/other.py', 0),
+            ('python3 -I -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 1),
+            ('python3 "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py', 1),
+            ('python3 -S "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 1),
+            ('"$PY" -I -S -B /p/aiqt_hooks_launch.py h_one', 2),
+            ('"$PY" -I -S -B "$CLAUDE_PROJECT_DIR"/.claude/hooks/aiqt_hooks_launch.py h_one', 2),
+            ('"${PY}" -I -S -B /p/x.py', 2),
+            ('"$PY" -I -S -B /p/x.py', 2),
+            ('"$CLAUDE_PROJECT_DIR"/bin/python3 -I -S -B /p/aiqt_hooks_launch.py', 2),
+            ('python3 -I -W "$W"/x -S -B /p/aiqt_hooks_launch.py h_one', 2),
+            ('python3 -I -X "$D"/importtime -S -B /p/aiqt_hooks_launch.py', 2),
+            ('python3 --check-hash-based-pycs "$D"/x -I -S -B /p/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B --frob "$D"/aiqt_hooks_launch.py', 2),
+            ('X="$D"/y python3 -I -S -B /p/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B $CLAUDE_PROJECT_DIR/.claude/hooks/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B "$L"', 2),
+            ('python3 -I -S -B "$D"x/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B "$A"/"$B"/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B "$A/$B/aiqt_hooks_launch.py"', 2),
+            ('python3 -I -S -B "${D:-/x}"/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B "$1"/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B "x$D"/aiqt_hooks_launch.py', 2),
+            ('python3 -I -S -B /p/aiqt_hooks_launch.py "$X"', 2),
+            ('python3 -I -S -B "$D"/aiqt_hooks_launch.py 2>/dev/null', 2),
+            ('pyt\\hon3 -B x.py', 2),
+            ('pyth\\\non3 -B x.py', 2),
+            ('pyt"hon"3 -B x.py', 1),
+            ('"$D"/aiqt_hooks_launch.py h_one', 2),
+            ('"$CLAUDE_PROJECT_DIR"/.claude/hooks/check-style.sh', 0),
+            ('"${CLAUDE_PROJECT_DIR}/.claude/hooks/check-style.sh" 2>/dev/null', 0),
+            ('~/bin/notify.sh >> ~/.claude/notify.log 2>&1', 0),
+            ('{ jq -r .tool_input.command; echo; } >> /tmp/claude-commands.log', 0),
+            ('(cd "$CLAUDE_PROJECT_DIR" && npx prettier --write src/*.ts) || true', 0),
+            ('rm -f /tmp/*.lock; echo done > /dev/null', 0),
+            ("jq -r '.tool_input.file_path' | xargs -r npx eslint --fix", 0),
+            ('if [ -f .env ]; then echo "found"; fi', 0),
+            ('[ -n "$CI" ] || ./scripts/hook.sh', 0),
+            ('[[ -n "$CI" ]] && echo ci', 0),
+            ('for f in *.md; do echo "$f"; done', 0),
+            ('npm run lint -- --fix 2>&1 | tee /tmp/lint.log', 0),
+            ('"$HOME"/.claude/hooks/x.sh', 0),
+            ('bash "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh', 0),
+            ('X=1 Y="$Z" ./hook.sh < /dev/null', 0),
+            ('env -i FOO=1 ./hook.sh', 0),
+            ('echo "${X:-default}" >> log', 0),
+            ('cat <<EOF\nhello\nEOF', 0),
+            ('"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.py', 0),
+            ('echo "$(date)" >> ~/log', 2),
+            ('$HOME/.claude/hooks/x.sh', 2),
+            ('"$HOOK"', 2),
+            ('"$D"/pyth?n3 x.py', 2),
+            ('/usr/bin/pyth{o,}n3 x.py', 2),
+            ('X=1 "$PY" x.py', 2),
+            ('env -i "$PY" x.py', 2),
+            ('! "$PY" x.py', 2),
+            ('echo a; "$PY" x.py', 2),
+            ("$'pyth\\x6fn3' x.py", 2),
+            ('~x', 2),
+            ('echo `id`', 2),
+            ('cat <(echo x)', 2),
+            ("echo 'unbalanced", 2),
+            ('"$PY"x x.py', 2),
+            ('${PY} x.py', 2),
+            ('"$D"$E/x.sh', 2),
+            ('"$D"/~x/y.sh', 0),
+            ('if true; then "$PY" x.py; fi', 2),
+            ('{ "$PY" x.py; }', 2),
+            ('( "$PY" x.py )', 2),
+        )
+        for k, (cmd, want) in enumerate(scope_rows):
+            errs, fails = scan(settings_tree("scope-{}".format(k), cmd))
+            got = 2 if errs else (1 if fails else 0)
+            if got != want:
+                failures.append("scope: the settings command {!r} expected exit {} (got exit {}, "
+                                "errs={!r}, fails={!r})".format(cmd, want, got, errs, fails))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -1576,16 +2058,15 @@ def self_test_main():
           "never letter-scanned (-W/-X isolation is neither forged nor missed); a chained settings "
           "shell-string catches a later-segment launcher; a non-regular or non-UTF-8 required surface "
           "and a present-but-unusable optional settings file each fail closed (exit 2); a launcher "
-          "glued to a punctuation-adjacent operator (`prep;python3`, `&& (python3`) is still segmented "
-          "and caught in a settings shell-string and a run_all_checks.sh line (exit 1); a present-but-"
+          "glued to a `;` (`prep;python3`) is still segmented and caught in a settings shell-string and a "
+          "run_all_checks.sh line (exit 1); a present-but-"
           "dangling optional settings symlink fails closed (exit 2) while a truly-absent one is a clean "
-          "skip (exit 0); an attached -m/-c operand (-mIfoo, -cIbar) never forges isolation (exit 1); an "
-          "`&`-carrying redirect (`>&python3`, `2>&1`, `>&2`, `&>/dev/null`) is not mis-split into a "
-          "fabricated launcher (an isolated one passes, a non-isolated one fails once on the real "
-          "launcher) while a genuine `&&`/background `&` still splits, matching real bash; a quote/"
-          "escape-obfuscated launcher NAME (`pyt\\hon3`, `pyt\"hon\"3`, `py'thon'3`) that bash resolves "
-          "to a real interpreter is caught on a run_all_checks.sh line and in a settings.json shell-"
-          "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; a "
+          "skip (exit 0); an attached -m/-c operand (-mIfoo, -cIbar) never forges isolation (exit 1); a "
+          "redirect (`>&python3`, `2>&1`, `>&2`, `&>/dev/null`) is a cannot-evaluate (exit 2) while a "
+          "genuine `&&`/background `&` still splits; a quote-obfuscated launcher NAME (`pyt\"hon\"3`, "
+          "`py'thon'3`) that bash resolves to a real interpreter is caught on a run_all_checks.sh line and "
+          "in a settings.json shell-string (exit 1) with its isolated form passing (exit 0), and the "
+          "backslash-spelled `pyt\\hon3` is a cannot-evaluate (exit 2); a "
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); the core hook launcher registered without -S before it fails (exit 1) "
@@ -1596,12 +2077,20 @@ def self_test_main():
           "before it (=VALUE long options, a long option inside a cluster, -m cProfile, a -c runpy "
           "operand and the launcher as another script's argument each fail in both forms, the S-carrying "
           "clean spellings pass, an args-form /usr/bin/env fails closed, and a real interpreter confirms "
-          "those readings); a quoted or escaped shell operator is an argument, never a separator, so the "
-          "quoted-operator runpy reproduction fails for every separator while unquoted operators still "
-          "split, confirmed against real bash; a CI line that compiles or hashes the launcher passes while "
+          "those readings); a quoted shell operator is an argument, never a separator, so the quoted-"
+          "operator runpy reproduction fails for every separator (escaped, it is a cannot-evaluate) while "
+          "unquoted operators still split; a CI line that compiles or hashes the launcher passes while "
           "the same line as a settings hook command fails; a bare trailing `-` in a cluster hands the next "
           "token to the script operand, confirmed against a real interpreter; a second mention of the "
-          "launcher after a compliant operand passes; and the gate refuses to run non-isolated (exit 2)"
+          "launcher after a compliant operand passes; every reviewer reproduction and every other construct "
+          "outside the allow-listed shell grammar is a cannot-evaluate (exit 2) naming it while plain "
+          "compliant commands pass and plain non-compliant ones fail; a settings hook command with no "
+          "python word and no launcher name is out of scope (exit 0) with its redirections, `~` paths, "
+          "groups and globs, unless a command word can hide a python word (exit 2), and the documented "
+          "`\"$CLAUDE_PROJECT_DIR\"/...` script operand passes compliant (exit 0) and fails non-compliant "
+          "(exit 1) while an expansion at the command word or among the options is exit 2; and the gate "
+          "refuses to run non-"
+          "isolated (exit 2)"
           + note)
     return 0
 

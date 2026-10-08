@@ -68,11 +68,11 @@ LAUNCHER_PLUGIN_PATH = SCRIPT_PLUGIN_PATH.rsplit("/", 1)[0] + "/" + LAUNCHER_NAM
 # registered form: -I (isolated: no PYTHON* variable, no user site directory, neither the script's nor
 # the working directory on sys.path), -S (no site module, so no site-packages .pth file and no
 # sitecustomize or usercustomize of the interpreter that PATH selects, a project virtual environment for
-# example, runs before the launcher's first line; apart from the environment, which -I excludes, no
-# option excludes the files CPython reads to compute its startup configuration and module search path
-# before that line, the interpreter's directory, a ._pth file there, a pyvenv.cfg beside the binary or
-# in the directory above it and the home it names, and the standard library and zip locations those
-# resolve to for example, which stays with whoever can write those locations) and -B (no bytecode
+# example, runs before the launcher's first line; apart from the PYTHON* environment variables, which -I
+# ignores, no option excludes the files CPython reads to compute its startup configuration and module
+# search path before that line, the interpreter's directory, a ._pth file there, a pyvenv.cfg beside the
+# binary or in the directory above it and the home it names, and the standard library and zip locations
+# those resolve to for example, which stays with whoever can write those locations) and -B (no bytecode
 # written).
 LAUNCHER_FLAGS = ("-I", "-S", "-B")
 
