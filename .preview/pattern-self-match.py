@@ -114,8 +114,9 @@ THREAT MODEL
     byte order mark, UTF-16 and UTF-32 included, and the constants NaN, Infinity and -Infinity, which JSON does
     not have), a JSON value that is not an object, and a Bash call whose
     tool_input is not an object or whose command is not a string. An argv other than the plain hook call or
-    exactly `--self-test` gets a note too, that the hook checked nothing, written before stdin is read (stdin is
-    left unread). A JSON prefix followed by an idle interval is
+    exactly `--self-test` gets a note too (a stdin that is a directory excepted, since the registration line
+    exits before Python starts), that the hook checked nothing, written before stdin is read (stdin is left
+    unread); a verification worker process gets its stderr line instead. A JSON prefix followed by an idle interval is
     not taken as the whole payload: the hook reads on until the input ends, so a host that keeps stdin open after
     the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
     at most, so that note comes about 2 seconds late, but the OS can return from a wait late, and nothing here
@@ -135,7 +136,8 @@ THREAT MODEL
     file and exit 1, which PreToolUse treats as non-blocking. .preview/README.md (Installing a hook, step 4)
     describes those cases.
     The hook writes nothing to stdout in exactly these cases: a verification worker process (a worker kill-switch
-    variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped; a JSON
+    variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped, whatever
+    its argv other than a lone `--self-test`, and reads nothing; a JSON
     object whose tool_name is not Bash or whose event is not PreToolUse; a Bash call whose command is empty; a
     stdin that is a directory, which the REGISTRATION launch line answers before Python starts; a command the
     NOTE paragraph leaves silent or that opts out; and an output failure, when the line cannot be written. A
@@ -409,7 +411,7 @@ _NOTE_ERROR = ("pattern-self-match: an internal error stopped this check, so the
                "pattern that selects the shell running it.")
 _NOTE_PAYLOAD = ("pattern-self-match: the hook could not read this call's payload (cannot evaluate), so the call "
                  "was not checked for a pattern that selects the shell running it.")
-_NOTE_ARGV = ("pattern-self-match: the hook was launched with {} (only --self-test is known), so it checked "
+_NOTE_ARGV = ("pattern-self-match: the hook was launched with {} (only a lone --self-test is accepted), so it checked "
               "nothing: the call was not checked for a pattern that selects the shell running it.")
 _WORKER_LINE = "pattern-self-match: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)"
 
@@ -977,20 +979,20 @@ def _emit_line(text, *stream):
 
 def main(argv):
     """The hook: always 0, output only a deny or note line (a payload it cannot read gets the cannot-evaluate
-    note). `--self-test` alone runs the self-test instead; any other argv gets the argv note (_NOTE_ARGV) and
-    returns 0 before stdin is read."""
-    if not isinstance(argv, (list, tuple)) or not all(isinstance(a, str) for a in argv) or not argv:
-        # a bad argv: it checks nothing, and says so, reading nothing
+    note). `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
+    the worker line, to stderr, whatever its argv; any other argv gets the argv note (_NOTE_ARGV). Both return 0
+    before stdin is read."""
+    readable = isinstance(argv, (list, tuple)) and bool(argv) and all(isinstance(a, str) for a in argv)
+    if readable and list(argv[1:]) == ["--self-test"]:
+        return _self_test()
+    if _is_worker(os.environ):  # before the argv notes: a worker process writes nothing to stdout (QA round 15)
+        _emit_line(_WORKER_LINE, sys.stderr)
+        return 0
+    if not readable:  # a bad argv: it checks nothing, and says so, reading nothing
         _emit_line(json.dumps({"systemMessage": _NOTE_ARGV.format("an argument list it cannot read")}))
         return 0
-    if list(argv[1:]) == ["--self-test"]:
-        return _self_test()
-    if len(argv) != 1:  # launched with an argument it does not know: it checks nothing, and says so, reading nothing
-        _emit_line(json.dumps({"systemMessage": _NOTE_ARGV.format(
-            "{} unexpected command-line argument(s)".format(len(argv) - 1))}))
-        return 0
-    if _is_worker(os.environ):
-        _emit_line(_WORKER_LINE, sys.stderr)
+    if len(argv) != 1:  # an argument list it does not accept: it checks nothing, and says so, reading nothing
+        _emit_line(json.dumps({"systemMessage": _NOTE_ARGV.format("an argument list it does not accept")}))
         return 0
     try:
         payload = _read_complete()
@@ -1539,42 +1541,65 @@ def _self_test():
                                      (0, want.encode(), b""), chunks)
 
         def test_10_argv(self):
-            # a bad argv gets the argv note on stdout, nothing on stderr, and stdin is never read (QA round 14)
+            # a bad argv gets the argv note on stdout, nothing on stderr, and _read_complete is never called (QA
+            # round 14); under a worker marker it gets the worker line on stderr instead, nothing on stdout (QA
+            # round 15)
             def read(*args, **kw):
                 reads.append(args)
                 raise OSError("stdin read")
             reads = []
             bad = json.dumps(dict(systemMessage=_NOTE_ARGV.format("an argument list it cannot read"))) + "\n"
+            argvs = (None, 7, "--self-test", ["x", 3], dict(a=1), [], [3, "--self-test"])
             old = sys.stdout, sys.stderr
+            saved = os.environ.get("AIQT_HOOKS_WORKER")
             sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             try:
                 with patched(_read_complete=read, _is_worker=lambda env: False):
-                    for argv in (None, 7, "--self-test", ["x", 3], {"a": 1}, []):
+                    for argv in argvs:
                         sys.stdout.seek(0)
                         sys.stdout.truncate()
                         self.assertEqual((main(argv), sys.stdout.getvalue()), (0, bad), argv)
                 text = sys.stderr.getvalue()
+                os.environ["AIQT_HOOKS_WORKER"] = "1"  # the real _is_worker, on a worker marker
+                with patched(_read_complete=read):
+                    for argv in argvs:
+                        for stream in (sys.stdout, sys.stderr):
+                            stream.seek(0)
+                            stream.truncate()
+                        self.assertEqual((main(argv), sys.stdout.getvalue(), sys.stderr.getvalue()),
+                                         (0, "", _WORKER_LINE + "\n"), argv)
             finally:
                 sys.stdout, sys.stderr = old
+                if saved is None:
+                    os.environ.pop("AIQT_HOOKS_WORKER", None)
+                else:
+                    os.environ["AIQT_HOOKS_WORKER"] = saved
             self.assertEqual((reads, text), ([], ""))
-            # on the actual command line: an unsupported argument gets the argv note naming how many arguments
-            # it did not know, and returns 0 before stdin is read. The payload and its end of input are in the
-            # pipe before the child starts, and the pipe's read end, kept open here, still holds the whole payload
-            # after the child exits (QA rounds 12 to 14)
+            # on the actual command line: an argument list it does not accept (only a lone --self-test is
+            # accepted, so --self-test twice is refused too) gets the argv note and returns 0 before stdin is
+            # read; under each worker marker the hook honours, an argv it does not accept gets the worker line on
+            # stderr and nothing on stdout. The payload and its end of input are in the pipe before the child
+            # starts, and the pipe's read end, kept open here, still holds the whole payload after the child
+            # exits (QA rounds 12 to 15)
             data = payload_bytes("pkill -f qa-x/")
-            for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""], ["-x", "-y"]):
-                note = _NOTE_ARGV.format("{} unexpected command-line argument(s)".format(len(argv)))
-                note = (json.dumps(dict(systemMessage=note)) + "\n").encode()
+            note = _NOTE_ARGV.format("an argument list it does not accept")
+            note = (json.dumps(dict(systemMessage=note)) + "\n").encode()
+            worker = _WORKER_LINE.encode() + b"\n"
+            cases = [(argv, dict(), (0, note, b"", data)) for argv in (["--self-test", "x"], ["-x"], ["--selftest"],
+                                                                        [""], ["-x", "-y"], ["--self-test"] * 2)]
+            cases += [(["-x"], extra, (0, b"", worker, data))
+                      for extra in (dict(AIQT_HOOKS_WORKER="1"), dict(ORCH_WORKER="1"), dict(ORCH_VERIFY_OWNER="x"))]
+            for argv, extra, want in cases:
                 r, w = os.pipe()
                 try:
                     self.assertEqual(os.write(w, data), len(data))
                     os.close(w)
                     w = None
                     p = subprocess.run([sys.executable, "-I", "-S", "-B", here] + argv, stdin=r,
-                                       capture_output=True, env=dict(LC_ALL="C"), timeout=30)
+                                       capture_output=True, env=dict(extra, LC_ALL="C"), timeout=30)
                     os.set_blocking(r, False)
-                    self.assertEqual((p.returncode, p.stdout, p.stderr, os.read(r, len(data) + 1)),
-                                     (0, note, b"", data), argv)
+                    self.assertEqual((p.returncode, p.stdout, p.stderr, os.read(r, len(data) + 1)), want,
+                                     (argv, extra))
                 finally:
                     for fd in (r, w):
                         if fd is not None:
