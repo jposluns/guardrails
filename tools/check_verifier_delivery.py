@@ -3,6 +3,7 @@
 verbatim in the reviewed tree and its clean verdict covers answered items.
 
   check_verifier_delivery.py --brief FILE --delivery FILE --repo DIR
+  check_verifier_delivery.py                 (validates its own static tables; reads no input, runs no git)
   check_verifier_delivery.py --self-test
   check_verifier_delivery.py [--self-test] --execution-report ABS_PATH   (the execution-set gate's launch)
 
@@ -23,13 +24,14 @@ ambiguous BRIEF-PIN, an unresolvable SHA, an unclosed fenced block and every git
 CANNOT_EVALUATE (exit 2), never a pass.
 
 Rules:
-  C1 coverage. A clean verdict (VERDICT: NO BLOCKERS) is reclassed NO_VOTE (exit 1, reason named) when
-     no numbered item is answered (every item UNVERIFIABLE, or no item at all), or when every numbered
-     question of the brief asks for a quote and no delivery item carries one. One UNVERIFIABLE item
-     among answered ones is legitimate. Coverage n/m is reported: n answered items, m the brief's
-     numbered questions (the delivery's items when the brief numbers none); an unanswered question
-     counts as uncovered. A delivery with no VERDICT line, or with conflicting VERDICT lines, is
-     NO_VOTE. C1 never reclasses a verdict other than NO BLOCKERS.
+  C1 coverage. A verdict of any kind (VERDICT: NO BLOCKERS, VERDICT: BLOCKERS FOUND or another) is
+     reclassed NO_VOTE (exit 1, reason named) when no numbered item is answered (every item
+     UNVERIFIABLE, or no item at all): a verdict counts only for answered items, so a BLOCKERS verdict
+     with coverage 0/m is no vote. A clean verdict is also NO_VOTE when every numbered question of the
+     brief asks for a quote and no delivery item carries one. One UNVERIFIABLE item among answered ones
+     is legitimate. Coverage n/m is reported: n answered items, m the brief's numbered questions (the
+     delivery's items when the brief numbers none); an unanswered question counts as uncovered. A
+     delivery with no VERDICT line, or with conflicting VERDICT lines, is NO_VOTE.
   C2 verbatim. Every fenced code block, every blockquote run and every inline double-quoted span must
      appear byte for byte (UTF-8) as a contiguous span of one file of the pinned tree. A quote may
      start or end mid-line, so an exact excerpt passes; joining non-adjacent lines, dropping a line,
@@ -37,8 +39,11 @@ Rules:
      counts (only the opening fence's own indentation, up to three spaces, is removed, as CommonMark
      does). When the item's heading names a file, the quote must match in that file; otherwise, when
      the brief's question with the item's number names a file, in that file; otherwise anywhere in the
-     tree. A match only in another file fails, naming both; a heading that names a path absent from
-     the pinned tree fails every quote under it. Any failing quote fails the whole delivery (exit 1),
+     tree. A named path with a slash binds exactly; a bare file name (no slash) binds to every file of
+     the pinned tree with that basename, root or not (a root README.md and .preview/README.md are both
+     named by "README.md"), and the result's found_in names the file that matched. A match only in
+     another file (another path, or another basename) fails, naming both; a heading that names a path
+     absent from the pinned tree fails every quote under it. Any failing quote fails the whole delivery (exit 1),
      each listed with the files searched and, when one exists, the nearest whitespace-normalised match
      (a diagnostic only, never a pass).
 
@@ -72,9 +77,11 @@ The grammar read (a declared subset of Markdown, not a general parser):
     quotes, quoted, quoting).
   * A file is named when a token of the heading or question (split at whitespace, quotes, backticks,
     brackets, commas, semicolons and asterisks; a ":LINE" or ":LINE-LINE" suffix, a "#" anchor and
-    trailing dots or colons removed) is a blob path of the pinned tree. In a heading, a token shaped
-    like a relative file path (a slash and a file extension) that is absent from the tree is also a
-    named file, which no quote can match.
+    trailing dots or colons removed) is a blob path of the pinned tree, or is a bare name (no slash)
+    that is the basename of a blob and either is a root blob itself or carries a file extension; a
+    bare name names every blob with that basename. In a heading, a token shaped like a relative file
+    path (a slash and a file extension) that is absent from the tree is also a named file, which no
+    quote can match.
 
 DISCLOSED RESIDUAL. C2 proves a quote EXISTS in the named file at the pinned SHA, not that it supports
 the grade the verifier gave; a grade resting on an earlier answer is not linked to that answer;
@@ -451,13 +458,22 @@ def _named_paths(text, tree, keep_unresolved):
             token = token[2:]
         if not token:
             continue
-        if token in tree.blobs:
-            if token not in found:
-                found.append(token)
+        bound = [token] if "/" in token and token in tree.blobs else _basename_bindings(token, tree)
+        if bound:
+            found.extend(path for path in bound if path not in found)
         elif (keep_unresolved and PATHLIKE_RE.fullmatch(token) and token not in tree.dirs
               and FILE_NAME_RE.fullmatch(token.rsplit("/", 1)[1]) and token not in unresolved):
             unresolved.append(token)
     return found, unresolved
+
+
+def _basename_bindings(token, tree):
+    """The blobs a bare name (no slash) names: every blob with that basename, the root one first, when
+    the name is a root blob or carries a file extension; a name that is no basename binds nothing."""
+    if "/" in token or not (token in tree.blobs or FILE_NAME_RE.fullmatch(token)):
+        return []
+    return sorted((path for path in tree.blobs if path.rsplit("/", 1)[-1] == token),
+                  key=lambda path: ("/" in path, path))
 
 
 def _heading_names(heading, tree):
@@ -556,11 +572,12 @@ def _check_quote(tree, quote, targets, unresolved, named_by):
     return result
 
 
-def _rule_all_unverifiable(clean, answered, total):
-    """C1: a clean verdict with no answered item is no vote."""
-    if clean and answered == 0:
-        return "clean verdict with no answered item (every item UNVERIFIABLE or absent; coverage 0/{})" \
-            .format(total)
+def _rule_all_unverifiable(verdict, answered, total):
+    """C1: a verdict of any kind with no answered item is no vote (a verdict counts only for answered
+    items)."""
+    if verdict is not None and answered == 0:
+        return "verdict {!r} with no answered item (every item UNVERIFIABLE or absent; coverage 0/{})" \
+            .format(verdict, total)
     return None
 
 
@@ -633,7 +650,7 @@ def evaluate(brief_path, delivery_path, repo):
     report["coverage"] = {"answered": answered, "total": total, "text": "{}/{}".format(answered, total)}
     quote_only = bool(questions) and all(QUOTE_WORD_RE.search(question["text"]) for question in questions)
     report["quote_only_questions"] = quote_only
-    for reason in (_rule_all_unverifiable(report["clean"], answered, total),
+    for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),
                    _rule_quote_only(report["clean"], quote_only, items)):
         if reason:
             no_vote.append(reason)
@@ -671,6 +688,8 @@ FIXTURE_FILES = {
                      "The third rule closes the set.\n",
     "src/beta.py": "def beta(ready):\n    if ready:\n        return 1\n    return 0\n",
     "docs/gamma.md": "Only gamma carries this exact sentence.\n",
+    "README.md": "Only the root readme carries this line.\n",
+    ".preview/README.md": "| Tool | Role |\n| pattern-self-match.py | matches its own pattern |\n",
 }
 BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
                "1. Quote the first rule from docs/alpha.md.\n"
@@ -680,6 +699,11 @@ BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
                "Standing lines:\n1. This list restarts and holds no question.\n")
 BRIEF_QUOTE_ONLY = BRIEF_MIXED.replace("4. Does src/beta.py return 0 when not ready?",
                                        "4. Quote the closing rule from docs/alpha.md.")
+BRIEF_FIVE = BRIEF_MIXED.replace("\n\nStanding lines:", "\n5. Quote the closing rule from docs/alpha.md.\n\n"
+                                                    "Standing lines:")
+BRIEF_README = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
+                "1. Quote the README.md table row for pattern-self-match.py.\n")
+BRIEF_SLASH = BRIEF_README.replace("the README.md table row", "the table row of .preview/README.md")
 A1 = '1. docs/alpha.md reads "The first rule is plain."'
 A2 = "2. src/beta.py:\n```python\n    if ready:\n        return 1\n```"
 A3 = '3. docs/gamma.md says "Only gamma carries this exact sentence."'
@@ -787,9 +811,14 @@ def _self_test_cases(fx):
         _delivery(sha, A1, A2, A3, '4. docs/alpha.md: "The third rule closes the set."'), BRIEF_QUOTE_ONLY)),
         "PASS")
     check("c1/mixed-list-without-quotes-passes", verdict(fx.run(no_quotes)), "PASS")
-    check("c1/blocker-verdict-not-reclassed",
-          verdict(fx.run(_delivery(sha, *(_unverifiable(n) for n in range(1, 5)), verdict="VERDICT: BLOCKERS"))),
-          "PASS")
+    blockers_none = _delivery(sha, *(_unverifiable(n) for n in range(1, 6)), verdict="VERDICT: BLOCKERS FOUND")
+    report = fx.run(blockers_none, BRIEF_FIVE)
+    check("c1/blockers-zero-coverage-no-vote", (verdict(report), report["coverage"]["text"]), ("NO_VOTE", "0/5"))
+    clean_only = lambda found, answered, total: "no vote" if found == CLEAN_VERDICT and answered == 0 else None
+    check("flip/c1-blockers-zero-coverage",
+          verdict(_patched("_rule_all_unverifiable", clean_only, lambda: fx.run(blockers_none, BRIEF_FIVE))), "PASS")
+    report = fx.run(_delivery(sha, A1, *(_unverifiable(n) for n in range(2, 5)), verdict="VERDICT: BLOCKERS FOUND"))
+    check("c1/blockers-with-answered-item-passes", (verdict(report), report["coverage"]["text"]), ("PASS", "1/4"))
     check("c1/absent-verdict-no-vote", verdict(fx.run(_delivery(sha, A1, A2, A3, A4, verdict="Summary."))),
           "NO_VOTE")
     check("c1/conflicting-verdicts-no-vote",
@@ -859,6 +888,24 @@ def _self_test_cases(fx):
         _delivery(sha, "2. src/beta.py:\n```\n    if ready\\:\n```"))), "FAIL")
     check("c2/preamble-quote-checked-fails", verdict(fx.run(
         _delivery(sha, A1, A2, A3, A4).replace("VERDICT:", 'Intro "never in the tree"\nVERDICT:', 1))), "FAIL")
+    row = _delivery(sha, '1. The row reads "| pattern-self-match.py | matches its own pattern |"')
+    report = fx.run(row, BRIEF_README)
+    check("c2/bare-name-binds-by-basename-passes",
+          (verdict(report), report["items"][0]["quotes"][0]["found_in"] if report["items"] else None),
+          ("PASS", [".preview/README.md"]))
+    root_only = lambda token, tree: [token] if token in tree.blobs else []
+    check("flip/c2-bare-name-root-only",
+          verdict(_patched("_basename_bindings", root_only, lambda: fx.run(row, BRIEF_README))), "FAIL")
+    neither = _delivery(sha, '1. The row reads "Only gamma carries this exact sentence."')
+    report = fx.run(neither, BRIEF_README)
+    reason = " ".join(report["reasons"])
+    check("c2/bare-name-other-basename-fails",
+          (verdict(report), ".preview/README.md" in reason, "docs/gamma.md" in reason), ("FAIL", True, True))
+    check("flip/c2-bare-name-binding",
+          verdict(_patched("_basename_bindings", lambda token, tree: [], lambda: fx.run(neither, BRIEF_README))),
+          "PASS")
+    check("c2/slash-path-binds-exactly-fails", verdict(fx.run(
+        _delivery(sha, '1. The line reads "Only the root readme carries this line."'), BRIEF_SLASH)), "FAIL")
     nested = _delivery(sha, "## 1. docs/alpha.md\n1. one\n2. two\n\"The first rule is plain.\"",
                        "## 2. src/beta.py\n1. again\n\"    if ready:\"")
     check("items/heading-style-ignores-nested-lists-passes", verdict(fx.run(nested)), "PASS")
@@ -916,6 +963,15 @@ def _self_test_cases(fx):
     result = subprocess.run([sys.executable, "-I", "-B", script, "--brief"], capture_output=True, text=True,
                             timeout=TIMEOUT, check=False)
     check("cli/usage-exit-2", result.returncode, 2)
+    result = subprocess.run([sys.executable, "-I", "-B", script], capture_output=True, text=True,
+                            timeout=TIMEOUT, check=False)
+    check("cli/bare-ok-exit-0",
+          (result.returncode, len(result.stdout.splitlines()), result.stdout.startswith("check_verifier_delivery: OK"),
+           result.stderr), (0, 1, True, ""))
+    check("bare/static-tables-valid", _static_config_problems(), [])
+    check("bare/broken-grammar-refused", bool(_patched("ITEM_RE", never, _static_config_problems)), True)
+    check("bare/broken-quote-pairs-refused",
+          bool(_patched("INLINE_QUOTE_PAIRS", (('"',),), _static_config_problems)), True)
 
 
 def _expected_check_ids():
@@ -970,9 +1026,60 @@ def self_test(report_path=None):
 
 USAGE = ("usage: check_verifier_delivery.py --brief FILE --delivery FILE --repo DIR\n"
          "       check_verifier_delivery.py [--self-test] [--execution-report ABS_PATH]")
+# The bare run's probes of the declared grammar: (pattern name, line, whether it must match).
+GRAMMAR_PROBES = (
+    ("ITEM_RE", "1. answer", True), ("ITEM_RE", "Q1: answer", True), ("ITEM_RE", "**2.** answer", True),
+    ("ITEM_RE", "### 3) answer", True), ("ITEM_RE", "Item 4. answer", True), ("ITEM_RE", "1.5 answer", False),
+    ("FENCE_RE", "```python", True), ("FENCE_RE", "   ~~~", True), ("FENCE_RE", "    ```", False),
+    ("BLOCKQUOTE_RE", "> quoted", True), ("PIN_LINE_RE", "BRIEF-PIN: " + "0" * 40, True),
+    ("VERDICT_RE", "**VERDICT:** NO BLOCKERS", True), ("QUESTIONS_MARKER_RE", "QUESTIONS:", True),
+)
+
+
+def _static_config_problems():
+    """The faults of this tool's own static tables (grammar patterns, quote pairs, limits); no input
+    is read and no git is run."""
+    module = sys.modules[__name__]
+    problems = []
+    for name, line, want in GRAMMAR_PROBES:
+        pattern = getattr(module, name, None)
+        if not isinstance(pattern, re.Pattern) or bool(pattern.match(line)) != want:
+            problems.append("{} {} {!r}".format(name, "does not match" if want else "matches", line))
+    if not FENCE_CLOSE_RE.fullmatch("```") or FENCE_CLOSE_RE.fullmatch("``` x"):
+        problems.append("FENCE_CLOSE_RE does not hold the declared closing fence")
+    if not (SHA_RE.fullmatch("0" * 40) and not SHA_RE.fullmatch("0" * 39)):
+        problems.append("SHA_RE does not hold exactly 40 hex digits")
+    if _verdict_value("**NO BLOCKERS.**") != CLEAN_VERDICT:
+        problems.append("the clean verdict {!r} does not survive its own normalisation".format(CLEAN_VERDICT))
+    if not (UNVERIFIABLE_RE.search("UNVERIFIABLE") and not UNVERIFIABLE_RE.search("unverifiable")):
+        problems.append("UNVERIFIABLE_RE is not an upper-case word test")
+    if not all(QUOTE_WORD_RE.search(word) for word in ("quote", "quotes", "quoted", "quoting")):
+        problems.append("QUOTE_WORD_RE misses a declared form of quote")
+    if not INLINE_QUOTE_PAIRS or not all(
+            isinstance(pair, tuple) and len(pair) == 2 and all(isinstance(c, str) and len(c) == 1 for c in pair)
+            for pair in INLINE_QUOTE_PAIRS):
+        problems.append("INLINE_QUOTE_PAIRS is not a table of (opener, closer) characters")
+    for name in ("TIMEOUT", "MAX_INPUT_BYTES", "MAX_TREE_BYTES", "MAX_LISTED"):
+        value = getattr(module, name, None)
+        if not isinstance(value, int) or value <= 0:
+            problems.append("{} is not a positive integer".format(name))
+    return problems
+
+
+def _bare_run():
+    problems = _static_config_problems()
+    if problems:
+        print("check_verifier_delivery: CANNOT_EVALUATE: static configuration invalid: {}".format(
+            "; ".join(problems)), file=sys.stderr)
+        return 2
+    print("check_verifier_delivery: OK: static tables valid ({} grammar probes); lint a delivery with "
+          "check_verifier_delivery.py --brief FILE --delivery FILE --repo DIR".format(len(GRAMMAR_PROBES)))
+    return 0
 
 
 def main(argv):
+    if not argv:
+        return _bare_run()
     if argv and argv[0] in ("--self-test", "--execution-report"):
         rest = argv[1:] if argv[0] == "--self-test" else list(argv)
         if not rest:
