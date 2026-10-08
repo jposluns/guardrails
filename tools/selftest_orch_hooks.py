@@ -49,6 +49,7 @@ import os
 import subprocess
 import tempfile
 import shutil
+import threading
 import datetime
 import hashlib
 from pathlib import Path
@@ -4916,7 +4917,7 @@ def _main_isolated(report_path=None):
         check("attest/ok-snapshot-present", (asd / "attestations-validated.json").exists(), True)
         _o_wja = aiqt_hooks._orch_write_json_atomic
         try:
-            aiqt_hooks._orch_write_json_atomic = lambda p, o: False
+            aiqt_hooks._orch_write_json_atomic = lambda p, o: "PermissionError"
             aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja
@@ -4928,10 +4929,12 @@ def _main_isolated(report_path=None):
         # the failed snapshot write is itself a finding, so the resume audit's warning names it (the findings
         # list is that warning's text), whatever happens to the audit's own guard-events row
         try:
-            aiqt_hooks._orch_write_json_atomic = lambda p, o: False
+            aiqt_hooks._orch_write_json_atomic = lambda p, o: "PermissionError"
             _at_fail = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja
+        # REGRESSION PIN: it pins behaviour the 88e0b86 hooks already had, not a change of this PR; it fails on
+        # those hooks now only because its patched writer returns this round's failure detail, not False
         check("attest/failed-write-finding-names-it",
               any(x.startswith("the attestation snapshot could not be written") for x in _at_fail), True)
         # a broken chain is held, never read as a smaller clean register
@@ -5059,7 +5062,7 @@ def _main_isolated(report_path=None):
         _o_wja3 = aiqt_hooks._orch_write_json_atomic
         try:
             aiqt_hooks._orch_write_json_atomic = (
-                lambda p, o: False if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
+                lambda p, o: "PermissionError" if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
             check("ckpt/marker-unwritable-holds", _verdict(cmstop()), "block2")
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja3
@@ -5229,7 +5232,7 @@ def _main_isolated(report_path=None):
             return verdict, text in msg
         _r22_record = aiqt_hooks._orch_record_denial
         try:
-            aiqt_hooks._orch_record_denial = lambda *a: False
+            aiqt_hooks._orch_record_denial = lambda *a: "PermissionError"
             _r22.set_turn_state(dict())
             check("r22/allow-unpersistable-warns",
                   _r22_has(aiqt_hooks.orch_stop_guard(_r22.payload("Stop")),
@@ -5359,7 +5362,7 @@ def _main_isolated(report_path=None):
         try:
             _rw.set_items([item("RW-1")])
             _rw.set_turn_state(dict())
-            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
             check("recwrite/stop-call-deny-unpersisted-counter-warns",
                   _rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")),
                            _rw_counter + ", so this deny does not count toward the loop bound"),
@@ -5373,7 +5376,7 @@ def _main_isolated(report_path=None):
             _rw.set_turn_state(dict())
             for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP):
                 _rw_sched(dict(prompt="recheck RW-1 later"))
-            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
             check("recwrite/wake-digest-unwritten-findings-warns",
                   _rw_note(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_wake), ("warn", True))
             aiqt_hooks._orch_escape_active = lambda reg, root: (True, None)
@@ -5398,7 +5401,7 @@ def _main_isolated(report_path=None):
         _rw_wake_prompt = lambda: aiqt_hooks.orch_prompt_stamp(
             _rw.payload("UserPromptSubmit", extra=dict(prompt="wake RW-1")))
         try:
-            aiqt_hooks._orch_save_turn_state = lambda root, state: False
+            aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
             _rw_timer = _rw_context(_rw_wake_prompt())
         finally:
             aiqt_hooks._orch_save_turn_state = _rw_save
@@ -5516,7 +5519,7 @@ def _main_isolated(report_path=None):
         _r2_ea = aiqt_hooks._orch_escape_active
 
         def _r2_refuse(suffix):
-            return lambda p, o: False if str(p).endswith(suffix) else _r2_wja(p, o)
+            return lambda p, o: "PermissionError" if str(p).endswith(suffix) else _r2_wja(p, o)
 
         def _r2_out(result):
             # (verdict, deny reason or Stop block reason, systemMessage)
@@ -5586,7 +5589,7 @@ def _main_isolated(report_path=None):
         for _r2_pre in ([_r2_dig], []):
             _r2.set_turn_state(dict(wake_digests=list(_r2_pre)))
             try:
-                aiqt_hooks._orch_save_turn_state = lambda root, state: False
+                aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
                 _r2_w = _r2_out(_r2_sched(dict(prompt=_r2_same)))
             finally:
                 aiqt_hooks._orch_save_turn_state = _r2_save
@@ -5599,18 +5602,18 @@ def _main_isolated(report_path=None):
         _r2.set_turn_state(dict(wake_digests=[_r2_dig]))
         _r2_tsp = _r2_sd / "turn-state.json"
         _r2_before = _r2_tsp.read_bytes()
-        _r2_dump = json.dump
+        _r2_write = os.write
 
-        def _r2_partial(obj, fh, **kw):
-            fh.write("{")
+        def _r2_partial(fd, data):
+            _r2_write(fd, bytes(data[:1]))
             raise OSError("injected after a partial write")
         try:
-            json.dump = _r2_partial
+            os.write = _r2_partial
             _r2_p = _r2_prompt(_r2_same)
         finally:
-            json.dump = _r2_dump
+            os.write = _r2_write
         _r2_after = _r2_tsp.read_bytes()
-        _r2_tmp_left = (_r2_sd / "turn-state.json.tmp").exists()
+        _r2_tmp_left = bool(list(_r2_sd.glob("turn-state.json*.tmp")))
         _r2_next = _r2_prompt(_r2_same)
         check("recwrite2/turn-state-partial-write-leaves-previous-state",
               (_r2_after == _r2_before, _r2_tmp_left, "TIMER-ORIGINATED" in _r2_context(_r2_next),
@@ -5642,6 +5645,8 @@ def _main_isolated(report_path=None):
             _r2_bm = [_r2_mut() for _ in range(3)]
         finally:
             aiqt_hooks._orch_barrier_write = _r2_bw
+        # REGRESSION PIN: this vector passes on the 88e0b86 hooks too; it pins behaviour that was already
+        # correct and does not test a change of this PR
         check("recwrite2/failed-clear-persistent-fault-noted-each-mutation",
               (_r2_bc, _r2_bm, json.loads(_r2_bar.read_text(encoding="utf-8")).get("warned")),
               ((0, None, None), ["warn"] * 3, False))
@@ -5654,6 +5659,7 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks._orch_escape_active = _r2_ea
             aiqt_hooks._orch_write_json = _r2_wj
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
         check("recwrite2/spoof-file-unwritten-named-while-its-row-is-written",
               (_r2_sp[0], "(guard-events ok, escape-spoof.json FAILED)" in _r2_sp[2], _r2_events("escape-spoof")),
               ("warn", True, 1))
@@ -5664,6 +5670,7 @@ def _main_isolated(report_path=None):
             _r2_fx = _r2_out(_r2_stop())
         finally:
             aiqt_hooks._orch_append_jsonl = _r2_aj
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
         check("recwrite2/forced-exit-log-unwritten-named-while-its-row-is-written",
               (_r2_fx[0], "(guard-events ok, forced-exit.jsonl FAILED)" in _r2_fx[2],
                _r2_events("forced_unresolved")),
@@ -5677,9 +5684,207 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks._orch_append_jsonl = _r2_aj
             _r2.mode.write_text("", encoding="utf-8")
+        # REGRESSION PIN: passes on the 88e0b86 hooks too (pins already-correct behaviour, not a change)
         check("recwrite2/pending-ask-unwritten-named-while-its-row-is-written",
               (_r2_ask[0], "the pending row could NOT be persisted" in _r2_ask[2], _r2_events("ask-guard")),
               ("deny", True, 1))
+
+        # QA round 2 of the silent-write fixes: _orch_write_json_atomic creates its own temporary file
+        # (O_CREAT|O_EXCL|O_NOFOLLOW under a random name) and replaces the target with only that file.
+        # (1) A symlink planted at the old fixed temporary name, and one at the exact name the writer draws
+        # (os.urandom pinned), change neither the target nor the symlinks' referent: the pinned save fails and
+        # leaves both links, an ordinary save publishes a regular file. (2) Save A writes one byte, save B runs
+        # whole and succeeds, then A's rename fails: A reports the failure and B's file is published whole.
+        # (3) Save B creates its temporary file before A renames and writes after: a reader between the two
+        # reads A's whole file, both report success and B's file is the final one. (4) Under umask 022 an
+        # existing 0600 or 0640 target keeps its bits and a new target is 0600. (5) A failed save whose cleanup
+        # also fails names the temporary file it left in the hook's note. (6) A writable turn-state.json in a
+        # state directory the hook cannot write is not saved, so the Stop deny fails open with findings (the
+        # disclosed decision change; as root the directory mode is not enforced and the deny stands). (7) The
+        # mode reader: a FIFO with no writer, /dev/zero, a file one byte over the bound, a path with a lone
+        # surrogate and one with a NUL character each deny the ask, naming the reason, and a JSON-shaped file
+        # nested too deep to parse denies it too, each inside a child with its own RLIMIT_AS and a 30-second
+        # timeout.
+        _r3 = Fixture(tmp, "recwrite3")
+        _r3_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r3.root)))
+        _r3_sd.mkdir(parents=True, exist_ok=True)
+        _r3_ts = _r3_sd / "turn-state.json"
+        _r3_save = lambda state: aiqt_hooks._orch_write_json_atomic(str(_r3_ts), state)
+        _r3_tmps = lambda: sorted(p.name for p in _r3_sd.iterdir() if p.name.endswith(".tmp"))
+        _r3_victim = _r3_sd / "victim.txt"
+        _r3_victim.write_text("victim", encoding="utf-8")
+        _r3_prior = json.dumps(dict(tag="prior")).encode("utf-8")
+        _r3_ts.write_bytes(_r3_prior)
+        _r3_fixed = os.urandom(8)
+        _r3_drawn = _r3_sd / "turn-state.json.{}.tmp".format(_r3_fixed.hex())
+        (_r3_sd / "turn-state.json.tmp").symlink_to(_r3_victim)
+        _r3_drawn.symlink_to(_r3_victim)
+        _r3_urandom = os.urandom
+        try:
+            os.urandom = lambda n: _r3_fixed
+            _r3_pinned = _r3_save(dict(tag="pinned"))
+        finally:
+            os.urandom = _r3_urandom
+        _r3_after_pinned = _r3_ts.read_bytes()
+        _r3_plain = _r3_save(dict(tag="plain"))
+        check("recwrite3/planted-temp-symlink-no-effect",
+              (_r3_pinned, _r3_after_pinned == _r3_prior, _r3_plain, _r3_ts.is_symlink(), _r3.turn_state(),
+               _r3_victim.read_text(encoding="utf-8"), (_r3_sd / "turn-state.json.tmp").is_symlink(),
+               _r3_drawn.is_symlink(), _r3_tmps()),
+              ("FileExistsError", True, None, False, dict(tag="plain"), "victim", True, True,
+               sorted(["turn-state.json.tmp", _r3_drawn.name])))
+        for _r3_link in (_r3_sd / "turn-state.json.tmp", _r3_drawn):
+            if os.path.lexists(str(_r3_link)):  # a writer that removes or replaces them fails the check above
+                os.unlink(str(_r3_link))
+        _r3_real_write, _r3_real_replace, _r3_real_open = os.write, os.replace, os.open
+        _r3_b, _r3_calls = [], []
+
+        def _r3_write_a(fd, data):
+            os.write = _r3_real_write  # the rest of A, and all of B, write unhindered
+            n = _r3_real_write(fd, bytes(data[:1]))
+            _r3_b.append(_r3_save(dict(long_name=123456)))
+            return n
+
+        def _r3_replace_a(src, dst):
+            _r3_calls.append(src)
+            if len(_r3_calls) == 2:
+                raise OSError("injected: the rename of save A fails")
+            return _r3_real_replace(src, dst)
+        try:
+            os.write, os.replace = _r3_write_a, _r3_replace_a
+            _r3_a = _r3_save(dict(a=1))
+        finally:
+            os.write, os.replace = _r3_real_write, _r3_real_replace
+        check("recwrite3/overlap-failed-save-leaves-the-successful-one-whole",
+              (_r3_a, _r3_b, _r3.turn_state(), _r3_tmps(), len(set(_r3_calls))),
+              ("OSError", [None], dict(long_name=123456), [], 2))
+        _r3_ev_b, _r3_ev_a = threading.Event(), threading.Event()
+        _r3_seen, _r3_res = [], dict()
+
+        def _r3_open(path, flags, *args, **kw):
+            fd = _r3_real_open(path, flags, *args, **kw)
+            if threading.current_thread().name == "r3-B" and flags & os.O_EXCL:
+                _r3_ev_b.set()
+                _r3_ev_a.wait(10)  # B holds its created temporary file until A has renamed
+            return fd
+
+        def _r3_replace(src, dst):
+            if threading.current_thread().name != "r3-A":
+                return _r3_real_replace(src, dst)
+            _r3_ev_b.wait(10)
+            _r3_real_replace(src, dst)
+            _r3_seen.append(aiqt_hooks._orch_turn_state(str(_r3.root)))
+            _r3_ev_a.set()
+            return None
+        _r3_threads = [threading.Thread(target=lambda n=n, st=st: _r3_res.__setitem__(n, _r3_save(st)), name=n)
+                       for n, st in (("r3-B", dict(stop_denials=7, tag="B")), ("r3-A", dict(stop_denials=1, tag="A")))]
+        try:
+            os.open, os.replace = _r3_open, _r3_replace
+            for _r3_t in _r3_threads:
+                _r3_t.start()
+            for _r3_t in _r3_threads:
+                _r3_t.join(30)
+        finally:
+            os.open, os.replace = _r3_real_open, _r3_real_replace
+        check("recwrite3/overlap-reader-reads-a-whole-file-and-both-report-success",
+              (_r3_res.get("r3-A"), _r3_res.get("r3-B"), _r3_seen, _r3.turn_state(), _r3_tmps()),
+              (None, None, [dict(stop_denials=1, tag="A")], dict(stop_denials=7, tag="B"), []))
+        _r3_modes = []
+        _r3_umask = os.umask(0o022)
+        try:
+            for _r3_mode in (0o600, 0o640):
+                os.chmod(str(_r3_ts), _r3_mode)
+                _r3_save(dict(mode=_r3_mode))
+                _r3_modes.append(oct(os.stat(str(_r3_ts)).st_mode & 0o777))
+            _r3_new = _r3_sd / "r3-fresh.json"
+            aiqt_hooks._orch_write_json_atomic(str(_r3_new), dict(fresh=True))
+            _r3_modes.append(oct(os.stat(str(_r3_new)).st_mode & 0o777))
+        finally:
+            os.umask(_r3_umask)
+        check("recwrite3/permission-bits-kept-new-file-0600-under-umask-022", _r3_modes,
+              ["0o600", "0o640", "0o600"])
+        _r3_unlink = os.unlink
+
+        def _r3_partial(fd, data):
+            _r3_real_write(fd, bytes(data[:1]))
+            raise OSError("injected after a partial write")
+
+        def _r3_no_unlink(path, *args, **kw):
+            raise PermissionError("injected: the temporary file cannot be removed")
+        _r3.set_turn_state(dict(tag="kept"))
+        try:
+            os.write, os.unlink = _r3_partial, _r3_no_unlink
+            _r3_note = _r2_out(aiqt_hooks.orch_prompt_stamp(
+                _r3.payload("UserPromptSubmit", extra=dict(prompt="genuine r3"))))
+        finally:
+            os.write, os.unlink = _r3_real_write, _r3_unlink
+        _r3_left = _r3_tmps()
+        check("recwrite3/failed-cleanup-names-the-left-temporary-file",
+              (_r3_note[0], "removing its temporary file" in _r3_note[2], len(_r3_left),
+               bool(_r3_left) and str(_r3_sd / _r3_left[0]) in _r3_note[2], _r3.turn_state()),
+              ("warn", True, 1, True, dict(tag="kept")))
+        for _r3_name in _r3_left:
+            os.unlink(str(_r3_sd / _r3_name))
+        _r3.set_items([item("QA-R3")])
+        _r3.set_turn_state(dict())
+        os.chmod(str(_r3_sd), 0o555)
+        try:
+            _r3_ro = _r2_out(aiqt_hooks.orch_stop_guard(_r3.payload("Stop")))
+        finally:
+            os.chmod(str(_r3_sd), 0o755)
+        check("recwrite3/unwritable-state-dir-writable-turn-state-fails-open-with-findings",
+              (_r3_ro[0], "the denial counter could not be persisted (PermissionError)" in _r3_ro[2]),
+              ("warn", True) if os.geteuid() != 0 else ("block2", False))
+        _r3_regp = _r3.root / ".aiqt" / "orchestration.local.json"
+        _r3_reg_text = _r3_regp.read_text(encoding="utf-8")
+        _r3_child_src = (
+            "import json, os, resource, sys\n"
+            "sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])\n"
+            "import aiqt_hooks, selftest_orch_hooks as t\n"
+            "vm = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+            "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
+            "soft = vm + (64 << 20) if hard == resource.RLIM_INFINITY else min(vm + (64 << 20), hard)\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
+            "res = aiqt_hooks.orch_ask_guard(json.loads(sys.argv[4]))\n"
+            "hso = res[1].get('hookSpecificOutput') if isinstance(res[1], dict) else None\n"
+            "reason = hso.get('permissionDecisionReason', '') if isinstance(hso, dict) else ''\n"
+            "print(json.dumps([t._verdict(res), sys.argv[3] in str(reason)]))\n")
+        _r3_fifo = _r3.root / "r3-mode-fifo"
+        _r3_big = _r3.root / "r3-mode-big.md"
+        _r3_deep = _r3.root / "r3-mode-deep.json"
+        _r3_bound = getattr(aiqt_hooks, "_ORCH_MODE_MAX_BYTES", 1 << 20)  # a base without it still runs
+        _r3_cases = (
+            ("fifo", str(_r3_fifo), lambda: os.mkfifo(str(_r3_fifo)), "is not a regular file"),
+            ("dev-zero", "/dev/zero", lambda: None, "is not a regular file"),
+            ("over-bound", str(_r3_big), lambda: _r3_big.write_bytes(b"a" * (_r3_bound + 1)),
+             "larger than the {}-byte bound".format(_r3_bound)),
+            ("lone-surrogate", str(_r3.root / "r3-mode") + "\ud800", lambda: None, "holds a lone surrogate"),
+            ("nul", str(_r3.root / "r3-mode") + "\x00x", lambda: None, "contains a NUL character"),
+            ("deep-nesting", str(_r3_deep), lambda: _r3_deep.write_text("[" * 100000, encoding="utf-8"), ""))
+        _r3_rows = []
+        _r3_ask = json.dumps(_r3.payload("PreToolUse", "AskUserQuestion", dict(questions=[])))
+        for _r3_name, _r3_path, _r3_make, _r3_reason in _r3_cases:
+            _r3_reg = json.loads(_r3_reg_text)
+            _r3_reg["mode"] = dict(path=_r3_path)
+            _r3_regp.write_text(json.dumps(_r3_reg), encoding="utf-8")  # ensure_ascii escapes the odd paths
+            _r3_make()
+            try:
+                p = subprocess.run([sys.executable, "-I", "-B", "-c", _r3_child_src, _r16_hooks, _r16_tools,
+                                    _r3_reason, _r3_ask], capture_output=True, text=True, timeout=30)
+                try:
+                    _r3_rows.append((_r3_name,) + tuple(json.loads(p.stdout)))
+                except (ValueError, TypeError):
+                    _r3_rows.append((_r3_name, "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:]),
+                                     False))
+            except subprocess.TimeoutExpired:
+                _r3_rows.append((_r3_name, "child timed out", False))
+            finally:
+                _r3_regp.write_text(_r3_reg_text, encoding="utf-8")
+                for _r3_made in (_r3_fifo, _r3_big, _r3_deep):
+                    if os.path.lexists(str(_r3_made)):
+                        os.unlink(str(_r3_made))
+        check("recwrite3/mode-reader-nonregular-oversize-undecodable-path-fails-closed-promptly", tuple(_r3_rows),
+              tuple((n, "deny", True) for n, _p, _m, _r in _r3_cases))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

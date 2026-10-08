@@ -850,7 +850,7 @@ def _test_note_literal_sites(failures, tmp):
         aiqt_hooks._orch_append_jsonl = saved_append
     saved_save = aiqt_hooks._orch_save_turn_state
     try:
-        aiqt_hooks._orch_save_turn_state = lambda root, state: False
+        aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
         note("(nl-stamp-unwritten) a genuine prompt whose turn-state stamp cannot be written proceeds with a note "
              "saying the stamp was not written",
              aiqt_hooks.orch_prompt_stamp(y.payload("UserPromptSubmit", extra=dict(prompt="hello"))),
@@ -1306,7 +1306,7 @@ def _test_stop_dispatch_note_sites(failures, tmp):
         aiqt_hooks._orch_registry = saved[0]
         s.set_items([orch.item("NS-1")])
         s.set_turn_state(dict())
-        aiqt_hooks._orch_record_denial = lambda *_a: False
+        aiqt_hooks._orch_record_denial = lambda *_a: "PermissionError"
         note("(ns-stop-counter) a Stop deny whose denial counter cannot be saved fails open with a warning",
              aiqt_hooks.orch_stop_guard(s.payload("Stop")), "denial counter could not be persisted")
         aiqt_hooks._orch_record_denial = saved[1]

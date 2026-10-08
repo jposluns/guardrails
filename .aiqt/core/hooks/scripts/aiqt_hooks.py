@@ -8084,6 +8084,7 @@ _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
 # and their compound forms, are recognized); a present value outside that family is unrecognized and fails
 # closed to this posture rather than silently disarming.
 _ORCH_MODE_ARMED = "unattended"
+_ORCH_MODE_MAX_BYTES = 1 << 20  # _orch_mode_read reads at most this many bytes; a larger mode file fails closed
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
 _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
 # A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
@@ -8603,19 +8604,67 @@ def _orch_write_json(path, obj):
 
 
 def _orch_write_json_atomic(path, obj):
-    """Crash-safe JSON overwrite: write a sibling temp then os.replace (an atomic rename on the same
-    filesystem), so a crash mid-write never leaves a truncated file a reader would treat as malformed.
-    Same best-effort contract as _orch_write_json (returns True on success; the caller decides what a
-    failure means)."""
+    """Crash-safe JSON overwrite, the one writer of turn-state.json, backlog-checkpoint.json,
+    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
+    else a short failure detail the caller names in its output (the caller decides what a failure means).
+    It serializes obj first (a value json cannot encode fails before any file is created), creates the
+    parent directory, then creates a temporary file of its own beside the target with
+    os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other file
+    already at a temporary-like name is never opened, written or removed (an existing name fails the
+    create, and the save fails). It sets that file's permission bits to the existing target's (a regular
+    file at the target, read with lstat), else to 0600, then writes, fsyncs and closes it through that
+    descriptor only and os.replace()s it onto the target, so the target is swapped whole: a reader sees
+    the previous file or the new one, never a part of either. The new file is owned by the writing uid;
+    a symlink at the target is replaced, not followed. On any failure after the create it unlinks only
+    its own temporary file; an unlink that fails leaves that file beside the target, and the returned
+    detail names it. A process killed between the create and the replace (a hook timeout, for example)
+    leaves its temporary file, and nothing removes it. Concurrent saves never share a temporary file, so
+    one save cannot write into or remove another's; the last replace wins, so where callers read, modify
+    and save the same file at the same time one update can be lost (read-modify-write is not
+    serialized). The writing uid can itself replace any of these files, so this is crash and collision
+    safety, not a boundary against that uid."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, sort_keys=True)
-        os.replace(tmp, path)
-        return True
-    except (OSError, ValueError):
-        return False
+        blob = json.dumps(obj, sort_keys=True).encode("utf-8")
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        try:
+            prior = os.lstat(path)
+            mode = stat.S_IMODE(prior.st_mode) & 0o777 if stat.S_ISREG(prior.st_mode) else 0o600
+        except FileNotFoundError:
+            mode = 0o600
+        tmp = "{}.{}.tmp".format(path, os.urandom(8).hex())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     0o600)
+    except (OSError, TypeError, ValueError) as exc:
+        return type(exc).__name__
+    failure = None
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(blob)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except (OSError, ValueError) as exc:
+        failure = type(exc).__name__
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            failure = failure or type(exc).__name__
+    if failure is None:
+        try:
+            os.replace(tmp, path)
+            return None
+        except (OSError, ValueError) as exc:
+            failure = type(exc).__name__
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        failure += "; removing its temporary file {} failed with {}, so remove it by hand".format(
+            tmp, type(exc).__name__)
+    return failure
 
 
 def _orch_guard_event(root, kind, decision, detail):
@@ -8669,18 +8718,14 @@ def _orch_turn_state(root):
 
 
 def _orch_save_turn_state(root, state):
-    """Atomic turn-state save through _orch_write_json_atomic (a sibling temporary file, then os.replace), so a
-    save that fails at any step, mid-write included, leaves the previous turn-state.json (or its absence)
-    byte-identical rather than truncated; the temporary file is removed on a failure. Returns True on
-    success; the caller decides what a failure means."""
-    path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
-    if _orch_write_json_atomic(path, state):
-        return True
-    try:
-        os.remove(path + ".tmp")
-    except OSError:
-        pass
-    return False
+    """Save turn-state.json through _orch_write_json_atomic: None on success, else the failure detail the
+    caller names in its output (the caller decides what a failure means). A failed save, mid-write
+    included, leaves the previous turn-state.json (or its absence) in place unchanged, and a reader sees
+    the previous file or the new one, never a part of either. The save needs a writable state directory
+    (its temporary file is created there), so a writable turn-state.json in a directory the hook cannot
+    write is not saved. Two saves at once are both published whole, the later replacing the earlier, so
+    one update can be lost (the read-modify-write is not serialized)."""
+    return _orch_write_json_atomic(os.path.join(_orch_state_dir_for_root(root), "turn-state.json"), state)
 
 
 def _orch_mode_classify(value):
@@ -8711,17 +8756,79 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_read(path):
+    """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
+    _ORCH_MODE_MAX_BYTES bytes that decodes as strict UTF-8, else ('bad', reason) for every other outcome.
+    The path must encode as strict UTF-8 (a lone surrogate or a NUL character is bad, before any open).
+    The open is os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at
+    once instead of waiting; the descriptor is fstat'ed and anything not a regular file (a FIFO, a device
+    such as /dev/zero, a directory, a socket) is bad without a read. The read asks for at most
+    _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
+    a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
+    bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
+    stall the read, and what opening a device node does is up to its driver; the hook timeout bounds each
+    such stall."""
+    try:
+        if "\x00" in path:
+            return ("bad", "the mode path contains a NUL character")
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return ("bad", "the mode path holds a lone surrogate, which UTF-8 cannot encode")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return ("absent", None)
+    except Exception as exc:
+        return ("bad", "the mode file cannot be opened ({})".format(type(exc).__name__))
+    chunks, total, result = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            result = ("bad", "the mode file is not a regular file")
+        else:
+            while total <= _ORCH_MODE_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_MODE_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > _ORCH_MODE_MAX_BYTES:
+                result = ("bad", "the mode file is larger than the {}-byte bound".format(_ORCH_MODE_MAX_BYTES))
+    except Exception as exc:
+        result = ("bad", "the mode file cannot be read ({})".format(type(exc).__name__))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            result = result or ("bad", "the mode file cannot be closed ({})".format(type(exc).__name__))
+    if result is not None:
+        return result
+    try:
+        return ("ok", b"".join(chunks).decode("utf-8"))  # strict decode
+    except UnicodeDecodeError:
+        return ("bad", "the mode file is not valid UTF-8")
+
+
 def _orch_mode(reg, root):
-    """The operating-mode token from the declared mode record, parsed by ONE sound reader (never an
-    incremental regex-plus-substring scan). The mode file is a SHARED text file: either a state-record file
-    carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
+    """The operating-mode token of _orch_mode_detail (see there), without the read-failure reason."""
+    return _orch_mode_detail(reg, root)[0]
+
+
+def _orch_mode_detail(reg, root):
+    """(mode, reason): the operating-mode token, and the reason the mode file could not be read where it
+    fails closed for that (else None). The token comes from the declared mode record, parsed by ONE sound
+    reader (never an incremental regex-plus-substring scan). The mode file is a SHARED text file: either a
+    state-record file carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
       - None when NO marker is present, preserving the fail-open answer for the ask blocker (the file is
         shared, so prose must NOT arm): an undeclared mode path, a genuinely absent file (FileNotFoundError),
         an empty or whitespace-only file, or prose with no `Operating-mode:` declaration line and no JSON
         marker (including a sentence that merely mentions attended or unattended);
       - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
-        recognized value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable
-        file (an OSError other than FileNotFoundError) or one whose bytes are not valid UTF-8 (strict decode);
+        recognized value, so the guard fails CLOSED rather than silently disarming: every outcome of
+        _orch_mode_read other than not found or a read text (a path with a NUL character or a lone
+        surrogate, a file that cannot be opened or read, one that is not a regular file, one larger than the
+        bound, or one whose bytes are not valid UTF-8), which also returns the reason;
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
@@ -8744,14 +8851,17 @@ def _orch_mode(reg, root):
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            text = fh.read()               # strict decode: invalid UTF-8 raises UnicodeDecodeError
-    except FileNotFoundError:
-        return None                       # no marker file present: unchanged no-marker default (fail open)
-    except (OSError, UnicodeDecodeError):
-        return _ORCH_MODE_ARMED           # present but unreadable or non-UTF-8: fail closed to guards-armed
+        return (None, None)
+    status, text = _orch_mode_read(path)
+    if status == "absent":
+        return (None, None)               # no marker file present: unchanged no-marker default (fail open)
+    if status != "ok":
+        return (_ORCH_MODE_ARMED, text)   # any other read outcome fails closed to guards-armed, with a reason
+    return (_orch_mode_classify_text(text), None)
+
+
+def _orch_mode_classify_text(text):
+    """The mode token of a mode file's decoded text, by the soundness rules of _orch_mode_detail."""
     text = text.lstrip("\ufeff")          # strip a leading byte-order mark ONCE, before every subsequent check
     # DECLARATION (line form): parse each PHYSICAL line so the value never crosses a newline. The FIRST line
     # that matches is the declaration; a present declaration never falls through to the no-marker None (an
@@ -8767,10 +8877,11 @@ def _orch_mode(reg, root):
         return None                       # empty/whitespace-only: no marker present, unchanged (fail open)
     try:
         obj = json.loads(stripped, object_pairs_hook=_orch_reject_duplicate_keys)
-    except ValueError:
-        # Unparseable (malformed, trailing garbage, or duplicate keys): a JSON-SHAPED marker attempt (the
-        # content begins with `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no
-        # declaration and no JSON, the no-marker None (fail open, because the file is shared).
+    except (ValueError, RecursionError):
+        # Unparseable (malformed, trailing garbage, duplicate keys, or nesting too deep to parse, which only
+        # content beginning with `{` or `[` can reach): a JSON-SHAPED marker attempt (the content begins with
+        # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
+        # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
     if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
         classified = _orch_mode_classify(obj["mode"])
@@ -9423,22 +9534,24 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
         # the failed write itself is reported in the hook's output; its guard-events row is a second record
         # that can succeed or fail on its own, so the warning never depends on that append failing too
         failed = []
-        if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
-                                              "ids": union}):
+        unsaved = _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
+                                                 "ids": union})
+        if unsaved is not None:
             events.append(("checkpoint-unwritable", "recorded",
                            "the checkpoint could not be rewritten; the next window compares "
                            "against the prior state"))
             failed.append("Additionally, the anti-shrinkage checkpoint backlog-checkpoint.json could not be "
-                          "written, so it does not record this window's items: an item that leaves the "
+                          "written ({}), so it does not record this window's items: an item that leaves the "
                           "enumeration, or is demoted, before a later checkpoint write succeeds is not held "
                           "as vanished or demoted unless an earlier checkpoint already records it; record "
-                          "this window's items manually (nocncl).")
+                          "this window's items manually (nocncl).".format(unsaved))
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
             # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
             # never a silent gap, consistent with the other recorders.
-            if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
+            unsaved = _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()})
+            if unsaved is not None:
                 events.append(("checkpoint-marker-unwritable", "recorded",
                                "the checkpoint-init marker could not be written; a later "
                                "checkpoint deletion would be undetectable this window"))
@@ -9446,8 +9559,8 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
                 failed.append("Additionally, the checkpoint-init marker checkpoint-init.marker could not be "
-                              "written, so this window is held as cannot-evaluate and a later deletion of the "
-                              "checkpoint would go undetected; record it manually (nocncl).")
+                              "written ({}), so this window is held as cannot-evaluate and a later deletion of "
+                              "the checkpoint would go undetected; record it manually (nocncl).".format(unsaved))
         for ev_kind, ev_decision, ev_detail in events:
             warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
             if warn and warnings is not None:
@@ -9519,10 +9632,10 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
 
 
 def _orch_record_denial(root, ts, kind, basis):
-    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
-    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
-    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
+    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns None on a
+    successful persist, else the failure detail of _orch_save_turn_state. The increment base is sanitized
+    so a tampered non-int counter cannot raise here; a STOP-path caller that gets a failure must fail OPEN,
+    since an un-persistable counter never reaches the loop bound and would otherwise re-deny forever."""
     state = dict(ts or {})
     if kind == "schedule_idle":
         prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
@@ -9621,9 +9734,10 @@ def _orch_stop_family(data, event_name, kind):
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
     if verdict == "DENY":
-        if not _orch_record_denial(root, ts, kind, basis):
-            warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
-                    "failing OPEN with findings rather than re-denying. Underlying: " + reason)
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        if unsaved is not None:
+            warn = ("the denial counter could not be persisted ({}), so the loop bound cannot advance; "
+                    "failing OPEN with findings rather than re-denying. Underlying: ".format(unsaved) + reason)
             ev = _orch_event_warn(root, event_name, "allow_unpersistable", warn)
             return _stop_warn("AIQT guardrail ({}): {}{}".format(
                 event_name, warn, _orch_warn_tail(ev, spoof_warn, ctx["record_warn"])))
@@ -9687,11 +9801,12 @@ def _orch_register_wake(root, ts, prompt):
     wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
     wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    if _orch_save_turn_state(root, state):
+    unsaved = _orch_save_turn_state(root, state)
+    if unsaved is None:
         return ""
-    return ("Additionally, this wake's prompt digest could not be written to turn-state.json, so how the "
+    return ("Additionally, this wake's prompt digest could not be written to turn-state.json ({}), so how the "
             "prompt it returns with is classified is uncertain: it may read as genuine human input or as "
-            "timer-originated; record the wake manually (nocncl).")
+            "timer-originated; record the wake manually (nocncl).".format(unsaved))
 
 
 def orch_yield_tool(data):
@@ -9749,10 +9864,11 @@ def orch_yield_tool(data):
     if verdict == "DENY":
         # a counter that cannot be persisted leaves this deny uncounted, so the cap (or the loop bound) is
         # never reached while the write fails; the deny stands and the failure is reported on it
-        counter_warn = "" if _orch_record_denial(root, ts, kind, basis) else (
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        counter_warn = "" if unsaved is None else (
             "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
-            "count toward the {} and its relief is not reached while the write fails; record it manually "
-            "(nocncl).".format("scheduling cap" if kind == "schedule_idle" else "loop bound"))
+            "count toward the {} and its relief is not reached while the write fails ({}); record it manually "
+            "(nocncl).".format("scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved))
         tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
                                spoof_warn, ctx["record_warn"])
         return _deny(reason + tail,
@@ -9799,8 +9915,10 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable, non-UTF-8, a present-but-unrecognized `Operating-mode:` declaration (empty, or not
-    beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
+    is present but unreadable, not a regular file (a FIFO or a device included, opened without waiting),
+    larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path holding a NUL or a lone surrogate (each such
+    read outcome names its reason in the deny), a present-but-unrecognized `Operating-mode:` declaration
+    (empty, or not beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
     "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
     declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
     (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
@@ -9817,7 +9935,7 @@ def orch_ask_guard(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
-    mode = _orch_mode(reg, root)
+    mode, unread = _orch_mode_detail(reg, root)
     if mode is None or "unattended" not in mode:
         if mode is None and not _orch_guard_event(
                 root, "ask-guard", "fail-open",
@@ -9847,6 +9965,9 @@ def orch_ask_guard(data):
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
               "the mode record first, then re-issue.")
+    if unread:
+        # a mode file the reader cannot read as text fails closed to unattended; the deny names why
+        reason += " The mode record reads as unattended because {} (it fails closed).".format(unread)
     tail = _orch_warn_tail(_orch_event_warn(
         root, "ask-guard", "deny", "pending key {}{}".format(key, "" if recorded else " (NOT persisted)")))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
@@ -12995,30 +13116,31 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
-        if _orch_save_turn_state(root, ts):
+        unsaved = _orch_save_turn_state(root, ts)
+        if unsaved is None:
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
-                           "could not be written, so its time was not stamped and the denial counters were "
-                           "not reset; record it manually (nocncl).")
+                           "could not be written ({}), so its time was not stamped and the denial counters were "
+                           "not reset; record it manually (nocncl).".format(unsaved))
     # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
     # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
     wd = list(ts.get("wake_digests") or [])
     if digest in wd:
         wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
     ts["wake_digests"] = wd
-    consumed = _orch_save_turn_state(root, ts)
+    unsaved = _orch_save_turn_state(root, ts)
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
         gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)
     context = ("[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not human input. Measured "
                "gap since the last genuine human input: {}.".format(gap))
-    if not consumed:
+    if unsaved is not None:
         # the model reads the context line and the operator the systemMessage; neither promises how a later
         # prompt with the same text is classified
-        warn = ("turn-state.json could not be written, so consuming this wake's digest failed and how a later "
-                "prompt with the same text is classified is uncertain: it may read as timer-originated or as "
-                "genuine human input; record it manually (nocncl).")
+        warn = ("turn-state.json could not be written ({}), so consuming this wake's digest failed and how a "
+                "later prompt with the same text is classified is uncertain: it may read as timer-originated "
+                "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
     return (0, {"hookSpecificOutput": {
@@ -13419,9 +13541,10 @@ def _orch_validate_attestations(reg, root):
                 os.remove(snap_path)
             except OSError:
                 pass
-        if not _orch_write_json_atomic(snap_path, snap):
-            findings.append("the attestation snapshot could not be written; invalidating any prior "
-                            "snapshot so the yield-time reader holds (never a stale clean pass)")
+        unsaved = _orch_write_json_atomic(snap_path, snap)
+        if unsaved is not None:
+            findings.append("the attestation snapshot could not be written ({}); invalidating any prior "
+                            "snapshot so the yield-time reader holds (never a stale clean pass)".format(unsaved))
             try:
                 os.remove(snap_path)  # a failed OK write must not leave a prior snapshot usable either
             except OSError:
@@ -13483,7 +13606,9 @@ def _orch_forced_exit_findings(sd):
                             ", ".join(str(i) for i in ids[:10]) or "unrecorded"))
     if fresh:
         all_keys = sorted({r.get("key") for r in rows if isinstance(r.get("key"), str)})
-        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})  # at-least-once: a failed advance re-fires
+        # at-least-once: a failed advance re-fires these rows at the next audit, so its failure detail (a
+        # temporary file left by a failed cleanup included) is not reported here
+        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})
     return findings
 
 

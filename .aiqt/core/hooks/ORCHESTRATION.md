@@ -196,7 +196,25 @@ Stop or TeammateIdle, which has no banner; a denied scheduling call carries it i
 banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
 (every non-closed-disposition forced exit appended as its
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
-companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
+companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+`backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
+`forced-exit-surfaced.json`) are each saved by one writer: it creates a temporary file of its own beside
+the target (an exclusive create under a random name that never follows a symlink, so a file or symlink
+already at a temporary-like name is never opened, written or removed), gives it the existing target's
+permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the target. A reader
+therefore sees the previous file or the new one, never a part of either, and a failed save leaves the
+previous file (or its absence) in place. A failed save is named with its error in the hook's output, except
+for the forced-exit surfaced set, whose failed advance raises those rows again at the next resume audit; a
+temporary file whose removal after a failure also fails is left beside the target and named there too, and
+one left by a process killed mid-save is removed by nothing. Concurrent saves never share a temporary file,
+so one save cannot corrupt or remove another's, but the last rename wins: two hooks that read, modify and
+save the same file at once can lose one update (the read-modify-write is not serialized), and each reports
+its own save as succeeded. The save needs a writable state directory, so a writable `turn-state.json` in a
+state directory the hook cannot write is not saved: a Stop or TeammateIdle deny there now fails open with
+findings (the earlier in-place overwrite let it stand), and a scheduling deny says its counter was not
+written. A symlink at the target is replaced, not written through, and the new file is owned by the writing
+uid. The uid the hooks run as can replace any of these files itself, so this is crash and collision safety,
+not a boundary against that uid. The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
 scan), and is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` declaration line, or a JSON
 object with exactly a top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`). A
 leading byte-order mark is tolerated in both shapes (stripped once before any check). The `Operating-mode:`
@@ -208,10 +226,15 @@ and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<atten
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
 whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
-recognized value: a present-but-unreadable or non-UTF-8 file, a present `Operating-mode:` declaration whose
+recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
+holding a NUL character or a lone surrogate; a file that cannot be opened or read; one that is not a regular
+file, such as a FIFO, a device like `/dev/zero`, a directory or a socket, refused after a non-blocking open
+and before any read, so a FIFO with no writer does not wait; one larger than 1048576 bytes, of which the
+reader reads at most one byte more; or one whose bytes are not valid UTF-8), each of which the ask guard's
+deny names, a present `Operating-mode:` declaration whose
 value is empty or does not begin with attended/unattended, a JSON-shaped marker (content beginning with `{`,
-`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate keys
-included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
+`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, duplicate keys, or
+nesting too deep to parse included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
 scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
 `mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
 (undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file (one
@@ -220,9 +243,11 @@ directory and fails closed, as any other unreadable file does), an empty
 or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
 JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
 mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
-trailing`, is such prose and does not arm). Two inputs reach neither answer: a FIFO with no writer at the
-mode path, whose blocking open waits, so the outcome is the platform's hook-timeout handling, and a mode path
-containing a NUL character, which the dispatcher blocks as a failed handler (exit 2). The escape sentinel (default
+trailing`, is such prose and does not arm). Every other input fails closed, so every input reaches one of
+the two answers; only a stall bounded by the hook timeout delays it (a path lookup on a hung mount, a read
+from a stalled filesystem, or what a device driver's open does). The scope check of the stop, idle and
+yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and a
+fail-closed read counts there as a declared mode, so scope is live. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored

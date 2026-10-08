@@ -533,6 +533,13 @@ expected-check-ids = [
   "recwrite2/spoof-file-unwritten-named-while-its-row-is-written",
   "recwrite2/forced-exit-log-unwritten-named-while-its-row-is-written",
   "recwrite2/pending-ask-unwritten-named-while-its-row-is-written",
+  "recwrite3/planted-temp-symlink-no-effect",
+  "recwrite3/overlap-failed-save-leaves-the-successful-one-whole",
+  "recwrite3/overlap-reader-reads-a-whole-file-and-both-report-success",
+  "recwrite3/permission-bits-kept-new-file-0600-under-umask-022",
+  "recwrite3/failed-cleanup-names-the-left-temporary-file",
+  "recwrite3/unwritable-state-dir-writable-turn-state-fails-open-with-findings",
+  "recwrite3/mode-reader-nonregular-oversize-undecodable-path-fails-closed-promptly",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",
