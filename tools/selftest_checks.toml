@@ -510,6 +510,7 @@ expected-check-ids = [
   "recwrite/wake-digest-unwritten-clean-allow-warns",
   "recwrite/wake-digest-written-no-warning",
   "recwrite/stop-call-deny-unpersisted-counter-warns",
+  "recwrite/unsaved-counter-deny-text-names-each-relief-trigger",
   "recwrite/stop-call-deny-counted-no-warning",
   "recwrite/wake-digest-unwritten-findings-warns",
   "recwrite/wake-digest-unwritten-escape-warns",

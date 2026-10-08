@@ -9907,13 +9907,13 @@ def orch_yield_tool(data):
             "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
             "count toward the {} ({}); {}; record it manually (nocncl).".format(
                 "scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved,
-                "a later call is relieved only when the count it reads from turn-state.json is at the cap on "
-                "an unchanged basis, which needs a state directory it can search and a turn-state.json it "
-                "can read" if kind == "schedule_idle" else
+                "a later call is relieved only when the count it reads from turn-state.json is at or above the "
+                "cap on an unchanged basis, which needs a state directory it can search and a turn-state.json "
+                "it can read" if kind == "schedule_idle" else
                 "a later stop=true call or Stop takes the loop-bound exit only when the count it reads from "
-                "turn-state.json is at the bound, that file cannot be read as a JSON object or its stop_denials "
-                "value is malformed (each of which needs a state directory it can search), or it carries the "
-                "platform's stop_hook_active loop signal"))
+                "turn-state.json is at or above the bound, that file cannot be read as a JSON object or its "
+                "stop_denials value is malformed (each of which needs a state directory it can search), or that "
+                "call carries the platform's stop_hook_active loop signal"))
         tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
                                spoof_warn, ctx["record_warn"])
         return _deny(reason + tail,
