@@ -20,7 +20,10 @@ text and no hookSpecificOutput) is "allow-note"; an explicit permissionDecision 
 note, is "explicit-allow", which no expectation accepts (the hooks' own _allow never emits one). A check
 that reads a handler's result in memory beside its own message test goes through _site_ok (the same
 reducer, plus "block2" for exit 2 with no stdout object), keyed in _SITE_REDUCTIONS, whose (ims-*) fixtures
-hold a malformed result per site. The PASS
+hold a malformed result per site. A site never searches a refused result's reduction string for its
+text (that string embeds the whole object): the gd146 reason judge (_gd146_reason_failure) reads the
+reason only from an accepted deny, and (gd146-site-*) drives it with a stubbed producer. The (b2p-*)
+check holds this suite's block2 and selftest_orch_hooks._verdict's to one definition. The PASS
 banner enumerates the current per-guard outcomes. The value "ask" survives only in the reducers'
 vocabulary and in the invariant that proves it never occurs.
 
@@ -301,6 +304,26 @@ def _site_reduction(code, stdout_obj):
 def _site_ok(site, code, stdout_obj):
     """True when the in-memory judge site's result reduces to one of _SITE_REDUCTIONS[site]."""
     return _site_reduction(code, stdout_obj) in _SITE_REDUCTIONS[site]
+
+
+def _gd146_reason_failure(producer, label, command, cwd, needles):
+    """None when producer's result for a Bash PreToolUse payload (command, run in cwd) is a deny that
+    _site_ok("gd146-reason") accepts and whose permissionDecisionReason names every needle, else the
+    failure line labelled label. The reason is read ONLY from an accepted result: a refused result
+    is a failure on its own and is never searched, since its reduction string carries the whole
+    object (its reason included), so it would hold the needles of a malformed deny. The
+    (gd146-m26/m27) checks call this with the plugin handler, and _test_gd146_reason_site drives it
+    with a stubbed producer."""
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": command}, "cwd": cwd}
+    code, stdout_obj, _stderr = producer(data)
+    if not _site_ok("gd146-reason", code, stdout_obj):
+        return "{}: expected a deny, got {}".format(label, _site_reduction(code, stdout_obj))
+    reason = stdout_obj["hookSpecificOutput"]["permissionDecisionReason"]
+    missing = [needle for needle in needles if needle not in reason]
+    if missing:
+        return "{}: the deny reason does not name {!r}, got: {!r}".format(label, missing, reason)
+    return None
 
 
 def _declared_names(tree, name):
@@ -1111,6 +1134,62 @@ def _test_inmemory_judge_sites(failures):
         if _site_ok(site, code, obj):
             failures.append("(ims-{}) the site's judge accepts the malformed result {!r}".format(
                 site, (code, obj)))
+
+
+def _test_gd146_reason_site(failures):
+    """(gd146-site-*) Drives the gd146-m26/m27 judge itself (_gd146_reason_failure) with a stubbed
+    producer. The stub returns the deny the real handler emits for each command, with every needle in
+    its reason, and that deny plus "continue": false or a top-level "decision": "approve". The
+    well-formed deny must pass and each malformed one must fail. The round-13 site (replayed here:
+    "not a deny: " plus the reduction, then searched for the needles) accepted both malformed denies,
+    because the reduction string embeds the whole object and so its reason."""
+    reasons = (("(gd146-site-m26)", "git -c remote.origin.mirror=true push origin",
+                ("remote.origin.mirror", "DELETES")),
+               ("(gd146-site-m27)", "git --config-env remote.origin.mirror=MFLAG push origin",
+                ("remote.origin.mirror", "cannot read")))
+    for label, command, needles in reasons:
+        good = (0, {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": " ".join(needles)},
+                    "systemMessage": "b"}, None)
+        if _gd146_reason_failure(lambda _data, _r=good: _r, label, command, "/r", needles) is not None:
+            failures.append("{} the judge refuses the well-formed deny {!r}".format(label, good[1]))
+        for extra in ({"continue": False}, {"decision": "approve"}):
+            bad = (0, dict(good[1], **extra), None)
+            former = ("not a deny: " + _site_reduction(bad[0], bad[1])
+                      if not _site_ok("gd146-reason", bad[0], bad[1])
+                      else bad[1]["hookSpecificOutput"]["permissionDecisionReason"])
+            if not all(needle in former for needle in needles):
+                failures.append("{} the fixture does not discriminate: the round-13 site refuses {!r}"
+                                .format(label, bad[1]))
+            if _gd146_reason_failure(lambda _data, _r=bad: _r, label, command, "/r", needles) is None:
+                failures.append("{} the judge accepts the malformed deny {!r}".format(label, bad[1]))
+
+
+def _test_block2_parity(failures):
+    """(b2p-*) This suite's _site_reduction and selftest_orch_hooks._verdict each define "block2" (exit 2
+    with NO stdout object). Over one corpus of (code, stdout_obj) pairs both must call the same pairs
+    block2, so the two definitions cannot drift apart unnoticed; a replay of the former orch definition
+    (code == 2 alone) must be refused by the same comparison, so the check discriminates."""
+    import selftest_orch_hooks as orch
+    corpus = [(code, obj) for code in (2, 0, 1, 2.0, True, "2", None)
+              for obj in (None, {}, {"decision": "approve"}, {"systemMessage": "n"}, "", [], 0, False)]
+
+    def divergence(site_reduction, verdict):
+        return [(code, obj) for code, obj in corpus
+                if (site_reduction(code, obj) == "block2") != (verdict((code, obj, None)) == "block2")]
+
+    def former_orch(result):
+        return "block2" if result[0] == 2 else orch._verdict(result)
+
+    if divergence(_site_reduction, orch._verdict):
+        failures.append("(b2p-parity) _site_reduction and selftest_orch_hooks._verdict disagree on block2 "
+                        "for {!r}".format(divergence(_site_reduction, orch._verdict)))
+    if not divergence(_site_reduction, former_orch):
+        failures.append("(b2p-discriminates) the parity corpus does not tell the former orch block2 "
+                        "(code == 2 alone) from the current one")
+    if [pair for pair in corpus if _site_reduction(*pair) == "block2"] != [(2, None), (2.0, None)]:
+        failures.append("(b2p-shape) block2 must be exactly exit 2 with no stdout object, got {!r}".format(
+            [pair for pair in corpus if _site_reduction(*pair) == "block2"]))
 
 
 def _test_strict_rule_parity(failures):
@@ -6142,22 +6221,16 @@ def _main_isolated(monitor):
         pexpect("(gd146-m25) a falsy config never stands down an explicit --mirror, denies",
                 "git -c remote.origin.mirror=false push --mirror origin", "deny", cwd=plf)
         # Wording: the ASK detail names the concrete key and the effect (direct), or the unreadable env
-        # value (--config-env). Extracted from the reason like the pl-y3c-reason check above.
-        def _reason(command, cwd):
-            _d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                  "tool_input": {"command": command}, "cwd": cwd}
-            _c, _o, _e = plg(_d)
-            if not _site_ok("gd146-reason", _c, _o):
-                return "not a deny: " + _site_reduction(_c, _o)
-            return _o["hookSpecificOutput"]["permissionDecisionReason"]
-        _m26 = _reason("git -c remote.origin.mirror=true push origin", plf)
-        if _mkey not in _m26 or "DELETES" not in _m26:
-            failures.append("(gd146-m26) direct-config ASK detail must name the {} key and the "
-                            "delete effect, got: {!r}".format(_mkey, _m26))
-        _m27 = _reason("git --config-env remote.origin.mirror=MFLAG push origin", plf)
-        if _mkey not in _m27 or "cannot read" not in _m27:
-            failures.append("(gd146-m27) config-env ASK detail must name the key and say the value "
-                            "cannot be read, got: {!r}".format(_m27))
+        # value (--config-env). The reason is read only from a result _site_ok accepts
+        # (_gd146_reason_failure, which _test_gd146_reason_site drives with a malformed deny).
+        for _label, _cmd, _needles in (
+                ("(gd146-m26) direct-config ASK detail must name the key and the delete effect",
+                 "git -c remote.origin.mirror=true push origin", (_mkey, "DELETES")),
+                ("(gd146-m27) config-env ASK detail must name the key and say the value cannot be read",
+                 "git --config-env remote.origin.mirror=MFLAG push origin", (_mkey, "cannot read"))):
+            _fail = _gd146_reason_failure(plg, _label, _cmd, plf, _needles)
+            if _fail is not None:
+                failures.append(_fail)
         # Raw fallback (wrapped or unparseable): asks on the same spellings, anchored to the option token.
         pexpect("(gd146-m28) wrapped direct mirror config denies via the raw fallback",
                 "env git -c remote.origin.mirror=true push origin", "deny", cwd=plf)
@@ -7953,6 +8026,8 @@ def _main_isolated(monitor):
         _test_hook_stdout_strict(failures)
         _test_reducer_deny_schema(failures)
         _test_inmemory_judge_sites(failures)
+        _test_gd146_reason_site(failures)
+        _test_block2_parity(failures)
         _test_strict_rule_parity(failures)
         _test_note_shape_pins(failures, tmp)
 

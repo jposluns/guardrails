@@ -53,8 +53,9 @@ does not support dir_fd for os.open the hook is opened by its full name, still w
 the final component; and a writer whose in-place rewrite of the SAME inode is still in progress
 when the launcher reads it (never a rename, removal or replacement, which the descriptor
 acquisition covers) can expose a partial hook: an empty or uncompilable prefix is refused, a prefix that still compiles runs.
-These launcher steps, and no others, run outside any protected block, so a fault in one of them (a
-MemoryError, for example) exits 1, which does not block a PreToolUse call: the module imports (sys
+These launcher steps, and no others, run outside any protected block, so a fault in one of them exits 1 (a
+MemoryError, for example) or with the status an injected SystemExit carries (SystemExit(0) exits 0),
+and neither blocks a PreToolUse call: the module imports (sys
 before the floor guard; ast, io, itertools, os, stat, tokenize, types and warnings after it), the
 FLOOR_FAIL_OPEN_MODES assignment, the floor test `tuple(sys.version_info[:2]) < (3, 14)`, the floor
 guard's own steps before its try (its `import os`, its status decision and the def statement for
@@ -72,10 +73,17 @@ acquisition refusal and applies the same mode rule: the `_got = ("the acquisitio
 sentinel assignment, the acquisition, the __main__ setup (the sys.argv replacement, the module
 allocation, its __file__, __package__ and __cached__ assignments and its sys.modules install), the
 `isinstance(_got, tuple)` test and the raise that selects the refusal. The refusal's closing
-os._exit is retried once under its own try/except BaseException, so a fault there exits 1 only when
-the retry faults too. A line trace can also raise at a bare `try:` or `except BaseException:` clause
-line of the dispatch or of the unknown-mode refusal (those lines call no function; the except clause
-loads and matches the name BaseException), and such an injected fault exits 1. The hook's own
+os._exit is retried once under its own try/except BaseException, so a fault there escapes only when
+the retry faults too, and then exits 1 or with the status an injected SystemExit carries. A line
+trace can also raise at a bare `try:` or `except BaseException:` clause line of the dispatch or of
+the unknown-mode refusal (those lines call no function; the except clause loads and matches the
+name BaseException), and such an injected fault exits 1, or with the status an injected SystemExit
+carries (SystemExit(0) exits 0, even on a blocking event). One two-fault case also escapes the mode
+rule: the `pass` of each refusal's diagnostic handler (the outer `except BaseException:` of the
+floor guard, of the acquisition refusal and of the unknown-mode refusal) runs only after a first
+diagnostic fault was swallowed there, and a second fault injected at that `pass` (by a line trace)
+escapes the same way, exiting 1 or with the status an injected SystemExit carries; one diagnostic
+fault alone keeps the mode rule (tools/check_python_floor.py pins both sides). The hook's own
 execution, the exec statement (its evaluation of exec, _got and _module.__dict__ included) and the
 hook's code, keeps the platform's exit semantics as any hook does: an exception it does not catch
 exits 1, as when the hook file is launched directly. Each fail-open refusal (the floor guard's and

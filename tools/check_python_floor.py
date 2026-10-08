@@ -1566,8 +1566,10 @@ def dispatch_modes(tree):
 def dispatch_probe_findings(root, launcher, pinned, floor):
     """Below-floor deny probes for a launcher whose LAUNCHERS entry pins a modes tuple: its
     DISPATCH_NAME literal must be present and hold every pinned mode, and each of its other modes
-    must refuse with the blocking exit 2 below the floor, observed in a child; a fail-open mode
-    outside the pin would let a PreToolUse call proceed unchecked."""
+    must refuse with the blocking exit 2 and EMPTY stdout below the floor, observed in a child; a
+    fail-open mode outside the pin would let a PreToolUse call proceed unchecked, and a refusal that
+    also prints a stdout object hands the platform a decision beside the blocking exit, so it is a
+    finding too. The stderr text is not judged here."""
     modes = dispatch_modes(_parse(root, launcher))
     if modes is None:
         return ["{}: no {} literal (a sorted, unique tuple of mode names) to probe".format(
@@ -1578,11 +1580,11 @@ def dispatch_probe_findings(root, launcher, pinned, floor):
     for mode in modes:
         if mode in pinned:
             continue
-        rc = refusal_observed(root / launcher, version, (), [mode])[0]
-        if rc != REFUSAL_EXIT:
-            findings.append("{}: the mode {} exits {} at patched {}.{}.{}, not the blocking {} "
-                            "(fails open below the floor)".format(launcher, mode, rc, *version,
-                                                                  REFUSAL_EXIT))
+        rc, out = refusal_observed(root / launcher, version, (), [mode])[:2]
+        if (rc, out) != (REFUSAL_EXIT, ""):
+            findings.append("{}: the mode {} exits {} with stdout {!r} at patched {}.{}.{}, not the "
+                            "blocking {} with empty stdout (fails open below the floor)".format(
+                                launcher, mode, rc, out, *version, REFUSAL_EXIT))
     return findings
 
 
@@ -2430,12 +2432,13 @@ def _self_test_cases(base):
     preview_deny_modes = ("future_stamp_write", "record_remove_check", "unbounded_wait",
                           "ungated_record")
     check("launcher/real-launchers-block-below-floor", [
-        refusal_observed(ROOT / rel, old, (), [mode])[0] for rel in sorted(LAUNCHERS)
+        tuple(refusal_observed(ROOT / rel, old, (), [mode])[:2]) for rel in sorted(LAUNCHERS)
         for mode in (preview_deny_modes if isinstance(LAUNCHERS[rel], tuple)
                      else ("absolute_paths",))],
-        [2, 2, 2, 2, 2, 2])
+        [(2, "")] * 6)
     # At the real interpreter version, a launcher whose hook file is missing beside it refuses a
-    # PreToolUse mode with exit 2 (never runpy's FileNotFoundError exit 1, which would fail open).
+    # PreToolUse mode with exit 2 and empty stdout (never runpy's FileNotFoundError exit 1, which
+    # would fail open, and never a stdout object beside the blocking exit).
     sibling_runner = ("import runpy, sys\n"
                       "path = sys.argv[1]\n"
                       "sys.argv = [path] + sys.argv[2:]\n"
@@ -2445,8 +2448,35 @@ def _self_test_cases(base):
         spot = base / "missing-sibling" / Path(rel).name
         _write(base, "missing-sibling/" + Path(rel).name, _read_text(ROOT / rel))
         mode = preview_deny_modes[0] if isinstance(LAUNCHERS[rel], tuple) else "absolute_paths"
-        results.append(_child(sibling_runner, [str(spot), mode], (), base)[0])
-    check("launcher/real-launchers-missing-sibling-blocks", results, [2, 2, 2])
+        results.append(_child(sibling_runner, [str(spot), mode], (), base)[:2])
+    check("launcher/real-launchers-missing-sibling-blocks", results, [(2, "")] * 3)
+    # (stdout mutants) A launcher that prints a stdout object and then exits 2, at the floor guard
+    # (below the floor) and at the acquisition refusal (its hook missing), passed the two rows above
+    # when they read the exit status only (replayed here as rc == 2), and so did the below-floor
+    # dispatch probe (dispatch_probe_findings); each now refuses it.
+    junk_line = "os.write(1, %r)" % (json.dumps(dict(decision="approve")) + "\n").encode()
+    floor_tail = "    except BaseException:\n        pass\n    os._exit(_floor_status)\n"
+    acquire_tail = "        pass\n    try:\n        os._exit(_refusal_status)\n"
+    mutant_got, mutant_want = [], []
+    for rel in sorted(LAUNCHERS):
+        text = _read_text(ROOT / rel)
+        mutant = text.replace(floor_tail, floor_tail.replace(
+            "    os._exit(", "    " + junk_line + "\n    os._exit("), 1)
+        mutant = mutant.replace(acquire_tail, acquire_tail.replace(
+            "    try:\n", "    " + junk_line + "\n    try:\n"), 1)
+        spot = base / "stdout-mutant" / rel
+        _write(base, "stdout-mutant/" + rel, mutant)
+        multi = isinstance(LAUNCHERS[rel], tuple)
+        mode = preview_deny_modes[0] if multi else "absolute_paths"
+        floor_seen = tuple(refusal_observed(spot, old, (), [mode])[:2])
+        missing_seen = tuple(_child(sibling_runner, [str(spot), mode], (), base)[:2])
+        probe = dispatch_probe_findings(base / "stdout-mutant", rel, LAUNCHERS[rel], floor) if multi else []
+        mutant_got.append((rel, text.count(floor_tail), text.count(acquire_tail),
+                           floor_seen[0] == REFUSAL_EXIT, floor_seen == (REFUSAL_EXIT, ""),
+                           missing_seen[0] == REFUSAL_EXIT, missing_seen == (REFUSAL_EXIT, ""),
+                           len(probe)))
+        mutant_want.append((rel, 1, 1, True, False, True, False, len(preview_deny_modes) if multi else 0))
+    check("launcher/real-launchers-stdout-mutant", mutant_got, mutant_want)
     # REQUIRED acquisition behavior (each real launcher, deterministic): the sibling hook is
     # acquired ONCE (open without following a symbolic link, fstat, read, compile) and ONLY the
     # acquired content runs, and every acquisition failure (missing, a symbolic link, a directory,
@@ -3112,6 +3142,106 @@ def _self_test_cases(base):
                         dispatch_want.append((rel, kind, statement, present, fault, rc_want, True, True,
                                               True, True if kind == "fail_open" else ""))
     check("launcher/dispatch-fault-mode-rule", dispatch_got, dispatch_want)
+    # The two-fault boundary each launcher's RESIDUAL discloses: the `pass` of a refusal's diagnostic
+    # handler (the floor guard's, the acquisition refusal's and the preview launcher's unknown-mode
+    # refusal's) runs outside the mode rule. One diagnostic fault (a MemoryError from the floor
+    # message's formatting, through sys.executable's __str__, or from the refusal's first _deliver
+    # call, whose global the line trace replaces with a raiser just before that line runs) is
+    # swallowed and the mode rule holds; a second fault, raised by the line trace AT that handler's
+    # `pass`, escapes, so the process exits 1 (MemoryError) or with the status an injected SystemExit
+    # carries (SystemExit(0), a silent exit 0 on a blocking event). The trace raises only once, since
+    # a trace function that raises is unset. This row pins both sides, so a launcher that protects
+    # the `pass` (or loses its single-fault protection) fails it and the RESIDUAL must be revisited.
+    # The parent finds each line itself and refuses a line found on any other number of lines than
+    # one; each child also reports whether its first fault fired.
+    boundary_runner = (
+        "import os, runpy, sys\n"
+        "fault, path, first, second, version = sys.argv[1], sys.argv[2], int(sys.argv[3]), "
+        "int(sys.argv[4]), sys.argv[5]\n"
+        "sys.argv = [path] + sys.argv[6:]\n"
+        "if version != 'real':\n"
+        "    sys.version_info = tuple(int(p) for p in version.split('.')) + ('final', 0)\n"
+        "fired = []\n"
+        "def _raiser(*args, **kwargs):\n"
+        "    fired.append('deliver')\n"
+        "    raise MemoryError('injected in the diagnostic block')\n"
+        "class _Boom:\n"
+        "    def __bool__(self):\n"
+        "        return True\n"
+        "    def __str__(self):\n"
+        "        fired.append('format')\n"
+        "        raise MemoryError('injected at formatting')\n"
+        "if first == 0:\n"
+        "    sys.executable = _Boom()\n"
+        "def _report():\n"
+        "    os.write(2, ('FIRST_FAULT=%d\\n' % len(fired)).encode())\n"
+        "def _local(frame, event, arg):\n"
+        "    if event == 'line' and frame.f_lineno == first:\n"
+        "        frame.f_globals['_deliver'] = _raiser\n"
+        "    if event == 'line' and frame.f_lineno == second:\n"
+        "        _report()\n"
+        "        if fault == 'memoryerror':\n"
+        "            raise MemoryError('injected at the handler pass')\n"
+        "        raise SystemExit(0)\n"
+        "    if event == 'line' and frame.f_code.co_name == '<module>' and 'os._exit(' in "
+        "lines[frame.f_lineno - 1]:\n"
+        "        _report()\n"
+        "    return _local\n"
+        "handle = open(path, encoding='utf-8')\n"
+        "lines = handle.read().splitlines()\n"
+        "handle.close()\n"
+        "def _global(frame, event, arg):\n"
+        "    if frame.f_code.co_filename == path and frame.f_code.co_name == '<module>':\n"
+        "        return _local\n"
+        "    return None\n"
+        "sys.settrace(_global)\n"
+        "runpy.run_path(path, run_name='__main__')\n")
+
+    def _handler_pass(lines, after):
+        return [n for n in range(2, len(lines)) if lines[n - 1].strip() == "pass"
+                and lines[n - 2].strip() == "except BaseException:"
+                and [text.strip() for text in lines[n:n + len(after)]] == list(after)]
+
+    boundary_legs = (
+        ("floor", None, ("os._exit(_floor_status)",), "%d.%d.%d" % old, None),
+        ("acquire", lambda text: text.strip() == "_deliver(2, _missing)",
+         ("try:", "os._exit(_refusal_status)"), "real", None),
+        ("unknown-mode", lambda text: text.strip().startswith(
+            '_deliver(2, "error: preview-launch.py: the first argument'), ("try:", "os._exit(2)"), "real",
+         "no_such_mode"))
+    if os.name != "posix":
+        boundary_got = boundary_want = "skipped (the line-trace child needs posix)"
+    else:
+        boundary_got, boundary_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            lines = _read_text(ROOT / rel).splitlines()
+            for leg, first_test, after, version, only_mode in boundary_legs:
+                if only_mode is not None and not multi:
+                    continue
+                first = ([0] if first_test is None
+                         else [n for n, text in enumerate(lines, 1) if first_test(text)])
+                second = _handler_pass(lines, after)
+                if (len(first), len(second)) != (1, 1):
+                    boundary_got.append((rel, leg, "found on", len(first), len(second)))
+                    boundary_want.append((rel, leg, "found on", 1, 1))
+                    continue
+                kinds = (("blocking", REFUSAL_EXIT),) if only_mode else (("blocking", REFUSAL_EXIT),
+                                                                         ("fail_open", 0))
+                for kind, rc_want in kinds:
+                    mode = only_mode or _hook_kind_mode(rel, kind)
+                    for fault, at, want in (("memoryerror", 0, (rc_want, True)),
+                                            ("memoryerror", second[0], (1, False)),
+                                            ("systemexit", second[0], (0, True))):
+                        spot = Path(tempfile.mkdtemp(prefix="handler-pass-", dir=base))
+                        (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                        rc, out, err = _child(boundary_runner, [fault, str(spot / Path(rel).name),
+                                                                str(first[0]), str(at), version, mode],
+                                              (), spot)
+                        boundary_got.append((rel, leg, kind, fault, at > 0, "FIRST_FAULT=1" in err, rc,
+                                             "Traceback" not in err))
+                        boundary_want.append((rel, leg, kind, fault, at > 0, True) + want)
+    check("launcher/refusal-handler-pass-two-fault-boundary", boundary_got, boundary_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
