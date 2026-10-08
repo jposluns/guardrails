@@ -158,6 +158,7 @@
 .aiqt/core/rules/trust-standing-constraints-persist.md text eol=lf
 .aiqt/core/rules/trust-trust-recovery-ext.md text eol=lf
 .aiqt/core/skill/skill-source.md text eol=lf
+.aiqt/core/worker-capabilities.toml text eol=lf
 .aiqt/enforceability.json text eol=lf
 .aiqt/frozen.json text eol=lf
 .aiqt/gensrc.json text eol=lf
@@ -650,6 +651,7 @@ tools/audit_reference.py text eol=lf
 tools/check_applies.py text eol=lf
 tools/check_artifact_checksums.py text eol=lf
 tools/check_branch_root.py text eol=lf
+tools/check_brief_capability.py text eol=lf
 tools/check_byte_canon.py text eol=lf
 tools/check_ci_parity.py text eol=lf
 tools/check_clauses.py text eol=lf
