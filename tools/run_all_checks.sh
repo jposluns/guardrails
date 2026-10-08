@@ -73,6 +73,7 @@ run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived
 run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
 run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
+run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
 run_gate "links"     python3 -I -B tools/check_links.py
 run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
 run_gate "site"      python3 -I -B tools/check_site.py
@@ -183,6 +184,8 @@ run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
+run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-test
+run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
 run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
 run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test

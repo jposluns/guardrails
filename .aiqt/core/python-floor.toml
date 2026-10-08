@@ -136,6 +136,7 @@ guarded-surfaces = [
     "tools/gen_adapters.py",
     "tools/gen_agents.py",
     "tools/gen_changelog.py",
+    "tools/gen_char_policy.py",
     "tools/gen_claude.py",
     "tools/gen_crosswalk.py",
     "tools/gen_cursor.py",

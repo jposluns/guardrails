@@ -14,16 +14,22 @@ weakens the gate here, and an adopter who ships no policy file gets exactly that
 present but malformed, unreadable, a symbolic link, or over POLICY_CAP bytes is a cannot-evaluate (exit 2),
 never a fallback to the default. A policy character that str.splitlines() treats as a line boundary (U+2028 and
 U+2029; the others are control characters) makes the policy malformed, because the line scan would drop it
-before the check. The region between the BEGIN COPY SOURCE and END COPY SOURCE markers is copied byte for byte
-into the preview hook, whose self-test compares the two. The built-in default is the same policy as this
-repository's file, and the self-test checks that too. This Python file is in no scope entry, so it may name the
-characters in its own source without flagging itself; it writes them only as escapes.
+before the check, and so does a lone surrogate (U+D800 to U+DFFF) in any policy string, which UTF-8 cannot
+encode. The region between the BEGIN COPY SOURCE and END COPY SOURCE markers is the policy validator with every
+module-level name it reads; tools/gen_char_policy.py writes it byte for byte into the preview hook, and its
+--check fails on any byte difference. The built-in default is the same policy as this repository's file;
+--default-parity checks that, for this repository's CI only. This Python file is in no scope entry, so it may
+name the characters in its own source without flagging itself; it writes them only as escapes.
 
-  check_no_dashes.py              scan the repository under its policy
-  check_no_dashes.py --self-test  fixture trees for the scan and the policy validator
+  check_no_dashes.py                   scan the repository under its policy
+  check_no_dashes.py --self-test       fixture trees for the scan and the policy validator
+  check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a malformed policy, a bad argument). A file
-that is not valid UTF-8 is reported as SKIP and not scanned.
+that is not valid UTF-8 is reported as SKIP and not scanned. --default-parity exits 0 when the two are equal,
+and also, saying SKIP, when the file is absent; 1 when they differ; 2 when the file cannot be used. An adopter's
+own policy differs from this repository's by design, so only this repository's check roster runs that mode;
+the self-test never reads the repository's policy file.
 """
 import sys
 
@@ -34,7 +40,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import json
 import os
 import stat
 from pathlib import Path
@@ -44,7 +49,6 @@ from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not 
 from _standards import dir_present  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
 
 POLICY_PATH = ".aiqt/char-policy.json"
-POLICY_CAP = 65536  # bytes; a larger policy file is malformed
 _SKIP = [".git", "node_modules", "__pycache__"]
 # The policy that applies when no policy file is present: this project's own, the same as its data file.
 DEFAULT_POLICY = {
@@ -61,7 +65,12 @@ DEFAULT_POLICY = {
         {"file": ".aiqt/attribution.toml"},
     ],
 }
-# --- BEGIN COPY SOURCE: .preview/char-policy-write.py holds a byte-identical copy of this region (its H12) ---
+# --- BEGIN COPY SOURCE: tools/gen_char_policy.py writes this region into .preview/char-policy-write.py ---
+# The policy validator. Every module-level name it reads is bound in this region or is a builtin, and neither
+# file binds one of them outside it (the hook's H12 walks both files' module scope to check that).
+import json  # noqa: E402
+
+POLICY_CAP = 65536  # bytes; a larger policy file is malformed
 _TOP_KEYS = frozenset(("version", "id", "chars", "advice", "scope"))
 _REQUIRED_KEYS = frozenset(("version", "id", "chars", "scope"))
 _TREE_KEYS = frozenset(("tree", "suffixes", "skip"))
@@ -76,9 +85,10 @@ class PolicyError(ValueError):
 
 
 def _plain(text):
-    """A non-empty string holding no control character (C0, DEL or C1)."""
+    """A non-empty string holding no control character (C0, DEL or C1) and no lone surrogate (U+D800 to
+    U+DFFF, which UTF-8 cannot encode, so the gate could not print it)."""
     return (isinstance(text, str) and text != ""
-            and not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text))
+            and not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 or 0xD800 <= ord(ch) <= 0xDFFF for ch in text))
 
 
 def _rel_ok(value, tree):
@@ -122,20 +132,22 @@ def validate_policy(data):
     if type(data["version"]) is not int or data["version"] != 1:
         raise PolicyError("version must be 1")
     if not _plain(data["id"]):
-        raise PolicyError("id must be a non-empty string without control characters")
+        raise PolicyError("id must be a non-empty string without control characters or lone surrogates")
     chars = data["chars"]
     if not isinstance(chars, dict) or not chars:
         raise PolicyError("chars must be a non-empty object")
     for char, name in chars.items():
         if len(char) != 1 or not _plain(char):
-            raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character")
+            raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character or a "
+                              "lone surrogate")
         if char in LINE_BOUNDARIES:
             raise PolicyError(f"chars key U+{ord(char):04X} is a line boundary (str.splitlines splits on it), "
                               "which a line-by-line scan cannot see")
         if not _plain(name):
-            raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string")
+            raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string without control "
+                              "characters or lone surrogates")
     if "advice" in data and not _plain(data["advice"]):
-        raise PolicyError("advice must be a non-empty string without control characters")
+        raise PolicyError("advice must be a non-empty string without control characters or lone surrogates")
     scope = data["scope"]
     if not isinstance(scope, list) or not scope:
         raise PolicyError("scope must be a non-empty list")
@@ -276,6 +288,26 @@ def run(root):
     return 0
 
 
+def default_parity(root):
+    """This repository's own check, run by its CI roster and not by the self-test: DEFAULT_POLICY equals the
+    policy file under root, value for value. Prints the result and returns the exit status: 0 equal, or SKIP
+    when the file is absent; 1 when they differ; 2 when the file cannot be used."""
+    try:
+        policy = load_policy(Path(root))
+    except (PolicyError, OSError) as exc:
+        print(f"error: the character policy {POLICY_PATH} cannot be used ({exc}); fail-closed", file=sys.stderr)
+        return 2
+    if policy is DEFAULT_POLICY:
+        print(f"SKIP: {POLICY_PATH} is absent, so the built-in default applies and there is nothing to compare")
+        return 0
+    if policy != DEFAULT_POLICY:
+        print(f"FAIL: DEFAULT_POLICY in tools/check_no_dashes.py differs from {POLICY_PATH}; make them the same "
+              "policy")
+        return 1
+    print(f"PASS: DEFAULT_POLICY equals {POLICY_PATH}")
+    return 0
+
+
 def _self_test():
     """Fixture trees for each scan and validation clause; each pair differs in one feature."""
     import io
@@ -302,14 +334,17 @@ def _self_test():
                 handle.write(raw_policy)
         return root
 
-    def scan(root):
+    def scan(root, check=run):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = run(root)
+            try:
+                rc = check(root)
+            except Exception as exc:  # a traceback is never an exit status: record it as one more failure
+                rc = f"an exception ({type(exc).__name__}: {exc!r})"
         return rc, out.getvalue(), err.getvalue()
 
-    def expect(label, root, want, needle=None):
-        rc, out, err = scan(root)
+    def expect(label, root, want, needle=None, check=run):
+        rc, out, err = scan(root, check)
         if rc != want or (needle is not None and needle not in out + err):
             failures.append(f"{label}: want exit {want}" + (f" and {needle!r}" if needle else "")
                             + f", got {rc}: {out.strip()[:200]!r}")
@@ -325,14 +360,11 @@ def _self_test():
             validate_policy(DEFAULT_POLICY)
         except PolicyError as exc:
             failures.append(f"DEFAULT_POLICY is invalid: {exc}")
-        # G0 the built-in default is this repository's policy file, value for value.
-        shipped = os.path.join(Path(__file__).resolve().parents[1], *POLICY_PATH.split("/"))
-        try:
-            with open(shipped, "rb") as handle:
-                if parse_policy(handle.read()) != DEFAULT_POLICY:
-                    failures.append(f"G0 DEFAULT_POLICY differs from {POLICY_PATH}")
-        except (OSError, PolicyError) as exc:
-            failures.append(f"G0 {POLICY_PATH} cannot be compared with DEFAULT_POLICY ({exc})")
+        # G0 _plain refuses exactly the C0, DEL, C1 and lone-surrogate code points, and accepts every other one.
+        refused = [c for c in range(0x110000) if not _plain(chr(c))]
+        if refused != [*range(32), *range(127, 160), *range(0xD800, 0xE000)]:
+            failures.append(f"G0 _plain refuses {len(refused)} code points, not exactly C0, DEL, C1 and the "
+                            "surrogates")
         # G0 LINE_BOUNDARIES is exactly the set str.splitlines() splits on, and each one is rejected.
         splitting = {chr(c) for c in range(0x110000) if len(f"a{chr(c)}b".splitlines()) == 2}
         if splitting != LINE_BOUNDARIES:
@@ -372,44 +404,66 @@ def _self_test():
         # G6 file entry.
         expect("G6A NOTICE present", tree({"NOTICE": em}), 1, "NOTICE:1:1: em dash")
         expect("G6B NOTICE absent", tree({"README.md": "x\n"}), 0)
-        # G7 policy validity: a present file is used, and a malformed one is exit 2, never the default.
+        # G7 policy validity: a present file is used, and a malformed one is exit 2, never the default. Each
+        # fixture is otherwise valid; validate_policy itself must raise PolicyError naming the fault, and the
+        # scan must exit 2 with that diagnostic, so a fault that a later step happens to reject (a "." file
+        # entry would make the scan read a directory) cannot pass for a validation failure.
+        one_code_point, file_entry = "must be exactly one code point", "a file entry holds one repo-relative path"
+        tree_path, tree_keys = "tree must be a repo-relative path", "a tree entry holds tree, suffixes"
+        name_fault, bad_suffix, bad_skip = ("chars name for U+201C must be a non-empty string",
+                                            "suffixes holds an invalid entry", "skip holds an invalid entry")
         bad = {
-            "two-code-point key": policy(chars={quote + quote: "pair"}),
-            "version 2": policy(version=2),
-            "version true": policy(version=True),
-            "unknown key": policy(extra=1),
-            "missing scope": {"version": 1, "id": "x", "chars": {quote: "q"}},
-            "empty id": policy(id=""),
-            "empty chars": policy(chars={}),
-            "control character": policy(chars={"\n": "newline"}),
-            "C1 character": policy(chars={"\x9f": "application program command"}),
-            "C1 character in the id": policy(id="a\x80b"),
-            "DEL character": policy(chars={"\x7f": "delete"}),
-            "empty name": policy(chars={quote: ""}),
-            "empty advice": policy(advice=""),
-            "empty scope": policy(scope=[]),
-            "tree and file": policy(scope=[{"tree": ".", "file": "NOTICE", "suffixes": [".md"]}]),
-            "neither tree nor file": policy(scope=[{"suffixes": [".md"]}]),
-            "dot-dot path": policy(scope=[{"file": "../NOTICE"}]),
-            "absolute path": policy(scope=[{"tree": "/etc", "suffixes": [".md"]}]),
-            "backslash path": policy(scope=[{"file": "a\\b"}]),
-            "dot component": policy(scope=[{"file": "a/./b"}]),
-            "empty component": policy(scope=[{"file": "a//b"}]),
-            "trailing slash": policy(scope=[{"tree": "a/", "suffixes": [".md"]}]),
-            "dot-led tree": policy(scope=[{"tree": "./a", "suffixes": [".md"]}]),
-            "dot file entry": policy(scope=[{"file": "."}]),
-            "suffix with a slash": policy(scope=[{"tree": ".", "suffixes": [".m/d"]}]),
-            "dot skip": policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": ["."]}]),
-            "dot-dot skip": policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": [".."]}]),
-            "missing suffixes": policy(scope=[{"tree": "."}]),
-            "suffix without a dot": policy(scope=[{"tree": ".", "suffixes": ["md"]}]),
-            "empty suffixes": policy(scope=[{"tree": ".", "suffixes": []}]),
-            "skip with a slash": policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": ["a/b"]}]),
-            "extra key on a file entry": policy(scope=[{"file": "NOTICE", "skip": []}]),
-            "extra key on a tree entry": policy(scope=[{"tree": ".", "suffixes": [".md"], "file2": "x"}]),
+            "two-code-point key": (policy(chars={quote + quote: "pair"}), one_code_point),
+            "version 2": (policy(version=2), "version must be 1"),
+            "version true": (policy(version=True), "version must be 1"),
+            "unknown key": (policy(extra=1), "unknown key(s) ['extra']"),
+            "missing scope": ({"version": 1, "id": "x", "chars": {quote: "q"}}, "missing key(s) ['scope']"),
+            "empty id": (policy(id=""), "id must be a non-empty string"),
+            "empty chars": (policy(chars={}), "chars must be a non-empty object"),
+            "control character": (policy(chars={"\n": "newline"}), one_code_point),
+            "C1 character": (policy(chars={"\x9f": "application program command"}), one_code_point),
+            "C1 character in the id": (policy(id="a\x80b"), "id must be a non-empty string"),
+            "DEL character": (policy(chars={"\x7f": "delete"}), one_code_point),
+            "empty name": (policy(chars={quote: ""}), name_fault),
+            "empty advice": (policy(advice=""), "advice must be a non-empty string"),
+            "empty scope": (policy(scope=[]), "scope must be a non-empty list"),
+            "tree and file": (policy(scope=[{"tree": ".", "file": "NOTICE", "suffixes": [".md"]}]),
+                              "exactly one of tree or file"),
+            "neither tree nor file": (policy(scope=[{"suffixes": [".md"]}]), "exactly one of tree or file"),
+            "dot-dot path": (policy(scope=[{"file": "../NOTICE"}]), file_entry),
+            "absolute path": (policy(scope=[{"tree": "/etc", "suffixes": [".md"]}]), tree_path),
+            "backslash path": (policy(scope=[{"file": "a\\b"}]), file_entry),
+            "dot component": (policy(scope=[{"file": "a/./b"}]), file_entry),
+            "empty component": (policy(scope=[{"file": "a//b"}]), file_entry),
+            "trailing slash": (policy(scope=[{"tree": "a/", "suffixes": [".md"]}]), tree_path),
+            "dot-led tree": (policy(scope=[{"tree": "./a", "suffixes": [".md"]}]), tree_path),
+            "dot file entry": (policy(scope=[{"file": "."}]), file_entry),
+            "suffix with a slash": (policy(scope=[{"tree": ".", "suffixes": [".m/d"]}]), bad_suffix),
+            "dot skip": (policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": ["."]}]), bad_skip),
+            "dot-dot skip": (policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": [".."]}]), bad_skip),
+            "missing suffixes": (policy(scope=[{"tree": "."}]), tree_keys),
+            "suffix without a dot": (policy(scope=[{"tree": ".", "suffixes": ["md"]}]), bad_suffix),
+            "empty suffixes": (policy(scope=[{"tree": ".", "suffixes": []}]), "suffixes must not be empty"),
+            "skip with a slash": (policy(scope=[{"tree": ".", "suffixes": [".md"], "skip": ["a/b"]}]), bad_skip),
+            "extra key on a file entry": (policy(scope=[{"file": "NOTICE", "skip": []}]), file_entry),
+            "extra key on a tree entry": (policy(scope=[{"tree": ".", "suffixes": [".md"], "file2": "x"}]),
+                                          tree_keys),
+            # A lone surrogate cannot be encoded as UTF-8, so the gate could not print it: malformed, exit 2.
+            "lone surrogate in a name": (policy(chars={quote: "a\ud800"}), name_fault),
+            "lone surrogate in the id": (policy(id="a\udfff"), "id must be a non-empty string"),
+            "lone surrogate in the advice": (policy(advice="\udc80"), "advice must be a non-empty string"),
+            "lone high surrogate as a character": (policy(chars={"\ud800": "high"}), one_code_point),
+            "lone low surrogate as a character": (policy(chars={"\udfff": "low"}), one_code_point),
+            "lone surrogate in a path": (policy(scope=[{"file": "a\ud800"}]), file_entry),
         }
-        for label, data in bad.items():
-            expect(f"G7 {label}", tree({"d/a.md": quote}, data), 2)
+        for label, (data, needle) in bad.items():
+            try:
+                validate_policy(data)
+                failures.append(f"G7 {label}: validate_policy accepted it")
+            except PolicyError as exc:
+                if needle not in str(exc):
+                    failures.append(f"G7 {label}: want PolicyError with {needle!r}, got {exc}")
+            expect(f"G7 {label}", tree({"d/a.md": quote}, data), 2, needle)
         expect("G7 duplicate key", tree({"d/a.md": quote}, raw_policy=(
             b'{"version": 1, "version": 1, "id": "x", "chars": {"a": "a"}, "scope": [{"file": "N"}]}')), 2)
         expect("G7 not JSON", tree({"d/a.md": quote}, raw_policy=b"{"), 2)
@@ -461,12 +515,24 @@ def _self_test():
             finally:
                 os.chmod(os.path.join(hidden, "d"), 0o700)
         # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
-        for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"]):
+        for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"],
+                     ["check_no_dashes.py", "--default-parity", "x"]):
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 rc = main(argv)
             if rc != 2 or "usage:" not in err.getvalue() or out.getvalue():
                 failures.append(f"G13 {argv[1:]}: want exit 2 and usage, got {rc} {out.getvalue()[:120]!r}")
+        # G14 --default-parity, on fixture trees only (never this repository's own file, which an adopter's
+        # tree does not hold): equal is 0, absent is 0 with SKIP, different is 1, and malformed is 2.
+        expect("G14A default parity, equal", tree({}, DEFAULT_POLICY), 0, "PASS: DEFAULT_POLICY equals",
+               check=default_parity)
+        expect("G14B default parity, absent", tree({}), 0, "SKIP:", check=default_parity)
+        expect("G14C default parity, different advice", tree({}, DEFAULT_POLICY | {"advice": "x"}), 1,
+               "FAIL: DEFAULT_POLICY", check=default_parity)
+        expect("G14D default parity, another policy", tree({}, policy()), 1, "FAIL: DEFAULT_POLICY",
+               check=default_parity)
+        expect("G14E default parity, malformed", tree({}, raw_policy=b"{"), 2, "cannot be used",
+               check=default_parity)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     for failure in failures:
@@ -481,8 +547,10 @@ def _self_test():
 def main(argv):
     if argv[1:] == ["--self-test"]:
         return _self_test()
+    if argv[1:] == ["--default-parity"]:
+        return default_parity(Path(__file__).resolve().parents[1])
     if argv[1:]:
-        print("usage: check_no_dashes.py [--self-test]", file=sys.stderr)
+        print("usage: check_no_dashes.py [--self-test | --default-parity]", file=sys.stderr)
         return 2
     return run(Path(__file__).resolve().parents[1])
 

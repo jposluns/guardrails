@@ -11,15 +11,17 @@ WHAT IT DOES
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
     PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: always
     0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks. Once
-    armed, it never allows a call it could not evaluate silently: each such call gets a note naming why.
+    armed (its root set), it allows every call it cannot evaluate with a note naming why, and it allows
+    silently a call it evaluates and finds clean, a call outside the root or the policy's scope, a tool other
+    than Write, Edit or MultiEdit, and a well-formed call while the root holds no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
     default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently. Set but
-    relative or holding a control character, it checks nothing and says so in a note on every call. The
-    policy file is
-    <root>/.aiqt/char-policy.json; absent, the hook does nothing (the gate then applies its built-in default
-    policy, which this hook does not copy).
+    relative, holding a control character, or naming a path that does not exist or is not a directory, it
+    checks nothing and says so in a note on every call; so does an armed hook launched with any command-line
+    argument other than --self-test alone. The policy file is <root>/.aiqt/char-policy.json; absent, the hook
+    does nothing (the gate then applies its built-in default policy, which this hook does not copy).
 
 POLICY FILE
     {"version": 1, "id": <name>, "chars": {<one code point>: <name>, ...}, "advice": <optional text>,
@@ -29,13 +31,22 @@ POLICY FILE
     directory or the file below the tree has a name in that entry's skip list; a file entry scopes that one
     file. Unknown keys and any other fault make the file malformed, and so does a character that
     str.splitlines() treats as a line boundary (U+2028 or U+2029; the rest are control characters), which
-    the gate's line scan could not see. The region between the BEGIN COPY and END COPY markers below is a
-    byte-for-byte copy of the gate's marked region; H12 compares the bytes, the policy cap and path, a sample
-    of policies through both validators, and this hook's scope test with the gate's walk.
+    the gate's line scan could not see, or a lone surrogate (U+D800 to U+DFFF) in any policy string. The
+    region between the BEGIN COPY and END COPY markers below is generated from the gate's marked region by
+    tools/gen_char_policy.py, whose --check fails on any byte difference: edit the gate and regenerate,
+    never the copy. The region holds the validator and every module-level name it reads. H12 compares the
+    bytes; walks both files' module scope (conditional and compound statements included, function and class
+    bodies not) to check that no name the region binds or reads is bound outside it, and that no function
+    declares one of them global; and compares the policy path, a sample of policies through both
+    validators, and this hook's scope test with the gate's walk. Rebinding at run time (through globals(),
+    setattr on the module, or builtins) is beyond that static walk.
 
 DECISION
-    - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative or
-      holding a control character: allow with a note naming the variable.
+    - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
+      holding a control character, or naming a path that does not exist, cannot be examined or is not a
+      directory: allow with a note naming the variable and the reason. Armed, but launched with a
+      command-line argument other than --self-test alone: allow with a note saying so, without reading the
+      payload.
     - A tool_name string naming a tool other than Write, Edit or MultiEdit: allow, silently.
     - Fail-open, made visible: the preview channel allows what it cannot evaluate (the hook is opt-in and the
       CI gate is the backstop), but always with a note naming the reason, never silently and never with an
@@ -92,9 +103,11 @@ RESIDUAL COVERAGE
     - The file can change between this hook's decision and the write (a race).
     - A payload over 64 MiB, or one that is not a JSON object, is allowed with a note.
     - It does not read AIQT_HOOKS_WORKER: worker processes are checked like any other session.
+    - An armed hook whose root holds no policy file allows every well-formed call silently; the gate then
+      applies its built-in default, which this hook does not copy.
 
 SELF-TEST
-    --self-test runs the vectors H1 to H19 below. The parity test H12 imports the sibling gate
+    --self-test runs the vectors H1 to H20 below. The parity test H12 imports the sibling gate
     ../tools/check_no_dashes.py; when it is absent the test reports skipped, unless the environment sets
     AIQT_HOOKS_REQUIRE_SIBLINGS=1, when its absence fails the test.
 """
@@ -107,7 +120,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import json
 import os
 import stat
 from pathlib import PurePosixPath
@@ -116,13 +128,17 @@ HOOK_ID = "char-policy-write"
 ROOT_VAR = "AIQT_CHAR_POLICY_ROOT"
 POLICY_PATH = ".aiqt/char-policy.json"
 GATE = "tools/check_no_dashes.py"
-POLICY_CAP = 65536  # bytes; the gate's cap
 EXISTING_CAP = 4 * 1024 * 1024  # bytes of an existing file a Write is compared with
 _MAX_INPUT = 64 * 1024 * 1024  # bytes of hook payload read
 TOOLS = ("Write", "Edit", "MultiEdit")
 
 
-# --- BEGIN COPY of the policy validator in tools/check_no_dashes.py (H12 checks the two agree) ---
+# --- BEGIN COPY: generated from tools/check_no_dashes.py by tools/gen_char_policy.py; do not edit ---
+# The policy validator. Every module-level name it reads is bound in this region or is a builtin, and neither
+# file binds one of them outside it (the hook's H12 walks both files' module scope to check that).
+import json  # noqa: E402
+
+POLICY_CAP = 65536  # bytes; a larger policy file is malformed
 _TOP_KEYS = frozenset(("version", "id", "chars", "advice", "scope"))
 _REQUIRED_KEYS = frozenset(("version", "id", "chars", "scope"))
 _TREE_KEYS = frozenset(("tree", "suffixes", "skip"))
@@ -137,9 +153,10 @@ class PolicyError(ValueError):
 
 
 def _plain(text):
-    """A non-empty string holding no control character (C0, DEL or C1)."""
+    """A non-empty string holding no control character (C0, DEL or C1) and no lone surrogate (U+D800 to
+    U+DFFF, which UTF-8 cannot encode, so the gate could not print it)."""
     return (isinstance(text, str) and text != ""
-            and not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text))
+            and not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 or 0xD800 <= ord(ch) <= 0xDFFF for ch in text))
 
 
 def _rel_ok(value, tree):
@@ -183,20 +200,22 @@ def validate_policy(data):
     if type(data["version"]) is not int or data["version"] != 1:
         raise PolicyError("version must be 1")
     if not _plain(data["id"]):
-        raise PolicyError("id must be a non-empty string without control characters")
+        raise PolicyError("id must be a non-empty string without control characters or lone surrogates")
     chars = data["chars"]
     if not isinstance(chars, dict) or not chars:
         raise PolicyError("chars must be a non-empty object")
     for char, name in chars.items():
         if len(char) != 1 or not _plain(char):
-            raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character")
+            raise PolicyError(f"chars key {char!r} must be exactly one code point, not a control character or a "
+                              "lone surrogate")
         if char in LINE_BOUNDARIES:
             raise PolicyError(f"chars key U+{ord(char):04X} is a line boundary (str.splitlines splits on it), "
                               "which a line-by-line scan cannot see")
         if not _plain(name):
-            raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string")
+            raise PolicyError(f"chars name for U+{ord(char):04X} must be a non-empty string without control "
+                              "characters or lone surrogates")
     if "advice" in data and not _plain(data["advice"]):
-        raise PolicyError("advice must be a non-empty string without control characters")
+        raise PolicyError("advice must be a non-empty string without control characters or lone surrogates")
     scope = data["scope"]
     if not isinstance(scope, list) or not scope:
         raise PolicyError("scope must be a non-empty list")
@@ -244,6 +263,14 @@ def parse_policy(raw):
         raise PolicyError(f"the policy file is not valid UTF-8 JSON ({exc})") from None
     return validate_policy(data)
 # --- END COPY ---
+
+
+def _clean(text):
+    """A non-empty string holding no control character (C0, DEL or C1): the test for a root, path or cwd. Unlike
+    the policy validator's _plain, it lets a lone surrogate through, because a low one can stand for a byte of
+    a file name; one that cannot be encoded as a file name fails later, with a note."""
+    return (isinstance(text, str) and text != ""
+            and not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in text))
 
 
 def _read_capped(path, cap):
@@ -349,8 +376,16 @@ def _decide(payload, env):
     root = env.get(ROOT_VAR)
     if not root:
         return None  # unset or empty: the hook is not armed
-    if not isinstance(root, str) or not os.path.isabs(root) or not _plain(root):
+    if not isinstance(root, str) or not os.path.isabs(root) or not _clean(root):
         return _unchecked(f"{ROOT_VAR} is set but is not an absolute path without control characters")
+    try:
+        root_mode = os.stat(root).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return _unchecked(f"{ROOT_VAR} names a path that does not exist")
+    except (OSError, ValueError) as exc:  # ValueError: a lone surrogate cannot be encoded (UnicodeEncodeError)
+        return _unchecked(f"{ROOT_VAR} names a path that cannot be examined ({type(exc).__name__})")
+    if not stat.S_ISDIR(root_mode):
+        return _unchecked(f"{ROOT_VAR} names a path that is not a directory")
     if not isinstance(payload, dict):
         return _unchecked("the hook payload is not a JSON object")
     if not isinstance(payload.get("tool_name"), str):
@@ -361,11 +396,11 @@ def _decide(payload, env):
     if not isinstance(tool_input, dict):
         return _unchecked("its tool_input is not an object", tool)
     file_path = tool_input.get("file_path")
-    if not _plain(file_path):
+    if not _clean(file_path):
         return _unchecked("its file_path is not a non-empty string without control characters", tool)
     if not os.path.isabs(file_path):
         cwd = payload.get("cwd")
-        if not _plain(cwd) or not os.path.isabs(cwd):
+        if not _clean(cwd) or not os.path.isabs(cwd):
             return _unchecked("its file_path is relative and the payload has no absolute cwd", tool)
         file_path = os.path.join(cwd, file_path)
     try:
@@ -478,10 +513,14 @@ def main(argv):
     """The hook: always 0. `--self-test` alone runs the self-test instead."""
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
         return 0
-    if len(argv) > 1:
-        return _self_test() if list(argv[1:]) == ["--self-test"] else 0
+    if list(argv[1:]) == ["--self-test"]:
+        return _self_test()
     if not os.environ.get(ROOT_VAR):
         return 0  # unset or empty: the hook is not armed, so it reads nothing and says nothing
+    if len(argv) > 1:  # armed but launched with an argument it does not know: it checks nothing, and says so
+        _emit_line(json.dumps(_unchecked(f"the hook was launched with {len(argv) - 1} unexpected command-line "
+                                         "argument(s) (only --self-test is known)")))
+        return 0
     # Fail-open, made visible: a payload it cannot read, or an internal error, allows the call with a note.
     try:
         payload = _read_payload()
@@ -532,6 +571,92 @@ def _self_test():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def marked(text):
+        """(first, last, region): the 1-based first and last line between text's one BEGIN COPY line and its one
+        END COPY line, and the text between them."""
+        lines = text.split("\n")
+        begins = [i for i, line in enumerate(lines) if line.startswith("# --- BEGIN COPY")]
+        ends = [i for i, line in enumerate(lines) if line.startswith("# --- END COPY")]
+        if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+            raise AssertionError(f"want one BEGIN COPY line before one END COPY line, found {begins} and {ends}")
+        return begins[0] + 2, ends[0], "\n".join(lines[begins[0] + 1:ends[0]])
+
+    def bindings(node, out):
+        """Add to out each name node binds in the scope it runs in. Nested statements and expressions are walked
+        (an if, try, for, while, with or match body included); a def, class or lambda body, a scope of its own,
+        is not, though its name, decorators, defaults and bases are. A comprehension's own targets count too
+        (conservative), and a wildcard import adds "*"."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                out.add(node.name)
+            inner = list(getattr(node, "decorator_list", []))
+            if isinstance(node, ast.ClassDef):
+                inner += node.bases + [keyword.value for keyword in node.keywords]
+            else:
+                inner += node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+            for child in inner:
+                bindings(child, out)
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            out.add(node.id)
+        elif isinstance(node, ast.alias):
+            out.add(node.asname or node.name.partition(".")[0])
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            out.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            out.add(node.rest)
+        for child in ast.iter_child_nodes(node):
+            bindings(child, out)
+
+    def rebound(text):
+        """The names the marked region binds or reads (every name in it, function bodies included) that the rest
+        of the module binds at module scope or that a function outside the region declares global, plus "*"
+        for a wildcard import outside it. Each module-level statement must lie wholly on one side."""
+        first, last, _ = marked(text)
+        inside, outside = {"*"}, set()
+        for stmt in ast.parse(text).body:
+            start = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
+            if first <= start and stmt.end_lineno <= last:
+                bindings(stmt, inside)
+                inside.update(n.id for n in ast.walk(stmt) if isinstance(n, ast.Name))
+            elif stmt.end_lineno < first or start > last:
+                bindings(stmt, outside)
+                outside.update(name for n in ast.walk(stmt) if isinstance(n, (ast.Global, ast.Nonlocal))
+                               for name in n.names)
+            else:
+                raise AssertionError(f"the statement at line {start} straddles a copy marker")
+        return inside & outside
+
+    def after_end(text, code):
+        """text with code inserted on the line after its END COPY marker."""
+        lines = text.split("\n")
+        end = next(i for i, line in enumerate(lines) if line.startswith("# --- END COPY"))
+        return "\n".join(lines[:end + 1] + [code] + lines[end + 1:])
+
+    # Rebindings outside the region that H12 must find, in either file. The first four are the mutants that
+    # survived QA round 2 (a plain and a conditional rebinding of _TOP_KEYS, a plain and a conditional
+    # redefinition of _rel_ok); the rest are the other ways a statement can bind a name.
+    rebindings = (
+        ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
+        ("_TOP_KEYS", 'if True:\n    _TOP_KEYS = _TOP_KEYS | {"metadata"}'),
+        ("_rel_ok", "_region_rel_ok = _rel_ok\ndef _rel_ok(value, tree):\n"
+                    '    return _region_rel_ok(value, tree) or (isinstance(value, str) and "/../" in value)'),
+        ("_rel_ok", "if True:\n    _region_rel_ok = _rel_ok\n    def _rel_ok(value, tree):\n"
+                    '        return _region_rel_ok(value, tree) or (isinstance(value, str) and "/../" in value)'),
+        ("POLICY_CAP", "def widen():\n    global POLICY_CAP\n    POLICY_CAP = 1 << 30"),
+        ("POLICY_CAP", "[POLICY_CAP := 1 << 30 for _ in ()]"),
+        ("json", "import json"),
+        ("json", "try:\n    pass\nexcept ImportError as json:\n    pass"),
+        ("isinstance", "for isinstance in ():\n    pass"),
+        ("PolicyError", "with open(__file__) as PolicyError:\n    pass"),
+        ("LINE_BOUNDARIES", "match 1:\n    case LINE_BOUNDARIES:\n        pass"),
+        ("_TREE_KEYS", "del _TREE_KEYS"),
+        ("_name_list", "class _name_list:\n    pass"),
+        ("validate_policy", "while False:\n    validate_policy = None"),
+        ("parse_policy", "type parse_policy = int"),
+        ("*", "from os.path import *"),
+    )
 
     class T(unittest.TestCase):
         def setUp(self):
@@ -618,10 +743,24 @@ def _self_test():
             for env in ({}, {ROOT_VAR: ""}):
                 self.assertIsNone(_decide(payload, env), env)
                 self.assertIsNone(_decide("not a payload", env), env)
-            # set but unusable: a note naming the variable, even for a root that resolves to the fixture from here
-            for root in (os.path.relpath(self.root), self.root + "\n"):
-                self.is_unchecked(_decide(payload, {ROOT_VAR: root}), ROOT_VAR)
+            # set but unusable: a note naming the variable and the reason, even for a root that resolves to the
+            # fixture from here, a mistyped root, and the policy file named as the root
+            policy_file = os.path.join(self.root, ".aiqt", "char-policy.json")
+            for root, why in ((os.path.relpath(self.root), "not an absolute path"),
+                              (self.root + "\n", "not an absolute path"),
+                              (os.path.join(self.root, "no-such-dir"), "does not exist"),
+                              (self.root + "-typo", "does not exist"),
+                              (os.path.join(policy_file, "x"), "does not exist"),
+                              (policy_file, "is not a directory"),
+                              (self.root + "\ud800", "cannot be examined (UnicodeEncodeError)")):
+                self.assertIn(why, self.is_unchecked(_decide(payload, {ROOT_VAR: root}), ROOT_VAR), root)
             self.is_deny(_decide(payload, self.env))
+            # armed and evaluable: a clean call, an out-of-scope call and another tool are allowed silently
+            self.assertIsNone(self.edit("docs/a.md", "x", "clean"))
+            self.assertIsNone(self.write("docs/a.md", "clean"))
+            self.assertIsNone(self.edit("docs/a.txt", "x", em))
+            self.assertIsNone(_decide({"tool_name": "Read", "tool_input": {"file_path": self.at("docs/a.md")}},
+                                      self.env))
 
         def test_h04_process(self):
             data = json.dumps({"tool_name": "Edit", "tool_input": {
@@ -645,6 +784,17 @@ def _self_test():
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=junk, capture_output=True,
                                    env={"LC_ALL": "C"}, timeout=60)
                 self.assertEqual((p.returncode, p.stdout), (0, b""), junk)
+            # armed: a command-line argument other than --self-test alone checks nothing and says so, for a
+            # payload it would deny and for one it cannot read; unarmed: silent
+            for extra in (["--bogus"], ["--self-test", "x"], ["x", "--self-test"]):
+                for junk in (data, b"not json"):
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here, *extra], input=junk,
+                                       capture_output=True, env={"LC_ALL": "C", ROOT_VAR: self.root}, timeout=60)
+                    self.assertEqual(p.returncode, 0, extra)
+                    self.is_unchecked(json.loads(p.stdout), "unexpected command-line argument")
+                p = subprocess.run([sys.executable, "-I", "-S", "-B", here, *extra], input=data,
+                                   capture_output=True, env={"LC_ALL": "C"}, timeout=60)
+                self.assertEqual((p.returncode, p.stdout), (0, b""), extra)
 
         def test_h05_policy(self):
             self.is_deny(self.edit("docs/a.md", "x", em))
@@ -727,36 +877,32 @@ def _self_test():
             gate = sibling_gate()
             if gate is None:
                 self.skipTest(f"sibling gate {GATE} absent; set AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it")
-            # The source: the marked validator region is byte-identical to the gate's, and nothing outside it
-            # here redefines a name it defines.
-            regions = {}
+            # The source. tools/gen_char_policy.py writes the marked region from the gate's and fails its --check
+            # on any byte difference; this compares the bytes again, for a tree where that check did not run.
+            texts = {}
             for path in (here, gate.__file__):
                 with open(path, "rb") as handle:
-                    lines = handle.read().splitlines(keepends=True)
-                begins = [i for i, line in enumerate(lines) if line.startswith(b"# --- BEGIN COPY")]
-                ends = [i for i, line in enumerate(lines) if line.startswith(b"# --- END COPY")]
-                self.assertEqual((len(begins), len(ends)), (1, 1), path)
-                self.assertLess(begins[0], ends[0], path)
-                regions[path] = (b"".join(lines[begins[0] + 1:ends[0]]), begins[0] + 1, ends[0],
-                                 b"".join(lines).decode("utf-8"))
-            self.assertEqual(regions[here][0], regions[gate.__file__][0], "the copied validator region drifted")
-            _, first, last, source = regions[here]
-            inside, outside = set(), set()
-            for node in ast.parse(source).body:
-                names = set()
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    names.add(node.name)
-                elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                    for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
-                        names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
-                elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                    names.update((a.asname or a.name).split(".")[0] for a in node.names)
-                (inside if first < node.lineno <= last else outside).update(names)
-            self.assertEqual(inside & outside, set(), "a name from the copied region is redefined outside it")
-            self.assertEqual((POLICY_CAP, POLICY_PATH), (gate.POLICY_CAP, gate.POLICY_PATH))
-            # The behaviour, on a sample: each fixture is otherwise valid, so a rejection is the named fault's.
-            raws = [json.dumps(p).encode("ascii") for p in (
-                dashes, quotes, gate.DEFAULT_POLICY, dashes | {"version": 2}, dashes | {"extra": 1},
+                    texts[path] = handle.read().decode("utf-8")
+            self.assertEqual(marked(texts[here])[2], marked(texts[gate.__file__])[2],
+                             "the validator region drifted; run tools/gen_char_policy.py")
+            # Both files alike: no name the region binds or reads is bound outside it at module scope, and each
+            # surviving mutant of QA round 2, with the other binding forms, is found after either END marker.
+            # A rebinding at run time (through globals(), setattr on the module, or builtins) is beyond this
+            # static walk.
+            for path, text in texts.items():
+                self.assertEqual(rebound(text), set(), (path, "a name of the copied region is bound outside it"))
+                for name, code in rebindings:
+                    self.assertEqual(rebound(after_end(text, code)), {name}, (path, code))
+            self.assertEqual(POLICY_PATH, gate.POLICY_PATH)
+            # The behaviour, on a sample: each rejected fixture is otherwise valid, so its rejection is the named
+            # fault's, and both validators must give the stated verdict, not merely the same one.
+            valid = json.dumps(dashes).encode("ascii")
+            accepted = [valid, json.dumps(quotes).encode("ascii"), json.dumps(gate.DEFAULT_POLICY).encode("ascii"),
+                        valid + b" " * (POLICY_CAP - len(valid)),
+                        json.dumps(dashes | {"chars": {"\ud7ff": "before the surrogates",
+                                                       "\ue000": "after them"}}).encode("ascii")]
+            rejected = [json.dumps(p).encode("ascii") for p in (
+                dashes | {"version": 2}, dashes | {"extra": 1},
                 dashes | {"chars": {em + em: "x"}}, dashes | {"chars": {}}, dashes | {"id": ""},
                 dashes | {"advice": ""}, dashes | {"scope": []}, dashes | {"scope": [{"file": "../x"}]},
                 dashes | {"scope": [{"file": "a\\b"}]}, dashes | {"scope": [{"tree": "/x", "suffixes": [".md"]}]},
@@ -769,30 +915,31 @@ def _self_test():
                 dashes | {"chars": {"\u2028": "line separator"}},
                 dashes | {"chars": {"\u2029": "paragraph separator"}},
                 dashes | {"scope": [{"file": "a/./b"}]}, dashes | {"scope": [{"file": "a//b"}]},
+                dashes | {"scope": [{"file": "."}]},
                 dashes | {"scope": [{"tree": "a/", "suffixes": [".md"]}]},
                 dashes | {"scope": [{"tree": ".", "suffixes": [".m/d"]}]},
                 dashes | {"scope": [{"tree": ".", "suffixes": []}]},
                 dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": ["."]}]},
                 dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": [".."]}]},
-                dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": "x"}]})]
-            valid = json.dumps(dashes).encode("ascii")
-            raws += [b"{", b"[]", b"\xff", valid[:-1] + b', "version": 1}',
-                     valid.replace(b'"en dash"', b'"en dash", "\\u2013": "again"'),
-                     valid.replace(b'"version": 1', b'"version": NaN'),
-                     valid.replace(b'"version": 1', b'"version": Infinity'),
-                     valid + b" " * (gate.POLICY_CAP - len(valid)),
-                     valid + b" " * (gate.POLICY_CAP + 1 - len(valid))]
-            for raw in raws:
-                verdicts = []
-                for parse, error in ((parse_policy, PolicyError), (gate.parse_policy, gate.PolicyError)):
-                    try:
-                        parse(raw)
-                        verdicts.append(True)
-                    except error:
-                        verdicts.append(False)
-                self.assertEqual(verdicts[0], verdicts[1], raw[:120])
-            for raw in (valid, raws[0], raws[1], raws[-2]):  # the sample holds accepted policies too
-                self.assertEqual(parse_policy(raw)["version"], 1)
+                dashes | {"scope": [{"tree": ".", "suffixes": [".md"], "skip": "x"}]},
+                dashes | {"chars": {"\ud800": "high surrogate"}}, dashes | {"chars": {"\udfff": "low surrogate"}},
+                dashes | {"chars": {em: "em\udc80"}}, dashes | {"id": "a\ud800"}, dashes | {"advice": "\udfff"},
+                dashes | {"scope": [{"file": "a\ud800"}]})]
+            rejected += [b"{", b"[]", b"\xff", valid[:-1] + b', "version": 1}',
+                         valid.replace(b'"en dash"', b'"en dash", "\\u2013": "again"'),
+                         valid.replace(b'"version": 1', b'"version": NaN'),
+                         valid.replace(b'"version": 1', b'"version": Infinity'),
+                         valid + b" " * (POLICY_CAP + 1 - len(valid))]
+            for raws, want in ((accepted, True), (rejected, False)):
+                for raw in raws:
+                    for parse, error, who in ((parse_policy, PolicyError, "hook"),
+                                              (gate.parse_policy, gate.PolicyError, "gate")):
+                        try:
+                            parse(raw)
+                            got = True
+                        except error:
+                            got = False
+                        self.assertEqual(got, want, (who, raw[:120]))
             files = ["a.md", "a.mdc", "a.txt", "docs/a.md", "docs/node_modules/a.md", "node_modules.md",
                      "docs/__pycache__/a.md", ".git/a.md", "plugin/x.py", "plugin/x.json", "plugin/sub/y.toml",
                      "plugin/node_modules/z.py", ".aiqt/standards/s.toml", ".aiqt/standards/n/s.toml",
@@ -898,6 +1045,21 @@ def _self_test():
                                timeout=60)
             self.assertEqual(p.returncode, 0)
             self.is_unchecked(json.loads(p.stdout), "at most 64 bytes (ValueError)")
+
+        def test_h20_surrogates(self):
+            # a lone surrogate in any policy string makes the policy malformed, as the gate exits 2 on it: a note
+            for policy in (dashes | {"chars": {"\ud800": "high surrogate"}}, dashes | {"chars": {em: "em\udfff"}},
+                           dashes | {"id": "a\udc80"}, dashes | {"advice": "\ud800"},
+                           dashes | {"scope": [{"file": "a\ud800"}]}):
+                self.set_policy(policy)
+                note = self.is_note(self.write("docs/a.md", f"x{em}\ud800"))
+                self.assertIn("is malformed", note)
+                self.assertIn("exits 2", note)
+                self.assertFalse(any(ord(c) > 126 for c in note), note)
+            # the code points either side of the surrogate block are ordinary policy characters
+            self.set_policy(dashes | {"chars": {"\ud7ff": "before the surrogates", "\ue000": "after them"}})
+            self.assertIn("U+E000 (after them)", self.is_deny(self.edit("docs/a.md", "x", "\ue000")))
+            self.assertIn("U+D7FF (before the surrogates)", self.is_deny(self.write("docs/a.md", "\ud7ff")))
 
         def test_h19_require_siblings(self):
             missing = os.path.join(self.tmp, "absent", "check_no_dashes.py")

@@ -700,6 +700,7 @@ tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf
 tools/gen_agents.py text eol=lf
 tools/gen_changelog.py text eol=lf
+tools/gen_char_policy.py text eol=lf
 tools/gen_claude.py text eol=lf
 tools/gen_crosswalk.py text eol=lf
 tools/gen_cursor.py text eol=lf
