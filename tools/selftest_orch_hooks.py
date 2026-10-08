@@ -5702,9 +5702,11 @@ def _main_isolated(report_path=None):
         # state directory the hook cannot write is not saved, so the Stop deny fails open with findings (the
         # disclosed decision change; as root the directory mode is not enforced and the deny stands). (7) The
         # mode reader: a FIFO with no writer, /dev/zero, a file one byte over the bound, a path with a lone
-        # surrogate and one with a NUL character each deny the ask, naming the reason, and a JSON-shaped file
-        # nested too deep to parse denies it too, each inside a child with its own RLIMIT_AS and a 30-second
-        # timeout.
+        # surrogate, a surrogate-escaped non-UTF-8 name of an existing attended file the OS could open, a
+        # socket (refused at the open; that row passes on the 7f97273f hooks too, pinning the corrected
+        # disclosure) and a path with a NUL character each deny the ask, naming the reason,
+        # and a JSON-shaped file nested too deep to parse denies it too, with the unattended deny and no read
+        # failure named, each inside a child with its own RLIMIT_AS and a 30-second timeout.
         _r3 = Fixture(tmp, "recwrite3")
         _r3_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r3.root)))
         _r3_sd.mkdir(parents=True, exist_ok=True)
@@ -5745,11 +5747,11 @@ def _main_isolated(report_path=None):
             _r3_b.append(_r3_save(dict(long_name=123456)))
             return n
 
-        def _r3_replace_a(src, dst):
+        def _r3_replace_a(src, dst, **kw):
             _r3_calls.append(src)
             if len(_r3_calls) == 2:
                 raise OSError("injected: the rename of save A fails")
-            return _r3_real_replace(src, dst)
+            return _r3_real_replace(src, dst, **kw)
         try:
             os.write, os.replace = _r3_write_a, _r3_replace_a
             _r3_a = _r3_save(dict(a=1))
@@ -5768,11 +5770,11 @@ def _main_isolated(report_path=None):
                 _r3_ev_a.wait(10)  # B holds its created temporary file until A has renamed
             return fd
 
-        def _r3_replace(src, dst):
+        def _r3_replace(src, dst, **kw):
             if threading.current_thread().name != "r3-A":
-                return _r3_real_replace(src, dst)
+                return _r3_real_replace(src, dst, **kw)
             _r3_ev_b.wait(10)
-            _r3_real_replace(src, dst)
+            _r3_real_replace(src, dst, **kw)
             _r3_seen.append(aiqt_hooks._orch_turn_state(str(_r3.root)))
             _r3_ev_a.set()
             return None
@@ -5848,19 +5850,32 @@ def _main_isolated(report_path=None):
             "res = aiqt_hooks.orch_ask_guard(json.loads(sys.argv[4]))\n"
             "hso = res[1].get('hookSpecificOutput') if isinstance(res[1], dict) else None\n"
             "reason = hso.get('permissionDecisionReason', '') if isinstance(hso, dict) else ''\n"
-            "print(json.dumps([t._verdict(res), sys.argv[3] in str(reason)]))\n")
+            "has, lacks = json.loads(sys.argv[3])\n"
+            "print(json.dumps([t._verdict(res), has in str(reason) and not (lacks and lacks in str(reason))]))\n")
         _r3_fifo = _r3.root / "r3-mode-fifo"
         _r3_big = _r3.root / "r3-mode-big.md"
         _r3_deep = _r3.root / "r3-mode-deep.json"
+        _r3_esc = _r3.root / "r3-mode-\udcff.md"  # the name's byte 0xff, surrogate-escaped
+        _r3_sock = _r3.root / "r3-mode-sock"
+        _r3_bind = ("import os, socket, sys\nos.chdir(sys.argv[1])\ns = socket.socket(socket.AF_UNIX)\n"
+                    "s.bind(sys.argv[2])\ns.close()\n")  # a relative bind: the root may be too long for a path
         _r3_bound = getattr(aiqt_hooks, "_ORCH_MODE_MAX_BYTES", 1 << 20)  # a base without it still runs
         _r3_cases = (
             ("fifo", str(_r3_fifo), lambda: os.mkfifo(str(_r3_fifo)), "is not a regular file"),
             ("dev-zero", "/dev/zero", lambda: None, "is not a regular file"),
             ("over-bound", str(_r3_big), lambda: _r3_big.write_bytes(b"a" * (_r3_bound + 1)),
              "larger than the {}-byte bound".format(_r3_bound)),
-            ("lone-surrogate", str(_r3.root / "r3-mode") + "\ud800", lambda: None, "holds a lone surrogate"),
+            ("lone-surrogate", str(_r3.root / "r3-mode") + "\ud800", lambda: None, "is not strict UTF-8"),
+            ("surrogate-escaped-openable", str(_r3_esc),
+             lambda: _r3_esc.write_text("Operating-mode: attended\n", encoding="utf-8"),
+             "is not strict UTF-8 (a lone surrogate or a surrogate-escaped non-UTF-8 byte), so it is refused"),
+            ("socket", str(_r3_sock),
+             lambda: subprocess.run([sys.executable, "-I", "-B", "-c", _r3_bind, str(_r3.root), _r3_sock.name],
+                                    check=True, timeout=30),
+             "the mode file cannot be opened (OSError)"),
             ("nul", str(_r3.root / "r3-mode") + "\x00x", lambda: None, "contains a NUL character"),
-            ("deep-nesting", str(_r3_deep), lambda: _r3_deep.write_text("[" * 100000, encoding="utf-8"), ""))
+            ("deep-nesting", str(_r3_deep), lambda: _r3_deep.write_text("[" * 100000, encoding="utf-8"),
+             ("the session operating-mode is unattended. RECORD", " because ")))
         _r3_rows = []
         _r3_ask = json.dumps(_r3.payload("PreToolUse", "AskUserQuestion", dict(questions=[])))
         for _r3_name, _r3_path, _r3_make, _r3_reason in _r3_cases:
@@ -5869,8 +5884,9 @@ def _main_isolated(report_path=None):
             _r3_regp.write_text(json.dumps(_r3_reg), encoding="utf-8")  # ensure_ascii escapes the odd paths
             _r3_make()
             try:
+                _r3_needle = json.dumps(list(_r3_reason) if isinstance(_r3_reason, tuple) else [_r3_reason, ""])
                 p = subprocess.run([sys.executable, "-I", "-B", "-c", _r3_child_src, _r16_hooks, _r16_tools,
-                                    _r3_reason, _r3_ask], capture_output=True, text=True, timeout=30)
+                                    _r3_needle, _r3_ask], capture_output=True, text=True, timeout=30)
                 try:
                     _r3_rows.append((_r3_name,) + tuple(json.loads(p.stdout)))
                 except (ValueError, TypeError):
@@ -5880,11 +5896,84 @@ def _main_isolated(report_path=None):
                 _r3_rows.append((_r3_name, "child timed out", False))
             finally:
                 _r3_regp.write_text(_r3_reg_text, encoding="utf-8")
-                for _r3_made in (_r3_fifo, _r3_big, _r3_deep):
+                for _r3_made in (_r3_fifo, _r3_big, _r3_deep, _r3_esc, _r3_sock):
                     if os.path.lexists(str(_r3_made)):
                         os.unlink(str(_r3_made))
         check("recwrite3/mode-reader-nonregular-oversize-undecodable-path-fails-closed-promptly", tuple(_r3_rows),
               tuple((n, "deny", True) for n, _p, _m, _r in _r3_cases))
+
+        # QA round 3 of the silent-write fixes: _orch_write_json_atomic opens the parent directory once and
+        # binds the target's lstat, the create, the replace and the cleanup unlink to that descriptor. (1) The
+        # state directory is moved aside and a symlink to a foreign directory put in its place while the
+        # writer fsyncs, the foreign directory holding a file at the exact temporary name the writer draws
+        # (os.urandom pinned): the save lands in the moved original, the foreign file is neither published
+        # nor removed, and no temporary file is left. (2) The same swap, then an injected fsync failure: the
+        # writer removes its own temporary file in the moved original, never the foreign file of that name.
+        # (3) An injected fsync failure with no swap returns its reason, leaves the prior target unchanged and
+        # no temporary file, and the save opens no descriptor it does not close.
+        _r4 = Fixture(tmp, "recwrite4")
+        _r4_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r4.root)))
+        _r4_sd.mkdir(parents=True, exist_ok=True)
+        _r4_moved = _r4_sd.parent / (_r4_sd.name + ".moved")
+        _r4_foreign = Path(tmp) / "recwrite4-foreign"
+        _r4_foreign.mkdir()
+        _r4_fixed = os.urandom(8)
+        _r4_tmpname = "turn-state.json.{}.tmp".format(_r4_fixed.hex())
+        _r4_alien = json.dumps(dict(foreign=True)).encode("utf-8")
+        _r4_prior = json.dumps(dict(tag="prior")).encode("utf-8")
+        _r4_save = lambda state: aiqt_hooks._orch_write_json_atomic(str(_r4_sd / "turn-state.json"), state)
+        _r4_tmps = lambda d: sorted(p.name for p in d.iterdir() if p.name.endswith(".tmp"))
+        _r4_real_fsync, _r4_urandom = os.fsync, os.urandom
+        _r4_fds = lambda: len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else 0
+
+        def _r4_swap():
+            os.rename(str(_r4_sd), str(_r4_moved))
+            os.symlink(str(_r4_foreign), str(_r4_sd))
+
+        def _r4_unswap():
+            if os.path.islink(str(_r4_sd)):
+                os.unlink(str(_r4_sd))
+            if os.path.isdir(str(_r4_moved)):
+                os.rename(str(_r4_moved), str(_r4_sd))
+
+        def _r4_run(fsync):
+            (_r4_sd / "turn-state.json").write_bytes(_r4_prior)
+            (_r4_foreign / _r4_tmpname).write_bytes(_r4_alien)
+            try:
+                os.fsync, os.urandom = fsync, (lambda n: _r4_fixed)
+                res = _r4_save(dict(tag="saved"))
+            finally:
+                os.fsync, os.urandom = _r4_real_fsync, _r4_urandom
+            seen = _r4_moved if os.path.isdir(str(_r4_moved)) else _r4_sd
+            out = (res, (seen / "turn-state.json").read_bytes(), _r4_tmps(seen),
+                   os.path.lexists(str(_r4_foreign / "turn-state.json")),
+                   (_r4_foreign / _r4_tmpname).read_bytes() if (_r4_foreign / _r4_tmpname).exists() else None)
+            _r4_unswap()
+            for _r4_left in [_r4_foreign / "turn-state.json"] + [_r4_sd / n for n in _r4_tmps(_r4_sd)]:
+                if os.path.lexists(str(_r4_left)):
+                    os.unlink(str(_r4_left))
+            return out
+
+        def _r4_swap_then_sync(fd):
+            _r4_swap()
+            return _r4_real_fsync(fd)
+
+        def _r4_swap_then_fail(fd):
+            _r4_swap()
+            raise OSError("injected: fsync fails after the parent swap")
+
+        def _r4_fail(fd):
+            raise OSError("injected: fsync fails")
+        _r4_saved = json.dumps(dict(tag="saved"), sort_keys=True).encode("utf-8")
+        check("recwrite4/parent-swapped-during-fsync-never-publishes-foreign-content",
+              _r4_run(_r4_swap_then_sync), (None, _r4_saved, [], False, _r4_alien))
+        check("recwrite4/fsync-failure-after-parent-swap-removes-its-own-temporary-file",
+              _r4_run(_r4_swap_then_fail), ("OSError", _r4_prior, [], False, _r4_alien))
+        # REGRESSION PIN: passes on the 7f97273f hooks too; a writer that skips the fsync fails it
+        _r4_fd0 = _r4_fds()
+        _r4_plain = _r4_run(_r4_fail)
+        check("recwrite4/fsync-failure-returns-its-reason-prior-target-unchanged-no-temporary-file",
+              (_r4_plain, _r4_fds() - _r4_fd0), (("OSError", _r4_prior, [], False, _r4_alien), 0))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

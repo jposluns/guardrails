@@ -540,6 +540,9 @@ expected-check-ids = [
   "recwrite3/failed-cleanup-names-the-left-temporary-file",
   "recwrite3/unwritable-state-dir-writable-turn-state-fails-open-with-findings",
   "recwrite3/mode-reader-nonregular-oversize-undecodable-path-fails-closed-promptly",
+  "recwrite4/parent-swapped-during-fsync-never-publishes-foreign-content",
+  "recwrite4/fsync-failure-after-parent-swap-removes-its-own-temporary-file",
+  "recwrite4/fsync-failure-returns-its-reason-prior-target-unchanged-no-temporary-file",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

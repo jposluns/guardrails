@@ -8608,34 +8608,57 @@ def _orch_write_json_atomic(path, obj):
     checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
     else a short failure detail the caller names in its output (the caller decides what a failure means).
     It serializes obj first (a value json cannot encode fails before any file is created), creates the
-    parent directory, then creates a temporary file of its own beside the target with
-    os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other file
-    already at a temporary-like name is never opened, written or removed (an existing name fails the
+    parent directory and opens it ONCE (os.open O_RDONLY|O_DIRECTORY|O_CLOEXEC); every later step is bound
+    to that directory descriptor through dir_fd, so a parent path swapped for a symlink or another directory
+    after the open cannot redirect the save: the prior target's lstat (follow_symlinks=False), the create of
+    the temporary file, the replace and the cleanup unlink all act in the directory opened, and the
+    descriptor is closed exactly once on every path. It creates a temporary file of its own beside the
+    target with os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other
+    file already at a temporary-like name is never opened, written or removed (an existing name fails the
     create, and the save fails). It sets that file's permission bits to the existing target's (a regular
-    file at the target, read with lstat), else to 0600, then writes, fsyncs and closes it through that
-    descriptor only and os.replace()s it onto the target, so the target is swapped whole: a reader sees
-    the previous file or the new one, never a part of either. The new file is owned by the writing uid;
-    a symlink at the target is replaced, not followed. On any failure after the create it unlinks only
-    its own temporary file; an unlink that fails leaves that file beside the target, and the returned
-    detail names it. A process killed between the create and the replace (a hook timeout, for example)
-    leaves its temporary file, and nothing removes it. Concurrent saves never share a temporary file, so
+    file at the target), else to 0600, then writes, fsyncs and closes it through that descriptor only and
+    os.replace()s it onto the target, so the target is swapped whole: a reader sees the previous file or the
+    new one, never a part of either. The new file is owned by the writing uid; a symlink at the target is
+    replaced, not followed. On any failure after the create it unlinks only its own temporary file; an
+    unlink that fails leaves that file beside the target, and the returned detail names it by the parent
+    path as given (which, after a swap, may no longer lead to it). A process killed between the create and
+    the replace (a hook timeout, for example) leaves its temporary file, and nothing removes it. Not bound
+    here: the parent path itself is resolved once, at the directory open (a symlink in it at that moment is
+    followed), and a directory moved after the open still receives the save under its new name. Concurrent saves never share a temporary file, so
     one save cannot write into or remove another's; the last replace wins, so where callers read, modify
     and save the same file at the same time one update can be lost (read-modify-write is not
     serialized). The writing uid can itself replace any of these files, so this is crash and collision
     safety, not a boundary against that uid."""
     try:
         blob = json.dumps(obj, sort_keys=True).encode("utf-8")
-        directory = os.path.dirname(path)
+        directory, name = os.path.split(path)
         os.makedirs(directory, exist_ok=True)
+        dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, TypeError, ValueError) as exc:
+        return type(exc).__name__
+    try:
+        return _orch_write_json_at(dirfd, directory, name, blob)
+    finally:
         try:
-            prior = os.lstat(path)
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass  # a read-only directory descriptor: the save's outcome was settled through it already
+
+
+def _orch_write_json_at(dirfd, directory, name, blob):
+    """The save of _orch_write_json_atomic (see there), every step bound to the open directory dirfd:
+    None on success, else the failure detail. directory is the parent path as given, used only to name a
+    temporary file left behind."""
+    try:
+        try:
+            prior = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
             mode = stat.S_IMODE(prior.st_mode) & 0o777 if stat.S_ISREG(prior.st_mode) else 0o600
         except FileNotFoundError:
             mode = 0o600
-        tmp = "{}.{}.tmp".format(path, os.urandom(8).hex())
+        tmp = "{}.{}.tmp".format(name, os.urandom(8).hex())
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                     0o600)
-    except (OSError, TypeError, ValueError) as exc:
+                     0o600, dir_fd=dirfd)
+    except (OSError, TypeError, ValueError, NotImplementedError) as exc:
         return type(exc).__name__
     failure = None
     try:
@@ -8653,17 +8676,17 @@ def _orch_write_json_atomic(path, obj):
             failure = failure or type(exc).__name__
     if failure is None:
         try:
-            os.replace(tmp, path)
+            os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
             return None
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, NotImplementedError) as exc:
             failure = type(exc).__name__
     try:
-        os.unlink(tmp)
+        os.unlink(tmp, dir_fd=dirfd)
     except FileNotFoundError:
         pass
-    except OSError as exc:
+    except (OSError, NotImplementedError) as exc:
         failure += "; removing its temporary file {} failed with {}, so remove it by hand".format(
-            tmp, type(exc).__name__)
+            os.path.join(directory, tmp), type(exc).__name__)
     return failure
 
 
@@ -8760,10 +8783,13 @@ def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
     _ORCH_MODE_MAX_BYTES bytes that decodes as strict UTF-8, else ('bad', reason) for every other outcome.
-    The path must encode as strict UTF-8 (a lone surrogate or a NUL character is bad, before any open).
-    The open is os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at
-    once instead of waiting; the descriptor is fstat'ed and anything not a regular file (a FIFO, a device
-    such as /dev/zero, a directory, a socket) is bad without a read. The read asks for at most
+    The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
+    also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
+    could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
+    at that open (it reports ENXIO on Linux, so the reason is the open's OSError); every other node opens,
+    and the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such as /dev/zero, a
+    directory) is bad without a read. The read asks for at most
     _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
     a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
     bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
@@ -8774,7 +8800,8 @@ def _orch_mode_read(path):
             return ("bad", "the mode path contains a NUL character")
         path.encode("utf-8")
     except UnicodeEncodeError:
-        return ("bad", "the mode path holds a lone surrogate, which UTF-8 cannot encode")
+        return ("bad", "the mode path is not strict UTF-8 (a lone surrogate or a surrogate-escaped "
+                       "non-UTF-8 byte), so it is refused, fail-closed, even where the OS could open it")
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
                      | getattr(os, "O_CLOEXEC", 0))
@@ -8826,9 +8853,10 @@ def _orch_mode_detail(reg, root):
         marker (including a sentence that merely mentions attended or unattended);
       - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
         recognized value, so the guard fails CLOSED rather than silently disarming: every outcome of
-        _orch_mode_read other than not found or a read text (a path with a NUL character or a lone
-        surrogate, a file that cannot be opened or read, one that is not a regular file, one larger than the
-        bound, or one whose bytes are not valid UTF-8), which also returns the reason;
+        _orch_mode_read other than not found or a read text (a path with a NUL character or one that is
+        not strict UTF-8, a file that cannot be opened or read (a socket included), one that is not a
+        regular file, one larger than the bound, or one whose bytes are not valid UTF-8), which also returns
+        the reason;
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
@@ -9915,8 +9943,9 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable, not a regular file (a FIFO or a device included, opened without waiting),
-    larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path holding a NUL or a lone surrogate (each such
+    is present but unreadable (a socket, refused at the open, included), not a regular file (a FIFO or a
+    device included, opened without waiting), larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path
+    holding a NUL or not strict UTF-8 (each such
     read outcome names its reason in the deny), a present-but-unrecognized `Operating-mode:` declaration
     (empty, or not beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
     "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no

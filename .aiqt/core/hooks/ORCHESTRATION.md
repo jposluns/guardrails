@@ -198,9 +198,14 @@ banner), which asks for a manual record, and leaves no row) and the append-only 
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
 companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
-`forced-exit-surfaced.json`) are each saved by one writer: it creates a temporary file of its own beside
-the target (an exclusive create under a random name that never follows a symlink, so a file or symlink
-already at a temporary-like name is never opened, written or removed), gives it the existing target's
+`forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
+directory descriptor and binds every later step (the read of the target's permission bits, the create, the
+rename and the cleanup removal) to it, so a symlink swapped in for that directory after the open can
+neither make the writer publish foreign content under the target's name nor hide the writer's own temporary
+file (the directory path itself is resolved once, at that open, and the writing uid is not a boundary); it
+creates a temporary file of its own beside the target (an exclusive create under a random name that never
+follows a symlink, so a file or symlink already at a temporary-like name is never opened, written or
+removed), gives it the existing target's
 permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the target. A reader
 therefore sees the previous file or the new one, never a part of either, and a failed save leaves the
 previous file (or its absence) in place. A failed save is named with its error in the hook's output, except
@@ -227,10 +232,12 @@ strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails 
 whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
 recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
-holding a NUL character or a lone surrogate; a file that cannot be opened or read; one that is not a regular
-file, such as a FIFO, a device like `/dev/zero`, a directory or a socket, refused after a non-blocking open
-and before any read, so a FIFO with no writer does not wait; one larger than 1048576 bytes, of which the
-reader reads at most one byte more; or one whose bytes are not valid UTF-8), each of which the ask guard's
+holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a
+surrogate-escaped non-UTF-8 name arrives), refused fail-closed before any open even where the OS could open
+it; a file that cannot be opened or read, a socket included, whose non-blocking open itself fails (`ENXIO`
+on Linux); one that is not a regular file, such as a FIFO, a device like `/dev/zero` or a directory, refused
+by an fstat after the non-blocking open and before any read, so a FIFO with no writer does not wait; one
+larger than 1048576 bytes, of which the reader reads at most one byte more; or one whose bytes are not valid UTF-8), each of which the ask guard's
 deny names, a present `Operating-mode:` declaration whose
 value is empty or does not begin with attended/unattended, a JSON-shaped marker (content beginning with `{`,
 `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, duplicate keys, or
@@ -246,8 +253,10 @@ mentioning attended or unattended, or one beginning with a number or word such a
 trailing`, is such prose and does not arm). Every other input fails closed, so every input reaches one of
 the two answers; only a stall bounded by the hook timeout delays it (a path lookup on a hung mount, a read
 from a stalled filesystem, or what a device driver's open does). The scope check of the stop, idle and
-yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and a
-fail-closed read counts there as a declared mode, so scope is live. The escape sentinel (default
+yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and
+every fail-closed result counts there as a declared mode, so scope is live: a read failure (a file not valid
+UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
+unrecognized alike. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
