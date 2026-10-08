@@ -113,7 +113,9 @@ THREAT MODEL
     after its JSON, one that is not JSON in strict UTF-8 (bytes that are not valid UTF-8, encoded surrogates, a
     byte order mark, UTF-16 and UTF-32 included, and the constants NaN, Infinity and -Infinity, which JSON does
     not have), a JSON value that is not an object, and a Bash call whose
-    tool_input is not an object or whose command is not a string. A JSON prefix followed by an idle interval is
+    tool_input is not an object or whose command is not a string. An argv other than the plain hook call or
+    exactly `--self-test` gets a note too, that the hook checked nothing, written before stdin is read (stdin is
+    left unread). A JSON prefix followed by an idle interval is
     not taken as the whole payload: the hook reads on until the input ends, so a host that keeps stdin open after
     the payload gets the cannot-evaluate note on every Bash call. Each wait is for the time left
     at most, so that note comes about 2 seconds late, but the OS can return from a wait late, and nothing here
@@ -134,11 +136,10 @@ THREAT MODEL
     describes those cases.
     The hook writes nothing to stdout in exactly these cases: a verification worker process (a worker kill-switch
     variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped; a JSON
-    object whose tool_name is not Bash or whose event is not PreToolUse; a Bash call whose command is empty; any
-    argv other than the plain hook call or exactly `--self-test` (answered before stdin is read); a stdin that is a
-    directory, which the REGISTRATION launch line answers before Python starts; a command the NOTE paragraph
-    leaves silent or that opts out; and an output failure, when the line cannot be written. A payload carrying
-    agent_id (a subagent's call) is checked like any other. Work is bounded: a
+    object whose tool_name is not Bash or whose event is not PreToolUse; a Bash call whose command is empty; a
+    stdin that is a directory, which the REGISTRATION launch line answers before Python starts; a command the
+    NOTE paragraph leaves silent or that opts out; and an output failure, when the line cannot be written. A
+    payload carrying agent_id (a subagent's call) is checked like any other. Work is bounded: a
     command over 64 KiB of UTF-8 is not read; the tokenizer and the grammar read each token a bounded number of
     times, the note scan reads each word at most four times (once per layer), and each distinct pattern it checks
     is searched for once in the command. The hook never runs the command and starts no process.
@@ -408,6 +409,8 @@ _NOTE_ERROR = ("pattern-self-match: an internal error stopped this check, so the
                "pattern that selects the shell running it.")
 _NOTE_PAYLOAD = ("pattern-self-match: the hook could not read this call's payload (cannot evaluate), so the call "
                  "was not checked for a pattern that selects the shell running it.")
+_NOTE_ARGV = ("pattern-self-match: the hook was launched with {} (only --self-test is known), so it checked "
+              "nothing: the call was not checked for a pattern that selects the shell running it.")
 _WORKER_LINE = "pattern-self-match: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)"
 
 
@@ -974,14 +977,18 @@ def _emit_line(text, *stream):
 
 def main(argv):
     """The hook: always 0, output only a deny or note line (a payload it cannot read gets the cannot-evaluate
-    note). `--self-test` alone runs the self-test instead; any other argv returns 0 silently before stdin is
-    read."""
+    note). `--self-test` alone runs the self-test instead; any other argv gets the argv note (_NOTE_ARGV) and
+    returns 0 before stdin is read."""
     if not isinstance(argv, (list, tuple)) or not all(isinstance(a, str) for a in argv) or not argv:
-        return 0  # a bad argv: fail open, reading nothing
+        # a bad argv: it checks nothing, and says so, reading nothing
+        _emit_line(json.dumps({"systemMessage": _NOTE_ARGV.format("an argument list it cannot read")}))
+        return 0
     if list(argv[1:]) == ["--self-test"]:
         return _self_test()
-    if len(argv) != 1:
-        return 0  # an unsupported argument: fail open, reading nothing
+    if len(argv) != 1:  # launched with an argument it does not know: it checks nothing, and says so, reading nothing
+        _emit_line(json.dumps({"systemMessage": _NOTE_ARGV.format(
+            "{} unexpected command-line argument(s)".format(len(argv) - 1))}))
+        return 0
     if _is_worker(os.environ):
         _emit_line(_WORKER_LINE, sys.stderr)
         return 0
@@ -1035,9 +1042,11 @@ def _self_test():
 
     # The child that T.run_hook runs: this file loaded as a module, its main called with this file's path and the
     # arguments after it, its _read_complete given 20 seconds whatever arguments main passes, 10 seconds below the
-    # child's default parent-observed bound of 30 (T.child), so a reader that waits its whole deadline still exits
-    # before the kill, and a verdict there depends on how fast the host runs the child only when the host stalls
-    # it (or this test) for about 20 seconds (QA rounds 11 to 13). The arguments main passes, stdin at the
+    # child's default parent-observed bound of 30 (T.child). That 10 seconds is a NOMINAL margin: the child's
+    # start-up, the host's scheduling and the time to report the result all come out of it, so a reader that waits
+    # its whole deadline exits before the kill only while those delays total under 10 seconds, and a verdict
+    # there depends on how fast the host runs the child only when the host stalls it (or this test) for about
+    # that long (QA rounds 11 to 14). The arguments main passes, stdin at the
     # production deadline, are pinned in process (T.scheduled with via_main); the script's own entry point runs
     # on the actual command line in T.hook and T.child with [here].
     MAIN = "\n".join((
@@ -1530,19 +1539,32 @@ def _self_test():
                                      (0, want.encode(), b""), chunks)
 
         def test_10_argv(self):
-            old = sys.stdout
-            sys.stdout = io.StringIO()
+            # a bad argv gets the argv note on stdout, nothing on stderr, and stdin is never read (QA round 14)
+            def read(*args, **kw):
+                reads.append(args)
+                raise OSError("stdin read")
+            reads = []
+            bad = json.dumps(dict(systemMessage=_NOTE_ARGV.format("an argument list it cannot read"))) + "\n"
+            old = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             try:
-                for argv in (None, 7, "--self-test", ["x", 3], {"a": 1}, []):
-                    self.assertEqual(main(argv), 0)
-                self.assertEqual(sys.stdout.getvalue(), "")
+                with patched(_read_complete=read, _is_worker=lambda env: False):
+                    for argv in (None, 7, "--self-test", ["x", 3], {"a": 1}, []):
+                        sys.stdout.seek(0)
+                        sys.stdout.truncate()
+                        self.assertEqual((main(argv), sys.stdout.getvalue()), (0, bad), argv)
+                text = sys.stderr.getvalue()
             finally:
-                sys.stdout = old
-            # on the actual command line: an unsupported argument returns 0 silently before stdin is read. The
-            # payload and its end of input are in the pipe before the child starts, and a duplicate of the pipe's
-            # read end kept here still holds the whole payload after the child exits (QA rounds 12 and 13)
+                sys.stdout, sys.stderr = old
+            self.assertEqual((reads, text), ([], ""))
+            # on the actual command line: an unsupported argument gets the argv note naming how many arguments
+            # it did not know, and returns 0 before stdin is read. The payload and its end of input are in the
+            # pipe before the child starts, and the pipe's read end, kept open here, still holds the whole payload
+            # after the child exits (QA rounds 12 to 14)
             data = payload_bytes("pkill -f qa-x/")
-            for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""]):
+            for argv in (["--self-test", "x"], ["-x"], ["--selftest"], [""], ["-x", "-y"]):
+                note = _NOTE_ARGV.format("{} unexpected command-line argument(s)".format(len(argv)))
+                note = (json.dumps(dict(systemMessage=note)) + "\n").encode()
                 r, w = os.pipe()
                 try:
                     self.assertEqual(os.write(w, data), len(data))
@@ -1552,7 +1574,7 @@ def _self_test():
                                        capture_output=True, env=dict(LC_ALL="C"), timeout=30)
                     os.set_blocking(r, False)
                     self.assertEqual((p.returncode, p.stdout, p.stderr, os.read(r, len(data) + 1)),
-                                     (0, b"", b"", data), argv)
+                                     (0, note, b"", data), argv)
                 finally:
                     for fd in (r, w):
                         if fd is not None:
@@ -2139,9 +2161,11 @@ def _self_test():
             """The hook's main run in a child process (child, MAIN) on data and then the end of input, with argv
             after this file's path and env the whole environment: (status, stdout, stderr). Its reader is given
             20 seconds whatever arguments main passes, 10 seconds below the child's parent-observed 30-second
-            bound, so a reader that waits its whole deadline exits before the kill, and these verdicts depend on
-            how fast the host runs the child only when the host stalls it (or this test) for about 20 seconds (QA
-            rounds 11 to 13); scheduled with via_main pins that main reads stdin at the production deadline."""
+            bound. That is a NOMINAL margin, reduced by the child's start-up, the host's scheduling and the time
+            to report the result, so a reader that waits its whole deadline exits before the kill only while those
+            delays total under 10 seconds, and these verdicts depend on how fast the host runs the child only when
+            the host stalls it (or this test) for about that long (QA rounds 11 to 14); scheduled with via_main
+            pins that main reads stdin at the production deadline."""
             return self.child(["-c", MAIN, here] + list(argv), [(0, data)], env=env)
 
         def hook(self, data, env=None, argv=()):
@@ -2161,9 +2185,11 @@ def _self_test():
             _READ_DEADLINE of 2.0) and, when max_input is given, a _MAX_INPUT of max_input: the payload, or
             "refused: <message>" for the ValueError it raised. The child must exit 0 with one line on stdout and
             nothing on stderr within bound seconds (child). The default deadline of 20 seconds is 10 seconds below
-            the default parent-observed bound of 30, so a reader that waits its whole deadline exits, and is
-            reported, before the kill (QA round 13); every caller that passes a deadline of None (the production
-            2.0 seconds) passes a bound of 12, the same 10-second margin."""
+            the default parent-observed bound of 30, a NOMINAL margin reduced by the child's start-up, the host's
+            scheduling and the time to report the result, so a reader that waits its whole deadline exits, and is
+            reported, before the kill only while those delays total under 10 seconds (QA rounds 13 and 14); every
+            caller that passes a deadline of None (the production 2.0 seconds) passes a bound of 12, the same
+            nominal 10-second margin."""
             rc, out, err = self.child(["-c", DRIVER, here, reader, "-" if deadline is None else repr(deadline),
                                        "-" if max_input is None else str(max_input)], parts, end, bound)
             self.assertEqual((rc, err, out.count(b"\n")), (0, b"", 1), out)

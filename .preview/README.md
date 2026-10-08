@@ -158,7 +158,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `9f641cc9b6a1d31805b53ae49e2ef8d2b9deb9214baa4d59d20222647df483ca` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `897242ebbadb926df46354053f05e045716c6202b710047e979ce6c6b50d6abd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -568,9 +568,11 @@ complete JSON prefix followed by a pause is not taken as the whole input), bytes
 (space, tab, carriage return, newline) after the JSON, input that is not JSON in strict UTF-8 (bytes
 that are not valid UTF-8, encoded surrogates, a byte order mark, UTF-16 and UTF-32 included, and the
 constants NaN, Infinity and -Infinity, which JSON does not have), JSON that is not an object, or a Bash
-call without a string command. The hook reads its clock again after
-every wait and every read, so input that ends after the 2 seconds gets the note even when the system runs
-the hook late; a hook run late can take longer than 2 seconds to give it. It writes nothing when
+call without a string command. A launch with a command-line argument it does not know (only
+`--self-test` is known) gets a note that it checked nothing, written before it reads its input. The
+hook reads its clock again after every wait and every read, so input that ends after the 2 seconds gets
+the note even when the system runs the hook late; a hook run late can take longer than 2 seconds to
+give it. It writes nothing when
 standard input is a directory (its launch line exits before Python starts), for another tool or event,
 for an empty command, and for a command it allows without a note. It skips verification worker processes
 and checks helper-session calls.
