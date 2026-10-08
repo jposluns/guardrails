@@ -40,21 +40,29 @@ WHAT IT DOES
           pipeline pgrep F LITERAL | xargs [-r | --no-run-if-empty] kill [SIG] [R];
       (d) while pgrep G LITERAL [R]; do BODY; done, or until ! pgrep G LITERAL [R]; do BODY; done, where G is F
           plus optional separate -a, -l or -c, and BODY holds only sleep N, echo, `:`, true and date.
-    R is one or more of >/dev/null, 2>/dev/null, 2>&1 and &>/dev/null after the command's last word: on the
-    signalling command it changes only where messages go, and on the pgrep of (d) only what is shown. A shape may
-    be followed by `|| true` or `|| :`, which runs only after the shape has run. V is an identifier that holds a
-    lowercase letter (so no all-caps name, and not `_`), does not start with BASH, is not a reserved word and is
-    not one of bash's special names (EUID, UID, PPID, RANDOM, SRANDOM, IFS, LINENO, SECONDS, EPOCHSECONDS,
-    EPOCHREALTIME, PATH, HOME, SHELLOPTS, BASHOPTS, auto_resume, histchars): assigning a readonly name stops the
-    loop, and a special name changes the value kill gets. N is a plain number with an optional s, m, h or d
-    suffix, and the sleeps in the elements up to and through the first shape (its loop body counted once) add up
-    to at most 60 seconds, so no sleep keeps the shape from running (`sleep infinity` or `sleep 99999d` takes the
-    note). A shape is a whole element of the top-level list, whose elements are split by `;` or newlines. Every
+    R is one or more of >/dev/null, 2>/dev/null, 2>&1 and &>/dev/null after the command's last word, with or
+    without a blank before it: as in bash, `>` ends a word, so `qa-x/>/dev/null` is the word qa-x/ and then
+    >/dev/null, while `qa-x/2>&1` is the word qa-x/2 and then >&1, which is not in R. On the signalling command R
+    changes only where messages go, and on the pgrep of (d) only what is shown. A shape may be followed by one
+    `|| CMD` or `&& CMD`, CMD a benign simple command (below), and the kill in a (b) body by one `|| CMD` or
+    `&& CMD`, CMD an echo, sleep N, `:` or true as that body allows: CMD runs, if at all, only after the shape or
+    the kill has run. V is an identifier that holds a lowercase letter (so no all-caps name, and not `_`), does
+    not start with BASH and is not a reserved word, so it is none of bash's all-caps special names: assigning a
+    readonly one (EUID, UID, PPID) stops the loop, and others (RANDOM, SRANDOM, SECONDS, LINENO, IFS, PATH) change
+    the value kill gets or how the shell runs it. auto_resume and histchars, special names that hold a lowercase
+    letter, are allowed: neither is readonly, and neither changes the value assigned to it (bash 5.3.9 printed
+    both loop values back unchanged). N is a plain number with an optional s, m, h or d suffix. The sleeps that
+    can run before the first shape add up to at most 60 seconds, so no sleep keeps the shape from running
+    (`sleep infinity` anywhere, or `sleep 99999d` before the shape, takes the note): the sleeps in the elements
+    before the shape and, when the shape is (b), the sleeps in its body, counted once (one in a `|| CMD` or
+    `&& CMD` there too). A (d) body is not counted: its pgrep runs before any body sleep, and the loop waits on
+    its own shell whatever the body sleeps. A shape is a whole element of the top-level list, whose elements are
+    split by `;` or newlines. Every
     other element is a benign simple command: echo, sleep N, pwd, true, `:`, date or ls, with LITERAL or quoted
     arguments holding no expansion, no argument starting with `-` (an option, quoted or not), and redirections from
     R. printf and cd are not benign: `printf -v` assigns a variable (PATH, or the loop variable), a printf field
     width can write gigabytes before the shape runs, and cd can change what a relative PATH entry finds. No
-    element holds `&&`, `||` (other than the trailing form above), `&`, an assignment, a function definition or a
+    element holds `&&`, `||` (other than the trailing forms above), `&`, an assignment, a function definition or a
     prefix word (exec, sudo, env, nice, timeout, command, nohup and the rest), and every element after the shape
     parses too, since an unparsable tail could stop the shape running.
     The words are read by a small tokenizer that refuses everything else: a backtick, a backslash, `(`, `{`, `<`,
@@ -76,8 +84,12 @@ OPT-OUT
     `# self-match-ok`, optionally followed by a colon or blank and a reason, for example:
         pkill -f run-42/ # self-match-ok: the shell is meant to stop too
     The comment must be unquoted, begin a word (after a blank, a newline, `;`, `&` or `|`), and be the last
-    non-blank content of the command; a `#` inside a word, directly after `)` (in `$(...)#` it continues the word)
-    or in a quoted string is not a comment and does not opt out. It silences both the deny and the note.
+    non-blank content of the command; a `#` inside a word or in a quoted string is not a comment and does not opt
+    out. A `#` directly after `)` does not opt out either. After a command substitution, `$(...)#`, bash reads no
+    comment: the `#` continues the last word the substitution gives (`$(echo 11 22)#` gives the words 11 and 22#).
+    After a subshell, `(...)#`, bash does read a comment, but the hook deliberately does not accept it as an
+    opt-out (hook policy, not bash's reading), and such a command gets the note. The opt-out silences both the
+    deny and the note.
 
 THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that stops or
@@ -85,20 +97,26 @@ THREAT MODEL
     resists a caller that sets out to hide a pattern. The deny set is closed, and each shape in it selects the
     running shell under the premises in RESIDUAL COVERAGE; everything uncertain gets a note at most. An internal
     error while reading a command allows it WITH a note that it was not checked, and so does a payload the hook
-    cannot evaluate: a stdin that is closed or fails to read, one over 16 MiB, one that is not complete JSON after
-    2 seconds or is not JSON, a JSON value that is not an object, and a Bash call whose tool_input is not an object
-    or whose command is not a string. The one exception is an interpreter older than Python 3.14 that can start
-    the hook: the guard
+    cannot evaluate: a stdin that is closed or fails to read, one over 16 MiB, one whose input does not end (EOF)
+    within 2 seconds, one with bytes other than blanks after its JSON, one that is not JSON, a JSON value that is
+    not an object, and a Bash call whose tool_input is not an object or whose command is not a string. A JSON
+    prefix followed by an idle interval is not taken as the whole payload: the hook reads on until the input ends,
+    so a host that keeps stdin open after the payload gets the cannot-evaluate note on every Bash call, 2 seconds
+    late. The one exception is an interpreter older than Python 3.14 that can start the hook: the guard
     at the top of this file reads no input, writes one line beginning
     `error: pattern-self-match.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
     a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
     interpreter that cannot start the hook never reaches the guard and fails with Python's own error first. For
     this hook that is only one that predates the -I option, and it exits 2, which still denies every Bash call:
-    this file is written without f-strings or other syntax newer than Python 3.4 (the self-test checks for
-    f-strings and parses the file with the parser's 3.4 grammar setting), so any interpreter that accepts -I
-    reaches the guard. .preview/README.md (Installing a hook, step 4) describes those cases. The self-test also
-    scans the syntax tree and tokens for the newer forms that grammar setting accepts ([*a], {**a}, f(*a, b),
-    f(**a, **b), and a trailing comma after a starred parameter or argument).
+    this file is meant to hold no f-string or other syntax newer than Python 3.4, so that any interpreter that
+    accepts -I reaches the guard. The self-test checks for f-strings, parses the file with the parser's 3.4
+    grammar setting, and scans the syntax tree and tokens for these newer forms that grammar setting accepts: a
+    starred item in a display or subscript ([*a], x[*a], return *a, b), {**a}, f(*a, b), f(**a, **b), a trailing
+    comma after a starred parameter or argument (lambda *a,: 0 too), a decorator that is not a dotted name or a
+    call of one (@a[0].b, @(a)), a parenthesized with (with (a as b, c as d):), and continue inside finally. A
+    newer form outside these checks would go unnoticed, and an older interpreter would then fail to compile the
+    file and exit 1, which PreToolUse treats as non-blocking. .preview/README.md (Installing a hook, step 4)
+    describes those cases.
     The hook writes nothing to stdout in exactly these cases: a verification worker process (a worker kill-switch
     variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped; a JSON
     object whose tool_name is not Bash or whose event is not PreToolUse; a Bash call whose command is empty; any
@@ -121,8 +139,9 @@ RESIDUAL COVERAGE.
       - procps: pgrep and pkill search a whole argument (a literal 131,000 bytes into one argument still matched,
         and Linux caps one argument at 128 KiB), and change only NUL and newline to blanks and escape only
         non-printable bytes;
-      - a `kill`, `pkill` or `pgrep` shell function or alias (one defined in a shell snapshot, say) can change what
-        a shape runs;
+      - a shell function or alias (one defined in a shell snapshot, say) that shadows a command word the grammar
+        accepts (kill, pkill, pgrep, xargs, echo, sleep, ls, date, pwd, true or `:`) can change what a shape runs,
+        or keep it from running;
       - shell state set before the command (by a shell snapshot, say): an IFS without a newline changes how
         $(pgrep ...) splits, and a loop variable made readonly, a nameref or otherwise given an attribute changes
         the loop;
@@ -130,8 +149,9 @@ RESIDUAL COVERAGE.
         (an ls on a hung network mount, or an echo into a full pipe, would keep a later shape from running);
       - a trap on the shell: the deny says the command selects or signals its own shell, not that the shell dies.
     What is not denied: everything outside the closed set gets a note at most, including compound commands (`if`,
-    groups, subshells), `&&` lists and every `||` list but a shape's trailing `|| true` or `|| :`, `ps | grep`
+    groups, subshells), `&&` and `||` lists other than one trailing `|| CMD` or `&& CMD` as above, `ps | grep`
     pipelines, prefix words such as `sudo` or `exec`, name mode (pkill without -f), killall and pidof, other loops,
+    a pattern outside LITERAL (one holding a blank, as in `pkill -f 'python worker.py'`),
     options outside the lists above (an option cluster such as -ef too), printf, cd, an echo or other benign
     command with an argument starting with `-`, a loop variable outside V's rule, sleeps over the 60-second bound,
     redirections outside R, an R redirection in a shape anywhere but after the last word of its signalling command
@@ -257,6 +277,32 @@ def _read_payload(fd=0, deadline=_READ_DEADLINE):
 # END VENDOR
 
 # The hook's own reading.
+_JSON_BLANKS = b" \t\r\n"
+
+
+def _read_complete(fd=0, deadline=_READ_DEADLINE):
+    """The payload _read_payload parses, once the input has also ended (EOF) within the deadline. _read_payload
+    returns a complete JSON prefix that an idle interval follows, which may not be the whole payload, so reading
+    goes on to the end: JSON blanks after the prefix are read past, and any other byte (the input as a whole is
+    then not one JSON object), or no end before the deadline, raises ValueError."""
+    end = time.monotonic() + deadline
+    payload = _read_payload(fd, deadline)
+    while True:
+        left = end - time.monotonic()
+        chunk = None
+        if select.select([fd], [], [], max(left, 0))[0]:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                pass
+        if chunk == b"":
+            return payload
+        if chunk and chunk.strip(_JSON_BLANKS):
+            raise ValueError("bytes after the hook payload")
+        if left <= 0:
+            raise ValueError("hook payload did not end within the read deadline")
+
+
 _SCAN_LIMIT = 64 * 1024
 # A LITERAL's value, and a bare word: only these characters (a LITERAL also must not start with `-`).
 _LITERAL_RE = re.compile(r"[A-Za-z0-9_./:@%=,-]+\Z")
@@ -265,11 +311,12 @@ _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DQ_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\Z")
 # The redirections R, at a token's start: >, 2> or &> onto /dev/null (a blank may stand before the target), or 2>&1.
 _REDIR_RE = re.compile(r"(2>|&>|>)[ \t]*/dev/null|2>&1")
-# What may follow a word, a variable, a redirection or `)`: a blank, a newline, `;`, `|`, `&`, `)`, or the end.
-_AFTER_WORD = frozenset(" \t\n;|&)")
+# What may follow a word, a variable, a redirection or `)`: a blank, a newline, `;`, `|`, `&`, `)`, `>` (as in bash,
+# it ends the word and starts a redirection, which must then be one of R), or the end.
+_AFTER_WORD = frozenset(" \t\n;|&)>")
 _SLEEP_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)([smhd]?)\Z")
 _SLEEP_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-# Seconds: the most the sleeps up to and through the first shape (its loop body counted once) may add up to.
+# Seconds: the most the sleeps before the first shape, and a (b) shape's body counted once, may add up to.
 _SLEEP_TOTAL = 60
 _SIG_VALUES = frozenset(("9", "15", "1", "2", "3", "KILL", "TERM", "HUP", "INT", "QUIT",
                          "SIGKILL", "SIGTERM", "SIGHUP", "SIGINT", "SIGQUIT"))
@@ -285,12 +332,8 @@ _FULL = frozenset(("-f", "--full"))
 _LISTING = frozenset(("-a", "-l", "-c"))
 _RESERVED = frozenset(("for", "in", "do", "done", "while", "until", "if", "then", "else", "elif", "fi", "case",
                        "esac", "select", "function", "time", "coproc"))
-# Bash's special names a loop variable must not be: the docstring's list (every other special name is all caps,
-# which a loop variable must not be either) and the two that hold a lowercase letter.
-_SPECIAL_NAMES = frozenset(("EUID", "UID", "PPID", "RANDOM", "SRANDOM", "IFS", "LINENO", "SECONDS", "EPOCHSECONDS",
-                            "EPOCHREALTIME", "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "auto_resume", "histchars"))
-# What may follow `||` after a shape.
-_TRAILERS = frozenset(("true", ":"))
+# The operators of a trailing `|| CMD` or `&& CMD`.
+_ANDOR = (("op", "||", None), ("op", "&&", None))
 # The characters that make a "..." string an expansion.
 _DQ_SPECIAL = "$`\\"
 _SEPS = (("op", ";", None), ("op", "\n", None))
@@ -445,7 +488,11 @@ def _seconds(word):
 
 
 def _slept(run):
-    """The seconds the simple command run sleeps: its N for `sleep N`, else 0."""
+    """The seconds the simple command run sleeps: its N for `sleep N`, else 0; for `X || CMD` or `X && CMD`, the
+    sleeps of X and CMD."""
+    k = _andor(run)
+    if k < len(run):
+        return _slept(run[:k]) + _slept(run[k + 1:])
     if not run or not _w(run[0], "sleep"):
         return 0
     return sum(_seconds(t[1]) or 0 for t in run[1:] if t[0] == "w")
@@ -459,19 +506,29 @@ def _unredirected(run):
     return run[:k]
 
 
-def _trailer(toks, i):
-    """The index past a `|| true` or `|| :` at toks[i], or i when there is none."""
-    if (0 <= i and i + 1 < len(toks) and toks[i] == ("op", "||", None) and _w(toks[i + 1])
-            and toks[i + 1][1] in _TRAILERS):
-        return i + 2
+def _andor(run):
+    """The index of the first `||` or `&&` in run, or len(run)."""
+    for k, t in enumerate(run):
+        if t in _ANDOR:
+            return k
+    return len(run)
+
+
+def _trailer(toks, i, names, var=None):
+    """The index past a `|| CMD` or `&& CMD` at toks[i] that reaches the next `;`, newline or the end, CMD a simple
+    command named in names (_simple; redirections from R only for _BENIGN); i when there is none."""
+    if i < len(toks) and toks[i] in _ANDOR:
+        e = _upto_sep(toks, i + 1)
+        if _simple(toks[i + 1:e], names, redirs=names is _BENIGN, var=var):
+            return e
     return i
 
 
 def _loop_var(name):
-    """True for a loop variable V: an identifier holding a lowercase letter, not starting with BASH, and neither a
-    reserved word nor one of _SPECIAL_NAMES."""
+    """True for a loop variable V: an identifier holding a lowercase letter, not starting with BASH, and not a
+    reserved word."""
     return (bool(_NAME_RE.fullmatch(name)) and any("a" <= ch <= "z" for ch in name) and not name.startswith("BASH")
-            and name not in _RESERVED and name not in _SPECIAL_NAMES)
+            and name not in _RESERVED)
 
 
 def _signal(run, k, who):
@@ -638,8 +695,14 @@ def _for(toks, i):
     j = _seps(toks, j + 1)
     if not (j < n and _w(toks[j], "do")):
         raise _Refused
-    end, runs = _body(toks, j + 1, lambda run: _kill_var(run, var) or _simple(run, _FOR_BODY, var=var))
-    if sum(1 for run in runs if _kill_var(run, var)) != 1:
+
+    def check(run):
+        k = _andor(run)
+        if k < len(run):
+            return _kill_var(run[:k], var) and _trailer(run, k, _FOR_BODY, var) == len(run)
+        return _kill_var(run, var) or _simple(run, _FOR_BODY, var=var)
+    end, runs = _body(toks, j + 1, check)
+    if sum(1 for run in runs if _kill_var(run[:_andor(run)], var)) != 1:
         raise _Refused
     return ("signal", lit), end, runs
 
@@ -667,21 +730,25 @@ def _wait(toks, i):
 
 
 def _element(toks, i):
-    """(the shape found, or None for a benign command; the index past the element; its simple commands that can
-    sleep) for the element at toks[i]; raise _Refused for anything else. A shape may end with `|| true` or `|| :`,
-    and its signalling command with redirections from R."""
+    """(the shape found, or None for a benign command; the index past the element; its simple commands whose sleeps
+    can run before the shape: a benign command itself, a (b) body, and nothing for (d), whose pgrep runs before
+    its body) for the element at toks[i]; raise _Refused for anything else. A shape may end with one `|| CMD` or
+    `&& CMD`, CMD benign, and its signalling command with redirections from R."""
     t = toks[i]
     if _w(t, "for") or _w(t, "while") or _w(t, "until"):
         found, end, runs = (_for if _w(t, "for") else _wait)(toks, i)
-        return found, _trailer(toks, end), runs
+        return found, _trailer(toks, end, _BENIGN), runs if _w(t, "for") else []
     j = _upto_sep(toks, i)
     run = toks[i:j]
-    core = run[:-2] if len(run) > 2 and _trailer(run, len(run) - 2) == len(run) else run
+    k = _andor(run)
+    if k < len(run) and _trailer(toks, i + k, _BENIGN) != j:
+        raise _Refused
+    core = run[:k]
     for shape in (_pkill, _kill_sub, _xargs_kill):
         lit = shape(_unredirected(core))
         if lit is not None:
             return ("signal", lit), j, []
-    if core is run and _simple(run, _BENIGN, redirs=True):
+    if k == len(run) and _simple(run, _BENIGN, redirs=True):
         return None, j, [run]
     raise _Refused
 
@@ -866,7 +933,7 @@ def main(argv):
         _emit_line(_WORKER_LINE, sys.stderr)
         return 0
     try:
-        payload = _read_payload()
+        payload = _read_complete()
     except Exception:
         payload = None  # a closed or failing stdin, over 16 MiB, incomplete, or not JSON: _decide notes it
     try:
@@ -883,9 +950,11 @@ def _self_test():
     import hashlib
     import io
     import shutil
+    import signal
     import stat
     import subprocess
     import tempfile
+    import threading
     import tokenize
     import unittest
 
@@ -992,6 +1061,21 @@ def _self_test():
         # sleeps within the 60-second bound, a mixed-case loop variable, and a sleep after the shape
         "sleep 30; sleep 30; pkill -f qa-x/", "sleep 1m; pkill -f qa-x/", "pkill -f qa-x/; sleep 99999d",
         "for Pid in $(pgrep -f qa-x/); do kill $Pid; done",
+        # R right after the last word, as bash reads it: `>` ends the word (the QA round 2 table)
+        "pkill -f qa-r2-adj/>/dev/null", "kill $(pgrep -f qa-r2-adj/)>/dev/null", "pkill -f qa-r2-adj/ >/dev/null",
+        "while pgrep -f qa-x/>/dev/null; do sleep 1; done", "pgrep -f qa-x/ | xargs kill>/dev/null",
+        "pkill -f qa-x/&>/dev/null", 'pkill -f "qa-x/">/dev/null 2>&1',
+        # a (d) body's sleeps are not counted: its pgrep runs before any of them
+        "while pgrep -f qa-x/ >/dev/null; do sleep 61; done", "while pgrep -f qa-x/ >/dev/null; do sleep 300; done",
+        "until ! pgrep -f qa-x/ >/dev/null; do sleep 5m; done", "while pgrep -f qa-x/; do sleep 300; done",
+        # one trailing `|| CMD` or `&& CMD`, CMD benign, runs after the shape (or the (b) kill) has run
+        "pkill -f qa-x/ || echo none", "pkill -f qa-x/ && echo stopped",
+        "pkill -f qa-x/ 2>/dev/null || echo 'not running'", "pkill -f qa-x/ || true x",
+        "for p in $(pgrep -f qa-x/); do kill $p 2>/dev/null || true; done",
+        'for p in $(pgrep -f qa-x/); do kill $p || echo "$p"; done', "while pgrep -f qa-x/; do sleep 1; done && date",
+        # auto_resume and histchars are neither readonly nor change the value assigned
+        "for histchars in $(pgrep -f qa-x/); do kill $histchars; done",
+        "for auto_resume in $(pgrep -f qa-x/); do kill $auto_resume; done",
     ]
     # Elements that would keep a shape from running or from reaching the shell: each must take the note.
     false_deny_witnesses = [
@@ -1005,9 +1089,10 @@ def _self_test():
         "for p in $(pgrep -f qa-x/); do echo \"-n\"; kill $p; done", "while pgrep -f qa-x/; do echo '-e'; done",
         "sleep 99999d; pkill -f qa-x/", "sleep 30; sleep 31; pkill -f qa-x/",
         "for p in $(pgrep -f qa-x/); do sleep 61; kill $p; done",
+        "for p in $(pgrep -f qa-x/); do kill $p && sleep 61; done", "sleep 61; while pgrep -f qa-x/; do :; done",
     ] + ["for V in $(pgrep -f qa-x/); do kill $V; done".replace("V", name) for name in (
         "RANDOM", "SRANDOM", "IFS", "LINENO", "EPOCHSECONDS", "EPOCHREALTIME", "SECONDS", "PPID", "UID", "EUID",
-        "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_pid", "MYPID", "_", "auto_resume", "histchars")]
+        "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_pid", "MYPID", "_")]
     # The counterexamples: each must not be denied; each gets a note.
     counter_vectors = [
         "pkill -f 'qa2451newline\nend'",
@@ -1026,9 +1111,28 @@ def _self_test():
 
     def newer_syntax(text):
         """The (form, line) of each syntax newer than Python 3.4 that parsing with the 3.4 grammar setting lets
-        through: a starred item in a display, `**` in a dict display, a call with a positional or a second `*`
-        after `*`, or with anything after `**`, and a trailing comma after a starred parameter or argument."""
+        through and this scan knows: a starred item in a display, `**` in a dict display, a call with a positional
+        or a second `*` after `*`, or with anything after `**`, a trailing comma after a starred parameter or
+        argument (in a lambda too), a decorator that is not a dotted name or a call of one, a parenthesized with,
+        and continue inside finally."""
         found = []
+        skip = (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT)
+        toks = [t for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type not in skip]
+        at = dict((t.start, k) for k, t in enumerate(toks))  # the file is ASCII, so ast and tokenize columns agree
+
+        def closing(k):
+            """The index of the token that closes the bracket at toks[k]."""
+            depth = 0
+            for m in range(k, len(toks)):
+                if toks[m].string in ("(", "[", chr(123)):
+                    depth += 1
+                elif toks[m].string in (")", "]", chr(125)):
+                    depth -= 1
+                    if not depth:
+                        return m
+            return len(toks) - 1
+        tries = tuple(getattr(ast, name) for name in ("Try", "TryStar") if hasattr(ast, name))
+        defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
         for node in ast.walk(ast.parse(text)):
             if isinstance(node, (ast.List, ast.Tuple, ast.Set)) and not isinstance(getattr(node, "ctx", None),
                                                                                    ast.Store):
@@ -1041,20 +1145,49 @@ def _self_test():
                 double = [k for k, kw in enumerate(node.keywords) if kw.arg is None]
                 if stars and stars != [len(node.args) - 1] or double and double != [len(node.keywords) - 1]:
                     found.append(("call", node.lineno))
-        skip = (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT)
-        toks = [t for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type not in skip]
-        starred = []  # one flag per open bracket: a `*` or `**` began one of its items
+            if isinstance(node, defs):
+                for d in node.decorator_list:
+                    e = d.func if isinstance(d, ast.Call) else d
+                    while isinstance(e, ast.Attribute):
+                        e = e.value
+                    k = at.get((e.lineno, e.col_offset), 0)
+                    if not isinstance(e, ast.Name) or not k or toks[k - 1].string != "@":
+                        found.append(("decorator", d.lineno))
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                k = at[(node.lineno, node.col_offset)]
+                k += toks[k].string == "async"
+                if toks[k + 1].string == "(" and toks[closing(k + 1) + 1].string == ":":
+                    if len(node.items) > 1 or node.items[0].optional_vars is not None:
+                        found.append(("with", node.lineno))
+            elif isinstance(node, tries):
+                stack = list(node.finalbody)
+                while stack:
+                    st = stack.pop()
+                    if isinstance(st, ast.Continue):
+                        found.append(("finally", st.lineno))
+                    elif isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+                        stack.extend(st.orelse)  # a continue in the loop's body is that loop's
+                    elif not isinstance(st, defs):
+                        stack.extend(c for c in ast.iter_child_nodes(st)
+                                     if isinstance(c, (ast.stmt, ast.excepthandler)))
+        starred = []  # one [flag, lambda] per open bracket or lambda parameter list: a `*` or `**` began an item
         for k, t in enumerate(toks):
+            if t.type == tokenize.NAME and t.string == "lambda":
+                starred.append([False, True])
             if t.type != tokenize.OP:
                 continue
             if t.string in ("(", "[", chr(123)):
-                starred.append(False)
+                starred.append([False, False])
             elif t.string in (")", "]", chr(125)):
                 starred.pop()
-            elif t.string in ("*", "**") and starred and toks[k - 1].string in ("(", ","):
-                starred[-1] = True
-            elif t.string == "," and starred and starred[-1] and toks[k + 1].string == ")":
-                found.append(("comma", t.start[0]))
+            elif t.string == ":" and starred and starred[-1][1]:
+                starred.pop()  # the end of a lambda's parameters
+            elif t.string in ("*", "**") and starred and toks[k - 1].string in ("(", ",", "lambda"):
+                starred[-1][0] = True
+            elif t.string == "," and starred and starred[-1][0]:
+                nxt = toks[k + 1].string
+                if nxt == ")" or nxt == ":" and starred[-1][1]:
+                    found.append(("comma", t.start[0]))
         return found
 
     class T(unittest.TestCase):
@@ -1117,8 +1250,9 @@ def _self_test():
             for command in ("echo '# self-match-ok: x'; " + d1, "echo ' # self-match-ok: x'; " + d1,
                             "echo \"# self-match-ok\"; " + d1):
                 self.assertDeny(command)
-            # in `$(...)#` the `#` continues the word: kill gets `PID#`, so when the shell's id is the last one
-            # pgrep prints it is not signalled, and no deny is proved either; it takes the note
+            # in `$(...)#` the `#` continues the substitution's last word: kill gets `PID#` for the last id pgrep
+            # prints, so when that is the shell's it is not signalled, and no deny is proved either; it takes the
+            # note. After a subshell's `)` bash reads a comment, but the hook does not accept it (hook policy).
             for command in (d1 + " # self-match-okay", d1 + "#self-match-ok", "pkill sleep '# self-match-ok'",
                             "# self-match-ok\n" + d1 + " # later", "kill $(pgrep -f qa-x/)# self-match-ok",
                             "(pkill -f qa-x/)# self-match-ok"):
@@ -1152,8 +1286,14 @@ def _self_test():
                             "pkill -f ''", "pkill -f \"qa x\"", "pkill -f qa~x",
                             "echo -n a; pkill -f qa-x/", "cd ~; pkill -f qa-x/", "true\n;pkill -f qa-x/",
                             "pkill -f qa-x/;; echo", "pkill -f qa-x/ || exit", "! pkill -f qa-x/",
-                            "pkill -f qa-x/ || true || true", "pkill -f qa-x/ || true x",
-                            "echo a || true; pkill -f qa-x/",
+                            "pkill -f qa-x/ || true || true", "pkill -f qa-x/ || echo a && echo b",
+                            "echo a || true; pkill -f qa-x/", "pkill -f qa-x/ || pkill -f qa-y/",
+                            "for p in $(pgrep -f qa-x/); do kill $p || break; done",
+                            "for p in $(pgrep -f qa-x/); do echo a || true; kill $p; done",
+                            "for p in $(pgrep -f qa-x/); do kill $p || kill $p; done",
+                            "pkill -f qa-x/ && sleep infinity", "pkill -f qa-x/ || echo $p",
+                            "pkill -f qa-x/2>&1", "pkill -f qa-x/>>/dev/null", "pkill -f qa-x/>log",
+                            "pkill -f qa-x/<x", "pkill -f qa-x/(", "pkill -f 'python worker.py'",
                             "pkill 2>/dev/null -f qa-x/", "pgrep -f qa-x/ >/dev/null | xargs kill",
                             "for p in $(pgrep -f qa-x/ >/dev/null); do kill $p; done"):
                 self.assertNote(command)
@@ -1242,6 +1382,27 @@ def _self_test():
                 sys.stdout = old
             self.assertEqual(json.loads(text), dict(systemMessage=_NOTE_PAYLOAD))
 
+        def test_09_fragmented_payload(self):
+            # a whole JSON payload, an idle interval, then more bytes: the input as a whole is not one JSON object,
+            # so it gets the cannot-evaluate note, never silence; the same interval before the end of input (or
+            # before blanks) leaves the payload read as sent
+            whole, note = payload_bytes("echo hi"), json.dumps(dict(systemMessage=_NOTE_PAYLOAD)).encode() + b"\n"
+            for chunks, want in (((whole, b"garbage"), note), ((payload_bytes("pkill -f qa-x/"), b"x"), note),
+                                 ((whole, b""), b""), ((whole, b"\n "), b""), ((whole[:20], whole[20:]), b"")):
+                p = subprocess.Popen([sys.executable, "-I", "-S", "-B", here], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
+                try:
+                    p.stdin.write(chunks[0])
+                    p.stdin.flush()
+                    time.sleep(0.2)
+                    p.stdin.write(chunks[1])  # the hook still reads: a BrokenPipeError here fails the test
+                    out, err = p.communicate(timeout=30)
+                finally:
+                    if p.poll() is None:
+                        p.kill()
+                        p.communicate()
+                self.assertEqual((p.returncode, out, err), (0, want, b""), chunks)
+
         def test_10_argv(self):
             old = sys.stdout
             sys.stdout = io.StringIO()
@@ -1315,11 +1476,24 @@ def _self_test():
         def test_12_newer_syntax_scan(self):
             # each form the 3.4 grammar setting accepts though Python 3.4 does not
             for snippet in ("[*a]\n", "(*a, b)\n", "{*a}\n", "{**a}\n", "f(*a, b)\n", "f(*a, *b)\n",
-                            "f(**a, **b)\n", "f(**a, b=1)\n", "def f(*, a,):\n    pass\n", "f(*a,)\n"):
+                            "f(**a, **b)\n", "f(**a, b=1)\n", "def f(*, a,):\n    pass\n", "f(*a,)\n",
+                            "x[*a]\n", "def f():\n    return *a, b\n", "f = lambda *a,: 0\n",
+                            "f = lambda *, a,: 0\n", "f = lambda **a,: 0\n", "@a[0].b\ndef f():\n    pass\n",
+                            "@(a)\ndef f():\n    pass\n", "@(a)(b)\nclass C:\n    pass\n",
+                            "with (open(a) as b, open(c) as d):\n    pass\n", "with (a as b):\n    pass\n",
+                            "for x in y:\n    try:\n        pass\n    finally:\n        continue\n",
+                            "for x in y:\n    try:\n        pass\n    finally:\n        if x:\n            continue\n",
+                            "for x in y:\n    try:\n        pass\n    finally:\n        for z in x:\n"
+                            "            pass\n        else:\n            continue\n"):
                 ast.parse(snippet, feature_version=(3, 4))
                 self.assertNotEqual(newer_syntax(snippet), [], snippet)
             for snippet in ("a, *b = c\n", "f(a, *b)\n", "f(a, *b, c=1, **d)\n", "def f(a, *b, **c):\n    pass\n",
-                            "x = (1, 2 * 3,)\n", "f(a,)\n"):
+                            "x = (1, 2 * 3,)\n", "f(a,)\n", "f = lambda a,: 0\n", "f = lambda *a: 0\n",
+                            "d = dict(k=lambda *a: 0)\n", "f = lambda a=x[1:2], *b: a\n",
+                            "@a.b(c)\ndef f():\n    pass\n", "@a\nclass C:\n    pass\n",
+                            "with (a) as b, c:\n    pass\n", "with (a):\n    pass\n", "with a as b:\n    pass\n",
+                            "try:\n    pass\nfinally:\n    for x in y:\n        continue\n",
+                            "for x in y:\n    try:\n        continue\n    finally:\n        pass\n"):
                 self.assertEqual(newer_syntax(snippet), [], snippet)
 
         def test_12_no_internal_names(self):
@@ -1635,18 +1809,22 @@ def _self_test():
             return ["for V in $(pgrep -f qa-x/); do kill $V; done".replace("V", name) for name in names]
 
         def test_m35_loop_variable_lowercase(self):
+            # the lowercase rule is what leaves out bash's all-caps special names
             self.kill_mutant(dict(_loop_var=lambda name: bool(_NAME_RE.fullmatch(name)) and not name.startswith("BASH")
-                                  and name not in _RESERVED and name not in _SPECIAL_NAMES),
-                             self.loop_vars("MYPID", "_", "PIDS"), "note", "deny")
+                                  and name not in _RESERVED),
+                             self.loop_vars("MYPID", "_", "PIDS", "RANDOM", "UID", "IFS", "SECONDS"), "note", "deny")
 
         def test_m36_loop_variable_special(self):
-            self.kill_mutant(dict(_SPECIAL_NAMES=frozenset()), self.loop_vars("auto_resume", "histchars"), "note",
-                             "deny")
+            # auto_resume and histchars are neither readonly nor change the value assigned: excluding them, as the
+            # previous revision did, turns two true denies into notes
+            real = _loop_var
+            self.kill_mutant(dict(_loop_var=lambda name: real(name) and name not in ("auto_resume", "histchars")),
+                             self.loop_vars("auto_resume", "histchars"), "deny", "note")
 
         def test_m37_loop_variable_bash_prefix(self):
             self.kill_mutant(dict(_loop_var=lambda name: bool(_NAME_RE.fullmatch(name))
                                   and any("a" <= ch <= "z" for ch in name)
-                                  and name not in _RESERVED and name not in _SPECIAL_NAMES),
+                                  and name not in _RESERVED),
                              self.loop_vars("BASH_pid"), "note", "deny")
 
         def test_m38_sleep_total(self):
@@ -1655,9 +1833,11 @@ def _self_test():
                               "for p in $(pgrep -f qa-x/); do sleep 61; kill $p; done"], "note", "deny")
 
         def test_m39_trailer(self):
-            self.kill_mutant(dict(_trailer=lambda toks, i: i),
+            self.kill_mutant(dict(_trailer=lambda toks, i, names, var=None: i),
                              ["pkill -f qa-x/ || true", "for p in $(pgrep -f qa-x/); do kill $p; done || :",
-                              "while pgrep -f qa-x/; do sleep 1; done || true"], "deny", "note")
+                              "while pgrep -f qa-x/; do sleep 1; done || true", "pkill -f qa-x/ || echo none",
+                              "pkill -f qa-x/ && echo stopped", "pkill -f qa-x/ 2>/dev/null || echo 'not running'",
+                              "for p in $(pgrep -f qa-x/); do kill $p 2>/dev/null || true; done"], "deny", "note")
 
         def test_m40_signaller_redirections(self):
             self.kill_mutant(dict(_unredirected=lambda run: run),
@@ -1675,6 +1855,76 @@ def _self_test():
         def test_m42_opt_out_after_paren(self):
             old = re.compile(r"(?<![^ \t\n;&|()])#[ \t]*self-match-ok(?:[ \t:][^\n]*)?\Z")
             self.kill_mutant(dict(_OPT_OUT_RE=old), ["kill $(pgrep -f qa-x/)# self-match-ok"], "note", "silent")
+
+        def test_m43_adjacent_redirection(self):
+            # as in bash, `>` ends a word: R needs no blank before it
+            self.kill_mutant(dict(_AFTER_WORD=_AFTER_WORD - frozenset(">")),
+                             ["pkill -f qa-r2-adj/>/dev/null", "kill $(pgrep -f qa-r2-adj/)>/dev/null",
+                              "while pgrep -f qa-x/>/dev/null; do sleep 1; done"], "deny", "note")
+
+        def test_m44_wait_body_sleeps_not_counted(self):
+            # a (d) loop's pgrep runs before any body sleep, so the body's sleeps cannot keep the shape from running
+            real = _element
+
+            def mutant(toks, i):
+                found, end, runs = real(toks, i)
+                if _w(toks[i], "while") or _w(toks[i], "until"):
+                    runs = _wait(toks, i)[2]
+                return found, end, runs
+            self.kill_mutant(dict(_element=mutant),
+                             ["while pgrep -f qa-x/ >/dev/null; do sleep 61; done",
+                              "while pgrep -f qa-x/ >/dev/null; do sleep 300; done",
+                              "until ! pgrep -f qa-x/ >/dev/null; do sleep 5m; done"], "deny", "note")
+
+        def test_m45_end_of_input_required(self):
+            # in process: the vendored reader alone returns a whole JSON prefix an idle interval follows; reading to
+            # the end of input refuses the bytes after it
+            whole = payload_bytes("echo hi")
+
+            def read(reader, tail):
+                r, w = os.pipe()
+
+                def feed():
+                    try:
+                        os.write(w, whole)
+                        time.sleep(0.2)
+                        if tail:
+                            os.write(w, tail)
+                    finally:
+                        os.close(w)
+                t = threading.Thread(target=feed)
+                t.start()
+                try:
+                    return reader(r)
+                except ValueError:
+                    return "refused"
+                finally:
+                    t.join()
+                    os.close(r)
+            self.assertEqual(read(_read_complete, b"garbage"), "refused")
+            self.assertEqual(read(_read_complete, b"\n"), json.loads(whole))
+            self.assertEqual(read(_read_complete, b""), json.loads(whole))
+            self.assertEqual(read(_read_payload, b"garbage"), json.loads(whole))  # the mutant: no end required
+
+        def test_15_adjacent_redirection_probe(self):
+            # non-signalling: pgrep -c in the wrapper form (a command after the eval), in its own process group,
+            # under a timeout, the group killed if it still runs; the pattern selects the shell running it
+            exe = trusted_bash()
+            if exe is None or not os.path.isfile("/usr/bin/pgrep") or not os.path.isdir("/proc/self"):
+                self.skipTest("SKIPPED, no trusted bash, /usr/bin/pgrep or /proc")
+            pattern = "qa-r3-adj-%d/" % os.getpid()
+            self.assertEqual(outcome("pkill -f " + pattern + ">/dev/null"), "deny")
+            wrapper = "eval 'pgrep -c -f " + pattern + ">/dev/null' < /dev/null; echo rc=$?; pwd -P >/dev/null"
+            p = subprocess.Popen([exe, "--norc", "--noprofile", "-c", wrapper], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, env=dict(LC_ALL="C", PATH="/usr/bin:/bin"), cwd="/",
+                                 start_new_session=True)
+            try:
+                out, err = p.communicate(timeout=10)
+            finally:
+                if p.poll() is None:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.communicate()
+            self.assertEqual(out, b"rc=0\n", err)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
     result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)
