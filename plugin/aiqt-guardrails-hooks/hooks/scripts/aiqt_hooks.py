@@ -7113,7 +7113,8 @@ _NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 # or the ':' builtin), and a truncating stdout sink after '|' that, under default pipeline semantics,
 # replaces the checker exit status with its own and can cut the failing tail of the output. tee/cat/less
 # are NOT truncating and never qualify. The deny tier uses its own sink allow-list (_truncating_sink_kind:
-# head, tail, cut, grep -m/-q/-c/-l/-L), and the note tier also counts any sed or awk program.
+# head or tail with one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l), and the note tier also counts
+# any other head, tail, cut or limiting grep spelling and any sed or awk program.
 _EXIT_SWALLOWS = frozenset(("true", ":"))
 _TRUNCATING_SINKS = frozenset(("head", "tail"))
 
@@ -7229,10 +7230,11 @@ def _is_checker_segment(tokens):
 # name costs the broad tier's note and never a false refusal: the first simple command of a pipeline (no
 # reserved word, no substitution, stdout not redirected) is a run form listed in _GATE_VERIFY_RUNS
 # (_is_verification_run), and its stdout reaches, through zero or more plain pass-through stages
-# (_gate_plain_filter: cat, tee, tr, uniq), a stage that cuts its stdin (_truncating_sink_kind: head, tail,
-# cut, or a grep-family limiting option). Every other shape (compound and grouped producers, substitutions,
-# here-strings, process substitution, wrappers beyond env/nice/timeout/time, an unlisted tool, subcommand,
-# operand or option, a sed, awk, sort or grep filter stage, a sed or awk program as the last stage) keeps the
+# (_gate_plain_filter: cat, tee, tr, uniq), a sink on the sink allow-list (_truncating_sink_kind: head or tail
+# with one positive line count, or a grep-family stage with exactly one limiting flag and one pattern). Every
+# other shape (compound and grouped producers, substitutions, here-strings, process substitution, wrappers
+# beyond nice/timeout/time, a producer whose environment the command sets, an unlisted tool, subcommand,
+# operand or option, a sed, awk, sort or grep filter stage, a sink spelling off the list, cut) keeps the
 # note tier (_gate_flow_note). The PreToolUse hook sees only the command, so the run form is the lexical
 # stand-in for "its status is the verdict".
 _GATE_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
@@ -7262,41 +7264,50 @@ _GATE_VERIFY_FLAGS = frozenset(("--self-test", "--selftest", "--check", "--verif
 
 
 def _gate_form(sub=(), short="", short_values="", long=(), long_values=(), operands=False, required=None,
-               assign=False, numeric="", refuse=()):
+               numeric="", refuse=(), valid=()):
     """One run form of _GATE_VERIFY_RUNS: the subcommand words that must lead its operands, the short flag
     letters, the short letters that take a value, the long (or single-dash multi-letter) flags and value
-    options, whether further positional operands are accepted, an option the form requires, whether
-    VAR=value operands are accepted (make), the value letters whose separated value is consumed only when
-    it is all digits, and (option, value) pairs that leave the form ('go test -run ^$' runs no test)."""
+    options, whether further positional operands are accepted, an option the form requires, the value
+    letters whose separated value is consumed only when it is all digits, (option, value) pairs that leave
+    the form ('go test -run ^$' runs no test), and (option, pattern) pairs whose value must match the pattern
+    in full ('go test -shuffle' takes off, on or an integer seed)."""
     return (tuple(sub), short, short_values, frozenset(long), frozenset(long_values), operands, required,
-            assign, numeric, frozenset(refuse))
+            numeric, frozenset(refuse), dict((name, re.compile(pattern)) for name, pattern in valid))
 
 
+# An option that supplies configuration on the command line (pytest -o/--override-ini and -c, ruff --config,
+# which also takes inline TOML such as fix-only=true, mypy --config-file, eslint -c/--config, tox -c) is
+# never listed: it can set a mode the table excludes (pytest -o addopts=--collect-only). Neither is a leading
+# VAR=value word, the env wrapper or a make VAR=value argument (PYTEST_ADDOPTS, MAKEFLAGS=n): _is_verification_run.
 _GATE_PYTEST_FORM = _gate_form(
-    short="qvxsl", short_values="kmpnrWoc", operands=True,
+    short="qvxsl", short_values="kmpnrW", operands=True,
     long=("--quiet", "--verbose", "--exitfirst", "--lf", "--last-failed", "--ff", "--failed-first", "--sw",
           "--stepwise", "--nf", "--new-first", "--showlocals", "--disable-warnings", "--disable-pytest-warnings",
           "--strict-markers", "--strict-config", "--no-header", "--no-summary", "--runxfail", "--cache-clear",
-          "--pyargs", "--cov"),
+          "--pyargs", "--cov", "--cov-branch", "--doctest-modules"),
     long_values=("--tb", "--maxfail", "--durations", "--durations-min", "--junitxml", "--junit-xml",
                  "--cov-report", "--cov-fail-under", "--cov-config", "--rootdir", "--basetemp", "--import-mode",
                  "--color", "--capture", "--timeout", "--deselect", "--ignore", "--ignore-glob",
-                 "--override-ini", "--confcutdir", "--log-level", "--log-cli-level", "--numprocesses", "--dist",
+                 "--confcutdir", "--log-level", "--log-cli-level", "--numprocesses", "--dist",
                  "--maxprocesses"))
-# ruff: quiet, silent and no-cache; its -e is --exit-zero and its -w is --watch, so neither is listed.
-_GATE_RUFF_SHORT = "qsn"
-_GATE_RUFF_COMMON = ("--quiet", "--silent", "--no-cache", "--preview", "--no-preview", "--isolated")
-_GATE_RUFF_VALUES = ("--config", "--line-length", "--target-version", "--exclude", "--extend-exclude",
+# ruff: quiet, silent, verbose and no-cache; its -e is --exit-zero and its -w is --watch, so neither is listed.
+_GATE_RUFF_SHORT = "qsvn"
+_GATE_RUFF_COMMON = ("--quiet", "--silent", "--verbose", "--no-cache", "--preview", "--no-preview", "--isolated",
+                     "--force-exclude")
+_GATE_RUFF_VALUES = ("--line-length", "--target-version", "--exclude", "--extend-exclude",
                      "--cache-dir")
+# make: -s (--silent, --quiet), -k (--keep-going), -C (--directory), -f (--file, --makefile), -I
+# (--include-dir), -j (--jobs), -l (--load-average, --max-load) and --no-print-directory (GNU Make 4.4.1).
 _GATE_MAKE_FORM = dict(short="sk", short_values="CfIjl", numeric="jl",
-                       long=("--silent", "--keep-going", "--no-print-directory"),
-                       long_values=("--directory", "--file", "--makefile", "--jobs", "--include-dir"), assign=True)
+                       long=("--silent", "--quiet", "--keep-going", "--no-print-directory"),
+                       long_values=("--directory", "--file", "--makefile", "--jobs", "--include-dir",
+                                    "--load-average", "--max-load"))
 # The deny tier's PRODUCER ALLOW-LIST: the known verification invocations, each written as its tool and the
 # exact run forms it accepts (_gate_form). A subcommand, positional operand or option outside a form leaves
 # the run outside the deny tier (it only notes), so an information or maintenance mode (--help, --version,
 # --collect-only, --cache-show, a listing, a config dump, a dry run, a fixer, an installer) is never listed.
-# A python interpreter is judged by _gate_python_run; the env, nice, timeout and time wrappers are peeled
-# first.
+# A python interpreter is judged by _gate_python_run; the nice, timeout and time wrappers are peeled first,
+# and a leading VAR=value word or the env wrapper leaves the run outside the table (_gate_peel).
 _GATE_VERIFY_RUNS = dict((
     ("pytest", (_GATE_PYTEST_FORM,)),
     ("mypy", (_gate_form(
@@ -7304,14 +7315,14 @@ _GATE_VERIFY_RUNS = dict((
         long=("--strict", "--ignore-missing-imports", "--pretty", "--show-error-codes", "--hide-error-codes",
               "--no-error-summary", "--show-column-numbers", "--no-incremental", "--warn-unused-ignores",
               "--check-untyped-defs", "--disallow-untyped-defs", "--show-traceback", "--no-color-output",
-              "--namespace-packages", "--explicit-package-bases", "--verbose"),
-        long_values=("--package", "--module", "--config-file", "--python-version", "--cache-dir", "--exclude",
+              "--namespace-packages", "--explicit-package-bases", "--verbose", "--warn-unreachable"),
+        long_values=("--package", "--module", "--python-version", "--cache-dir", "--exclude",
                      "--follow-imports", "--platform")),)),
     ("eslint", (_gate_form(
-        short_values="cf", operands=True,
+        short_values="f", operands=True,
         long=("--quiet", "--cache", "--no-eslintrc", "--no-inline-config", "--report-unused-disable-directives",
               "--color", "--no-color", "--no-error-on-unmatched-pattern", "--no-config-lookup"),
-        long_values=("--max-warnings", "--config", "--format", "--ext", "--ignore-path", "--ignore-pattern",
+        long_values=("--max-warnings", "--format", "--ext", "--ignore-path", "--ignore-pattern",
                      "--rule", "--parser", "--plugin", "--cache-location", "--env", "--global",
                      "--resolve-plugins-relative-to")),)),
     ("ruff", (_gate_form(sub=("check",), short=_GATE_RUFF_SHORT, operands=True,
@@ -7326,19 +7337,21 @@ _GATE_VERIFY_RUNS = dict((
              _gate_form(sub=("run", "check")))),
     ("go", (_gate_form(
         sub=("test",), operands=True, refuse=(("-run", "^$"),),
-        long=("-v", "-race", "-short", "-failfast", "-cover", "-json", "-shuffle"),
+        valid=(("-shuffle", r"(?:off|on|-?[0-9]+)\Z"), ("-mod", r"(?:readonly|vendor)\Z")),
+        long=("-v", "-race", "-short", "-failfast", "-cover", "-json"),
         long_values=("-run", "-count", "-timeout", "-p", "-tags", "-coverprofile", "-covermode", "-coverpkg",
-                     "-cpu", "-skip")),)),
+                     "-cpu", "-skip", "-shuffle", "-mod")),)),
     ("cargo", (_gate_form(
-        sub=("test",), short="qv", short_values="pjF", operands=True,
-        long=("--release", "--workspace", "--all", "--all-features", "--no-default-features", "--lib", "--bins",
+        sub=("test",), short="qvr", short_values="pjF", operands=True,
+        long=("--release", "--all-targets", "--workspace", "--all", "--all-features", "--no-default-features",
+              "--lib", "--bins",
               "--tests", "--doc", "--quiet", "--verbose", "--locked", "--frozen", "--offline", "--no-fail-fast"),
         long_values=("--package", "--features", "--test", "--jobs", "--target", "--manifest-path", "--exclude",
                      "--profile")),
                _gate_form(sub=("fmt",), short="qv", required="--check",
                           long=("--check", "--all", "--quiet", "--verbose"),
                           long_values=("--package", "--manifest-path")))),
-    ("tox", tuple(_gate_form(sub=sub, short="rqv", short_values="ec", long=("--recreate", "--quiet", "--verbose"))
+    ("tox", tuple(_gate_form(sub=sub, short="rqv", short_values="e", long=("--recreate", "--quiet", "--verbose"))
                   for sub in ((), ("run",)))),
     ("nox", (_gate_form(
         short="rRvx", short_values="sekptf",
@@ -7359,18 +7372,23 @@ def _gate_word(token):
     return token.lstrip("\\").rsplit("/", 1)[-1].lower()
 
 
-def _gate_peel(argv):
+def _gate_peel(argv, producer=False):
     """The argv of the command a segment runs after leading VAR-assignment words and the env, nice, timeout
     and time wrappers with their option grammar (_GATE_WRAPPER_GRAMMAR; timeout's duration operand too) are
-    peeled; [] when no command word remains; None when a wrapper carries an option outside that grammar.
-    Purely lexical."""
+    peeled; [] when no command word remains; None when a wrapper carries an option outside that grammar. For
+    a PRODUCER (producer=True) a leading VAR=value word or an env wrapper is None too: the environment can
+    set the run's mode (PYTEST_ADDOPTS=--collect-only, MAKEFLAGS=n). Purely lexical."""
     i = _command_word_index(argv)
+    if producer and i:
+        return None
     n = len(argv)
     while i < n:
         word = _gate_word(argv[i])
         grammar = _GATE_WRAPPER_GRAMMAR.get(word)
         if grammar is None:
             return argv[i:]
+        if producer and word == "env":
+            return None
         value_opts, flag_opts = grammar
         i += 1
         while i < n:
@@ -7400,9 +7418,9 @@ def _gate_form_matches(form, args):
     """True when args are exactly one run of the _gate_form: every option is a listed flag or value option
     (a separated value never starts with '-', which may be an option the form does not list), the positional
     operands start with the form's subcommand words, with further operands only where the form takes them,
-    its required option is present, and no refused (option, value) pair appears. '--' and anything unlisted
-    leave the form."""
-    sub, short, short_values, long, long_values, operands, required, assign, numeric, refuse = form
+    its required option is present, no refused (option, value) pair appears, and every value a pattern
+    checks matches it. '--', a VAR=value operand and anything unlisted leave the form."""
+    sub, short, short_values, long, long_values, operands, required, numeric, refuse, valid = form
     positional = []
     seen = set()
     i = 0
@@ -7410,8 +7428,7 @@ def _gate_form_matches(form, args):
         tok = args[i]
         i += 1
         if not tok.startswith("-") or tok == "-":
-            if not (assign and _ENV_ASSIGN_RE.match(tok)):
-                positional.append(tok)
+            positional.append(tok)
             continue
         name, eq, value = tok.partition("=")
         if name in long or name in long_values:
@@ -7420,7 +7437,7 @@ def _gate_form_matches(form, args):
                     return False
                 value = args[i]
                 i += 1
-            if (name, value) in refuse:
+            if (name, value) in refuse or (name in valid and not valid[name].match(value)):
                 return False
             seen.add(name)
             continue
@@ -7469,8 +7486,9 @@ def _is_verification_run(tokens):
     command is the argv after _gate_peel; its word is a python interpreter judged by _gate_python_run, bash or
     sh running a _GATE_SCRIPT_PREFIXES script with no option or argument, or a tool in _GATE_VERIFY_RUNS whose args match one of its run forms (_gate_form_matches). Anything else,
     including every information, maintenance or listing mode of a listed tool, is not a verification run
-    here; the broad _is_checker_segment heuristic and _gate_verify_shaped still feed the note tier."""
-    argv = _gate_peel(tokens)
+    here; the broad _is_checker_segment heuristic and _gate_verify_shaped still feed the note tier. A run
+    whose environment the command sets (a leading VAR=value word or the env wrapper) is not one either."""
+    argv = _gate_peel(tokens, producer=True)
     if not argv:
         return False
     word = _gate_word(argv[0])
@@ -7589,7 +7607,7 @@ def _verification_sink(records):
                 break
             kind = _truncating_sink_kind(stage.argv)
             if kind is not None:
-                return _gate_word(_gate_peel(seg.argv)[0]), kind, tee, filtered
+                return _gate_word(_gate_peel(seg.argv, producer=True)[0]), kind, tee, filtered
             if (stage.sep_after not in _GATE_PIPES or _gate_stdout_redirected(stage)
                     or not _gate_plain_filter(stage.argv)):
                 break
@@ -7601,12 +7619,13 @@ def _verification_sink(records):
 
 def _verification_sink_message(hit):
     """The (reason, banner) of the deny-and-educate decision for a _verification_sink hit. It claims only the
-    allow-listed shape: a known verification invocation whose output reaches a stage that cuts it. The
+    allow-listed shape: a known verification invocation whose output reaches a sink on the allow-list, and
+    it says what that sink passes on (_truncating_sink_kind). The
     suggested capture runs the check alone with no pipe after it, to a file at an ABSOLUTE path
     (bash_absolute_paths denies a relative truncating redirect target), and the message never suggests an
     exit-status echo trailer (the rule's propagation clause). A tee file is never called the full output
     when a filter stage precedes the tee."""
-    word, sink, tee, filtered = hit
+    word, (label, effect), tee, filtered = hit
     if tee is None:
         held = ""
     elif filtered:
@@ -7616,14 +7635,14 @@ def _verification_sink_message(hit):
         held = "The tee stage writes '{}', but the pipeline's status is still not the check's. ".format(tee)
     return (
         "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification "
-        "runs, and its output is piped into '{}', which cuts its input. The rule: no piping a check to a "
+        "runs, and its output is piped into '{}', {}. The rule: no piping a check to a "
         "truncating sink. The sink can cut the lines that explain a failure, and by default the pipeline's exit "
         "status is the sink's, so a failing check can read as a pass ('set -o pipefail' keeps the status but "
         "still cuts the output). {}Run the check alone with its full output in a file at an absolute path and "
         "no pipe after it, for example `<command> > /abs/path/check.log 2>&1`, take the verdict from that "
-        "command's own exit status, then read the file in a separate step.".format(word, sink, held),
+        "command's own exit status, then read the file in a separate step.".format(word, label, effect, held),
         "AIQT guardrail: denied a known verification run piped into a truncating sink ({}) (rule gatdis); "
-        "write the full output to a file and read it.".format(sink))
+        "write the full output to a file and read it.".format(label))
 
 
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
@@ -7648,23 +7667,38 @@ def _gate_suffixes(argv):
     return [argv[m:] for m in range(k, len(argv))]
 
 
+_GATE_NOTE_TAIL = (" The hook does not prove that this stage receives the check's output or that it drops any of "
+                   "it, so this is a note, not a refusal. If the check gates this work, run it alone with its full "
+                   "output in a file at an absolute path and read the file, so its failure signal is not cut; if "
+                   "this is only an output glance, this is allowed.")
+
+
 def _gate_flow_note(records, command):
-    """gatdis note tier, for a command the canonical deny does not prove: True when a checker-shaped command
-    (_is_checker_segment or _gate_verify_shaped on a _gate_suffixes suffix, or a checker word right inside a
-    $( or backquote substitution) is followed by a pipe and, after that pipe, by a stage that may cut its
-    input (_gate_note_sink_kind on a suffix), or when such a substitution sits in a command with a raw
-    '| head' or '| tail'. Over-matching by design: it costs a note, never a refusal."""
+    """gatdis note tier, for a command the canonical deny does not prove: the note text, or None. It notes
+    when a checker word right inside a $( or backquote substitution sits in a command with a raw '| head' or
+    '| tail', and when a checker-shaped command (_is_checker_segment or _gate_verify_shaped on a
+    _gate_suffixes suffix, or such a substitution) is followed by a pipe and, after that pipe, by a stage that
+    may pass on only part of its input (_gate_note_sink_kind on a suffix). Each text claims only what its
+    reason proves. Over-matching by design: it costs a note, never a refusal."""
     subst = any(_is_checker_segment([w]) for w in _GATE_SUBST_WORD_RE.findall(command))
     if subst and _RAW_TRUNCATE_RE.search(command):
-        return True
+        return ("AIQT guardrail (rule gatdis, gate-discipline): a command substitution in this command runs a "
+                "command that looks like a check, and the command also pipes into 'head' or 'tail'." + _GATE_NOTE_TAIL)
     first = 0 if subst else next((i for i, seg in enumerate(records)
                                   if any(_is_checker_segment(s) or _gate_verify_shaped(s)
                                          for s in _gate_suffixes(seg.argv))), None)
     if first is None:
-        return False
+        return None
     pipe = next((p for p in range(first, len(records)) if records[p].sep_after in _GATE_PIPES), None)
-    return pipe is not None and any(_gate_note_sink_kind(s) is not None
-                                    for seg in records[pipe + 1:] for s in _gate_suffixes(seg.argv))
+    if pipe is None:
+        return None
+    kind = next((k for k in (_gate_note_sink_kind(s) for seg in records[pipe + 1:]
+                             for s in _gate_suffixes(seg.argv)) if k is not None), None)
+    if kind is None:
+        return None
+    return ("AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+            "pipe and, later in this command, by a stage that may pass on only part of what it reads ('{}')."
+            .format(kind) + _GATE_NOTE_TAIL)
 
 
 def _gate_weakening_fallback(command):
@@ -7717,8 +7751,9 @@ def gate_weakening(data):
     immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
     ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
     INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
-    through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a stage that cuts its stdin
-    (_truncating_sink_kind: head, tail, cut, grep -m/-q/-c/-l/-L, rg -m/-q/-c/-l) DENIES-and-educates, naming
+    through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
+    (_truncating_sink_kind: head or tail with no option or one positive line count, grep, egrep or fgrep
+    with exactly one of -m N/-q/-c/-l/-L and one pattern, rg with one of -q/-c/-l) DENIES-and-educates, naming
     the fix (run the check alone with its full output in a file at an absolute path and read it). The rule
     forbids piping a check to a truncating sink without conditions, and 'set -o pipefail' gives no exemption
     (it keeps the status but the output is still cut). The deny is held until the segment loop ends so a
@@ -7726,8 +7761,9 @@ def gate_weakening(data):
     other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
     '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
-    a substitution, a wrapper beyond env/nice/timeout/time, a sed, awk, sort or grep stage, a checker-shaped
-    or verify-option command followed by a pipe and later a stage that may cut its input). On a parse error
+    a substitution, a wrapper beyond nice/timeout/time, a producer whose environment the command sets, a sed,
+    awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
+    followed by a pipe and later a stage that may pass on only part of its input). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
     otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
@@ -7804,8 +7840,9 @@ def gate_weakening(data):
             if pending_note is None:
                 pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
-                    "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
-                    "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
+                    "is piped into '{}', whose exit status replaces the checker's under default pipeline "
+                    "semantics and which may pass on only part of its output. If it gates this work, run it "
+                    "bare (or redirect the output "
                     "to a file and read that) so its failure signal is not discarded; if it is only a benign "
                     "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
     # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
@@ -7816,13 +7853,9 @@ def gate_weakening(data):
         return _deny(reason, banner)
     if pending_note is not None:
         return _allow_note(pending_note)
-    if _gate_flow_note(records, command):
-        return _allow_note(
-            "AIQT guardrail (rule gatdis, gate-discipline): a checker-shaped command and a truncating stage "
-            "('head', 'tail', 'grep -m' and kin) follow a pipe in this command, in a shape the hook does not "
-            "trace (a compound or grouped stage, a substitution, or a wrapper). If the check gates this work, "
-            "run it alone with its full output in a file at an absolute path and read the file, so its "
-            "failure signal is not cut; if this is only an output glance, this is allowed.")
+    flow_note = _gate_flow_note(records, command)
+    if flow_note is not None:
+        return _allow_note(flow_note)
     return _allow()
 
 
@@ -10372,15 +10405,20 @@ def _orch_effective_sink_word(argv):
     return "" if idx is None else argv[idx].lstrip("\\").rsplit("/", 1)[-1]
 
 
-# gatdis deny tier (gate_weakening): the SINK ALLOW-LIST, the pipeline stages that CUT a verification run's
-# output. This set is the gate-discipline guard's own, kept apart from _ORCH_TRUNCATING_SINKS so
-# orch_truncation_guard's behaviour is unchanged. head, tail and cut always cut their stdin (asked for --help or
-# --version too: they discard it); grep, egrep and fgrep cut it only with a count, limit, quiet or list option
-# (-m N, -q, -c, -l, -L and the long forms; the rule's "textual success token" form for -q and -c), and rg only
-# with -m, -q, -c or -l (rg -L is --follow, not a sink). Nothing else is a deny sink: a sed or awk program may
-# cut its input ('5q', '$!d', 'NR>5{exit}') or may not, and the deny tier parses no program, so such a stage
-# only notes (_gate_note_sink_kind). A plain filter ('grep FAIL', 'wc') is a sink in neither tier (residual R4).
-_GATE_ALWAYS_TRUNCATING = frozenset(("head", "tail", "cut"))
+# gatdis deny tier (gate_weakening): the SINK ALLOW-LIST, the exact pipeline stages proved to pass on only
+# part of a verification run's output (_truncating_sink_kind). This list is the gate-discipline guard's own,
+# kept apart from _ORCH_TRUNCATING_SINKS so orch_truncation_guard's behaviour is unchanged. It is a closed list
+# of shapes, not of words: head or tail with no option or with exactly one of -n N, -nN, --lines=N or -N (N a
+# positive decimal integer with no sign; tail +N, head -n -N, -c, -f and every other option keep the whole input
+# or are not modelled); grep, egrep or fgrep with exactly one limiting flag (-m N with N >= 1, -q, -c, -l or -L)
+# and otherwise one pattern; rg with exactly one of -q, -c or -l and otherwise one pattern. rg -m is not on the
+# list: an rg configuration file named by RIPGREP_CONFIG_PATH can add --passthru, and rg 15.1.0 then passes every
+# line on under -m 1 (checked 2026-10-07); the hook cannot see that file. cut is never a deny sink ('cut -c1-'
+# keeps every byte). Every other spelling of these words, and any sed or awk program (the hook parses no
+# program), may cut its input or may not, so it only notes (_gate_note_sink_kind). A plain filter ('grep FAIL',
+# 'wc') is a sink in neither tier (residual R4).
+_GATE_CUTTING_WORDS = frozenset(("head", "tail", "cut"))
+_GATE_COUNT_RE = re.compile(r"[0-9]+\Z")
 _GATE_GREP_SINKS = frozenset(("grep", "egrep", "fgrep", "rg"))
 _GATE_PROGRAM_FILTERS = frozenset(("sed", "gsed", "awk", "gawk", "mawk", "nawk"))
 _GATE_GREP_TRUNC_SHORT = frozenset("mqclL")
@@ -10445,11 +10483,12 @@ def _gate_reads_stdin(word, args):
 
 
 def _grep_truncation(word, args):
-    """The truncating option of a grep-family stage, or None: -m/-q/-c/-l/-L anywhere in a short cluster
-    (the scan of a cluster stops at a value letter e/f/A/B/C/d/D, whose value is the rest of the token or
-    the next token), or a --max-count/--quiet/--silent/--count/--files-with(out)-match(es) long option.
-    For rg the short letters are -m/-q/-c/-l (rg -L is --follow) and its own value letters stop the scan.
-    Scanning stops at '--'."""
+    """gatdis note tier. The limiting option a grep-family stage may carry, or None: -m/-q/-c/-l/-L anywhere
+    in a short cluster (the scan of a cluster stops at a value letter e/f/A/B/C/d/D, whose value is the rest
+    of the token or the next token), or a --max-count/--quiet/--silent/--count/--files-with(out)-match(es)
+    long option. For rg the short letters are -m/-q/-c/-l (rg -L is --follow) and its own value letters stop
+    the scan. Scanning stops at '--'. It models only a few value options, so it can read an option's value
+    as a flag ('grep --label -m .'): over-matching by design, it only ever costs a note."""
     trunc_short, value_short = ((_GATE_RG_TRUNC_SHORT, _GATE_RG_VALUE_SHORT) if word == "rg"
                                 else (_GATE_GREP_TRUNC_SHORT, _GATE_GREP_VALUE_SHORT))
     skip = False
@@ -10477,38 +10516,118 @@ def _grep_truncation(word, args):
     return None
 
 
+def _gate_count(text):
+    """True when text is a positive decimal integer with no sign (ASCII digits only, at least 1)."""
+    return bool(_GATE_COUNT_RE.match(text)) and int(text) > 0
+
+
+def _gate_line_count(args):
+    """The line count of a head or tail stage on the sink allow-list, as text, or None: '10' for no argument
+    at all, else N for exactly one of '-n N', '-nN', '--lines=N' or '-N' where N is _gate_count. Any other
+    argument list (tail +N, head -n -N, a byte count, an option or operand outside those) is None."""
+    if not args:
+        return "10"
+    if len(args) == 2 and args[0] == "-n":
+        count = args[1]
+    elif len(args) != 1 or not args[0].startswith("-"):
+        return None
+    elif args[0].startswith("--lines="):
+        count = args[0][len("--lines="):]
+    else:
+        count = args[0][2:] if args[0].startswith("-n") else args[0][1:]
+    return count if _gate_count(count) else None
+
+
+def _gate_grep_limit(word, args):
+    """The limiting flag of a grep-family stage on the sink allow-list ('-q', '-m 5', ...), or None: exactly
+    one limiting flag, each its own word (grep, egrep and fgrep: -m N with N a _gate_count, -q, -c, -l or -L;
+    rg: -q, -c or -l), and otherwise exactly one pattern, either one '-e PATTERN' or a positional operand that
+    is the last word. A second limiting flag or pattern, a cluster, a long option, any other option, a '--'
+    or an input operand leaves the stage off the list."""
+    limits = "qcl" if word == "rg" else "mqclL"
+    flag = None
+    patterns = 0
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok == "-e" and i < len(args):
+            patterns += 1
+            i += 1
+        elif len(tok) == 2 and tok[0] == "-" and tok[1] in limits and flag is None:
+            flag = tok
+            if tok == "-m":
+                if i >= len(args) or not _gate_count(args[i]):
+                    return None
+                flag = "-m " + args[i]
+                i += 1
+        elif not tok.startswith("-") and i == len(args) and not patterns:
+            patterns = 1
+        else:
+            return None
+    return flag if patterns == 1 else None
+
+
+# What each sink on the allow-list does to its input, for the deny message (a limiting flag's letter keys it).
+_GATE_GREP_EFFECTS = dict((
+    ("m", "which passes on only the first {} lines that match its pattern"),
+    ("q", "which prints nothing at all"),
+    ("c", "which prints only a count of the lines that match its pattern"),
+    ("l", "which prints only a name when a line matches its pattern"),
+    ("L", "which prints only a name when no line matches its pattern"),
+))
+
+
 def _truncating_sink_kind(argv):
-    """gatdis deny tier. The truncating-sink kind of one pipeline stage ('head', 'cut', 'grep -m', 'rg -q',
-    ...), or None when the stage is not on the sink allow-list. The stage's command word is resolved through
-    the four plain wrappers by _gate_peel (the producer's own grammar: '| env head', '| timeout 5 head', an
-    alias-suppressing '| \\tail'); a stage behind any other wrapper ('| command tail', '| sudo head', '| busybox
-    tail') is not matched here and only notes. A stage that reads a named file instead of its stdin
-    (_gate_reads_stdin) is not a sink of the pipe. head and tail asked only for --help or --version still
-    count: they discard their stdin. Purely lexical; an unmodelled option grammar degrades to no match."""
+    """gatdis deny tier. (label, effect) of one pipeline stage on the sink allow-list, or None: head or tail
+    with a _gate_line_count, or a grep-family stage with a _gate_grep_limit (the comment above
+    _GATE_CUTTING_WORDS gives the list). The label is the stage as the message names it ('tail -n 20', 'grep
+    -q'); the effect says what the stage passes on. The stage's command word is resolved through the four
+    plain wrappers by _gate_peel ('| env head', '| timeout 5 head', an alias-suppressing '| \\tail'); a
+    stage behind any other wrapper ('| command tail', '| sudo head', '| busybox tail') is not matched here
+    and only notes. Every other stage, cut included, is None. Purely lexical."""
     argv = _gate_peel(argv)
     if not argv:
         return None
     word = _gate_word(argv[0])
     args = argv[1:]
-    if not _gate_reads_stdin(word, args):
-        return None
-    if word in _GATE_ALWAYS_TRUNCATING:
-        return word
+    if word in ("head", "tail"):
+        count = _gate_line_count(args)
+        if count is None:
+            return None
+        label = word if not args else "{} -n {}".format(word, count)
+        return label, "which passes on only the {} {} lines of its input".format(
+            "first" if word == "head" else "last", count)
     if word in _GATE_GREP_SINKS:
-        return _grep_truncation(word, args)
+        flag = _gate_grep_limit(word, args)
+        if flag is None:
+            return None
+        return "{} {}".format(word, flag), _GATE_GREP_EFFECTS[flag[1]].format(flag[3:])
     return None
 
 
 def _gate_note_sink_kind(argv):
-    """gatdis note tier. The kind of a stage that may cut its input: a deny-tier sink (_truncating_sink_kind),
-    or any sed or awk program (_GATE_PROGRAM_FILTERS, through the four plain wrappers), which the hook does
-    not parse; None otherwise. Over-matching by design: it costs a note, never a refusal."""
+    """gatdis note tier. The kind of a stage that may pass on only part of its input, or None: a deny-tier
+    sink (_truncating_sink_kind), a head, tail or cut that reads its stdin with any arguments
+    (_gate_reads_stdin), a grep-family stage reading its stdin with a limiting option the broad scan
+    (_grep_truncation) sees, or any sed or awk program (_GATE_PROGRAM_FILTERS), which the hook does not
+    parse; each through the four plain wrappers. Over-matching by design: it costs a note, never a refusal."""
     kind = _truncating_sink_kind(argv)
     if kind is not None:
-        return kind
+        return kind[0]
     argv = _gate_peel(argv)
-    if argv and _gate_word(argv[0]) in _GATE_PROGRAM_FILTERS:
-        return "{} program".format(_gate_word(argv[0]))
+    if not argv:
+        return None
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in _GATE_PROGRAM_FILTERS:
+        return "{} program".format(word)
+    if not _gate_reads_stdin(word, args):
+        return None
+    if word in _GATE_CUTTING_WORDS:
+        return word
+    if word in _GATE_GREP_SINKS:
+        return _grep_truncation(word, args)
     return None
 
 
