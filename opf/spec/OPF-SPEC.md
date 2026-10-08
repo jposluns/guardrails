@@ -2098,260 +2098,88 @@ base 1.3.0 remains a target contract (section 9.2). A fresh-only implementation 
 one base `spec_version`, one homes generation, and one worklog storage generation, initializes
 stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.
 
-An implementation MUST declare, in the documentation of each release and in the report of every
-reference run of that release (defined below), its release identity, its class, and its supported
-`spec_version`, homes generation, and worklog storage generation. Each release MUST ship that
-declaration as one file, and that file is the declaration that every check of it reads: a runtime
-check reads the copy of that file installed with the implementation, as that copy stands, and a
-check of the documentation or the conformance reports of a release reads that file's bytes as the
-release ships them. A runtime check MUST read the declaration from the installed copy alone, never
-from the documentation of the release or from a conformance report. Each release MUST also carry, in
-the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release
-ships them (the shipped-file digest), and a runtime check MUST compare the installed copy's bytes
-with that digest before it reads any field: an installed copy whose bytes differ is contradictory,
-MUST yield cannot-evaluate, and MUST NOT authorize any store operation. That comparison detects an
-edit of the installed copy alone, which then yields cannot-evaluate; it does not detect an edit that
-changes both the installed copy and the shipped-file digest the implementation carries, a residual
-section 17 discloses. The documentation of each release MUST state where the implementation carries
-the shipped-file digest, so that a check of the documentation can detect a release that states no
-such place. A release that carries no such digest does not conform to this section, and a
-conformance claim MUST NOT be made for it. The documentation of each release MUST restate that
-file's declaration, and the report of every reference run of a release MUST restate it and MUST
-carry the shipped-file digest the implementation carries, written as 64 lowercase hexadecimal
-digits, the installed-copy digest, and the runtime result, the result that that run's runtime check
-of the installed copy yielded. The runtime result MUST be written as one of the tokens of the
-three-valued gate_run verdict field (section 8.5): `cannot_evaluate` where that check yielded
+An implementation MUST declare, in the documentation of each release and in every report its emitter
+writes, its release identity, its class, and its supported `spec_version`, homes generation, and
+worklog storage generation. Each release MUST ship that declaration as one file, the declaration
+file. A runtime check MUST read the declaration from the copy of that file installed with the
+implementation (the installed copy) alone, never from the documentation of the release or from any
+report. Each release MUST also carry, in the implementation and apart from that file, the SHA-256
+digest of that file's bytes as the release ships them (the shipped-file digest), and the
+documentation of each release MUST state where the implementation carries it. A release that carries
+no such digest, or whose documentation states no such place, does not conform to this section, and a
+conformance claim MUST NOT be made for it. A runtime check MUST compare the installed copy's bytes
+with the shipped-file digest before it reads any field, and an installed copy that is absent or
+unreadable, or whose bytes differ from that digest, MUST yield cannot-evaluate and MUST NOT
+authorize any store operation. That comparison detects an edit of the installed copy alone; section
+17 discloses that residual and the others these rules leave.
+
+Every report the emitter of a release writes MUST carry exactly four compared parts: the restatement
+of the declaration, the shipped-file digest the implementation carries, the installed-copy digest,
+and the runtime result. The installed-copy digest is the SHA-256 digest of the installed copy's
+bytes that the runtime check read, or the token `not-read` where that check read none because the
+installed copy is absent or unreadable, and a report MUST NOT carry `not-read` with any runtime
+result other than `cannot_evaluate`. Each digest in a report MUST be written as 64 lowercase
+hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued
+gate_run verdict field (section 8.5): `cannot_evaluate` where that run's runtime check yielded
 cannot-evaluate, and otherwise `pass` where it authorized store operations and `fail` where it did
-not. The installed-copy digest is the SHA-256 digest of the installed copy's bytes that the runtime
-check read, written as 64 lowercase hexadecimal digits, or, where that check could not read the
-installed copy because it is absent or unreadable, the token `not-read`, which a report MUST NOT
-carry with any runtime result other than `cannot_evaluate`. A restatement differs from that file's
-declaration where it gives a different value for any field the file carries, or states a field the
-file does not carry. The execution environment of an installation or of a run of a release is
-unaltered where it is a stock install of a platform and version within what the documentation of
-that release names, a family of platforms or a range of versions included, or, where that
-documentation names none, a stock install of the platform the installation or run uses, as that
-platform's own installer leaves it, changed only as that documentation directs; a failure that any
-such stock install shows under the rules below is the release's, whichever platform and version
-within that naming a checker used. Every default of
-that stock platform that the documentation does not exclude, by directing that it be changed or by
-naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the
-release's job, a stock version-control line-ending setting such as `core.autocrlf`, an interpreter's
-default text-mode newline translation, the platform's default umask, and a marker by which the
-platform refuses package installation into its own interpreter, such as the one that PEP 668
-defines, included. An environment is altered only by a setting or component that the checker, or
-anyone else, added, removed, or replaced relative to that stock platform beyond what the
-documentation directs, such as an environment variable, a preloaded or substituted library or
-interpreter, an interpreter or version-control configuration file or setting, or a package-manager
-configuration file, index, or resolver, and the test is counterfactual: such an addition, removal,
-or replacement alters the environment exactly where remaking the installation or run without it,
-under the same record otherwise, changes one of the observations named below, and one whose undoing
-changes none of them leaves the environment unaltered. Of the two tests above, the stock install is
-the baseline and the counterfactual test decides: an environment that differs from that stock
-install is altered only where a difference alters it under that test, and is otherwise unaltered.
-The observations that test compares are, for each step, the sources it resolves and the bytes it
-obtains from them, the installed files as the rule below on making an installation as a record
-states compares them, and, for a run, the report it emits and its runtime result, each compared
-apart from a value that differs only in naming the account, a time, or a scratch location, so a
-component that changes no more than such a value, as a checker's temporary directory changes where
-temporary files are written, leaves the environment unaltered. Where an observation can differ
-between remakings made under the same record, the checker MUST either replay each step's recorded
-inputs, the bytes each source served included, where the record holds them, or repeat the remaking
-with the component and the remaking without it each a number of times stated in advance and
-recorded; the component then alters the environment where, for some observation, no value that the
-remakings without it yield is one that the remakings with it yield, leaves it unaltered where every
-remaking, with it and without it, yields the same value of each observation, and otherwise has an
-undecided effect. Where a component's effect is undecided, or a remaking the test needs cannot be
-made, whether the environment is altered is cannot-evaluate: an attempt or run whose standing turns
-on it MUST NOT be counted as made in an unaltered or in an altered execution environment, a failure
-that it alone would show or establish is unresolved under the outcome states below, and section 17
-discloses that residual. A checker MUST record each documented installation and run attempt of a
-release that it makes under this section, whether or not it offers that attempt or its outcome as
-evidence, and each installation and run it offers as evidence under this section, each run that
-shows a failure included, with at least these fields, so that another checker can remake that
-installation or run under the record and apply each test this section sets to it: the platform and
-version that the documentation of that release names, if any, and the platform and version used; the
-account the steps ran as and whether it held administrative privilege; the umask; the locale and
-character encoding; every environment variable set, with its value, except that a value that bears a
-secret, such as a credential, a token, a password, or a private key, MUST be recorded as the
-variable's name and a redaction marker in place of the value; the path and SHA-256 digest of each
-interpreter, version-control, and package-manager configuration file that a step read; each package
-index or other source that a step used, any credential in its address replaced by a redaction
-marker; the documented steps followed and the commands run; the interpreter and tool versions; the
-store that a run read, as the path relative to the store root and the SHA-256 digest of each of its
-files that the run read; the list of files the installation installed, named relative to the
-installation's root, with the SHA-256 digest of each and whether the release ships it, a source the
-documentation directs served it, or a step wrote it; and each setting or component that the checker
-knows was added, removed, or replaced relative to the stock platform. An execution environment
-matches a recorded one where each of those fields other than the account and the list of installed
-files holds the value or digest the record states, apart from a value that differs only in naming
-the account, a time, or a scratch location, a value recorded as redacted being compared by its name
-alone, and where the account the steps ran as held administrative privilege exactly where the
-recorded one did, whatever either account is named; an installation is made as a record states where
-it follows the recorded steps and commands, its list of installed files names the same files, apart
-from such names, and each installed file that the release ships or that a source the documentation
-directs served holds the digest the record states, while an installed file that a step wrote, such
-as a script that embeds the installation's own location, is compared by name alone and its content
-is judged only as part of the execution environment, by the counterfactual test above. That record
-and the counterfactual test reach only alterations that a checker detects: one that no checker
-detected, such as an organization-wide package-manager configuration file that a checker took for
-part of the stock platform, makes an attempt in an altered environment look unaltered until another
-checker compares the recorded files with that stock platform, a residual that section 17 discloses.
-A fresh, unmodified installation of a release is one that any checker makes in an
-unaltered execution environment, exactly as the documentation of that release directs, from the
-bytes the release ships, and that nothing has changed since but the writes its own runs make, the
-bytecode and cache files they write and the reports they emit included: those writes do not end
-freshness, and any other change does. A reference run of a release is a run of the runtime check and
-the emitter of a fresh, unmodified installation of that release, made by any checker, under all of
-the following conditions: the installed copy holds exactly that file's bytes as the release ships
-them and is readable to the run; the execution environment of the run is unaltered, as defined
-above; and every other file the run reads that the release ships or that the documentation of that
-release directs be installed holds the bytes the release ships or, for a file the release does not
-ship, the bytes that documentation pins, where it pins them, or, where it does not pin them, the
-bytes that the installation the run is of obtained, in its unaltered execution environment, from the
-source that documentation directs. Where that documentation does not pin the bytes
-of such a file, reference runs of the release can differ as the bytes its directed source serves
-differ, a residual of the release's own documentation that section 17 discloses; a run over such a
-file whose bytes the checker chose or substituted, rather than obtained that way, is outside these
-conditions. A file the run reads that the release neither ships nor its documentation directs be
-installed, other than a file of a store that the run reads, such as the interpreter's standard
-library or a system library, is part of the execution
-environment, not of those byte conditions, and is judged by the test above for an unaltered
-execution environment. A store that the run reads is neither part of those byte conditions nor part
-of the execution environment, since its content is never the stock platform's: a reference run reads
-the store that the documentation of the release directs it to read or to create, made as that
-documentation directs, or, where that documentation directs none, a store whose files the run's
-record lists with their SHA-256 digests, so a run over any other store is not a reference run, and
-runs whose recorded store files or digests differ are not made under the same conditions. A run
-outside those conditions, one made in an altered execution environment, one of an installation made
-in an altered execution environment, or one whose installed copy it cannot read included, is not a
-reference run, and this section establishes nothing from its report or its runtime result: neither
-its report nor its runtime result establishes or counters any conformance or nonconformance of any
-release. The rule below on the conditions that gate a
-reference run takes precedence over that sentence for one kind of such run alone: a documented
-installation and run attempt, made and recorded in an unaltered execution environment, that yields a
-run outside those conditions, such as one whose installed copy it cannot read, is evidence of
-availability under that rule, though its report and its runtime result still count for nothing. A
-conformance report of a
-release is a report that an installation of that release emits whose restatement, shipped-file
-digest, installed-copy digest, and runtime result, compared as written, an omitted part included,
-equal those of a report that at least one reference run of that release emits; a report whose
-content in those four parts no reference run of that release emits is not a conformance report of
-that release, MUST NOT be presented as one, and does not make that release nonconformant, whatever
-the installation that emitted it, one whose installed copy, carried shipped-file digest, runtime
-check, emitter, or execution environment was altered included. A conformance report of a release is
-evidence about that release alone: it MUST NOT be presented as evidence that the installation that
-emitted it is unmodified, and it shows a release nonconformance only where a reference run of that
-release emits a report of the same content that shows it under the rule below on the reports of a
-reference run. A separate installation obligation binds each installation of a release over its own
-report, fresh or not, altered or not: every report it emits MUST state, as its installed-copy
-digest, the digest this section defines for the installed copy that its own runtime check read, and,
-as its runtime result, the result that its own runtime check yielded. A breach of that installation
-obligation in the report of a run that is not a reference run is the fault of the installation that
-emitted the report, of whoever altered it where it was altered, never the release's: it MUST NOT be
-counted against the release. A breach of it in a report that a reference run of that release emits
-is judged under the rules below on the reports of a reference run as well, and it counts against the
-release exactly as those rules provide. Whether a release conforms to this section is judged only
-from the bytes the release ships, that file's bytes, the implementation, and the installer included,
-from the documentation of the release, from documented installations of it made and recorded in
-unaltered execution environments, and from its reference runs, never from the report or the conduct
-of any other installation. A report whose installed-copy digest is 64 lowercase hexadecimal digits
-that differ from the digest of that file's bytes as the release ships them and whose runtime result
-is other than `cannot_evaluate` is inconsistent with that release, because a runtime check that
-compares an installed copy with the shipped-file digest this section requires the release to carry
-yields cannot-evaluate for an installed copy whose bytes differ from those the release ships, so
-such a report shows a modified implementation, a defective emitter, or a release that carries a
-shipped-file digest other than the one this section requires or whose runtime check does not compare
-the installed copy's bytes with the digest the implementation carries or does not yield
-cannot-evaluate where they differ: it MUST NOT be presented as evidence that the installation or the
-release conforms, and a check of the conformance reports MUST report it as inconsistent with that
-release. A release does not conform to this section, and a conformance claim MUST NOT be made for
-it, where its documentation omits the declaration or a field the file carries, states a declaration
-that differs from that file's, or does not state where the implementation carries the shipped-file
-digest. A release also does not conform to this section, and a conformance claim MUST NOT be made
-for it, where a report that a reference run of that release emits omits the declaration or a field
-the file carries, states a declaration that differs from that file's, omits the shipped-file digest,
-the installed-copy digest, or the runtime result, writes any of them in a form other than the one
-this section sets, `not-read` with a runtime result other than `cannot_evaluate` included, states an
-installed-copy digest other than the one this section defines for that run's installed copy or a
-runtime result other than the one that run's runtime check yielded, or states a shipped-file digest
-other than the digest of that file's bytes as the release ships them. A release also does not
-conform to this section, and a conformance claim MUST NOT be made for it, where the runtime check of
-a reference run of that release yields a result other than the one this section requires for that
-file's bytes as the release ships them, that is, where it yields cannot-evaluate although no rule of
-this section makes it yield cannot-evaluate for those bytes, or does not yield cannot-evaluate or
-authorizes a store operation although one does. A failure under the rules above on a reference run
-is shown where a reference run of that release shows it, and established where a reference run of
-that release made under the same conditions, meaning over an installation made as the showing run's
-record states its installation was made and in an execution environment that matches the showing
-run's recorded environment, reproduces it, that is, shows a failure of the same rule above in the
-same part of the report or in the runtime result, whichever checker makes each run and whether or
-not any other run shows it: two such runs suffice to establish it, reference runs that show no
-failure, however many there are, do not counter them, and a report of a run that is not a reference
-run establishes no such failure and cannot counter one. Every condition above that gates a reference
-run is the release's to meet, through its documentation, its installer, and its implementation: a
-documented installation and run attempt, made and recorded in an unaltered execution environment,
-that yields no reference run, for any reason, an installed copy that does not hold that file's bytes
-as the release ships them, as where the installer of that release rewrites that file by converting
-its line endings or otherwise, an installed copy the documented run cannot read, another file the
-run reads that does not hold the bytes the conditions above set, and an installation step that the
-attempt could not complete included, or that yields a run whose writes take a later documented run
-of the same installation outside those conditions, is a failed availability attempt, and a release
-for which a failure of availability is established under the next sentence does not conform to this
-section, and a conformance claim MUST NOT be made for such a release. A failure of availability is
-shown where one failed availability attempt is made, and established where a second attempt, made
-under the first attempt's recorded conditions, meaning in an execution environment that matches the
-first attempt's recorded environment and by following its recorded steps and commands, whether or
-not its list of installed files equals the recorded one, since a failing attempt can install other
-files or none, fails too, whatever the reason each time and whichever checker makes each attempt;
-attempts that yield a reference run, however many, do not counter it, and it establishes that the
-documented installation and run do not reliably yield a reference run, not that no attempt can yield
-one; an attempt made in an altered execution environment shows and establishes nothing here, so a
-locally altered installation or execution environment cannot make an authentic release
-nonconformant, and a release cannot take its reports outside the rules of this section through its
-own installation procedure. Each failure under the two rules above, a failure of availability
-included, is, whenever a checker reports on it, in one of three outcome states: established, where
-it has been shown and reproduced as those rules require, by any checkers; unresolved, where it has
-been shown and not reproduced, or where it would be shown or established but for an environment
-attribution that the counterfactual test above leaves cannot-evaluate; or not shown. Any checker
-that reports on a shown failure MUST report the state that the evidence known to it shows, naming
-that evidence, its own runs and attempts and each record of another checker's that it relied on,
-what was shown, and the recorded conditions: it MUST report a failure that this evidence shows
-established as established, whether or not its own runs or attempts reproduced it, and an unresolved
-one as unresolved, naming the reproduction procedure it ran, if any, stated in advance as a number
-of further reference runs or installation attempts under the same recorded conditions or a time
-spent making them, and it MUST NOT report an unresolved failure as established, as countered, or as
-conformance of the release. A check under those rules
-therefore ends in one of three outcomes,
-established, unresolved, or not shown, and an unresolved outcome neither establishes nor counters
-any conformance or nonconformance of the release. These rules do not remove nondeterministic
-escapes: a failure that shows too rarely to reproduce within any stated bounded procedure stays
-unresolved however often that procedure is repeated, a residual that section 17 discloses. No rule
-that this section, as it now stands, states makes a runtime check yield `fail` rather than `pass`,
-or `pass` rather than `fail`, for a declaration that no rule of this section makes yield
-cannot-evaluate, a statement about the present text of this section, not a constraint on a future
-revision of it, so reference runs that differ only in yielding `pass` or `fail` over that file's
-bytes as the release ships them show no failure under the rule on the runtime check of a reference
-run, and a report that states either is a conformance report of that release where a reference run
-emits a report of the same content. Each such failure is a release nonconformance, never a runtime
-state of the declaration: it MUST NOT be treated as making the declaration malformed or
-contradictory, and it does not change what a runtime check of the installed copy yields. A check of
-the documentation or the conformance reports of a release MUST compare each restatement, each
-shipped-file digest, and each installed-copy digest with that file's bytes as the release ships
-them, never with an installed copy. A check that tests whether a report is a conformance report of a
-release, or tests a report's runtime result, MUST make reference runs of that release and compare
-that report with the reports they emit and the results their runtime checks yield, never with those
-of any other installation or run; report membership and availability are separate questions, so a
-report is a conformance report of that release where a reference run of it emits a report of the
-same content, whatever other attempts yield, and a failure of availability established under the
-rule above makes the release nonconformant without taking out of scope a report that a reference run
-made in another attempt emits. Where every attempt a check makes yields no reference run, that check
-finds no conformance report of the release, which, as with any finite set of runs, does not
-establish that no reference run emits one. An implementation that declares no class MUST be treated
-as upgrade-capable,
-and every upgrade requirement binds it. An unreadable, malformed, or contradictory declaration MUST
-yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or
-that omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+not. A restatement differs from that file's declaration where it gives a different value for any
+field the file carries, omits such a field, or states a field the file does not carry. The
+documentation of each release MUST restate that file's declaration without differing from it. The
+expected report of a release is fixed by the bytes the release ships alone: its restatement is the
+declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of
+that file's bytes as the release ships them, and its runtime result is `cannot_evaluate` exactly
+where a rule of this section makes those bytes yield cannot-evaluate, and otherwise `pass` or
+`fail`, between which this section, as it now stands, sets no rule. A report deviates from the
+expected report where any of the four compared parts is omitted, written in another form, or holds
+another value; no other content of a report is compared.
+
+An execution environment is unaltered where it is a stock install of a platform and version within
+what the documentation of the release names or, where that documentation names none, of the platform
+the checker uses, as that platform's own installer leaves it, changed only as that documentation
+directs and in this closed operational list, and in nothing else: the account name, administrative
+privilege only where that documentation directs it, the working and temporary locations, and the
+clock. Every default of that stock install that the documentation does not exclude, by directing
+that it be changed or by naming a platform that lacks it, is part of an unaltered execution
+environment, so meeting it is the release's, whichever platform and version within that naming a
+checker uses. An attempt is the documented installation of a release, made by one checker in an
+unaltered execution environment, from the bytes the release ships and, for each installed file the
+release does not ship, from the source its documentation directs, followed by two successive
+documented runs of the runtime check and the emitter over that installation. A reference run of a
+release is a run of an attempt whose installed copy holds that file's bytes as the release ships
+them and is readable when the run starts.
+
+A release MUST be available: every attempt MUST complete the documented installation and yield two
+reference runs, so an installer that rewrites that file's bytes, by converting its line endings or
+otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot
+complete, and a first run whose writes leave the second run with an installed copy that no longer
+holds the shipped bytes are each a failure of this rule. A reference run of a release MUST NOT emit
+a report that deviates from the expected report, and its runtime check MUST NOT authorize any store
+operation where the expected runtime result is `cannot_evaluate`.
+
+Only a checker's own attempts and reference runs are evidence under the two rules above: a report of
+any other run or installation, altered or not, MUST NOT be presented as establishing or countering
+conformance of any release, and whether a release conforms to this section is judged only from the
+bytes the release ships, the implementation and the installer included, inspected, from the
+documentation of the release, and from the checker's own attempts and reference runs. A failure of
+either rule is shown for a checker where one of its own attempts or reference runs shows it, and
+established for that checker where a second of its own attempts or reference runs, made on the same
+platform and version, shows a failure of the same rule and, under the reference-run rule, in the
+same part of the report or in the runtime result; attempts and reference runs that show no failure,
+however many there are, never counter a shown or established failure. A checker that reports on a
+shown failure MUST report it as established or, where its own evidence has shown it and not
+reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and
+reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
+shown one, as conformance of the release. A release for which a checker's own evidence establishes a
+failure of either rule does not conform to this section, and that checker MUST NOT make a
+conformance claim for it; a conformance claim under this section MUST name the attempts and
+reference runs it rests on. Each such failure is a release nonconformance, never a runtime state of
+the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it
+does not change what a runtime check of an installed copy yields.
+
+An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade
+requirement binds it. An unreadable, malformed, or contradictory declaration MUST yield
+cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or that
+omits its release identity, its `spec_version`, its homes generation, or its worklog storage
 generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
 MUST NOT authorize any store operation. A declaration that carries its release identity, its
 `spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
@@ -2359,14 +2187,14 @@ declares no class: it MUST NOT be treated as malformed for that omission, and th
 that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
 contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
 classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
-as it stands, a check of the documentation or the conformance reports MUST apply them to that file
-as the release ships it, and each check MUST NOT take a class or any other field from the
-documentation of the release or from a conformance report. Where that documentation or a conformance
-report of that release states a class that the file omits, the release does not conform to this
-section because that restatement states a field the file does not carry, and the file declares no
-class only where it omits its class and no other field: a file that is absent, or that also omits
-its release identity, its `spec_version`, its homes generation, or its worklog storage generation,
-is malformed and MUST yield cannot-evaluate.
+as it stands, a check of the documentation or of the reports MUST apply them to that file as the
+release ships it, and each check MUST NOT take a class or any other field from the documentation of
+the release or from any report. Where that documentation or a report a reference run of that release
+emits states a class that the file omits, the release does not conform to this section because that
+restatement states a field the file does not carry, and the file declares no class only where it
+omits its class and no other field: a file that is absent, or that also omits its release identity,
+its `spec_version`, its homes generation, or its worklog storage generation, is malformed and MUST
+yield cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2761,145 +2589,30 @@ The gates in this standard are strong where they are strong and say so where the
   outside admission. Until validation tooling ships, a class claim is self-asserted (section 16).
 - The section 16.1 runtime check compares the installed copy of a release's declaration file with
   the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
-  which yields cannot-evaluate. It does not detect a co-edit that changes both the installed copy
-  and the digest the implementation carries to match it: that installation's runtime check passes
-  the byte comparison and then validates the edited copy as the declaration, so it still yields
-  cannot-evaluate where that copy is malformed or contradictory on other grounds. A report from that
-  installation whose runtime check read the edited copy and whose emitter writes the installed-copy
-  digest as section 16.1 defines it states a digest that differs from the digest of that file's
-  bytes as the release ships them, so it is a conformance report of the release only where a
-  reference run emits a report of the same content, a fault of the release's own emitter that
-  section 16.1 establishes from such a reference run and its reproduction alone, and otherwise it is
-  not one and does not make the release nonconformant; such a report that states a runtime result
-  other than `cannot_evaluate` is inconsistent with the release (section 16.1). Where the
-  documentation of a release directs that a file the release does not ship be installed and does not
-  pin its bytes, reference runs of the release made at different times can differ as the bytes the
-  documented source serves differ, a residual of the release's own documentation (section 16.1); a
-  run over such a file whose bytes the checker chose or substituted rather than obtained from that
-  source in an unaltered execution environment is not a reference run, and a failure reference runs
-  show makes the release nonconformant only where a reference run under the same recorded conditions
-  reproduces it. Section 16.1 counts every default of each stock install within what a release's
-  documentation names, a family of platforms or a range of versions included, or of a stock install
-  where it names none, as part of an unaltered execution environment unless that documentation
-  excludes it, so a stock `core.autocrlf` setting, an interpreter's default newline translation, a
-  default umask, or a PEP 668 marker is the release's to meet, and an environment is altered only by
-  what someone added, removed, or replaced relative to that platform, judged by remaking without it
-  and comparing the observations that section names, apart from names of the account, times, and
-  scratch locations: two honest checkers that replay the same recorded inputs to a step whose
-  observations those inputs determine then decide those cases alike, while checkers that instead
-  repeat the remakings of a nondeterministic step can reach different decisions, or none, and a case
-  that the test leaves undecided is unresolved, neither establishing nor countering any conformance
-  or nonconformance, at the cost that a release whose documentation names no platform must meet
-  every default of a stock install of whichever platform a checker uses, and one whose documentation
-  names a family or a range must meet those of every platform and version within it, and the test
-  reaches only alterations that a checker records and recognizes, so one that nobody detected, such
-  as an organization-wide package-manager configuration file taken for part of the stock platform,
-  can make an authentic release look nonconformant, or hide a failure of a release, until a checker
-  compares the recorded files with that stock platform (section 16.1). Section 16.1 compares by
-  digest only the installed files whose bytes the release ships or a directed source serves, and
-  compares a file that a step wrote, such as a script that embeds the installation's location, by
-  name alone, so two installations whose written files differ in content can both be made as one
-  record states, and such a difference counts only where the counterfactual test attributes it to an
-  alteration (section 16.1). A record carries a secret-bearing value, an environment variable's
-  value or a credential in a source's address, as a name and a redaction marker alone, so such a
-  value is compared by name alone and two environments that differ only in it match, though it can
-  change what a source serves (section 16.1). The scope of the conformance reports of a release
-  rests on what a reference run of
-  the release emits, never on the installation that emitted a report: a report is in scope only
-  where its restatement, its two digests, and its runtime result, compared as written, equal those
-  of a report that at least one reference run emits, so a defect of the release's own emitter is a
-  release nonconformance through the reports that reference runs emit (section 16.1), and a report
-  that only a modified installation writes is out of scope whatever it states. A check of the
-  conformance reports reports a report as inconsistent with the release only where its
-  installed-copy digest is 64 lowercase hexadecimal digits that differ from the digest of that
-  file's bytes as the release ships them and its runtime result is other than `cannot_evaluate`, so
-  a report out of scope that states `cannot_evaluate` over a runtime check that did not yield
-  cannot-evaluate, or that misstates any other part, is reported neither as a release nonconformance
-  nor as inconsistent with the release. A report is out of scope for its runtime result only where
-  the report of no reference run states that result, compared as emitted report content, never as
-  what the runtime checks yielded: where every reference run's runtime check authorizes store
-  operations yet the shipped emitter writes `cannot_evaluate` in every report, a report that states
-  `cannot_evaluate` matches the reports reference runs emit, so it is in scope and the reference
-  runs' own reports make the release nonconformant under section 16.1's rule on a reported result
-  other than the one the run's runtime check yielded; a check of the conformance reports tells a
-  report in scope from one out of scope only by making reference runs, and where every documented
-  installation and run attempt yields no reference run, as where its installer rewrites that file, a
-  check finds no conformance report of the release and two such attempts, the second made under the
-  first one's recorded conditions, establish that the release itself does not conform, while a
-  release whose installer, under the same recorded conditions, fails twice and succeeds once does
-  not conform and a report of the content that its one reference run emits is still in scope
-  (section 16.1). Where reference runs of a release
-  differ, a report is in scope where at least one of them emits a report of the same content, and
-  section 16.1 makes the release nonconformant where a reference run yields a runtime result other
-  than the one that section requires, or emits a report that breaks its report rules, and a
-  reference run under the same conditions reproduces that failure; a check that has made finitely
-  many reference runs and met none that emits a report of a given content has not thereby
-  established that no reference run emits one, so it can establish that a report is in scope, never
-  that it is out of scope, and a report, in scope or not, makes the release nonconformant only
-  through reference runs that show and reproduce the same failure. That shown-and-reproduced rule
-  bounds the evidence, two runs, never the work of obtaining them: a defect that shows in few runs
-  can take many runs to show twice, and one that no stated bounded procedure reproduces stays
-  unresolved however often that procedure is repeated, reported as unresolved and never as
-  conformance, so a nondeterministic defect of a release can stay unestablished (section 16.1).
-  Section 16.1 as it now stands sets no trigger for `fail`, a statement about that section's present
-  text only: no rule it now states makes a runtime check yield `fail` rather than `pass`, or `pass`
-  rather than `fail`, for a declaration that no rule of that section makes yield cannot-evaluate, so
-  reference runs that yield `pass` and reference runs that yield `fail` over the same bytes are each
-  permitted, that difference is no release nonconformance, and a report that states either is in
-  scope where a reference run emits a report of the same content. An installation whose installed
-  copy, carried shipped-file digest, runtime check, emitter, or execution environment is altered
-  therefore cannot make the release as shipped nonconformant through any report it emits: a report
-  it emits whose content no reference run emits is not a conformance report of the release, and one
-  whose content a reference run emits shows no failure that the reference run's own report does not
-  show; section 16.1 establishes every report-borne nonconformance, and every fault in the release's
-  own runtime check, from reference runs of the release alone, each shown and reproduced as that
-  section requires. An installation whose emitter is altered, whether or not its installed copy is,
-  can put a report in scope only by writing content that a reference run emits, so such a report
-  makes the release as shipped nonconformant only where that reference run's own report, shown and
-  reproduced, does, and a release whose reference runs show no such failure cannot be made
-  nonconformant that way; such a report is evidence about the release, never that the installation
-  that emitted it is unmodified (section 16.1). Such an emitter can, for example, write over an
-  edited installed copy exactly the content that a reference run emits, the digest of the shipped
-  bytes in place of its installed copy's included, and that report is in scope although its
-  installed copy was edited, a breach of section 16.1's installation obligation that is the altered
-  installation's fault alone and no release nonconformance, while each report it writes with content
-  that no reference run emits, such as one that omits the installed-copy digest or writes it in any
-  other form, writes `not-read` with a runtime result other than `cannot_evaluate`, writes a wrong
-  restatement, or omits the runtime result, is out of scope, so none of those defects makes the
-  release nonconformant unless a reference run's own report shows it. An anchor outside the
-  installation, such as a signature over that file that the implementation verifies or an
-  independent anchor like the one that section 14.1 has a plan's `manifest_sha256` checked against,
-  is the stronger option only against an edit that does not also change the implementation's
-  verification key or its anchor check; section 16.1 does not require one. An installer that
-  rewrites that file's bytes, such as by converting its line endings, makes every runtime check of
-  the rewritten copy yield cannot-evaluate (fail-closed) where the implementation carries the digest
-  of that file's bytes as the release ships them, and leaves each documented installation and run
-  attempt yielding no reference run, which under section 16.1 is itself a nonconformance of that
-  release once two recorded attempts show it, as is every other condition of its documented
-  installation or run that yields none, an unreadable installed copy, an installation step the
-  attempts could not complete, or a documented run whose writes invalidate later runs included: a
-  check whose attempts all yield none finds no conformance report of it, and no release escapes the
-  reporting
-  rules of that section through its own installation procedure (section 16.1). Where a release's
-  implementation instead carries the digest of the rewritten bytes, each runtime check that reads a
-  copy holding exactly those bytes passes the byte comparison and then validates that copy as the
-  declaration, so it still yields cannot-evaluate where that copy is malformed or contradictory on
-  other grounds. Such a release carries no digest of that file's bytes as the release ships them and
-  its documented installation leaves no installed copy holding those bytes, so it does not conform
-  to section 16.1 on both grounds, each established over documented installation attempts made and
-  recorded in unaltered execution environments or by an inspection of the implementation, never
-  through the report of an altered installation; there is no reference run, so a check of the
-  conformance reports finds no conformance report of the release and reports as inconsistent with it
-  each report whose installed-copy digest differs from the digest of that file's bytes as the
-  release ships them and that states a runtime result other than `cannot_evaluate`. A report that
-  omits the installed-copy digest or the runtime result, or writes either in a form other than the
-  one section 16.1 sets, is out of scope unless a reference run emits a report of the same content,
-  and then the reports that reference runs emit make the release nonconformant (section 16.1), so a
-  missing or malformed part never makes the release nonconformant through the report of an
-  installation that no reference run matches. A check of the documentation detects a release whose
-  documentation states no place where the implementation carries the shipped-file digest; it cannot
-  confirm that the implementation carries that digest at the stated place, which only an inspection
-  of the implementation establishes.
+  which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy
+  and the digest the implementation carries to match it, and an anchor outside the installation,
+  such as a signature over that file that the implementation verifies, is the stronger option only
+  against an edit that does not also change the implementation's verification key or its anchor
+  check; section 16.1 does not require one. Whether a release's runtime check compares the installed
+  copy's bytes with the digest the implementation carries at all, and whether that digest sits at
+  the place the documentation states, are established only by an inspection of the implementation,
+  never by a reference run: every reference run's installed copy holds the shipped bytes, over which
+  a runtime check that skips that comparison and one that makes it can yield the same report.
+  Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock
+  baseline and of what it changed, so an alteration the checker did not detect, such as an
+  organization-wide package-manager configuration file taken for part of the stock install, can
+  mislead that checker, another checker contests a claim only with its own attempts and reference
+  runs, and honest checkers on stock installs of different platforms or versions within a documented
+  family can reach different verdicts, each of which the release must meet. A failure that a checker
+  cannot show twice in its own attempts and reference runs stays unresolved, however many other
+  checkers each show it once, and an unresolved failure neither establishes nor counters any
+  conformance or nonconformance of the release. Where the documentation of a release directs that a
+  file the release does not ship be installed and does not pin its bytes, attempts made at different
+  times can differ as the bytes the directed source serves differ, a residual of the release's own
+  documentation. Appendix E gives informative guidance for checking release conformance: a record of
+  attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a
+  consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an
+  optional content-addressed reference environment.
 
 ## Appendix A: record envelope example
 
@@ -2995,5 +2708,43 @@ baseline record types, deterministic views with a drift gate, and the first impo
 tooling; then renamed types can no longer leave a stale generated view behind, and
 composed views now surface records awaiting ratification.
 ```
+
+## Appendix E: checking release conformance (informative)
+
+This appendix is informative: it recommends practice for checkers and releases working under
+section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a
+conformance claim is.
+
+- Keep a record of each attempt. A useful record holds the platform and version the documentation
+  names, if any, and the platform and version used; the account and whether it held administrative
+  privilege; the umask, locale, and character encoding; every environment variable set; the path and
+  SHA-256 digest of each interpreter, version-control, and package-manager configuration file a step
+  read; each package index or other source a step used; the documented steps followed and the
+  commands run; the interpreter and tool versions; the store a run read, with the SHA-256 digest of
+  each of its files; the list of installed files, with the SHA-256 digest of each; and each setting
+  or component the checker knows it changed relative to the stock install.
+- Redact secrets everywhere in a record: a credential, a token, a password, or a private key, in an
+  environment variable's value, in a source's address, or in a command argument, is written as its
+  name and a redaction marker, never as its value.
+- Share records so that another checker can repeat an attempt on its own stock install; keeping the
+  bytes each source served, and replaying them, makes a repetition closer. A shared record informs
+  another checker's work and never substitutes for that checker's own attempts and reference runs.
+- Corroborate across checkers: where two checkers each show the same failure once, on the same
+  platform and version, that agreement is a strong reason to keep attempting, though under
+  section 16.1 the failure stays unresolved until one checker's own evidence shows it twice
+  (section 17).
+- A report of a third-party installation can be probed for consistency: one whose installed-copy
+  digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's
+  bytes and whose runtime result is other than `cannot_evaluate` did not come from a runtime check
+  that compares the installed copy's bytes before reading any field. Such a report shows an altered
+  installation, a defective emitter, or a defective runtime check, without telling which, and it
+  establishes nothing under section 16.1.
+- Probe the byte comparison on a scratch copy: install the release somewhere disposable, edit the
+  installed copy, and confirm that the runtime check yields cannot-evaluate and authorizes no store
+  operation. This inspects the implementation's behaviour over bytes the release did not ship;
+  section 17 discloses that no reference run can show whether that comparison is made.
+- A content-addressed reference environment, such as a container image named by digest, makes a
+  checker's stock baseline reproducible and repetitions cheaper; section 16.1 does not require one,
+  and a release's documentation can name one as the platform it documents.
 
 ---
