@@ -166,7 +166,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `b41e44d09bc21b7e7df6202f40a99496a8cece6e6fc30d74d2432c2ec8afc103` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -353,18 +353,19 @@ fails and report it; do not work around a failed check.
    body whose own scope declares the name global (an enclosing def's declaration does not count); any other
    binding is local to its def or class body, a comprehension target to its comprehension and a nonlocal name
    to the enclosing def, and none aliases the module-level name of the same spelling. A name in a source or a
-   store's chain counts as the binding its scope reads, its own or else the nearest enclosing def's or the
-   module's; in a class body, which can read a name before binding it, conservatively both. Every other
-   aliasing form is out of scope; diff review is the control. Ordinary stores are not flagged: `sys.path[0] =
-   ...`, an item of `os.environ` or of a module-level dict under a key not named `sys`, `json`, `builtins` or
-   `modules`, a store to an attribute not so named of any other name (`_Options.verbose = True`), and a store
-   whose chain has no link so named and starts from a target whose source is none of those (`for _row in
-   sorted(_rows, key=len): _row[0] = 2`). That walk catches accidental drift between the two copies; it is not
-   a defence against a deliberate edit that replaces behaviour through a path the walk does not model.
-   Examples, not a complete list: an alias made by plain assignment or a walrus (`m = sys.modules[__name__]`,
-   then `m.validate_policy = ...`) or by a target over a call's result (`for m in
-   (importlib.import_module("__main__"),): ...`); an item key that is not a constant string; a call such as
-   `setattr` or `exec`; an in-place method call such as `globals().update`, `sys.modules.update` or
+   store's chain counts as the binding its scope reads: its own; for a name its scope does not bind, the
+   nearest enclosing def's that binds it (class bodies skipped) or else the module's; and in a class body that
+   binds the name, which can read it before binding it, conservatively both its own and the module's, never an
+   enclosing def's. Every other aliasing form is out of scope; diff review is the control. Ordinary stores are
+   not flagged: `sys.path[0] = ...`, an item of `os.environ` or of a module-level dict under a key not named
+   `sys`, `json`, `builtins` or `modules`, a store to an attribute not so named of any other name
+   (`_Options.verbose = True`), and a store whose chain has no link so named and starts from a target whose
+   source is none of those (`for _row in sorted(_rows, key=len): _row[0] = 2`). That walk catches accidental
+   drift between the two copies; it is not a defence against a deliberate edit that replaces behaviour through
+   a path the walk does not model. Examples, not a complete list: an alias made by plain assignment or a
+   walrus (`m = sys.modules[__name__]`, then `m.validate_policy = ...`) or by a target over a call's result
+   (`for m in (importlib.import_module("__main__"),): ...`); an item key that is not a constant string; a call
+   such as `setattr` or `exec`; an in-place method call such as `globals().update`, `sys.modules.update` or
    `json.__dict__.update`; a store in a function or lambda body; reflective access through an object the walk
    cannot name; another module patching the file; and a module that shadows a standard library module, such as
    a `json.py`. The gate imports `json` before it puts `tools/` on `sys.path`, which keeps out a

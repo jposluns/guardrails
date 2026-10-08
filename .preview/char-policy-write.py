@@ -60,29 +60,30 @@ POLICY FILE
     global (an enclosing def's declaration does not count); any other binding is local to its def or class
     body, a comprehension target to its comprehension and a nonlocal name to the enclosing def, and none
     aliases the module-level name of the same spelling. A name in a source or a store's chain counts as the
-    binding its scope reads, its own or else the nearest enclosing def's or the module's; in a class body,
-    which can read a name before binding it, conservatively both. Every other aliasing form is out of scope;
-    diff review is the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of os.environ or
-    of a module-level dict under a key not named sys, json, builtins or modules, a store to an attribute not
-    so named of any other name (_Options.verbose = True), and a store whose chain has no link so named and
-    starts from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That
-    walk catches accidental drift between the two copies; it is not a defence against a deliberate edit that
-    replaces behaviour through a path the walk does not model. Examples, not a complete list: an alias made by
-    plain assignment or a walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over
-    a call's result (for m in (importlib.import_module("__main__"),): ...); an item key that is not a constant
-    string; a call such as setattr or exec; an in-place method call such as globals().update,
-    sys.modules.update or json.__dict__.update; a store in a function or lambda body; reflective access
-    through an object the walk cannot name; another module patching the file; and a module that shadows a
-    standard library module, such as a json.py. The gate imports json before it puts tools/ on sys.path, so
-    under python3 -I, as CI runs it, a tools/json.py is never imported (the gate's self-test pins this); run
-    without -I, Python puts a script's own directory first on sys.path, and a module there named like a
-    standard library module that is neither built in, frozen, nor already imported at startup (json is one;
-    sys, os and time are not) shadows that module, for the gate and for this hook alike. The behaviour sample
-    runs both validators in one process, so it shares one json module and cannot see a change made to json.
-    Diff review is the control for a deliberate edit. The recorded hashes (.preview/SHA256SUMS for this hook,
-    the release manifest .aiqt/manifest.toml for both files) let an installer or a release check detect a
-    shipped copy that differs from the reviewed one; whoever makes an edit can record the new hashes in the
-    same change.
+    binding its scope reads: its own; for a name its scope does not bind, the nearest enclosing def's that
+    binds it (class bodies skipped) or else the module's; and in a class body that binds the name, which can
+    read it before binding it, conservatively both its own and the module's, never an enclosing def's. Every
+    other aliasing form is out of scope; diff review is the control. Ordinary stores are not flagged:
+    sys.path[0] = ..., an item of os.environ or of a module-level dict under a key not named sys, json,
+    builtins or modules, a store to an attribute not so named of any other name (_Options.verbose = True), and
+    a store whose chain has no link so named and starts from a target whose source is none of those (for _row
+    in sorted(_rows, key=len): _row[0] = 2). That walk catches accidental drift between the two copies; it is
+    not a defence against a deliberate edit that replaces behaviour through a path the walk does not model.
+    Examples, not a complete list: an alias made by plain assignment or a walrus (m = sys.modules[__name__],
+    then m.validate_policy = ...) or by a target over a call's result (for m in
+    (importlib.import_module("__main__"),): ...); an item key that is not a constant string; a call such as
+    setattr or exec; an in-place method call such as globals().update, sys.modules.update or
+    json.__dict__.update; a store in a function or lambda body; reflective access through an object the walk
+    cannot name; another module patching the file; and a module that shadows a standard library module, such
+    as a json.py. The gate imports json before it puts tools/ on sys.path, so under python3 -I, as CI runs it,
+    a tools/json.py is never imported (the gate's self-test pins this); run without -I, Python puts a script's
+    own directory first on sys.path, and a module there named like a standard library module that is neither
+    built in, frozen, nor already imported at startup (json is one; sys, os and time are not) shadows that
+    module, for the gate and for this hook alike. The behaviour sample runs both validators in one process, so
+    it shares one json module and cannot see a change made to json. Diff review is the control for a
+    deliberate edit. The recorded hashes (.preview/SHA256SUMS for this hook, the release manifest
+    .aiqt/manifest.toml for both files) let an installer or a release check detect a shipped copy that differs
+    from the reviewed one; whoever makes an edit can record the new hashes in the same change.
 
 DECISION
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
@@ -217,21 +218,22 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 # module scope or in a def or class body whose own scope declares the name global (an enclosing def's declaration
 # does not count); any other binding is local to its def or class body, a comprehension target to its comprehension
 # and a nonlocal name to the enclosing def, and none aliases the module-level name of the same spelling. A name in a
-# source or a store's chain counts as the binding its scope reads, its own or else the nearest enclosing def's or
-# the module's; in a class body, which can read a name before binding it, conservatively both. Every other aliasing
-# form is out of scope; diff review is the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of
-# os.environ or of a module-level dict under a key not named sys, json, builtins or modules, a store to an attribute
-# not so named of any other name (_Options.verbose = True), and a store whose chain has no link so named and starts
-# from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That walk catches
-# accidental drift between the two copies; it is not a defence against a deliberate edit that replaces behaviour
-# through a path the walk does not model. Examples, not a complete list: an alias made by plain assignment or a
-# walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over a call's result (for m in
-# (importlib.import_module("__main__"),): ...); an item key that is not a constant string; a call such as setattr or
-# exec; an in-place method call such as globals().update, sys.modules.update or json.__dict__.update; a store in a
-# function or lambda body; reflective access through an object the walk cannot name; another module patching the
-# file; and a module that shadows a standard library module, such as a json.py. The recorded hashes
-# (.preview/SHA256SUMS for the hook, .aiqt/manifest.toml for both files) let an installer or a release check detect
-# a shipped copy that differs from the reviewed one.
+# source or a store's chain counts as the binding its scope reads: its own; for a name its scope does not bind, the
+# nearest enclosing def's that binds it (class bodies skipped) or else the module's; and in a class body that binds
+# the name, which can read it before binding it, conservatively both its own and the module's, never an enclosing
+# def's. Every other aliasing form is out of scope; diff review is the control. Ordinary stores are not flagged:
+# sys.path[0] = ..., an item of os.environ or of a module-level dict under a key not named sys, json, builtins or
+# modules, a store to an attribute not so named of any other name (_Options.verbose = True), and a store whose chain
+# has no link so named and starts from a target whose source is none of those (for _row in sorted(_rows, key=len):
+# _row[0] = 2). That walk catches accidental drift between the two copies; it is not a defence against a deliberate
+# edit that replaces behaviour through a path the walk does not model. Examples, not a complete list: an alias made
+# by plain assignment or a walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over a
+# call's result (for m in (importlib.import_module("__main__"),): ...); an item key that is not a constant string; a
+# call such as setattr or exec; an in-place method call such as globals().update, sys.modules.update or
+# json.__dict__.update; a store in a function or lambda body; reflective access through an object the walk cannot
+# name; another module patching the file; and a module that shadows a standard library module, such as a json.py.
+# The recorded hashes (.preview/SHA256SUMS for the hook, .aiqt/manifest.toml for both files) let an installer or a
+# release check detect a shipped copy that differs from the reviewed one.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -659,8 +661,9 @@ def _emit_line(text):
 
 def main(argv):
     """The hook: always 0. `--self-test` alone runs the self-test instead. A real launch passes sys.argv, a
-    non-empty list of strings; any other argv (a call from other code) is treated like an unknown argument."""
-    readable = isinstance(argv, (list, tuple)) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
+    non-empty list of strings; any other argv (a call from other code, a tuple included) is treated like an
+    unknown argument, and its payload is never read."""
+    readable = isinstance(argv, list) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()
     if not os.environ.get(ROOT_VAR):
@@ -833,8 +836,9 @@ def _self_test():
         scope's own body declares name global (an enclosing def's declaration does not count), the enclosing def
         that binds it for a nonlocal name, and otherwise scope itself (a def or class body, or a comprehension for
         its target). visible(scope, name) lists the numbers of the scopes whose binding of name a read in scope
-        can find: its own scope's when it binds name, and otherwise the nearest enclosing def's or the module's,
-        class bodies skipped; a class body, which can read a name before binding it, conservatively lists both."""
+        can find: its own scope's when it binds name, and otherwise the nearest enclosing def's that binds it or
+        the module's, class bodies skipped. A class body that binds name reads it from its own namespace and then
+        the module's, never an enclosing def's; since it can read name before binding it, both are listed."""
         where, made = {}, []
 
         def scope_of(kind, parent):
@@ -909,13 +913,12 @@ def _self_test():
                 return [0]
             if name in scope["nonlocal"]:
                 return [home(scope, name)["number"]]
-            own = [scope["number"]] if name in scope["bound"] else []
-            if own and scope["kind"] != "class":
-                return own
+            if name in scope["bound"]:  # a class body reads a name it binds from itself, then the module (LOAD_NAME)
+                return [scope["number"]] + ([0] if scope["kind"] == "class" else [])
             outer = scope["parent"]
             while outer["kind"] == "class":
                 outer = outer["parent"]
-            return own + visible(outer, name)
+            return visible(outer, name)
 
         return where, home, visible
 
@@ -1063,8 +1066,12 @@ def _self_test():
     # call's positional argument named like a builtin that the file binds (at module scope, in a class body,
     # and in a def that declares it global), a store in a class body before the class binds the name, a
     # comprehension's first iterable read in the class body around it, a def's default read outside the def,
-    # and a store in a comprehension through a name a walrus in it binds outside it. A vector's first item is
-    # the one finding it must give, or a tuple of every finding it must give.
+    # and a store in a comprehension through a name a walrus in it binds outside it; then QA round 10's: a class
+    # body in a def, the class's own scope declaring a for target global, whose iterable names a name the class
+    # binds after the loop and the def binds too, so the read finds the module's import, never the def's (the
+    # reviewers' reproductions, and the class nested in another class), and a class that does not bind the name,
+    # nested in one that does, whose read finds the def's import. A vector's first item is the one finding it
+    # must give, or a tuple of every finding it must give.
     rebindings = (
         ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
         ("_TOP_KEYS", 'if True:\n    _TOP_KEYS = _TOP_KEYS | {"metadata"}'),
@@ -1214,6 +1221,17 @@ def _self_test():
         ("json", "class _P:\n    import json as _x\n    [0 for _j in (_x,) for _j.loads in [None]]"),
         ("json", "def _unrelated(json=[0 for json.loads in [None]]):\n    pass"),
         ("json", "import json as _j\n[(_j := _j) for _q in [0] for _j.loads in [None]]"),
+        ("json", "import json as _cfg\ndef _outer():\n    _cfg = None\n    class _C:\n        global _escaped\n"
+                 "        for _escaped in (_cfg,):\n            pass\n        _cfg = None\n_outer()\n"
+                 "_escaped.loads = None"),
+        ("json", "import json as _j\ndef _setup():\n    _j = None\n    class _H:\n        global _cfg\n"
+                 "        for _cfg in (_j,):\n            pass\n        _j = 2\n_cfg.loads = None"),
+        ("json", "import json as _j\ndef _setup():\n    _j = None\n    class _A:\n        class _B:\n"
+                 "            global _cfg\n            for _cfg in (_j,):\n                pass\n            _j = 2\n"
+                 "_cfg.loads = None"),
+        ("json", "_j = dict()\ndef _setup():\n    import json as _j\n    class _A:\n        _j = None\n"
+                 "        class _B:\n            global _cfg\n            for _cfg in (_j,):\n                pass\n"
+                 "_cfg.loads = None"),
     )
     # Ordinary module-level code that H12 must not flag, in either file, before the region and after it: a
     # store to an item of sys.path or os.environ, to an item of a module-level dict, to a class attribute, and
@@ -1226,7 +1244,10 @@ def _self_test():
     # through at module scope, a comprehension target named like a region name, a nonlocal name (an
     # assignment and an import, in a def and in a class body), a builtin passed as a positional argument
     # (map(list, ...), map(dict, ...), filter(len, ...)), a target over sys.path and over a slice of an alias
-    # of sys.path, and a comprehension's later iterable in a class body, which skips the class's own names.
+    # of sys.path, and a comprehension's later iterable in a class body, which skips the class's own names; then
+    # QA round 10's: a class body in a def, the class's own scope declaring a for target global, whose iterable
+    # names a name the class binds after the loop and the def imports, so the read finds the module's dict,
+    # never the def's import (the reviewers' reproductions).
     ordinary = (
         "sys.path[0] = os.path.dirname(os.path.abspath(__file__))",
         'os.environ["AIQT_CHAR_POLICY_EXAMPLE"] = "1"',
@@ -1264,6 +1285,10 @@ def _self_test():
         "for _p in (sys.path,):\n    _p[0] = 1",
         "from sys import path as _sp\nfor _first in (_sp[0:1],):\n    _first[0] = 1",
         "class _P:\n    import json as _x\n    [0 for _i in (0,) for _j in (_x,) for _j.y in [1]]",
+        "_cfg = {}\ndef _outer():\n    import json as _cfg\n    class _C:\n        global _escaped\n"
+        "        for _escaped in (_cfg,):\n            pass\n        _cfg = None\n_outer()\n_escaped['mode'] = 1",
+        "_j = dict()\ndef _setup():\n    import json as _j\n    class _H:\n        global _cfg\n"
+        "        for _cfg in (_j,):\n            pass\n        _j = 2\n_cfg = dict()\n_cfg['mode'] = 1",
     )
 
     class T(unittest.TestCase):
@@ -1860,7 +1885,8 @@ def _self_test():
             self.is_deny(json.loads(out))
             # an argument list that is not a non-empty list of strings: a note when armed, without reading the
             # payload; silence when not armed
-            for argv in (None, [], (), "char-policy-write.py", ["char-policy-write.py", 1], [b"char-policy-write.py"]):
+            for argv in (None, [], (), ("char-policy-write.py",), "char-policy-write.py", ["char-policy-write.py", 1],
+                         [b"char-policy-write.py"]):
                 out = io.StringIO()
                 with mock.patch.dict(os.environ, {ROOT_VAR: self.root}, clear=True), \
                         mock.patch.dict(globals(), {"_read_payload": boom}), redirect_stdout(out):
