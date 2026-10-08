@@ -29,10 +29,10 @@ SETTINGS SCOPE (the literal-scope ruling). A settings.json hook command is in sc
 CANDIDATE python launcher, decided without a shell lexer from readings of its text, none of them the
 shell's own: the raw text; that text with its backslash escapes read pairwise (a backslash and a
 newline after it removed, a backslash and any other character read as that character, so ``\\\\``
-stays one literal backslash and the newline after ``ok\\\\`` still ends a command); that reading with
-each backslash-newline leaving a newline in its place (a backslash that ends a comment is literal, so
-the newline after it still ends a command); the pairwise reading of the text after each newline; and
-each of these with its quote characters removed as well. In one of them a python interpreter name
+stays one literal backslash and the newline after ``ok\\\\`` still ends a command); the pairwise
+reading of the text after each newline (a backslash that ends a comment is literal, so the newline
+after it still ends a command; read as a match at the line's start, so the work is linear); and each
+of these with its quote characters removed as well. In one of them a python interpreter name
 (``python``, or ``python`` followed by digits, digits.digits or ``w``: ``python2``, ``python3``,
 ``python3.12``, ``pythonw``) or the core hook launcher's name (aiqt_hooks_launch.py) appears as a token
 bounded on the left by the start of the text, whitespace, a quote or one of ``/ ; | & ( ) { } ` = , <
@@ -42,11 +42,16 @@ bounded on the left by the start of the text, whitespace, a quote or one of ``/ 
 the name (``python3/x``); ``PY=python3``, ``{x,python3}``, ``python3<x.py`` and ``python3$X`` each make
 one, as do a name split by quotes (``pyt"hon"3``) and a python word in a heredoc body, inside ``$(...)``,
 inside a quoted argument (``echo "python3 done"``) or in a comment (``true # python3 note``). The
-readings are not proven against the shell: the self-test checks them against what bash and dash run
-over a GENERATED set of spellings (the bash oracle: each literal name whole or split by a quote, a
-backslash or a backslash-newline, after a command or a comment that may end in a run of 1 to 4
-backslashes, across a newline, CR LF, ``;`` or ``&&``), and a spelling outside that set, another
-arrangement of comments, quotes and backslash runs, is not proven a candidate. A candidate is parsed
+readings are not proven against the shell: the self-test checks them against what bash (required)
+and dash (when present) run over a GENERATED set of spellings (the bash oracle: four literal names,
+``python``, ``python3``, ``python3.12`` and the core hook launcher, each whole or split by a single
+quote, a double quote, a backslash, a backslash-newline or a double quote then a backslash-newline,
+after no prefix, ``true``, a command or a comment that may end in a run of 1 to 4 backslashes, across
+a newline, CR LF, ``;`` or ``&&``, followed by an argument or by a line continuation; the oracle fails
+closed when bash is absent, a stub's positive control or marker is wrong, or a command cannot
+execute), and a spelling outside that set (another name CANDIDATE_RE matches, such as ``python2``,
+``pythonw`` or ``python311``, or another arrangement of comments, quotes and backslash runs) is not
+proven a candidate. A candidate is parsed
 only inside the allow-listed shell grammar below. ANY other settings hook command
 is OUT OF SCOPE (exit 0) and is not lexed at all, its expansions, substitutions, redirections, ``~``
 paths, groups, globs and heredocs
@@ -184,9 +189,9 @@ settings hook command that names neither a python interpreter nor the core hook 
 (ANSI-C ``$'...'`` or locale ``$"..."`` quoting included), eval or watch re-parsing, or a wrapper
 (``"$PY" x.py``, ``eval "$CMD"``, ``pyt${E}hon3``, ``/usr/bin/pyth?n3``, ``env -Spython3 x.py``,
 ``$'pyth'on3``, ``$"pyth"on3``) is not caught, and only the repository's own settings author can write
-such a command. A python name spelled with comments, quotes and backslash runs (an escaped or
-line-continued name after a comment that ends in a backslash run, for example) in an arrangement
-outside the bash oracle's generated set is not proven a candidate. Inside a candidate, a wrapper that
+such a command. A python name outside the bash oracle's generated set (another name CANDIDATE_RE
+matches, such as ``python2``, ``pythonw`` or ``python311``, or a name spelled with comments, quotes and
+backslash runs in another arrangement) is not proven a candidate. Inside a candidate, a wrapper that
 executes a quoted argument
 (``env -S'python3 x.py'``, ``bash -c 'python3 x.py'``) parses as one argument word and passes
 unexamined; and the lines of a heredoc body in run_all_checks.sh or a ``run:`` block are scanned as shell lines,
@@ -665,78 +670,82 @@ def _shell_split(s, expansions=False):
 # `*python3`, `python3*`, `python3$X`).
 CANDIDATE_LEFT = "/;|&(){}`=,<>*"
 CANDIDATE_RIGHT = ";|&(){}`,<>[*?$"
-CANDIDATE_RE = re.compile(
-    r"(?:^|(?<=[\s'\"" + re.escape(CANDIDATE_LEFT) + r"]))"
+# The name with its right boundary: matched at the start of a line (_is_candidate), where the start of
+# the line is the left boundary.
+CANDIDATE_NAME_RE = re.compile(
     r"(?:python(?:[0-9]+(?:\.[0-9]+)?|w)?|"
     + "|".join(re.escape(name) for name in sorted(NO_SITE_SCRIPTS)) + r")"
     r"(?=$|[\s'\"" + re.escape(CANDIDATE_RIGHT) + r"])")
+CANDIDATE_RE = re.compile(
+    r"(?:^|(?<=[\s'\"" + re.escape(CANDIDATE_LEFT) + r"]))" + CANDIDATE_NAME_RE.pattern)
 
 
-def _unescaped_text(s, continuation=""):
-    """s with its backslash escapes read pairwise: a backslash and the newline after it (a line
-    continuation) are replaced by `continuation` (removed by default), a backslash and any other
-    character read as that character (so `\\\\` stays one literal backslash, and `ok\\\\<newline>python3`
-    keeps the newline before python3). This joins a python word or a NO_SITE_SCRIPTS name spelled with
-    escapes (`pyt\\hon3`, `pyth\\<newline>on3`). It is a reading, not a shell lexer: inside a comment the
-    shell keeps a backslash literally and the newline after it still ends the command (`true #x\\<newline>
-    pyt\\hon3`), so the default reading glues the next line onto the comment; called with
-    continuation="\\n" it keeps that newline as a boundary. One deliberate departure: a trailing lone
-    backslash, which bash keeps literally, is removed, so `python3\\` at the end of the text stays a
-    candidate (fail-closed)."""
-    out = []
+def _pairwise(s):
+    """One pass over s. Returns (joined, unquoted, starts): joined is s with its backslash escapes read
+    pairwise, a backslash and the newline after it (a line continuation) removed and a backslash and any
+    other character read as that character (so `\\\\` stays one literal backslash, and `ok\\\\<newline>
+    python3` keeps the newline before python3); unquoted is joined with its quote characters removed as
+    well; starts holds, for each newline in s, the offsets in joined and in unquoted where the text after
+    that newline begins. A newline is never the first character of an escape pair, so the pairwise
+    reading of the text after a newline is the suffix of joined from its offset (and likewise for
+    unquoted): no suffix is built. This joins a python word or a NO_SITE_SCRIPTS name spelled with
+    escapes (`pyt\\hon3`, `pyth\\<newline>on3`) or quotes (`pyt"hon"3`). It is a reading, not a shell
+    lexer. One deliberate departure: a trailing lone backslash, which bash keeps literally, is removed,
+    so `python3\\` at the end of the text stays a candidate (fail-closed)."""
+    joined = []
+    unquoted = []
+    starts = []
     i = 0
     while i < len(s):
-        if s[i] == "\\":
-            if i + 1 < len(s) and s[i + 1] != "\n":
-                out.append(s[i + 1])
-            elif i + 1 < len(s):
-                out.append(continuation)
-            i += 2
-            continue
-        out.append(s[i])
+        ch = s[i]
         i += 1
-    return "".join(out)
-
-
-def _readings(s):
-    """The texts _is_candidate searches: the raw text s; s with its escapes read pairwise
-    (_unescaped_text), and that text with its quote characters removed as well; the same two readings
-    with each line continuation leaving a newline in its place (the newline-kept readings); and, for
-    each newline in s, the text after it read pairwise, quotes kept and removed (the line readings: a
-    fresh start after a newline the shell may keep, `#x\\<newline>pyt\\<newline>hon3`, where one
-    backslash-newline is literal in a comment and the next joins the name). The quote-removed readings
-    join a name split by quotes as well as escapes (`pyt"hon"3`, `py\\th'on'3`). Each reading can only add
-    a candidate, so each fails closed. The readings overlap: on the self-test's rows and bash-oracle
-    spellings, dropping the quote-removed pairwise reading, the quote-removed line readings, or both
-    kinds of line reading fails the self-test, while dropping any one of the raw, pairwise quote-kept,
-    newline-kept (either form) or quote-kept line readings does not, since another reading finds each
-    of its candidates there; those are kept and only add candidates."""
-    joined = _unescaped_text(s)
-    kept = _unescaped_text(s, "\n")
-    texts = [s, joined, joined.translate(QUOTES), kept, kept.translate(QUOTES)]
-    for i, ch in enumerate(s):
+        if ch == "\\":
+            if i < len(s) and s[i] != "\n":
+                ch = s[i]
+                i += 1
+            else:
+                if i < len(s):
+                    starts.append((len(joined), len(unquoted)))
+                i += 1
+                continue
+        joined.append(ch)
+        if ch not in "'\"":
+            unquoted.append(ch)
         if ch == "\n":
-            line = _unescaped_text(s[i + 1:])
-            texts += [line, line.translate(QUOTES)]
-    return texts
+            starts.append((len(joined), len(unquoted)))
+    return "".join(joined), "".join(unquoted), starts
 
 
 def _is_candidate(s):
     """True iff the settings hook command s is a CANDIDATE python launcher: CANDIDATE_RE finds a token in
-    one of the _readings of s. No single reading is the shell's: a joining reading can delete a boundary
-    the shell keeps (a backslash at the end of a comment is literal, so the newline after it still ends
-    the command), and the raw reading keeps that boundary but cannot join a split name. So the raw
-    reading keeps every boundary the text spells (`ok\\\\<newline>python3`, and a backslash inside single
-    quotes, which the shell keeps literally); the pairwise reading joins an escape-split name and keeps
-    a quote as a boundary (`env -S'pyt\\hon3 x.py'`); the quote-removed reading joins a quote-split name
-    (`pyt"hon"3`); the newline-kept readings join a name split on the line after a comment that ends
-    in a backslash (`true #x\\<newline>pyt\\hon3`); and the line readings also join one split there by a
-    line continuation (`true #x\\<newline>pyt\\<newline>hon3`). Each extra reading can only add a candidate,
-    which fails closed; the self-test checks the union against what bash and dash actually run over a
-    generated set of spellings (the bash oracle). No shell lexing: a heredoc body, a `$(...)`, a
-    comment or a quoted argument that names python makes a candidate, which the grammar then refuses
-    or parses (fail-closed)."""
-    return any(CANDIDATE_RE.search(text) for text in _readings(s))
+    one of its readings (_pairwise), or CANDIDATE_NAME_RE matches at the start of a line in one. No
+    reading is the shell's: a joining reading can delete a boundary the shell keeps (a backslash at the
+    end of a comment is literal, so the newline after it still ends the command), and the raw reading
+    keeps that boundary but cannot join a split name. So the raw text keeps every boundary the text
+    spells (`ok\\\\<newline>python3`, and a backslash inside single quotes, which the shell keeps
+    literally); the pairwise reading joins an escape-split name and keeps a quote as a boundary (`env
+    -S'pyt\\hon3 x.py'`); the quote-removed reading joins a quote-split name (`pyt"hon"3`); and the line
+    readings, each reading started fresh after a newline of s (quotes kept and removed), join a name on
+    the line after a comment that ends in a backslash, whose newline the pairwise reading deletes (`true
+    #x\\<newline>pyt\\hon3`, `true #x\\<newline>pyt\\<newline>hon3`). A line reading differs from the
+    whole reading only at the line's start, so it is a match at that offset, not a rebuilt suffix: the
+    work is linear in the length of s. Each extra reading can only add a candidate, which fails closed.
+    The readings overlap: on the self-test's rows and bash-oracle spellings, dropping the pairwise
+    reading, the quote-removed reading, the quote-removed line readings, or both kinds of line reading
+    fails the self-test, while dropping the raw text or the quote-kept line readings alone does not,
+    since another reading finds each of their candidates there; those two are kept and only add
+    candidates. A reading that kept each line continuation's newline (round 23) is gone: over the
+    oracle's generated spellings, with a line continuation after the name as well (`pyt\\hon3\\<newline>
+    x`, `pyt\\hon3\\<newline> x`), no spelling bash or dash runs needed it, and it made a name joined
+    on its right a candidate (`python3\\<newline>x`, which bash reads as `python3x`; the self-test's
+    adopter table pins four such commands as out of scope). The self-test
+    checks the union against what bash and dash actually run over that generated set (the bash
+    oracle). No shell lexing: a heredoc body, a `$(...)`, a comment or a quoted argument that names
+    python makes a candidate, which the grammar then refuses or parses (fail-closed)."""
+    joined, unquoted, starts = _pairwise(s)
+    return (any(CANDIDATE_RE.search(text) for text in (s, joined, unquoted))
+            or any(CANDIDATE_NAME_RE.match(joined, j) or CANDIDATE_NAME_RE.match(unquoted, u)
+                   for j, u in starts))
 
 
 def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures, launch_surface):
@@ -1228,6 +1237,7 @@ def self_test_main():
     import shutil
     import subprocess
     import tempfile
+    import time
     from contextlib import redirect_stdout
 
     def run_quiet(root):
@@ -1241,6 +1251,7 @@ def self_test_main():
         return 2
     failures = []
     skipped = []
+    cannot = []
     try:
         # 1. The hostile-sibling MECHANISM: a probe importing json is neutered by a sibling json.py under
         #    a bare interpreter and clean under -I. This is the class this gate exists to prevent.
@@ -1502,10 +1513,12 @@ def self_test_main():
         # 29. A RUNTIME WITNESS (it exercises bash, not the gate): REAL bash reads `>&python3` as a
         #     redirect to a file named `python3`, not a command; the launcher runs ISOLATED
         #     (sys.flags.isolated == 1) and the file holds its output. It records why a redirection is
-        #     refused (rows 25-27) rather than parsed. Skipped where bash is unavailable.
+        #     refused (rows 25-27) rather than parsed. Bash is required: without it this case, 32, 37b
+        #     and the bash oracle (46) cannot run, and the self-test cannot evaluate (exit 2).
         bash_bin = shutil.which("bash")
+        dash_bin = shutil.which("dash")
         if bash_bin is None:
-            skipped.append("29 real-bash-redirect (bash unavailable)")
+            cannot.append("29 real-bash-redirect (bash unavailable)")
         else:
             rb = tmp / "realbash"
             rb.mkdir()
@@ -1554,9 +1567,9 @@ def self_test_main():
                                 .format(label, want))
 
         # 32. A RUNTIME WITNESS (it exercises bash, not the gate): real bash resolves each obfuscated
-        #     NAME to the token `python3`. Skipped where bash is unavailable.
+        #     NAME to the token `python3`. Without bash the self-test cannot evaluate (exit 2).
         if bash_bin is None:
-            skipped.append("32 real-bash-obfuscated-name (bash unavailable)")
+            cannot.append("32 real-bash-obfuscated-name (bash unavailable)")
         else:
             for label, expr in (("backslash", r"pyt\hon3"), ("dquote", 'pyt"hon"3'),
                                 ("squote", "py'thon'3")):
@@ -1726,9 +1739,9 @@ def self_test_main():
         # 37b. A RUNTIME WITNESS (it exercises bash and CPython, not the gate): real bash runs the
         #      reproduction: for each quoted separator, the -c runpy operand reaches
         #      a scratch file named like the core hook launcher, which reports that the site module is
-        #      loaded (stdout "1"). Skipped where bash is unavailable.
+        #      loaded (stdout "1"). Without bash the self-test cannot evaluate (exit 2).
         if bash_bin is None:
-            skipped.append("37b real-bash-quoted-operator (bash unavailable)")
+            cannot.append("37b real-bash-quoted-operator (bash unavailable)")
         else:
             probe_dir = tmp / "quoted-op-probe"
             probe_dir.mkdir()
@@ -1884,8 +1897,9 @@ def self_test_main():
                                 .format(label, line, want))
 
         # 42. SCOPE (the literal-scope ruling), and the leading path segment. A CANDIDATE settings hook
-        #     command (_is_candidate: one of its _readings, the raw text and four escape and quote
-        #     readings, names a python interpreter or the core hook launcher as a bounded token) is parsed in the allow-listed grammar; inside it the
+        #     command (_is_candidate: the raw text, its pairwise and quote-removed readings or a line
+        #     reading names a python interpreter or the core hook launcher as a bounded token) is parsed
+        #     in the allow-listed grammar; inside it the
         #     form Claude Code's hook documentation shows, a double-quoted `$NAME` or `${NAME}` as the
         #     leading path segment of the script operand, is admitted (compliant 0, non-compliant 1, the
         #     basename read literally), and
@@ -1964,9 +1978,10 @@ def self_test_main():
             ('echo "$(python3 x.py)"', 2),
             # Round 22: an escaped backslash before a newline is one literal backslash, so the newline
             # still ends the command and python3 runs (bash runs `python3 hook.py` after `echo ok\\`);
-            # read pairwise and raw, each is a candidate the grammar refuses. The split launcher name
-            # has no other boundary, so only the pairwise reading makes it a candidate. A plain line
-            # continuation before a python name stays a candidate by the raw reading (fail-closed).
+            # each is a candidate the grammar refuses. The quote-split name is a candidate only in the
+            # quote-removed readings (whole and line); the escape-split names, the launcher's included,
+            # in the pairwise readings, quotes kept or removed, whole or line. A plain line continuation
+            # before a python name stays a candidate (fail-closed) by the raw text and the line readings.
             ('echo ok\\\\\npython3 hook.py', 2),
             ('echo ok\\\\\npyt"hon"3 hook.py', 2),
             ('echo ok\\\\\npyt\\hon3 hook.py', 2),
@@ -1975,8 +1990,9 @@ def self_test_main():
             ('echo ok\\\npython3 hook.py', 2),
             # Round 23: a backslash at the end of a comment is literal, so the newline after it still
             # ends the command and the split name on the next line runs (bash and dash run python3);
-            # the newline-kept readings make each a candidate the grammar refuses. An even backslash
-            # run before the newline is a control the pairwise reading already catches.
+            # the line readings make each a candidate the grammar refuses (the quote-split ones only the
+            # quote-removed line reading). An even backslash run before the newline is a control the
+            # whole pairwise reading catches as well.
             ('# ok\\\npyt"hon"3 -c x', 2),
             ('# ok\\\npyt\\hon3 -c x', 2),
             ('true #x\\\npyt\\hon3 x.py', 2),
@@ -1987,8 +2003,12 @@ def self_test_main():
             ('true #x\\\naiqt_hooks_l\\aunch.py h_one', 2),
             ('true #x\\\\\npyt\\hon3 x.py', 2),
             # The documented comment example: a comment that names python is a candidate (it pins the
-            # wording, not a reading; every reading finds it).
+            # wording, not a reading; each whole reading finds it).
             ('true # python3 note', 2),
+            # Round 24: a false candidate the line readings keep (fail-closed): bash joins the
+            # continuation into `echo xpython3 done` and runs no python, but the line after the newline
+            # reads `python3 done`.
+            ('echo x\\\npyt\\hon3 done', 2),
         )
         # 43. OUT OF SCOPE: a settings hook command that names neither a python interpreter nor the core
         #     hook launcher is exit 0 and is never lexed. These rows pin the DISCLOSED literal-scope
@@ -2042,16 +2062,21 @@ def self_test_main():
             'uv run --python 3.12 ruff check . 2>&1 | head -20',
             'uv run --python=3.12 ruff check "$FILE_PATH"', 'cat <<EOF\n$FILE_PATH done\nEOF',
             "cat <<'EOF' > /tmp/x\nrun $X\nEOF",
+            # Round 24: the false candidates the newline-kept reading made, gone with it: bash joins each
+            # name to the text after its line continuation (`--venv=python-env`, `PY=python3x`, the
+            # command `python3x`), so no python runs.
+            'tool --venv=python\\\n-env', 'make PY=python\\\n3x all', 'pyt\\hon3\\\nx',
+            'true #x\\\npyt\\hon3\\\nx',
         )
         # 44. CANDIDACY boundaries, each in a row that the grammar refuses when it is a candidate (the
         #     double-quoted "$V" is no leading path segment): exit 2 pins a candidate, exit 0 pins a
         #     non-candidate. One row per CANDIDATE_LEFT and CANDIDATE_RIGHT character (spelled out here,
         #     not read from the constants, so dropping a character fails its row), per quote, per
-        #     interpreter-name form, per reading (raw: ok\\<newline>python3; escapes read pairwise,
-        #     quotes kept: env -S'pyt\hon3 x.py'; quotes removed: pyt"hon"3; newline-kept, quotes kept
-        #     and removed: #x\<newline>pyt\hon3, #x\<newline>pyt"hon"3; line readings, quotes kept and
-        #     removed: #x\<newline>pyt\<newline>hon3, #x\<newline>pyt"h"\<newline>on3), the backslash and
-        #     line-continuation readings, and the non-boundaries.
+        #     interpreter-name form, per reading where a row needs it alone (escapes read pairwise,
+        #     quotes kept: env -S'pyt\hon3 x.py'; quotes removed: pyt"hon"3; the quote-removed line
+        #     reading: #x\<newline>pyt"hon"3, #x\<newline>pyt"h"\<newline>on3; the raw text and the
+        #     quote-kept line reading have no such row, since another reading finds each of theirs), the
+        #     backslash and line-continuation spellings, and the non-boundaries.
         candidacy_rows = [(': "$V" X{}python3'.format(ch), 2) for ch in "/;|&(){}`=,<>*"]
         candidacy_rows += [('python3{}X "$V"'.format(ch), 2) for ch in ";|&(){}`,<>[*?$"]
         candidacy_rows += [
@@ -2068,15 +2093,14 @@ def self_test_main():
             (': "$V" python3.x', 0), (': "$V" python3:', 0), (': "$V" pythonx', 0),
             (': "$V" aiqt_hooks_launch.pyc', 0), (': "$V" xaiqt_hooks_launch.py', 0),
             (': "$V" /p/aiqt_hooks_launch.py.bak', 0),
-            # Round 22: a multi-digit version, `+` (no boundary), a backslash inside the quote-kept
-            # reading, and the raw reading of an escaped backslash before a newline.
+            # Round 22: a multi-digit version, `+` (no boundary), a backslash inside a quote the
+            # pairwise reading keeps, and an escaped backslash or a line continuation before a newline.
             (': "$V" python123', 2), (': "$V" python3+x', 0), (': "$V" +python3', 0),
             ("env -S'pyt\\hon3 x.py' \"$V\"", 2), (': "$V" ok\\\\\npython3', 2),
             (': "$V" ok\\\npython3', 2), (': "$V" ok\\\\python3', 0), (': "$V" python3\\', 2),
-            # Round 23: the newline-kept reading, quotes kept and quotes removed.
+            # Round 23: the line readings after a comment's literal backslash (the quote-split name only
+            # in the quote-removed one), then a name joined by a line continuation as well.
             (': "$V" #x\\\npyt\\hon3', 2), (': "$V" #x\\\npyt"hon"3', 2),
-            # The line readings, quotes kept and removed: a comment's literal backslash, then a name
-            # joined by a line continuation.
             (': "$V" #x\\\npyt\\\nhon3', 2), (': "$V" #x\\\npyt"h"\\\non3', 2),
         ]
         # 45. A CLUSTERED -c/-m protects the following operand exactly like a separate one: an admitted
@@ -2103,23 +2127,36 @@ def self_test_main():
         settings_rows = len(grammar_rows) + len(rows)
 
         # 46. THE BASH ORACLE (a runtime witness of candidacy; bash decides, not a hand-written reading).
-        #     Generated spellings of each CANDIDATE_RE literal name (python, python3, python3.N and the
-        #     core hook launcher) run under `bash --noprofile --norc -c`, and under `dash -c` when present,
-        #     with an empty environment but PATH (env -i PATH=...), the PATH a fresh directory of stub
-        #     executables, one per name, each appending its own name to a marker file there: no network
-        #     and no real interpreter. Every command where a stub ran must be a candidate (_is_candidate),
-        #     and one where a python interpreter stub ran must not pass the settings scan (a non-isolated
-        #     launch; the launcher run by its own shebang is the disclosed shebang residual). A spelling
-        #     is the name whole, split by a single quote, a double quote, a backslash, a backslash-newline,
-        #     or a double quote and then a backslash-newline (`pyt"h"\<newline>on3`); it follows a separator (newline, CR LF, `;`, `&&`) after a prefix (none, a command, a comment,
-        #     or a command or comment ending in a run of 1 to 4 backslashes). The generated set is capped
-        #     (a set over ORACLE_CAP fails rather than being cut), each run has a timeout, and the stub
-        #     directory (fresh, under this self-test's temporary root) is removed after. A control (`python3 x`) must run its stub, so a shell that runs
-        #     nothing cannot pass vacuously. Spellings outside this set are the disclosed residual.
-        ORACLE_CAP = 2000
+        #     Generated spellings of four literal names (python, python3, python3.12 and the core hook
+        #     launcher; not every name CANDIDATE_RE matches: python2, pythonw, python311 and the other
+        #     python3.N are not generated) run under `bash --noprofile --norc -c`, and under `dash -c` when
+        #     present, with an empty environment but PATH, the PATH a fresh directory of stub executables,
+        #     one per name, each appending its own name to a marker file there: no network and no real
+        #     interpreter. Every command where a stub ran must be a candidate (_is_candidate), and one where
+        #     a python interpreter stub ran must not pass the settings scan (a non-isolated launch; the
+        #     launcher run by its own shebang is the disclosed shebang residual). A spelling is the name
+        #     whole, split by a single quote, a double quote, a backslash, a backslash-newline, or a double
+        #     quote and then a backslash-newline (`pyt"h"\<newline>on3`); it follows a separator (newline,
+        #     CR LF, `;`, `&&`) after a prefix (none, `true `, `true;`, `true #x`, `# ok`, `echo ok`, or
+        #     one of the last three ending in a run of 1 to 4 backslashes), and is followed by ` x`, by a
+        #     line continuation and `x` (`true #x\<newline>pyt\hon3\<newline>x`: bash runs `python3x`) or
+        #     by a line continuation and ` x` (bash runs `python3 x`). The oracle FAILS CLOSED: bash is
+        #     required (without it the self-test cannot evaluate, exit 2; dash is optional and named when
+        #     absent); a positive control runs each stub by name under each shell and must exit 0 leaving
+        #     exactly that name in the marker; every marker must be non-empty and hold only stub names; a
+        #     command that ran no stub and exits 126 or 127 must explain it on stderr with "not found"
+        #     lines for non-stub words only, and no command that ran no stub may name a stub or the stub
+        #     directory on stderr (otherwise it is an execution failure); each of those, a run that times
+        #     out, and the whole oracle running past ORACLE_DEADLINE seconds is a cannot-evaluate (exit
+        #     2). The generated set is capped (a set over ORACLE_CAP fails rather than being cut), and the
+        #     stub directory (fresh, under this self-test's temporary root) is removed after and must be
+        #     gone. Spellings outside this set are the disclosed residual.
+        ORACLE_CAP = 6000
+        ORACLE_DEADLINE = 600
         oracle_names = ("python", "python3", "python3.12") + tuple(sorted(NO_SITE_SCRIPTS))
         oracle_prefixes = ("", "true ", "true;", "true #x", "# ok", "echo ok") + tuple(
             base + "\\" * n for base in ("true #x", "# ok", "echo ok") for n in range(1, 5))
+        oracle_suffixes = (" x", "\\\nx", "\\\n x")
         oracle_cmds = []
         for name in oracle_names:
             cut = 3 if name.startswith("python") else 7
@@ -2127,53 +2164,83 @@ def self_test_main():
             spellings = (name, head + "'" + tail[:3] + "'" + tail[3:], head + '"' + tail[:3] + '"' + tail[3:],
                          head + "\\" + tail, head + "\\\n" + tail,
                          head + '"' + tail[:1] + '"\\\n' + tail[1:])
-            oracle_cmds += [prefix + sep + spelled + " x" for spelled in spellings
-                            for prefix in oracle_prefixes for sep in ("\n", "\r\n", ";", "&&")]
-        oracle_bash = shutil.which("bash")
-        oracle_dash = shutil.which("dash")
-        oracle_shells = [sh for sh, found in (("bash", oracle_bash), ("dash", oracle_dash)) if found]
+            oracle_cmds += [prefix + sep + spelled + suffix for spelled in spellings
+                            for prefix in oracle_prefixes for sep in ("\n", "\r\n", ";", "&&")
+                            for suffix in oracle_suffixes]
+        # A shell's "command not found" line, the word it could not find captured.
+        oracle_not_found = dict(bash=re.compile(r"[^:\n]*: line [0-9]+: (.*): command not found"),
+                                dash=re.compile(r"[^:\n]*: [0-9]+: (.*): not found"))
         oracle_ran = {}
         if len(oracle_cmds) > ORACLE_CAP:
             failures.append("bash oracle: {} generated commands exceed the cap {}".format(len(oracle_cmds),
                                                                                        ORACLE_CAP))
-        elif oracle_bash is None:
-            skipped.append("46 bash-oracle (bash unavailable)")
+        elif bash_bin is None:
+            cannot.append("46 bash-oracle (bash unavailable)")
         else:
             stub_dir = tmp / "oracle-stubs"
+            marker = stub_dir / "ran"
+            oracle_end = time.monotonic() + ORACLE_DEADLINE
             try:
                 stub_dir.mkdir()
-                marker = stub_dir / "ran"
                 for name in oracle_names:
                     stub = stub_dir / name
                     stub.write_text("#!/bin/sh\nprintf '%s\\n' {} >> {}\n".format(
                         shlex.quote(name), shlex.quote(str(marker))), encoding="utf-8")
                     stub.chmod(0o755)
-                for sh in oracle_shells:
+                for sh in ["bash"] + (["dash"] if dash_bin is not None else []):
                     ran = 0
-                    for cmd in ["python3 x"] + oracle_cmds:
+                    for cmd, control in ([(name + " x", name) for name in oracle_names]
+                                         + [(cmd, None) for cmd in oracle_cmds]):
+                        left = oracle_end - time.monotonic()
+                        if left <= 0:
+                            cannot.append("46 bash-oracle (past its {} s deadline under {}, at {!r})"
+                                          .format(ORACLE_DEADLINE, sh, cmd))
+                            break
                         if marker.exists():
                             marker.unlink()
                         try:
                             if sh == "bash":
-                                subprocess.run([oracle_bash, "--noprofile", "--norc", "-c", cmd],
-                                               env={"PATH": str(stub_dir)}, cwd=str(stub_dir),
-                                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                               stderr=subprocess.DEVNULL, timeout=10)
+                                proc = subprocess.run([bash_bin, "--noprofile", "--norc", "-c", cmd],
+                                                      env=dict(PATH=str(stub_dir)), cwd=str(stub_dir),
+                                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                      stderr=subprocess.PIPE, timeout=min(10, left))
                             else:
-                                subprocess.run([oracle_dash, "-c", cmd], env={"PATH": str(stub_dir)},
-                                               cwd=str(stub_dir), stdin=subprocess.DEVNULL,
-                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                               timeout=10)
+                                proc = subprocess.run([dash_bin, "-c", cmd], env=dict(PATH=str(stub_dir)),
+                                                      cwd=str(stub_dir), stdin=subprocess.DEVNULL,
+                                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                                      timeout=min(10, left))
                         except subprocess.TimeoutExpired:
-                            failures.append("bash oracle: {} timed out on {!r}".format(sh, cmd))
+                            cannot.append("46 bash-oracle ({} timed out on {!r})".format(sh, cmd))
                             continue
-                        if not marker.exists():
-                            if cmd == "python3 x":
-                                failures.append("bash oracle: the control {!r} ran no stub under {}"
-                                                .format(cmd, sh))
+                        stubs = set()
+                        if marker.exists():
+                            text = marker.read_text(encoding="utf-8")
+                            lines = text.split("\n")
+                            if len(lines) < 2 or lines[-1] or not set(lines[:-1]) <= set(oracle_names):
+                                cannot.append("46 bash-oracle ({} left the invalid marker {!r} for {!r})"
+                                              .format(sh, text, cmd))
+                                continue
+                            stubs = set(lines[:-1])
+                        if control is not None:
+                            if stubs != {control} or proc.returncode != 0:
+                                cannot.append("46 bash-oracle (the control {!r} under {} exited {} and ran "
+                                              "{}, not its own stub alone)".format(cmd, sh, proc.returncode,
+                                                                                   sorted(stubs)))
                             continue
-                        stubs = set(marker.read_text(encoding="utf-8").split())
-                        if cmd == "python3 x":
+                        if not stubs:
+                            err_lines = [line for line in proc.stderr.decode("utf-8", "replace").split("\n")
+                                         if line]
+                            found = [(line, oracle_not_found[sh].fullmatch(line)) for line in err_lines]
+                            bad = [line for line, m in found if m is not None and m.group(1) in oracle_names]
+                            if proc.returncode in (126, 127):
+                                bad += [line for line, m in found if m is None]
+                            else:
+                                bad += [line for line, m in found if m is None and (
+                                    str(stub_dir) in line
+                                    or any(": " + name + ": " in line for name in oracle_names))]
+                            if bad:
+                                cannot.append("46 bash-oracle ({} could not execute {!r}: exit {}, {!r})"
+                                              .format(sh, cmd, proc.returncode, bad))
                             continue
                         ran += 1
                         errs, fails = [], []
@@ -2187,14 +2254,53 @@ def self_test_main():
                                             "settings scan passes".format(sh, sorted(stubs), cmd))
                     oracle_ran[sh] = ran
             finally:
-                shutil.rmtree(stub_dir, ignore_errors=True)
-            if oracle_dash is None:
+                try:
+                    shutil.rmtree(stub_dir)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failures.append("bash oracle: removing the stub directory failed: {}".format(exc))
+                if os.path.lexists(stub_dir):
+                    failures.append("bash oracle: the stub directory {} remains after removal"
+                                    .format(stub_dir))
+            if dash_bin is None:
                 skipped.append("46 dash-oracle (dash unavailable)")
-        oracle_note = ("the bash oracle generated {} spellings ({}): every one that ran a stub is a "
-                       "candidate (0 missed) and every one that ran a python interpreter stub fails the "
-                       "settings scan".format(len(oracle_cmds), ", ".join(
-                           "{} ran a stub under {}".format(n, sh) for sh, n in sorted(oracle_ran.items())))
-                       if oracle_ran else "the bash oracle did not run (see NOTE)")
+        oracle_note = ("after a positive control per stub name under each shell, the bash oracle generated "
+                       "{} spellings ({}): every one that ran a stub is a candidate (0 missed) and every "
+                       "one that ran a python interpreter stub fails the settings scan".format(
+                           len(oracle_cmds), ", ".join("{} ran a stub under {}".format(n, sh)
+                                                       for sh, n in sorted(oracle_ran.items())))
+                       if oracle_ran else "the bash oracle did not run")
+
+        # 47. LINEAR CANDIDACY: _pairwise is one pass over the text, and a line reading is a match at the
+        #     line's start, never a rebuilt suffix. A child interpreter under a 512 MiB address-space cap
+        #     and a 60 s timeout decides a command of 20,000 short lines whose last line follows a comment
+        #     ending in a backslash (a candidate only by a line reading). Two readings rebuilt per line (the
+        #     round 23 form) hold about 2.8 billion characters of suffix text there, which the cap refuses.
+        try:
+            import resource
+        except ImportError:
+            resource = None
+            cannot.append("47 linear-candidacy (no resource module to cap the child)")
+        if resource is not None:
+            linear_cap = 512 * 1024 * 1024
+            linear_code = (r"import importlib, sys; sys.path.append(sys.argv[1]); "
+                           r"g = importlib.import_module(sys.argv[2]); "
+                           r"sys.stdout.write(str(g._is_candidate('echo x\n' * 20000 + "
+                           r"'true #x\\\npyt\\hon3 x')))")
+            here = Path(__file__).resolve()
+            try:
+                linear = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", linear_code, str(here.parent), here.stem],
+                    capture_output=True, text=True, env=env, cwd=str(tmp), timeout=60,
+                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_AS, (linear_cap, linear_cap)))
+            except subprocess.TimeoutExpired:
+                failures.append("linear candidacy: 20,000 short lines took over 60 s")
+            else:
+                if linear.returncode != 0 or linear.stdout != "True":
+                    failures.append("linear candidacy: 20,000 short lines under a 512 MiB cap should be a "
+                                    "candidate (got rc={}, out={!r}, err={!r})".format(
+                                        linear.returncode, linear.stdout, linear.stderr[-200:]))
 
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
@@ -2206,10 +2312,18 @@ def self_test_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if cannot:
+        print("SELF-TEST CANNOT EVALUATE (exit 2): a required runtime witness did not run or gave no valid "
+              "evidence:")
+        for item in cannot:
+            print("  - " + item)
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
+    if cannot:
+        return 2
+    if failures:
         return 1
     note = ("" if not skipped else
             " NOTE: skipped {} case(s) the runner cannot exercise: {}"
@@ -2260,7 +2374,8 @@ def self_test_main():
           "passes compliant (exit 0) and fails non-compliant (exit 1) while an expansion at the command "
           "word, among the options or after a -c/-m, separate or ending a cluster (-Ic, -Im, -BIc), is "
           "exit 2 ({} settings-command scope and grammar rows); and the gate refuses to run non-"
-          "isolated (exit 2); {}".format(settings_rows, oracle_note)
+          "isolated (exit 2); {}; and 20,000 short lines are decided under a 512 MiB cap (linear "
+          "work)".format(settings_rows, oracle_note)
           + note)
     return 0
 
