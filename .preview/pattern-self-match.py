@@ -42,11 +42,16 @@ WHAT IT DOES
           plus optional separate -a, -l or -c, and BODY holds only sleep N, echo, `:`, true and date.
     R is one or more of >/dev/null, 2>/dev/null, 2>&1 and &>/dev/null after the command's last word, with or
     without a blank before it: as in bash, `>` ends a word, so `qa-x/>/dev/null` is the word qa-x/ and then
-    >/dev/null, while `qa-x/2>&1` is the word qa-x/2 and then >&1, which is not in R. On the signalling command R
-    changes only where messages go, and on the pgrep of (d) only what is shown. A shape may be followed by one
-    `|| CMD` or `&& CMD`, CMD a benign simple command (below), and the kill in a (b) body by one `|| CMD` or
-    `&& CMD`, CMD an echo, sleep N, `:` or true as that body allows: CMD runs, if at all, only after the shape or
-    the kill has run. V is an identifier that holds a lowercase letter (so no all-caps name, and not `_`), does
+    >/dev/null, while `qa-x/2>&1` is the word qa-x/2 and then >&1, which is not in R. A bare word of digits alone
+    needs the blank: bash reads `15>/dev/null` as a redirection of descriptor 15, not as the word 15 and then
+    >/dev/null, so `pkill -f 15>/dev/null` (pkill gets no pattern) and `while pgrep -f 7>/dev/null; ...` (the
+    loop ends at once) take the note, while `pkill -f 15 >/dev/null` and `pkill -f "15">/dev/null` are denied
+    (the hook also gives the note to a run of digits too large for a descriptor, which bash reads as a word). On
+    the signalling command R changes only where messages go, and on the pgrep of (d) only what is shown. A shape
+    may be followed by one `|| CMD` or `&& CMD`, CMD a benign simple command (below), and the kill in a (b) body
+    by one `|| CMD` or `&& CMD`, CMD an echo, sleep N, `:` or true as that body allows: CMD runs, if at all, only
+    after the shape or the kill has run. V is an identifier that holds a lowercase letter (so no all-caps name,
+    and not `_`), does
     not start with BASH and is not a reserved word, so it is none of bash's all-caps special names: assigning a
     readonly one (EUID, UID, PPID) stops the loop, and others (RANDOM, SRANDOM, SECONDS, LINENO, IFS, PATH) change
     the value kill gets or how the shell runs it. auto_resume and histchars, special names that hold a lowercase
@@ -97,9 +102,10 @@ THREAT MODEL
     resists a caller that sets out to hide a pattern. The deny set is closed, and each shape in it selects the
     running shell under the premises in RESIDUAL COVERAGE; everything uncertain gets a note at most. An internal
     error while reading a command allows it WITH a note that it was not checked, and so does a payload the hook
-    cannot evaluate: a stdin that is closed or fails to read, one over 16 MiB, one whose input does not end (EOF)
-    within 2 seconds, one with bytes other than blanks after its JSON, one that is not JSON, a JSON value that is
-    not an object, and a Bash call whose tool_input is not an object or whose command is not a string. A JSON
+    cannot evaluate: a stdin that is closed or fails to read, one over 16 MiB in all (every byte read through the
+    end of input counts, blanks after the JSON too), one whose input does not end (EOF) within 2 seconds, one
+    with bytes other than JSON blanks (space, tab, CR, LF) after its JSON, one that is not JSON, a JSON value that
+    is not an object, and a Bash call whose tool_input is not an object or whose command is not a string. A JSON
     prefix followed by an idle interval is not taken as the whole payload: the hook reads on until the input ends,
     so a host that keeps stdin open after the payload gets the cannot-evaluate note on every Bash call, 2 seconds
     late. The one exception is an interpreter older than Python 3.14 that can start the hook: the guard
@@ -141,7 +147,9 @@ RESIDUAL COVERAGE.
         non-printable bytes;
       - a shell function or alias (one defined in a shell snapshot, say) that shadows a command word the grammar
         accepts (kill, pkill, pgrep, xargs, echo, sleep, ls, date, pwd, true or `:`) can change what a shape runs,
-        or keep it from running;
+        or keep it from running, and the deny assumes no alias named for a reserved word (for, while, until, do,
+        done, if, then, fi, case or esac): with expand_aliases on, one named for, while, until, do or done changes
+        the loop that word belongs to (bash 5.3.9 then reported a syntax error and ran no loop);
       - shell state set before the command (by a shell snapshot, say): an IFS without a newline changes how
         $(pgrep ...) splits, and a loop variable made readonly, a nameref or otherwise given an attribute changes
         the loop;
@@ -276,43 +284,49 @@ def _read_payload(fd=0, deadline=_READ_DEADLINE):
             raise ValueError("hook payload over the read bound")
 # END VENDOR
 
-# The hook's own reading.
-_JSON_BLANKS = b" \t\r\n"
+# The hook's own reading. It does not call the vendored _read_payload, which returns a complete JSON prefix that an
+# idle interval follows (that may not be the whole payload) and does not say how many bytes it read, so the bytes
+# after that prefix could not be counted toward _MAX_INPUT.
 
 
 def _read_complete(fd=0, deadline=_READ_DEADLINE):
-    """The payload _read_payload parses, once the input has also ended (EOF) within the deadline. _read_payload
-    returns a complete JSON prefix that an idle interval follows, which may not be the whole payload, so reading
-    goes on to the end: JSON blanks after the prefix are read past, and any other byte (the input as a whole is
-    then not one JSON object), or no end before the deadline, raises ValueError."""
+    """The payload, parsed once the input has ended (EOF) within the deadline. Every byte read through the end
+    counts toward one _MAX_INPUT budget, and the time left is taken again after each wait, so no wait runs past the
+    deadline. The whole input must be one JSON value, so only JSON blanks (space, tab, CR and LF) may follow it.
+    Raises ValueError for more than _MAX_INPUT bytes, for no end before the deadline, and for input that is not
+    one JSON value."""
     end = time.monotonic() + deadline
-    payload = _read_payload(fd, deadline)
+    data = bytearray()
     while True:
         left = end - time.monotonic()
-        chunk = None
-        if select.select([fd], [], [], max(left, 0))[0]:
-            try:
-                chunk = os.read(fd, 65536)
-            except BlockingIOError:
-                pass
-        if chunk == b"":
-            return payload
-        if chunk and chunk.strip(_JSON_BLANKS):
-            raise ValueError("bytes after the hook payload")
         if left <= 0:
             raise ValueError("hook payload did not end within the read deadline")
+        if not select.select([fd], [], [], left)[0]:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            return json.loads(bytes(data))
+        data += chunk
+        if len(data) > _MAX_INPUT:
+            raise ValueError("hook payload over the read bound")
 
 
 _SCAN_LIMIT = 64 * 1024
 # A LITERAL's value, and a bare word: only these characters (a LITERAL also must not start with `-`).
 _LITERAL_RE = re.compile(r"[A-Za-z0-9_./:@%=,-]+\Z")
 _BARE_RE = re.compile(r"[A-Za-z0-9_./:@%=,-]+")
+# A bare word of digits alone: directly before `>` bash reads it as a file descriptor number, not as a word.
+_DIGITS_RE = re.compile(r"[0-9]+\Z")
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DQ_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\Z")
 # The redirections R, at a token's start: >, 2> or &> onto /dev/null (a blank may stand before the target), or 2>&1.
 _REDIR_RE = re.compile(r"(2>|&>|>)[ \t]*/dev/null|2>&1")
 # What may follow a word, a variable, a redirection or `)`: a blank, a newline, `;`, `|`, `&`, `)`, `>` (as in bash,
-# it ends the word and starts a redirection, which must then be one of R), or the end.
+# it ends the word and starts a redirection, which must then be one of R; a bare word of digits alone before it is
+# refused, _DIGITS_RE), or the end.
 _AFTER_WORD = frozenset(" \t\n;|&)>")
 _SLEEP_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)([smhd]?)\Z")
 _SLEEP_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -391,8 +405,8 @@ def _tokens(text):
     """The command's tokens, or raise _Refused at the first character or construct outside the tokenizer's set.
     A token is (kind, value, quoting): ("w", text, "bare" | "sq" | "dq") a word; ("v", name, quoted) a `$V` or
     "$V"; ("op", op, None) for `;`, newline, `|`, `&&`, `||`, `&`, `!`, `$(` and its `)`; ("r", target, None) one
-    of R, spelled without blanks. A `$(` may not nest, and every word stands alone (no word is joined to a quote,
-    a variable or a substitution)."""
+    of R, spelled without blanks. A `$(` may not nest, every word stands alone (no word is joined to a quote, a
+    variable or a substitution), and no bare word of digits alone stands directly before `>`."""
     out, i, n, depth = [], 0, len(text), 0
     while i < n:
         c = text[i]
@@ -456,8 +470,8 @@ def _tokens(text):
             tok, i = ("op", "!", None), i + 1
         else:
             m = _BARE_RE.match(text, i)
-            if not m:
-                raise _Refused
+            if not m or (_DIGITS_RE.match(m.group()) and text.startswith(">", m.end())):
+                raise _Refused  # bash reads `15>` as descriptor 15, so the digits are no word
             tok, i = ("w", m.group(), "bare"), _end(text, m.end())
         out.append(tok)
     if depth:
@@ -1076,6 +1090,12 @@ def _self_test():
         # auto_resume and histchars are neither readonly nor change the value assigned
         "for histchars in $(pgrep -f qa-x/); do kill $histchars; done",
         "for auto_resume in $(pgrep -f qa-x/); do kill $auto_resume; done",
+        # a word of digits with a blank, quoted, or not digits alone before `>` is a pattern (QA round 3)
+        "pkill -f 15 >/dev/null", 'pkill -f "15">/dev/null', "pkill -f '8080'>/dev/null", "pkill -f qa-x/15>/dev/null",
+        "pkill -f 15&>/dev/null", "pkill -f -- 15 >/dev/null", "while pgrep -f 7 >/dev/null; do sleep 1; done",
+        # the trailing CMD of a shape may carry R
+        "pkill -f qa-x/ || echo none >/dev/null", "pkill -f qa-x/ && date 2>/dev/null",
+        "while pgrep -f qa-x/; do sleep 1; done || echo gone >/dev/null 2>&1",
     ]
     # Elements that would keep a shape from running or from reaching the shell: each must take the note.
     false_deny_witnesses = [
@@ -1090,6 +1110,9 @@ def _self_test():
         "sleep 99999d; pkill -f qa-x/", "sleep 30; sleep 31; pkill -f qa-x/",
         "for p in $(pgrep -f qa-x/); do sleep 61; kill $p; done",
         "for p in $(pgrep -f qa-x/); do kill $p && sleep 61; done", "sleep 61; while pgrep -f qa-x/; do :; done",
+        # a bare word of digits alone directly before `>` is a descriptor number in bash: no pattern (QA round 3)
+        "pkill -f 15>/dev/null", "pkill -f 8080>/dev/null", "pkill -f -- 15>/dev/null", "pkill -f 15>/dev/null 2>&1",
+        "while pgrep -f 7>/dev/null; do sleep 1; done", "until ! pgrep -f 7>/dev/null; do sleep 1; done",
     ] + ["for V in $(pgrep -f qa-x/); do kill $V; done".replace("V", name) for name in (
         "RANDOM", "SRANDOM", "IFS", "LINENO", "EPOCHSECONDS", "EPOCHREALTIME", "SECONDS", "PPID", "UID", "EUID",
         "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_pid", "MYPID", "_")]
@@ -1295,7 +1318,10 @@ def _self_test():
                             "pkill -f qa-x/2>&1", "pkill -f qa-x/>>/dev/null", "pkill -f qa-x/>log",
                             "pkill -f qa-x/<x", "pkill -f qa-x/(", "pkill -f 'python worker.py'",
                             "pkill 2>/dev/null -f qa-x/", "pgrep -f qa-x/ >/dev/null | xargs kill",
-                            "for p in $(pgrep -f qa-x/ >/dev/null); do kill $p; done"):
+                            "for p in $(pgrep -f qa-x/ >/dev/null); do kill $p; done",
+                            "for p in $(pgrep -f qa-x/); do kill $p || date; done",
+                            "for p in $(pgrep -f qa-x/); do kill $p || pwd; done",
+                            "for p in $(pgrep -f qa-x/); do kill $p || echo x >/dev/null; done"):
                 self.assertNote(command)
             for command in ("for p in $(pgrep -f qa-x/); do kill $p; done; echo after",
                             " \n pkill -f qa-x/ \n", "pkill\t-f\tqa-x/", "true; : ; pwd; date; ls; pkill -f qa-x/",
@@ -1375,7 +1401,7 @@ def _self_test():
             old = sys.stdout
             sys.stdout = io.StringIO()
             try:
-                with patched(_read_payload=fail, _is_worker=lambda env: False):
+                with patched(_read_complete=fail, _is_worker=lambda env: False):
                     self.assertEqual(main(["hook"]), 0)
                 text = sys.stdout.getvalue()
             finally:
@@ -1388,7 +1414,9 @@ def _self_test():
             # before blanks) leaves the payload read as sent
             whole, note = payload_bytes("echo hi"), json.dumps(dict(systemMessage=_NOTE_PAYLOAD)).encode() + b"\n"
             for chunks, want in (((whole, b"garbage"), note), ((payload_bytes("pkill -f qa-x/"), b"x"), note),
-                                 ((whole, b""), b""), ((whole, b"\n "), b""), ((whole[:20], whole[20:]), b"")):
+                                 ((whole, b""), b""), ((whole, b"\n "), b""), ((whole[:20], whole[20:]), b""),
+                                 ((whole, b" \t\r\n"), b""), ((whole, b"\x0b"), note), ((whole, b"\x0c"), note),
+                                 ((whole, b"\xc2\xa0"), note)):
                 p = subprocess.Popen([sys.executable, "-I", "-S", "-B", here], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
                 try:
@@ -1877,8 +1905,8 @@ def _self_test():
                               "until ! pgrep -f qa-x/ >/dev/null; do sleep 5m; done"], "deny", "note")
 
         def test_m45_end_of_input_required(self):
-            # in process: the vendored reader alone returns a whole JSON prefix an idle interval follows; reading to
-            # the end of input refuses the bytes after it
+            # in process: the vendored reader alone (the hook does not call it) returns a whole JSON prefix an idle
+            # interval follows; reading to the end of input refuses the bytes after it
             whole = payload_bytes("echo hi")
 
             def read(reader, tail):
@@ -1905,6 +1933,117 @@ def _self_test():
             self.assertEqual(read(_read_complete, b"\n"), json.loads(whole))
             self.assertEqual(read(_read_complete, b""), json.loads(whole))
             self.assertEqual(read(_read_payload, b"garbage"), json.loads(whole))  # the mutant: no end required
+            for blank in (b" ", b"\t", b"\r", b"\n", b"\t\r\n "):  # every JSON blank may follow the payload
+                self.assertEqual(read(_read_complete, blank), json.loads(whole), blank)
+            for other in (b"\x0b", b"\x0c", b"\x00", b"\xc2\xa0"):  # no other byte may
+                self.assertEqual(read(_read_complete, other), "refused", other)
+
+        def feed(self, parts, deadline, close_after=None):
+            """_read_complete(r, deadline) on a pipe that a thread fills with parts, (pause, bytes) each, and then
+            closes, after close_after seconds when given: (the payload or "refused: <message>", seconds taken). The
+            read end is closed before the thread is joined, so a writer the reader has stopped reading gets EPIPE."""
+            r, w = os.pipe()
+
+            def write():
+                try:
+                    for pause, data in parts:
+                        time.sleep(pause)
+                        os.write(w, data)
+                    if close_after is not None:
+                        time.sleep(close_after)
+                except OSError:
+                    pass  # the reader stopped reading
+                finally:
+                    os.close(w)
+            t = threading.Thread(target=write)
+            t.start()
+            start = time.monotonic()
+            try:
+                out = _read_complete(r, deadline)
+            except ValueError as e:
+                out = "refused: " + str(e)
+            finally:
+                taken = time.monotonic() - start
+                os.close(r)
+                t.join()
+            return out, taken
+
+        def test_m46_input_still_open(self):
+            # a payload the input does not end after is refused at the deadline, not returned (QA round 3 mutant B);
+            # the time left is taken again after each wait, so the refusal comes at the deadline, not at the end
+            # of input 2 seconds later (a wait with a stale time left would run on to it)
+            one = json.dumps(dict(a=1)).encode()
+            out, taken = self.feed([(0, one)], 0.3, close_after=2.0)
+            self.assertEqual(out, "refused: hook payload did not end within the read deadline")
+            self.assertGreaterEqual(taken, 0.3)
+            self.assertLess(taken, 1.5)
+            self.assertEqual(self.feed([(0, one)], 30, close_after=0.3)[0], dict(a=1))
+            self.assertEqual(self.feed([(0, one[:5]), (0.3, one[5:])], 30)[0], dict(a=1))
+
+        def test_m47_one_input_budget(self):
+            # every byte read through the end of input counts toward the one 16 MiB budget, whether the blanks
+            # after the payload come at once or after a pause that a complete JSON prefix ends (QA round 3)
+            whole, blanks = payload_bytes("echo hi"), b" " * 65536
+            over = (_MAX_INPUT - len(whole)) // len(blanks) + 1
+            bound = "refused: hook payload over the read bound"
+            self.assertEqual(self.feed([(0, whole + blanks * over)], 30)[0], bound)  # continuous
+            self.assertEqual(self.feed([(0, whole)] + [(0.15, blanks)] + [(0, blanks)] * over, 30)[0],
+                             bound)  # fragmented
+            with patched(_MAX_INPUT=4096):  # the boundary: 4096 bytes in all is read, 4097 is not
+                pad = 4096 - len(whole)
+                for pause in (0, 0.15):
+                    self.assertEqual(self.feed([(0, whole), (pause, b" " * pad)], 30)[0], json.loads(whole))
+                    self.assertEqual(self.feed([(0, whole), (pause, b" " * (pad + 1))], 30)[0], bound)
+            p = subprocess.Popen([sys.executable, "-I", "-S", "-B", here], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LC_ALL="C"))
+            try:
+                try:
+                    p.stdin.write(whole)
+                    p.stdin.flush()
+                    time.sleep(0.15)
+                    for _ in range(over):
+                        p.stdin.write(blanks)
+                    p.stdin.close()
+                except BrokenPipeError:
+                    pass  # the hook stopped reading at the bound
+                out, err = p.communicate(timeout=30)
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.communicate()
+            self.assertEqual((p.returncode, json.loads(out), err), (0, dict(systemMessage=_NOTE_PAYLOAD), b""))
+
+        def test_m48_descriptor_number(self):
+            # bash reads a bare word of digits alone directly before `>` as a descriptor number: `pkill -f
+            # 15>/dev/null` gets no pattern and signals nothing, and `while pgrep -f 7>/dev/null` ends at once
+            self.kill_mutant(dict(_DIGITS_RE=re.compile(r"(?!)")),
+                             ["pkill -f 15>/dev/null", "pkill -f 8080>/dev/null", "pkill -f -- 15>/dev/null",
+                              "pkill -f 15>/dev/null 2>&1", "while pgrep -f 7>/dev/null; do sleep 1; done",
+                              "until ! pgrep -f 7>/dev/null; do sleep 1; done"], "note", "deny")
+            for command in ("pkill -f 15 >/dev/null", 'pkill -f "15">/dev/null', "pkill -f qa-x/15>/dev/null",
+                            "pkill -f 15&>/dev/null"):
+                self.assertEqual(outcome(command), "deny", command)
+
+        def test_m49_body_trailer_names(self):
+            # the CMD after the kill in a (b) body is one of that body's commands, not any benign command
+            real = _trailer
+            self.kill_mutant(dict(_trailer=lambda toks, i, names, var=None:
+                                  real(toks, i, _BENIGN if names is _FOR_BODY else names, var)),
+                             ["for p in $(pgrep -f qa-x/); do kill $p || date; done",
+                              "for p in $(pgrep -f qa-x/); do kill $p || pwd; done"], "note", "deny")
+
+        def test_m50_trailer_redirections(self):
+            # a shape's trailing CMD may carry R, as any benign command may
+            def unredirected(toks, i, names, var=None):
+                if i < len(toks) and toks[i] in _ANDOR:
+                    e = _upto_sep(toks, i + 1)
+                    if _simple(toks[i + 1:e], names, redirs=False, var=var):
+                        return e
+                return i
+            self.kill_mutant(dict(_trailer=unredirected),
+                             ["pkill -f qa-x/ || echo none >/dev/null", "pkill -f qa-x/ && date 2>/dev/null",
+                              "while pgrep -f qa-x/; do sleep 1; done || echo gone >/dev/null 2>&1"], "deny", "note")
+            self.assertEqual(outcome("for p in $(pgrep -f qa-x/); do kill $p || echo x >/dev/null; done"), "note")
 
         def test_15_adjacent_redirection_probe(self):
             # non-signalling: pgrep -c in the wrapper form (a command after the eval), in its own process group,

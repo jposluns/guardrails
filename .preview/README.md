@@ -158,7 +158,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `9b923b2aaf7b6fd938686c8c92695511d5f34d27f737173a7a29c5c87c2488d2` | [pattern-self-match.py](pattern-self-match.py) |
+| `pattern-self-match.py` | `d65eefe8ae11de199d205232da565121e76e808877dac7dbba597c4f5b6d178e` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
@@ -533,12 +533,17 @@ section of its opening docstring. Read that section before relying on a hook; in
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps
   matches. A shell function or alias that shadows a command word the hook accepts (`kill`, `pkill`,
-  `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), or shell state set before the
-  command (an `IFS` without a newline, or a loop variable made readonly), can change what a denied command
-  runs or keep it from running. A denied shape may end with one `|| CMD` or `&& CMD` whose `CMD` is a
+  `pgrep`, `xargs`, `echo`, `sleep`, `ls`, `date`, `pwd`, `true` or `:`), an alias named for a reserved
+  word (`for`, `while`, `until`, `do`, `done`, `if`, `then`, `fi`, `case` or `esac`; one named for a loop
+  word turned the loop into a syntax error in bash 5.3.9), or shell state set before the command (an `IFS`
+  without a newline, or a loop variable made readonly), can change what a denied command runs or keep it
+  from running. A denied shape may end with one `|| CMD` or `&& CMD` whose `CMD` is a
   simple `echo`, `sleep`, `pwd`, `true`, `:`, `date` or `ls` (the `kill` in a `for` loop body likewise,
   with that body's commands), and its signalling command with `>/dev/null`, `2>/dev/null`, `&>/dev/null`
-  or `2>&1` after its last word, with or without a blank before it. Everything else gets a note at most:
+  or `2>&1` after its last word, with or without a blank before it. A word of digits alone needs the
+  blank: bash reads `pkill -f 15>/dev/null` as a redirection of descriptor 15, so pkill gets no pattern,
+  and the hook gives that command the note (`pkill -f 15 >/dev/null` and `pkill -f "15">/dev/null` are
+  denied). Everything else gets a note at most:
   compound commands, other `&&` and `||` lists, `ps | grep` pipelines, `sudo` or `exec` prefixes,
   `killall`, `pidof`, nested shell strings, other redirections, `printf`, `cd`, an `echo` with an option,
   a pattern holding a blank, an all-caps loop variable, and sleeps that add up to more than 60 seconds
@@ -554,10 +559,11 @@ input they cannot follow. Their docstrings describe further parsing limits and w
 verification worker processes; `ungated-record.py` and `unbounded-wait.py` also skip helper-session calls.
 `pattern-self-match.py` instead adds a note for a command over 64 KiB, or one it cannot read, that names
 a process matcher, and for its own internal error. It also adds a cannot-evaluate note for a hook payload
-it cannot read: a closed stdin or a read error, more than 16 MiB, input that does not end within 2
-seconds (a complete JSON prefix followed by a pause is not taken as the whole input), bytes other than
-blanks after the JSON, input that is not JSON, JSON that is not an object, or a Bash call without a
-string command. It writes nothing when
+it cannot read: a closed stdin or a read error, more than 16 MiB in all (every byte through the end of
+the input counts, blanks after the JSON too), input that does not end within 2 seconds (a complete JSON
+prefix followed by a pause is not taken as the whole input), bytes other than JSON blanks (space, tab,
+carriage return, newline) after the JSON, input that is not JSON, JSON that is not an object, or a Bash
+call without a string command. It writes nothing when
 standard input is a directory (its launch line exits before Python starts), for another tool or event,
 for an empty command, and for a command it allows without a note. It skips verification worker processes
 and checks helper-session calls.
