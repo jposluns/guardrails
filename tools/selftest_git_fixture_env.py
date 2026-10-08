@@ -587,10 +587,11 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
     can never start a member after the sweep), then no queued member starts and every registered
     member group is killed (_signal_member_groups) BEFORE the wait for the workers, and every
     running member stops waiting (_run_member), so that wait never runs to a member's bound.
-    config/member-close-on-interrupt pins it with a real SIGINT, and
+    config/member-close-on-interrupt pins it with a real SIGINT,
     config/member-failed-no-late-launch with a failed member and a worker that reaches its member
-    only after the sweep. A caller that catches that raise and goes on clears closing again
-    (_reopen_members).
+    only after the sweep, and config/member-close-signal-sweep with a signal at every point of
+    this branch through main()'s closes and restore. A caller that catches that raise and goes on
+    clears closing again (_reopen_members).
     """
     import shlex
     from concurrent.futures import ThreadPoolExecutor
@@ -1496,10 +1497,12 @@ def _config_member_bound(member):
 # handler raising between the acquire and the protected range of a with statement would leave the
 # lock held). Every acquire is also BOUNDED (_RegistryLock, REGISTRY_LOCK_SECONDS): one not granted
 # raises RegistryLockTimeout, which each caller reports AND records in _MEMBERS["refused"]
-# (_lock_refused), so no path blocks forever on it and a refusal anywhere (a member start, a
-# release, a kill sweep, the close) makes the run cannot-evaluate (_final_verdict) even when a later
-# close gets the lock and ends cleanly. config/member-close-lock and
-# config/member-close-unresolved-verdict pin both.
+# (_lock_refused), so no path blocks forever on it and a refusal at any of the five sites (a member
+# start, a release, a kill sweep, the close's first acquire, the config pool's failed-member branch)
+# makes the run cannot-evaluate (_final_verdict) even when a later close gets the lock and ends
+# cleanly. config/member-close-lock pins the bound; config/member-close-unresolved-verdict pins the
+# persistence at each of the five sites ("start-timeout", "release-timeout", "sweep-refused",
+# "close-refused", "failed-refused").
 REGISTRY_LOCK_SECONDS = 60
 
 
@@ -1530,12 +1533,15 @@ class _RegistryLock:
 
 
 _MEMBERS_LOCK = _RegistryLock()
-# "raised": the SIGINT or SIGTERM _close_on_signal raised (None until one has). "held": the first
-# SIGINT or SIGTERM _close_on_signal deferred because closing was set or one had already raised
-# (raised once by main() after its second close and the restore, _raise_held, or by
-# _reopen_members, the one place that clears closing inside a run). "refused": every registry lock
+# "raised": the SIGINT or SIGTERM _close_on_signal raised (None until one has). "held": EVERY SIGINT
+# or SIGTERM _close_on_signal deferred because closing was set or one had already raised, in the
+# order received (none is dropped); main() raises the strongest after its second close and the
+# restore (_raise_held), and _reopen_members raises it when it clears closing. Inside a run, closing
+# is cleared only by _reopen_members (the controls that drive the failed-member branch on purpose,
+# and _closing_refusal_control, which sets and clears closing alone and never restores the whole
+# registry, so a signal held inside it is raised right after it). "refused": every registry lock
 # refusal of this run (_lock_refused).
-_MEMBERS = {"closing": False, "raised": None, "held": None, "refused": [], "groups": set()}
+_MEMBERS = {"closing": False, "raised": None, "held": [], "refused": [], "groups": set()}
 # How often a member's wait (_run_member) looks at closing: a member whose wait sees it set stops
 # waiting and runs its own cleanup at once, instead of waiting on to its bound.
 MEMBER_WAIT_SLICE_SECONDS = 0.5
@@ -1771,13 +1777,16 @@ def _close_on_signal(signum, frame):
     clear and none has raised, sets closing (no member starts after it), records itself in raised
     and raises (_raise_signal_exception), so main()'s finally closes every member group. Every
     later one (once one has raised, or once closing is set by main()'s finally, the close or the
-    config pool's failed-member branch) is DEFERRED, never raised: the first deferred is kept in
-    held and main() raises it exactly once after its second close and the restore (_raise_held),
-    so no second or later signal can cut either close short or be lost. It never takes the
-    registry lock, and it never raises while the main thread holds it: every main-thread path that
-    takes the lock during a run sets closing first."""
+    config pool's failed-member branch) is DEFERRED, never raised: each deferred one is appended to
+    held, in order, and main() raises the strongest of the run's signals once, after its second
+    close and the restore (_raise_held: SIGTERM over SIGINT), so no second or later signal can cut
+    either close short, and none is dropped. It never takes the registry lock, and it never raises
+    while the main thread holds it: every main-thread path that takes the lock during a run sets
+    closing first. (Residual: CPython clears a signal's pending flag before it calls the handler, so
+    a handler cut off at its own entry, before its first statement, by a newly arrived signal whose
+    handler raises is lost; the sweep injects nothing inside this function for that reason.)"""
     if _MEMBERS["closing"] or _MEMBERS["raised"]:
-        _MEMBERS["held"] = _MEMBERS["held"] or signum
+        _MEMBERS["held"].append(signum)
         return
     _MEMBERS["closing"] = True
     _MEMBERS["raised"] = signum
@@ -1793,18 +1802,24 @@ def _raise_signal_exception(signum):
 
 
 def _raise_held():
-    """Raise the SIGINT or SIGTERM _close_on_signal deferred (held), once, and clear it; nothing
-    when none was deferred. main() calls it after its second close and the restore."""
-    held, _MEMBERS["held"] = _MEMBERS["held"], None
+    """THE DEFERRED-SIGNAL PRECEDENCE. When _close_on_signal deferred any signal (held, every one in
+    the order received), clear held and raise ONCE the strongest of the run's signals, the one that
+    raised (raised) and every held one: SIGTERM over SIGINT, whatever the order, so SystemExit 143
+    whenever a SIGTERM was received and KeyboardInterrupt otherwise (a terminate request is never
+    downgraded to a KeyboardInterrupt a caller may catch, and a later SIGTERM replaces an earlier
+    SIGINT's exception still propagating). Nothing when none was deferred: the exception already
+    propagating, if any, stands. main() calls it after its second close and the restore."""
+    held, _MEMBERS["held"] = _MEMBERS["held"], []
     if held:
-        _raise_signal_exception(held)
+        _raise_signal_exception(signal.SIGTERM if signal.SIGTERM in [_MEMBERS["raised"]] + held
+                                else signal.SIGINT)
 
 
 def _reopen_members():
     """Clear closing after a control drove _config_results into its failed-member branch on
     purpose and caught the raise (production never clears it inside a run: that raise ends the
-    suite). A SIGINT or SIGTERM deferred while closing was set is raised now (_raise_held),
-    closing set again, instead of being lost."""
+    suite), or after _closing_refusal_control. A SIGINT or SIGTERM deferred while closing was set
+    is raised now (_raise_held), closing set again, instead of being lost."""
     _MEMBERS["closing"] = False
     if _MEMBERS["held"]:
         _MEMBERS["closing"] = True
@@ -1831,8 +1846,12 @@ def _install_signal_handlers(previous):
 
 def _restore_signal_handlers(previous):
     """Restore the dispositions _install_signal_handlers recorded, ONCE, after main()'s second
-    close, in reverse order so SIGINT (whose restored handler raises) is restored last; main()
-    then raises a deferred signal (_raise_held)."""
+    close, in REVERSE order of installation, so SIGTERM is restored first and SIGINT (whose restored
+    handler raises) last: a SIGINT arriving between the two finds _close_on_signal and is deferred,
+    and one arriving after SIGINT's restore raises with SIGTERM already restored, never leaving
+    _close_on_signal installed. main() then raises a deferred signal (_raise_held).
+    config/member-close-signal-sweep pins the order (the signal.signal calls made here are
+    recorded) and a signal at every point of this function."""
     for signum in reversed(list(previous)):
         signal.signal(signum, previous[signum])
 
@@ -1850,8 +1869,9 @@ def _final_verdict(code, unresolved, refused=()):
     """main()'s exit code after the suite's close. code is _suite_main's (0 when nothing was found);
     unresolved, the problems main()'s second close still met (a group not confirmed empty, a kill
     refused, a registry lock not granted), and refused, every registry lock refusal of the run
-    (_lock_refused: a member start, a release, a kill sweep or a close, even one a later close made
-    good), make the run cannot-evaluate: 0 becomes 2, a definite failure's 1 and a harness error's 2
+    (_lock_refused at its five sites: a member start, a release, a kill sweep, the close's first
+    acquire and the config pool's failed-member branch, even one a later close made good), make the
+    run cannot-evaluate: 0 becomes 2, a definite failure's 1 and a harness error's 2
     stand, and the problems are listed. The PASS line is printed here, after the close, and only
     for a run that is still 0."""
     problems = list(unresolved) + [entry for entry in refused if entry not in unresolved]
@@ -2388,20 +2408,28 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # real SIGINTs from another thread (each interrupted close must leave the lock free), a member
 # start and a close with the lock held by another thread (each must give up at the lock bound),
 # then main() with the wrapper armed for the close; "failed", the production pool with member a
-# failing its positive control (ValueError) and member b reaching its member only after the kill
-# sweep; "failed-signal", the same with the lock wrapper armed for the failed-member branch;
+# failing its positive control (ValueError) once member b's worker is running (so the branch's
+# cancel_futures never cancels b) and member b reaching its member only after the kill sweep;
+# "failed-signal", the same with the lock wrapper armed for the failed-member branch;
 # "unresolved", a member exiting 0 whose group's emptiness probes raise PermissionError (main()
 # must exit 2 and never print PASS), then the injection removed and _close_members releasing the
 # group; "release-timeout", a member exiting 0 whose release is refused (another thread takes the
 # registry lock right after the member's kill and holds it past a 0.2 s lock bound, freeing it once
 # _run_bounded returns, so main()'s closes then release the group cleanly), and "start-timeout",
-# a member start refused the same way (its timeout recorded only in a private list), each of
-# which main() must still end with exit 2, the CANNOT EVALUATE line, no PASS line and one recorded
-# refusal. It prints one PROBE-REPORT line: the outcome, how many groups are still registered after
-# main(), every recorded process's state (_recorded_states), whether main() ended within 30 s of
-# every signal or injected failure, and the extras: the handlers restored after main() and a real
-# SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and each scenario's own
-# observations.
+# a member start refused the same way (its timeout recorded only in a private list);
+# "sweep-refused", "close-refused" and "failed-refused", the same refusal (lock bound 0.2 s) at the
+# first close's kill sweep, at the first close's own first acquire, and at the failed-member
+# branch's acquire (member a failing as in "failed", the lanes catching the ValueError and clearing
+# closing with _reopen_members, as the suite's own failed-member controls do), each of which
+# main() must still end with exit 2, the CANNOT EVALUATE line, no PASS line and one recorded
+# refusal; "closing-control", _closing_refusal_control with a real SIGINT at its _run_bounded
+# entry: the start refused with the SIGINT held and closing set inside, then the SIGINT raised
+# right after the control (nothing after it in the lanes runs), so main() ends in
+# KeyboardInterrupt. It prints one PROBE-REPORT line: the outcome, how many groups are still
+# registered after main(), every recorded process's state (_recorded_states), whether main() ended
+# within 30 s of every signal or injected failure, and the extras: the handlers restored after
+# main() and a real SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and
+# each scenario's own observations.
 _CLOSE_PROBE_CHILD = "\n".join((
     "import contextlib, io, json, os, random, signal, sys, threading, time",
     "sys.path.insert(0, sys.argv[1])",
@@ -2409,7 +2437,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "scenario, folder, fixture = sys.argv[2], sys.argv[3], sys.argv[4]",
     "suite.CONFIG_MEMBER_BOUND_DEFAULT = 90",
     "suite.CONFIG_MEMBER_DRAIN_SECONDS = 3",
-    "suite.REGISTRY_LOCK_SECONDS = 2",
+    "suite.REGISTRY_LOCK_SECONDS = 0.2 if scenario.endswith('-refused') else 2",
     "main_id, sent, extra, fire = threading.main_thread().ident, [], {}, []",
     "def interrupt():",
     "    sent.append(time.monotonic())",
@@ -2427,6 +2455,21 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    if free:",
     "        suite._MEMBERS_LOCK.release()",
     "    return free",
+    "def hold_lock():",
+    "    taken, done = threading.Event(), threading.Event()",
+    "    def holder():",
+    "        got = real_acquire(10)",
+    "        taken.set()",
+    "        done.wait(30)",
+    "        if got:",
+    "            suite._MEMBERS_LOCK.release()",
+    "    thread = threading.Thread(target=holder, daemon=True)",
+    "    thread.start()",
+    "    taken.wait(30)",
+    "    def release():",
+    "        done.set()",
+    "        thread.join()",
+    "    return release",
     "def ready(tags):",
     "    deadline = time.monotonic() + 60",
     "    while time.monotonic() < deadline:",
@@ -2476,7 +2519,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "def direct():",
     "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
     "    try:",
-    "        suite._MEMBERS.update(closing=False, raised=None, held=None)",
+    "        suite._MEMBERS.update(closing=False, raised=None, held=[])",
     "        fire.append(True)",
     "        try:",
     "            problems, raised = suite._close_members(), None",
@@ -2502,7 +2545,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "            try:",
     "                if time.monotonic() >= end:",
     "                    break",
-    "                suite._MEMBERS.update(closing=False, raised=None, held=None)",
+    "                suite._MEMBERS.update(closing=False, raised=None, held=[])",
     "                problems = suite._close_members()",
     "                if problems:",
     "                    stuck.append(problems)",
@@ -2543,8 +2586,41 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    if scenario == 'pooled':",
     "        threading.Thread(target=monitor, args=(('a', 'b'),), daemon=True).start()",
     "        pool(('a', 'b'))",
+    "    elif scenario == 'failed-refused':",
+    "        try:",
+    "            pool(('a', 'b'))",
+    "        except ValueError as exc:",
+    "            extra['caught'] = str(exc)",
+    "        suite._reopen_members()",
     "    elif scenario.startswith('failed'):",
     "        pool(('a', 'b'))",
+    "    elif scenario == 'closing-control':",
+    "        real_bounded = suite._run_bounded",
+    "        def bounded(*args, **kwargs):",
+    "            interrupt()",
+    "            result = real_bounded(*args, **kwargs)",
+    "            extra['control'] = [result[0], list(suite._MEMBERS['held']),",
+    "                                suite._MEMBERS['closing']]",
+    "            return result",
+    "        suite._run_bounded = bounded",
+    "        try:",
+    "            extra['rc'] = suite._closing_refusal_control(suite.Path(folder),",
+    "                                                         suite.subprocess.Popen)",
+    "        finally:",
+    "            suite._run_bounded = real_bounded",
+    "        extra['after'] = True",
+    "    elif scenario in ('close-refused', 'sweep-refused'):",
+    "        name = '_close_members' if scenario == 'close-refused' else '_signal_member_groups'",
+    "        real_step = getattr(suite, name)",
+    "        def refused_once():",
+    "            setattr(suite, name, real_step)",
+    "            release = hold_lock()",
+    "            try:",
+    "                return real_step()",
+    "            finally:",
+    "                release()",
+    "        setattr(suite, name, refused_once)",
+    "        sent.append(time.monotonic())",
     "    elif scenario in ('close', 'lock'):",
     "        stray()",
     "        if scenario == 'lock':",
@@ -2604,21 +2680,27 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "        return old",
     "    signal.signal = installing",
     "elif scenario.startswith('failed'):",
-    "    swept, late = threading.Event(), []",
+    "    swept, b_running, late, releases = threading.Event(), threading.Event(), [], []",
     "    real_sweep, real_observed = suite._signal_member_groups, suite._require_wrapper_observed",
     "    real_member = suite._run_config_member",
     "    def sweep():",
+    "        for release in releases:",
+    "            release()",
     "        problems = real_sweep()",
     "        swept.set()",
     "        return problems",
     "    def observed(bypass, what):",
     "        real_observed(bypass, what)",
     "        if what.startswith('positive control') and what.endswith(' a sleep'):",
+    "            b_running.wait(30)",
     "            sent.append(time.monotonic())",
     "            if scenario == 'failed-signal':",
     "                fire.append(True)",
+    "            if scenario == 'failed-refused':",
+    "                releases.append(hold_lock())",
     "            raise ValueError('injected failed member a')",
     "        if what.startswith('positive control') and what.endswith(' b sleep'):",
+    "            b_running.set()",
     "            swept.wait(30)",
     "    def run_member(member_argv, env, *rest, **kwargs):",
     "        rc = real_member(member_argv, env, *rest, **kwargs)",
@@ -2653,7 +2735,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "if scenario == 'unresolved':",
     "    problems = suite._close_members()",
     "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]",
-    "if scenario.endswith('-timeout'):",
+    "if scenario.endswith(('-timeout', '-refused')):",
     "    extra['refused'] = len(suite._MEMBERS['refused'])",
     "restored = [signal.getsignal(signal.SIGINT) is signal.default_int_handler,",
     "            signal.getsignal(signal.SIGTERM) == signal.SIG_DFL]",
@@ -2672,37 +2754,64 @@ _CLOSE_PROBE_CHILD = "\n".join((
 
 
 # The child config/member-close-signal-sweep runs (python3 -I -B -c, argv: the tools directory):
-# THE SIGNAL-BOUNDARY SWEEP of main(). The suite body is a stub returning 0, the registry holds one
-# group whose own cleanup has run, and the only stubs are the process-touching ones (the group
-# kill is recorded, its emptiness probe finds the group empty) plus a recorder around
-# _close_members; main(), _finish_members, _close_members, the kill sweep, the release, the
-# bounded registry lock (0.01 s here) and the handlers are the production ones. Each run delivers
-# REAL signals (signal.raise_signal, so the production handler runs at that point) at one point of
-# the window from the stub body's first line through the first line of _restore_signal_handlers
-# (the end of the second close): "line", a SIGINT, and separately a SIGTERM, at every line event
-# (sys.settrace); "instruction", the same before every bytecode instruction (sys.monitoring);
-# "pair", a first signal at every line event and a second of the other kind at every later line
-# event of that run (sys.monitoring: CPython drops a trace function that raised, so sys.settrace
-# cannot deliver a second signal after a first that raised). Every run must end with the outcome
-# of a delivered signal (KeyboardInterrupt, or SystemExit 143 for SIGTERM; returned 0 with none),
+# THE SIGNAL-BOUNDARY SWEEP of main(), over two suite bodies: "body" returns 0; "branch" drives
+# the config pool's REAL failed-member branch (_config_results with an empty roster and a stub pool
+# whose map raises ValueError, so main() ends in that ValueError when no signal is sent). The
+# registry holds one group whose own cleanup has run, and the only stubs are the process-touching
+# ones (the group kill is recorded, its emptiness probe finds the group empty), the pool, a recorder
+# around _close_members and a recorder of the signal.signal calls _restore_signal_handlers makes;
+# main(), _finish_members, _close_members, the kill sweep, the release, the bounded registry lock
+# (0.01 s here), the failed-member branch and the handlers are the production ones. Each run
+# delivers REAL signals (signal.raise_signal, so the handler installed at that point runs) at one
+# point of the window from the body's first line through the end of _restore_signal_handlers:
+# "line", a SIGINT, and separately a SIGTERM, at every line event (sys.settrace); "instruction", the
+# same before every bytecode instruction (sys.monitoring); "pair", a first signal at every line
+# event and a second of the other kind at every later line event of that run (sys.monitoring:
+# CPython drops a trace function that raised, so sys.settrace cannot deliver a second signal after a
+# first that raised). A signal is sent only while its handler is _close_on_signal, or, for SIGINT,
+# the restored default handler (a SIGTERM restored to its default action would end the child);
+# nothing is injected inside _close_on_signal itself (a handler cut off at its entry is the residual
+# main() discloses; after its entry it has no signal-delivery point before it records the signal).
+# Every run must end with EXACTLY the outcome the deferred-signal precedence gives for the signals
+# sent (_raise_held: SIGTERM over SIGINT whatever the order; a SIGINT after SIGINT's restore raises
+# there, and the strongest held one, if any, replaces it; with no signal, the body's own outcome),
 # no close cut short, at least one close completed clean, the registry empty, the lock free, the
-# default handlers restored and no signal left deferred. It prints one SWEEP-REPORT line: the
-# baseline run, per mode and first signal the runs made and the first five failing ones (point,
-# offset of the second, signals, outcome, each close's problems, groups left), the functions the
-# window reached and the seconds taken.
+# handlers restored by exactly the calls SIGTERM then SIGINT and nothing left deferred. It prints
+# one SWEEP-REPORT line: each body's baseline run, per body, mode and first signal the runs made and
+# the first five failing ones (point, offset of the second, the signals sent with how each was
+# handled and whether it raised, the outcome, the expected one, each close's problems, groups left,
+# the restores), the functions the window reached and the seconds taken. Model-only points: a signal
+# at the failed-member branch's except line or at its plain closing store raises before the branch's
+# cancel and kill sweep (main()'s closes still end every group, which the run requires); those
+# instructions (exception match, forward jump, constant and global loads, the dict store) include no
+# call, function entry or backward jump, the points where CPython runs a Python signal handler, so a
+# real signal cannot raise there.
 _CLOSE_SWEEP_CHILD = "\n".join((
-    "import contextlib, io, json, signal, sys, time",
+    "import concurrent.futures, contextlib, io, json, shutil, signal, sys, tempfile, time",
     "sys.path.insert(0, sys.argv[1])",
     "import selftest_git_fixture_env as suite",
     "suite.REGISTRY_LOCK_SECONDS = 0.01",
+    "tempfile.tempdir = tempfile.mkdtemp(prefix='member-close-sweep-')",
     "M, TOOL = sys.monitoring, sys.monitoring.DEBUGGER_ID",
     "SUITE_FILE = suite.main.__code__.co_filename",
     "RESTORE = suite._restore_signal_handlers.__code__",
+    "HANDLER = suite._close_on_signal.__code__",
     "OUTCOME = {signal.SIGINT: 'KeyboardInterrupt', signal.SIGTERM: 'SystemExit 143'}",
     "def body(report_path, lanes):",
     "    code = 0",
     "    return code",
-    "BODY = body.__code__",
+    "class Pool:",
+    "    def __init__(self, max_workers):",
+    "        pass",
+    "    def map(self, fn, items):",
+    "        raise ValueError('injected failed member')",
+    "    def shutdown(self, wait=True, cancel_futures=False):",
+    "        pass",
+    "concurrent.futures.ThreadPoolExecutor = Pool",
+    "def branch(report_path, lanes):",
+    "    suite._config_results((), {}, None, None)",
+    "    return 0",
+    "BODIES = {body.__code__: 'returned 0', branch.__code__: 'ValueError: injected failed member'}",
     "class Proc:",
     "    pid, returncode, stdout, stderr = 0, 0, None, None",
     "def signal_group(group, sig):",
@@ -2710,41 +2819,60 @@ _CLOSE_SWEEP_CHILD = "\n".join((
     "        raise ProcessLookupError(3, 'the group is empty')",
     "    st['kills'] += 1",
     "    return True",
-    "real_close = suite._close_members",
+    "real_close, real_signal = suite._close_members, signal.signal",
     "def close():",
     "    st['closes'].append(None)",
     "    problems = real_close()",
     "    st['closes'][-1] = problems",
     "    return problems",
-    "suite._suite_main, suite._close_members = body, close",
+    "def recording_signal(signum, handler):",
+    "    if sys._getframe(1).f_code is RESTORE:",
+    "        st['restores'].append(int(signum))",
+    "    return real_signal(signum, handler)",
+    "suite._close_members, signal.signal = close, recording_signal",
     "suite._signal_member_group = signal_group",
     "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
     "st = {}",
+    "def send(sig):",
+    "    handler = signal.getsignal(sig)",
+    "    how = ('ours' if handler is suite._close_on_signal else",
+    "           'restored' if handler is signal.default_int_handler else None)",
+    "    if how is None:",
+    "        return",
+    "    entry = [int(sig), how, False]",
+    "    st['sent'].append(entry)",
+    "    try:",
+    "        signal.raise_signal(sig)",
+    "    except BaseException:",
+    "        entry[2] = True",
+    "        raise",
     "def step(code):",
-    "    if code.co_filename != SUITE_FILE and code is not BODY:",
+    "    if code.co_filename != SUITE_FILE and code not in BODIES:",
     "        return False",
     "    if not st['open']:",
-    "        if code is not BODY:",
+    "        if code is not st['body']:",
     "            return True",
     "        st['open'] = True",
-    "    if st['shut']:",
+    "    if st['shut'] or code is HANDLER:",
     "        return True",
-    "    st['shut'] = code is RESTORE",
+    "    if code is RESTORE:",
+    "        st['restoring'] = True",
+    "    elif st['restoring']:",
+    "        st['shut'] = True",
+    "        return True",
     "    st['n'] += 1",
     "    st['names'].add(code.co_name)",
     "    plan = st['plan']",
     "    if plan[0] == st['n']:",
     "        st['first'] = st['n']",
-    "        st['sent'].append(plan[1])",
-    "        signal.raise_signal(plan[1])",
-    "    elif st['first'] and plan[2] and st['n'] == st['first'] + plan[2]:",
-    "        st['sent'].append(plan[3])",
-    "        signal.raise_signal(plan[3])",
+    "        send(plan[1])",
+    "    elif st['sent'] and plan[2] and st['n'] == st['first'] + plan[2]:",
+    "        send(plan[3])",
     "    return True",
     "def tracer(frame, event, arg):",
     "    if event == 'call':",
     "        code = frame.f_code",
-    "        return tracer if code.co_filename == SUITE_FILE or code is BODY else None",
+    "        return tracer if code.co_filename == SUITE_FILE or code in BODIES else None",
     "    if event == 'line':",
     "        step(frame.f_code)",
     "    return tracer",
@@ -2755,16 +2883,25 @@ _CLOSE_SWEEP_CHILD = "\n".join((
     "    if free:",
     "        suite._MEMBERS_LOCK.release()",
     "    return free",
-    "def run(how, plan):",
+    "def strongest(sigs):",
+    "    return OUTCOME[signal.SIGTERM if signal.SIGTERM in sigs else signal.SIGINT]",
+    "def expected(sent, baseline):",
+    "    ours = [sig for sig, how, raised in sent if how == 'ours']",
+    "    if any(how == 'restored' for sig, how, raised in sent):",
+    "        held = [sig for sig, how, raised in sent if how == 'ours' and not raised]",
+    "        return strongest(ours) if held else 'KeyboardInterrupt'",
+    "    return strongest(ours) if ours else baseline",
+    "def run(how, suite_body, plan):",
     "    st.clear()",
-    "    st.update(open=False, shut=False, n=0, first=0, plan=plan, sent=[], closes=[], kills=0,",
-    "              names=set())",
+    "    st.update(open=False, shut=False, restoring=False, n=0, first=0, plan=plan, sent=[],",
+    "              closes=[], kills=0, names=set(), restores=[], body=suite_body.__code__)",
     "    group = suite._MemberGroup(Proc(), None)",
     "    group.ended = True",
     "    suite._MEMBERS['groups'].clear()",
     "    suite._MEMBERS['groups'].add(group)",
-    "    signal.signal(signal.SIGINT, signal.default_int_handler)",
-    "    signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+    "    suite._suite_main = suite_body",
+    "    real_signal(signal.SIGINT, signal.default_int_handler)",
+    "    real_signal(signal.SIGTERM, signal.SIG_DFL)",
     "    if how == 'trace':",
     "        sys.settrace(tracer)",
     "    else:",
@@ -2782,42 +2919,57 @@ _CLOSE_SWEEP_CHILD = "\n".join((
     "    finally:",
     "        sys.settrace(None)",
     "        M.set_events(TOOL, 0)",
-    "    sent, closes = list(st['sent']), st['closes']",
-    "    allowed = [OUTCOME[sig] for sig in sent] or ['returned 0']",
-    "    good = (outcome in allowed and None not in closes and [] in closes",
+    "    sent, closes = st['sent'], st['closes']",
+    "    want = expected(sent, BODIES[st['body']])",
+    "    good = (outcome == want and None not in closes and [] in closes",
     "            and (sent or len(closes) == 2) and not suite._MEMBERS['groups'] and lock_free()",
+    "            and st['restores'] == [signal.SIGTERM, signal.SIGINT]",
     "            and signal.getsignal(signal.SIGINT) is signal.default_int_handler",
     "            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL",
-    "            and suite._MEMBERS['held'] is None)",
-    "    return sent, good, [outcome, closes, len(suite._MEMBERS['groups'])]",
+    "            and suite._MEMBERS['held'] == [])",
+    "    return (st['first'] != 0, sent, good,",
+    "            [outcome, want, closes, len(suite._MEMBERS['groups']), st['restores']])",
+    "def sweep_mode(suite_body, how, pairs, first, second):",
+    "    points, bad, point = 0, [], 1",
+    "    while len(bad) < 5:",
+    "        offset = 1 if pairs else 0",
+    "        while True:",
+    "            reached, sent, good, seen = run(how, suite_body, (point, first, offset, second))",
+    "            if not sent:",
+    "                break",
+    "            names.update(st['names'])",
+    "            points += 1",
+    "            if not good:",
+    "                bad.append([point, offset, sent, seen])",
+    "            if not pairs or len(sent) < 2 or len(bad) >= 5:",
+    "                break",
+    "            offset += 1",
+    "        if not reached:",
+    "            break",
+    "        point += 1",
+    "    return [points, bad]",
+    "def sweep():",
+    "    report = {}",
+    "    for prefix, suite_body in (('', body), ('branch ', branch)):",
+    "        baseline = run('trace', suite_body, (0, 0, 0, 0))",
+    "        report[prefix + 'baseline'] = [baseline[2], baseline[3]]",
+    "        for how, pairs, label in (('trace', False, 'line'),",
+    "                                  ('instruction', False, 'instruction'),",
+    "                                  ('line', True, 'pair')):",
+    "            for first, second in ((signal.SIGINT, signal.SIGTERM),",
+    "                                  (signal.SIGTERM, signal.SIGINT)):",
+    "                report['{}{} {}'.format(prefix, label, signal.Signals(first).name)] = (",
+    "                    sweep_mode(suite_body, how, pairs, first, second))",
+    "    report['names'] = sorted(names)",
+    "    return report",
     "M.use_tool_id(TOOL, 'member close sweep')",
     "M.register_callback(TOOL, M.events.LINE, on_event)",
     "M.register_callback(TOOL, M.events.INSTRUCTION, on_event)",
-    "started, report, names = time.monotonic(), {}, set()",
-    "baseline = run('trace', (0, 0, 0, 0))",
-    "report['baseline'] = [baseline[1], baseline[2]]",
-    "for how, pairs, label in (('trace', False, 'line'), ('instruction', False, 'instruction'),",
-    "                          ('line', True, 'pair')):",
-    "    for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):",
-    "        points, bad, point = 0, [], 1",
-    "        while len(bad) < 5:",
-    "            offset = 1 if pairs else 0",
-    "            while True:",
-    "                sent, good, seen = run(how, (point, first, offset, second))",
-    "                if not sent:",
-    "                    break",
-    "                names |= st['names']",
-    "                points += 1",
-    "                if not good:",
-    "                    bad.append([point, offset, sent, seen])",
-    "                if not pairs or len(sent) < 2 or len(bad) >= 5:",
-    "                    break",
-    "                offset += 1",
-    "            if not sent:",
-    "                break",
-    "            point += 1",
-    "        report['{} {}'.format(label, signal.Signals(first).name)] = [points, bad]",
-    "report['names'] = sorted(names)",
+    "started, names = time.monotonic(), set()",
+    "try:",
+    "    report = sweep()",
+    "finally:",
+    "    shutil.rmtree(tempfile.tempdir, ignore_errors=True)",
     "report['seconds'] = round(time.monotonic() - started, 1)",
     "print('SWEEP-REPORT ' + json.dumps(report), flush=True)",
 ))
@@ -2896,11 +3048,35 @@ def _pidfd_group_signal_supported():
         os.close(fd)
 
 
+def _closing_refusal_control(fixture, spawn):
+    """The config/member-closing-refuses-start control: _run_bounded with closing set and Popen
+    replaced by spawn (the caller's stand-in, which may record any start); returns _run_bounded's
+    code, the launch-error message when nothing started. It sets ONLY closing and clears only closing, through
+    _reopen_members, never by restoring the whole registry: a SIGINT or SIGTERM received inside the
+    control is deferred (held, as everywhere closing is set) and raised right after it, never
+    erased. Closing already set on entry (never the case inside a run) is left set. The probe
+    scenario "closing-control" pins it with a real SIGINT inside the control."""
+    import io
+    from unittest.mock import patch
+
+    reopen = not _MEMBERS["closing"]
+    _MEMBERS["closing"] = True
+    try:
+        with patch.object(subprocess, "Popen", spawn):
+            return _run_bounded([sys.executable, "-I", "-B", "-c", "pass"], str(fixture),
+                                dict(os.environ), 60, "closing control", "CONTROL ", [],
+                                io.StringIO())[0]
+    finally:
+        if reopen:
+            _reopen_members()
+
+
 def _member_close_controls(fixture):
     """config/member-off-main-thread: _run_bounded called from the main thread starts the child
     (Popen) and waits in communicate() on another thread, returns its exit code, and leaves the
     registry empty. config/member-closing-refuses-start: once closing is set no child starts and
-    the refusal comes back as the launch-error message. config/member-grandchild-after-normal-exit:
+    the refusal comes back as the launch-error message (_closing_refusal_control).
+    config/member-grandchild-after-normal-exit:
     a member whose leader exits 0 leaving a grandchild in its group (stdio on /dev/null, so the
     wait returns), run on BOTH signalling paths whatever the kernel: the pidfd process-group path
     (where the kernel has it) has the grandchild killed by the cleanup and the group released; the
@@ -2929,10 +3105,17 @@ def _member_close_controls(fixture):
     the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
     injection is removed; "release-timeout" and "start-timeout": a registry lock refused once and
     then free, so the closes end cleanly, still makes main() return 2 with the CANNOT EVALUATE
-    line, no PASS line, no group registered and the refusal recorded.
-    config/member-close-signal-sweep: the _CLOSE_SWEEP_CHILD sweep reports no failing run in any
-    mode (line, instruction, pair; SIGINT first and SIGTERM first), a clean baseline and every
-    close function reached; the number of runs per mode is printed on a MEMBER CLOSE SWEEP line.
+    line, no PASS line, no group registered and the refusal recorded; "sweep-refused",
+    "close-refused" and "failed-refused" the same for a refusal at the first close's kill sweep,
+    at its first acquire and at the failed-member branch, so a refusal is pinned to persist at all
+    five sites. config/member-closing-refuses-start also requires the "closing-control" scenario:
+    a real SIGINT inside the control is held there and raised right after it (KeyboardInterrupt,
+    nothing after the control runs). config/member-close-signal-sweep: the _CLOSE_SWEEP_CHILD
+    child exited 0 and its sweep reports no failing run in any mode (line, instruction, pair;
+    SIGINT first and SIGTERM first; the plain body and the failed-member branch body), clean
+    baselines and every window function reached, and the report parser accepts a clean synthetic
+    report after exit 0 and refuses the same report after exit 1; the number of runs per mode is
+    printed on a MEMBER CLOSE SWEEP line.
     Every process recorded here is killed afterwards whatever the code under test did
     (_kill_recorded)."""
     import contextlib
@@ -2965,12 +3148,7 @@ def _member_close_controls(fixture):
           (0, [False], [False], 0), (rc,) if _is_timeout(rc) else None)
 
     del threads[:]
-    with patch.dict(_MEMBERS, {"closing": True}), patch.object(subprocess, "Popen", spawn):
-        rc, _, _ = _run_bounded([sys.executable, "-I", "-B", "-c", "pass"], str(fixture),
-                                dict(os.environ), 60, "closing control", "CONTROL ", [],
-                                io.StringIO())
-    check("config/member-closing-refuses-start", (rc, threads),
-          ("the suite is closing: no new member starts", []))
+    refused_start = (_closing_refusal_control(fixture, spawn), list(threads))
 
     def normal_exit(path, fallback):
         """One normal-exit member on one signalling path: (rc, recorded states, groups it left
@@ -3014,7 +3192,8 @@ def _member_close_controls(fixture):
     got = {}
     for scenario in ("pooled", "communicate", "leader-first", "setsid", "close", "sigterm",
                      "install", "lock", "failed", "failed-signal", "unresolved",
-                     "release-timeout", "start-timeout"):
+                     "release-timeout", "start-timeout", "sweep-refused", "close-refused",
+                     "failed-refused", "closing-control"):
         folder = fixture / "close-{}".format(scenario)
         folder.mkdir()
         try:
@@ -3066,31 +3245,70 @@ def _member_close_controls(fixture):
                 expect("release-timeout", "returned 2", 0, [], 0, (False, True),
                        run=["0", 0], refused=1),
                 expect("start-timeout", "returned 2", 0, [], 0, (False, True),
-                       run=["TIMEOUT: ", 1], refused=1)])):
+                       run=["TIMEOUT: ", 1], refused=1),
+                expect("sweep-refused", "returned 2", 0, [], 0, (False, True), refused=1),
+                expect("close-refused", "returned 2", 0, [], 0, (False, True), refused=1),
+                expect("failed-refused", "returned 2", 0, [], 0, (False, True),
+                       late=[["b", closing]], caught="injected failed member a", refused=1)])):
         observed = [got[want[0]] for want in wants]
         check(check_id, observed, wants, _partial_timeout_cause(observed, wants) or None)
+    observed = [refused_start, got["closing-control"]]
+    wants = [(closing, []), expect("closing-control", "KeyboardInterrupt", 0, [], 0,
+                                   control=[closing, [signal.SIGINT], True])]
+    check("config/member-closing-refuses-start", observed, wants,
+          _partial_timeout_cause(observed, wants) or None)
 
     rc, out, err = _run_bounded([sys.executable, "-I", "-B", "-c", _CLOSE_SWEEP_CHILD,
                                  str(ROOT / "tools")], str(fixture), dict(os.environ), 300,
                                 "member-close signal sweep child", "CONTROL ")
-    modes = ["{} {}".format(mode, name) for mode in ("line", "instruction", "pair")
-             for name in ("SIGINT", "SIGTERM")]
-    reached = ["__enter__", "__exit__", "_close_members", "_finish_members",
-               "_member_group_empty", "_release_member_group", "_restore_signal_handlers",
-               "_signal_member_groups", "body", "main"]
+    got, sweep = _sweep_observed(rc, out, err)
+    if sweep is not None:
+        print("MEMBER CLOSE SWEEP: {} ({} s)".format(", ".join(
+            "{} {} runs".format(mode, sweep[mode][0]) for mode in _SWEEP_MODES),
+            sweep["seconds"]), flush=True)
+    # The parser's own controls, on a synthetic report every mode of which is clean: accepted
+    # after exit 0, refused after the same report followed by exit 1.
+    synthetic = dict({mode: [1, []] for mode in _SWEEP_MODES}, names=list(_SWEEP_REACHED),
+                     seconds=0, baseline=_SWEEP_WANT[0][0])
+    synthetic["branch baseline"] = _SWEEP_WANT[0][1]
+    synthetic = "SWEEP-REPORT " + json.dumps(synthetic) + "\n"
+    controls = [_sweep_observed(0, synthetic, "")[0] == _SWEEP_WANT,
+                _sweep_observed(1, synthetic, "injected child failure")[0] == _SWEEP_WANT]
+    check("config/member-close-signal-sweep", (got, controls), (_SWEEP_WANT, [True, False]),
+          (rc,) if _is_timeout(rc) else None)
+
+
+# The _CLOSE_SWEEP_CHILD report config/member-close-signal-sweep requires: each body's clean
+# baseline (outcome, expected outcome, both closes clean, no group left, restores SIGTERM then
+# SIGINT), every mode with runs and none failing, and every window function reached.
+_SWEEP_MODES = tuple(body + mode + " " + name for body in ("", "branch ")
+                     for mode in ("line", "instruction", "pair") for name in ("SIGINT", "SIGTERM"))
+_SWEEP_REACHED = ("__enter__", "__exit__", "_close_members", "_config_results", "_finish_members",
+                  "_member_group_empty", "_release_member_group", "_restore_signal_handlers",
+                  "_signal_member_groups", "body", "branch", "main")
+_SWEEP_WANT = (
+    [[True, [outcome, outcome, [[], []], 0, [int(signal.SIGTERM), int(signal.SIGINT)]]]
+     for outcome in ("returned 0", "ValueError: injected failed member")],
+    [[mode, True, []] for mode in _SWEEP_MODES], [])
+
+
+def _sweep_observed(rc, out, err):
+    """config/member-close-signal-sweep's observation of one _CLOSE_SWEEP_CHILD run, and the parsed
+    report (None when not read). The child must have EXITED 0 before its report is read at all: a
+    report followed by any other exit is a failure, returned with the exit code and stderr; a
+    timeout is returned as is (cannot evaluate). The observation is the two baselines, per mode
+    whether it made runs and its failing runs, and the window functions it never reached."""
+    if _is_timeout(rc):
+        return rc, None
+    if rc != 0:
+        return "sweep child exited {}: err={!r}".format(rc, err[-400:]), None
     try:
         sweep = json.loads(out.rpartition("SWEEP-REPORT ")[2].partition("\n")[0])
-        print("MEMBER CLOSE SWEEP: {} ({} s)".format(", ".join(
-            "{} {} runs".format(mode, sweep[mode][0]) for mode in modes), sweep["seconds"]),
-            flush=True)
-        got = (sweep["baseline"], [[mode, sweep[mode][0] > 0, sweep[mode][1]] for mode in modes],
-               sorted(set(reached) - set(sweep["names"])))
+        return ([sweep["baseline"], sweep["branch baseline"]],
+                [[mode, sweep[mode][0] > 0, sweep[mode][1]] for mode in _SWEEP_MODES],
+                sorted(set(_SWEEP_REACHED) - set(sweep["names"]))), sweep
     except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
-        got = rc if _is_timeout(rc) else "no report ({}): rc={} err={!r}".format(
-            exc, rc, err[-400:])
-    check("config/member-close-signal-sweep", got,
-          ([True, ["returned 0", [[], []], 0]], [[mode, True, []] for mode in modes], []),
-          (rc,) if _is_timeout(rc) else None)
+        return "no report ({}): rc={} err={!r}".format(exc, rc, err[-400:]), None
 
 
 def _member_timeout_controls(base):
@@ -6462,26 +6680,35 @@ def main(report_path=None, lanes=None):
     leaves that line's NOP outside every protected range, so a raise delivered there escapes main()
     with both closes skipped.) The close handlers stay installed through BOTH closes and the
     caller's dispositions are restored ONCE, after the second (_restore_signal_handlers), even when
-    the installation itself was interrupted; then the first deferred signal is raised, exactly once
-    (_raise_held: KeyboardInterrupt, or SystemExit 143 for SIGTERM). Only then is the exit code final
+    the installation itself was interrupted. THE DEFERRED-SIGNAL PRECEDENCE (_raise_held): every
+    signal received while closing is set or after one has raised is kept, in the order received,
+    and none is dropped; after the restore, when any was deferred, the strongest of the run's
+    signals is raised exactly once, SIGTERM over SIGINT whatever the order (SystemExit 143 whenever
+    a SIGTERM was received, else KeyboardInterrupt); when none was deferred, the exception already
+    propagating stands. Only then is the exit code final
     (_final_verdict): problems the second close still meets, and any registry lock refusal of the
     run, make a clean run cannot-evaluate (exit 2), and the PASS line is printed only after the
-    close. config/member-close-signal-sweep pins this by a sweep: a real SIGINT, and separately a
-    SIGTERM, at every line event from the suite body through the second close (sys.settrace), at
-    every bytecode instruction of that range (sys.monitoring), and a second signal at every line
-    after each first (sys.monitoring, since CPython drops a trace function that raised), each run
-    requiring a completed close, an empty registry, a free lock, the restored handlers and the
-    signal's own outcome. config/member-close-handlers pins a SIGINT during the installation, a
+    close. config/member-close-signal-sweep pins this by a sweep over two suite bodies (one
+    returning 0, one driving the config pool's failed-member branch): a real SIGINT, and separately
+    a SIGTERM, at every line event from the suite body through the restore (sys.settrace), at every
+    bytecode instruction of that range (sys.monitoring), and a second signal at every line after
+    each first (sys.monitoring, since CPython drops a trace function that raised), each run
+    requiring a completed close, an empty registry, a free lock, the handlers restored in reverse
+    order, nothing left deferred and exactly the outcome this precedence gives for the signals
+    sent. config/member-close-handlers pins a SIGINT during the installation, a
     SIGTERM, the restored handlers and a real member closed under SIGINTs at the entry of each
     close; config/member-close-lock the lock; config/member-close-unresolved-verdict the verdict.
     DISCLOSED RESIDUALS: the guarantee holds at the interpreter's signal-delivery points
     (eval-breaker granularity) on the main thread, where CPython runs Python signal handlers; a
     signal delivered to the process before the handlers are installed takes the default
-    disposition, and one delivered after the restore takes the restored disposition. SIGKILL, and
-    a SIGINT or SIGTERM whose disposition the caller had already changed (left as it is), are
-    outside this; an exception set into the main thread from outside (PyThreadState_SetAsyncExc)
-    is not a signal and is not limited to one."""
-    _MEMBERS.update(closing=False, raised=None, held=None)
+    disposition, and one delivered after the restore takes the restored disposition (a SIGINT after
+    SIGINT's restore raises KeyboardInterrupt there, replacing an exception already propagating
+    when nothing was deferred). A signal whose own Python handler is cut off at its entry by a
+    newly arrived one that raises is lost (CPython has already cleared its pending flag;
+    _close_on_signal). SIGKILL, and a SIGINT or SIGTERM whose disposition the caller had already
+    changed (left as it is), are outside this; an exception set into the main thread from outside
+    (PyThreadState_SetAsyncExc) is not a signal and is not limited to one."""
+    _MEMBERS.update(closing=False, raised=None, held=[])
     del _MEMBERS["refused"][:]
     previous, code, unresolved = {}, None, []
     try:
