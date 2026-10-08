@@ -5924,7 +5924,19 @@ def _main_isolated(report_path=None):
         _r4_save = lambda state: aiqt_hooks._orch_write_json_atomic(str(_r4_sd / "turn-state.json"), state)
         _r4_tmps = lambda d: sorted(p.name for p in d.iterdir() if p.name.endswith(".tmp"))
         _r4_real_fsync, _r4_urandom = os.fsync, os.urandom
-        _r4_fds = lambda: len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else 0
+
+        def _r4_fds():
+            # None where the descriptors cannot be enumerated, never a measured zero
+            try:
+                return len(os.listdir("/proc/self/fd"))
+            except OSError:
+                return None
+
+        def _r4_fd_delta(before):
+            after = _r4_fds()
+            if before is None or after is None:
+                return "cannot-evaluate: the open descriptors cannot be enumerated (/proc/self/fd)"
+            return after - before
 
         def _r4_swap():
             os.rename(str(_r4_sd), str(_r4_moved))
@@ -5973,7 +5985,106 @@ def _main_isolated(report_path=None):
         _r4_fd0 = _r4_fds()
         _r4_plain = _r4_run(_r4_fail)
         check("recwrite4/fsync-failure-returns-its-reason-prior-target-unchanged-no-temporary-file",
-              (_r4_plain, _r4_fds() - _r4_fd0), (("OSError", _r4_prior, [], False, _r4_alien), 0))
+              (_r4_plain, _r4_fd_delta(_r4_fd0)), (("OSError", _r4_prior, [], False, _r4_alien), 0))
+
+        # QA round 4 of the silent-write fixes. (1) A write-and-search-only (0300) state directory: the writer
+        # opens it with _ORCH_O_WALK (O_PATH where available), which needs no read permission, so a direct
+        # save succeeds and the Stop deny stands (block2, its counter persisted) end to end; the O_RDONLY open
+        # of 181ff037 failed every such save and flipped that deny to fail open. As root the directory mode is
+        # not enforced; where O_PATH is absent the row expects the disclosed fallback (the save fails and the
+        # deny fails open with findings). (2) The state directory is swapped for a symlink to a foreign
+        # directory at the writer's stat of the target, before the create: the descriptor-bound no-follow
+        # stat reads the original target, a symlink to a 0640 file, so the new file is 0600, and the create,
+        # the replace and the cleanup act in the moved original. A stat by path reads the foreign target's
+        # 0604, a following stat the linked file's 0640, and a create by path puts the temporary file in the
+        # foreign directory, where the descriptor-bound replace cannot find it: each fails the row. (3) Each
+        # descriptor the save opens is closed exactly once, on success and on an fsync failure, and a
+        # successful save leaves the count of open descriptors unchanged (cannot-evaluate, which fails the
+        # row, where the descriptors cannot be enumerated).
+        _r5 = Fixture(tmp, "recwrite5")
+        _r5_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r5.root)))
+        _r5_sd.mkdir(parents=True, exist_ok=True)
+        _r5_ts = _r5_sd / "turn-state.json"
+        _r5_direct = _r5_sd / "r5-direct.json"
+        _r5.set_items([item("QA-R5")])
+        _r5.set_turn_state(dict())
+        os.chmod(str(_r5_sd), 0o300)
+        try:
+            _r5_res = aiqt_hooks._orch_write_json_atomic(str(_r5_direct), dict(direct=True))
+            _r5_stop = _r2_out(aiqt_hooks.orch_stop_guard(_r5.payload("Stop")))
+        finally:
+            os.chmod(str(_r5_sd), 0o755)
+        _r5_ok = hasattr(os, "O_PATH") or os.geteuid() == 0
+        check("recwrite5/search-only-state-dir-saves-and-stop-deny-stands",
+              (_r5_res, json.loads(_r5_direct.read_text(encoding="utf-8")) if _r5_direct.exists() else None,
+               _r5_stop[0], "could not be persisted" in _r5_stop[1] + _r5_stop[2],
+               _r5.turn_state().get("stop_denials"), _r4_tmps(_r5_sd)),
+              (None, dict(direct=True), "block2", False, 1, []) if _r5_ok
+              else ("PermissionError", None, "warn", True, None, []))
+        _r5_moved = _r5_sd.parent / (_r5_sd.name + ".moved")
+        _r5_foreign = Path(tmp) / "recwrite5-foreign"
+        _r5_foreign.mkdir()
+        _r5_linked = Path(tmp) / "recwrite5-linked.json"
+        _r5_linked.write_bytes(b'{"linked": true}')
+        os.chmod(str(_r5_linked), 0o640)
+        (_r5_foreign / "turn-state.json").write_bytes(b'{"foreign": true}')
+        os.chmod(str(_r5_foreign / "turn-state.json"), 0o604)
+        _r5_ts.unlink()
+        _r5_ts.symlink_to(_r5_linked)
+        _r5_real_stat, _r5_real_lstat = os.stat, os.lstat
+        _r5_swapped = []
+
+        def _r5_swap_at_stat(real):
+            def _stat(path, *args, **kw):
+                if (not _r5_swapped and isinstance(path, (str, bytes, os.PathLike))
+                        and os.path.basename(os.fsdecode(path)) == "turn-state.json"):
+                    _r5_swapped.append(os.fsdecode(path))
+                    os.rename(str(_r5_sd), str(_r5_moved))
+                    os.symlink(str(_r5_foreign), str(_r5_sd))
+                return real(path, *args, **kw)
+            return _stat
+        try:
+            os.stat, os.lstat = _r5_swap_at_stat(_r5_real_stat), _r5_swap_at_stat(_r5_real_lstat)
+            _r5_res = aiqt_hooks._orch_write_json_atomic(str(_r5_ts), dict(tag="r5"))
+        finally:
+            os.stat, os.lstat = _r5_real_stat, _r5_real_lstat
+        _r5_seen = _r5_moved if os.path.isdir(str(_r5_moved)) else _r5_sd
+        _r5_new = _r5_seen / "turn-state.json"
+        _r5_got = (_r5_res, len(_r5_swapped), _r5_new.read_bytes() if not _r5_new.is_symlink() else "a symlink",
+                   oct(os.lstat(str(_r5_new)).st_mode & 0o777), _r5_linked.read_bytes(),
+                   (_r5_foreign / "turn-state.json").read_bytes(), sorted(os.listdir(str(_r5_foreign))),
+                   _r4_tmps(_r5_seen))
+        if os.path.islink(str(_r5_sd)):
+            os.unlink(str(_r5_sd))
+        if os.path.isdir(str(_r5_moved)):
+            os.rename(str(_r5_moved), str(_r5_sd))
+        check("recwrite5/parent-swapped-at-the-stat-stat-and-create-stay-on-the-descriptor", _r5_got,
+              (None, 1, json.dumps(dict(tag="r5"), sort_keys=True).encode("utf-8"), "0o600", b'{"linked": true}',
+               b'{"foreign": true}', ["turn-state.json"], []))
+        _r5_real_open, _r5_real_close, _r5_real_fsync = os.open, os.close, os.fsync
+
+        def _r5_closes(fsync):
+            opened, closed = [], []
+
+            def _open(path, flags, *args, **kw):
+                fd = _r5_real_open(path, flags, *args, **kw)
+                opened.append(fd)
+                return fd
+
+            def _close(fd):
+                closed.append(fd)
+                return _r5_real_close(fd)
+            before = _r4_fds()
+            try:
+                os.open, os.close, os.fsync = _open, _close, fsync
+                res = aiqt_hooks._orch_write_json_atomic(str(_r5_ts), dict(tag="closes"))
+            finally:
+                os.open, os.close, os.fsync = _r5_real_open, _r5_real_close, _r5_real_fsync
+            return (res, len(opened), [closed.count(fd) for fd in opened], len(closed), _r4_fd_delta(before),
+                    _r4_tmps(_r5_sd))
+        check("recwrite5/each-save-descriptor-closed-exactly-once-on-success-and-failure",
+              (_r5_closes(_r5_real_fsync), _r5_closes(_r4_fail)),
+              ((None, 2, [1, 1], 2, 0, []), ("OSError", 2, [1, 1], 2, 0, [])))
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

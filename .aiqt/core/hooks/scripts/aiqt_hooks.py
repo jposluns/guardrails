@@ -8608,12 +8608,15 @@ def _orch_write_json_atomic(path, obj):
     checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
     else a short failure detail the caller names in its output (the caller decides what a failure means).
     It serializes obj first (a value json cannot encode fails before any file is created), creates the
-    parent directory and opens it ONCE (os.open O_RDONLY|O_DIRECTORY|O_CLOEXEC); every later step is bound
-    to that directory descriptor through dir_fd, so a parent path swapped for a symlink or another directory
-    after the open cannot redirect the save: the prior target's lstat (follow_symlinks=False), the create of
-    the temporary file, the replace and the cleanup unlink all act in the directory opened, and the
-    descriptor is closed exactly once on every path. It creates a temporary file of its own beside the
-    target with os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other
+    parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
+    open needs only search permission, so a write-and-search-only (0300) state directory saves; where O_PATH
+    is absent the O_RDONLY fallback also needs READ permission on that directory, so there such a directory
+    fails every save, named with its error); every later step is bound to that directory descriptor through
+    dir_fd, so a parent path swapped for a symlink or another directory after the open cannot redirect the
+    save: the prior target's lstat (follow_symlinks=False), the create of the temporary file, the replace and
+    the cleanup unlink all act in the directory opened, and the descriptor is closed exactly once on every
+    path. It creates a temporary file of its own beside the target with
+    os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other
     file already at a temporary-like name is never opened, written or removed (an existing name fails the
     create, and the save fails). It sets that file's permission bits to the existing target's (a regular
     file at the target), else to 0600, then writes, fsyncs and closes it through that descriptor only and
@@ -8624,16 +8627,16 @@ def _orch_write_json_atomic(path, obj):
     path as given (which, after a swap, may no longer lead to it). A process killed between the create and
     the replace (a hook timeout, for example) leaves its temporary file, and nothing removes it. Not bound
     here: the parent path itself is resolved once, at the directory open (a symlink in it at that moment is
-    followed), and a directory moved after the open still receives the save under its new name. Concurrent saves never share a temporary file, so
-    one save cannot write into or remove another's; the last replace wins, so where callers read, modify
-    and save the same file at the same time one update can be lost (read-modify-write is not
-    serialized). The writing uid can itself replace any of these files, so this is crash and collision
-    safety, not a boundary against that uid."""
+    followed), and a directory moved after the open still receives the save under its new name. Concurrent
+    saves never share a temporary file, so one save cannot write into or remove another's; the last replace
+    wins, so where callers read, modify and save the same file at the same time one update can be lost
+    (read-modify-write is not serialized). The writing uid can itself replace any of these files, so this is
+    crash and collision safety, not a boundary against that uid."""
     try:
         blob = json.dumps(obj, sort_keys=True).encode("utf-8")
         directory, name = os.path.split(path)
         os.makedirs(directory, exist_ok=True)
-        dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+        dirfd = os.open(directory, _ORCH_O_WALK | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
     except (OSError, TypeError, ValueError) as exc:
         return type(exc).__name__
     try:
@@ -8642,7 +8645,7 @@ def _orch_write_json_atomic(path, obj):
         try:
             os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
         except OSError:
-            pass  # a read-only directory descriptor: the save's outcome was settled through it already
+            pass  # a lookup-only directory descriptor: the save's outcome is settled already
 
 
 def _orch_write_json_at(dirfd, directory, name, blob):
@@ -8746,8 +8749,9 @@ def _orch_save_turn_state(root, state):
     included, leaves the previous turn-state.json (or its absence) in place unchanged, and a reader sees
     the previous file or the new one, never a part of either. The save needs a writable state directory
     (its temporary file is created there), so a writable turn-state.json in a directory the hook cannot
-    write is not saved. Two saves at once are both published whole, the later replacing the earlier, so
-    one update can be lost (the read-modify-write is not serialized)."""
+    write is not saved; where O_PATH is absent the directory must also be readable (see
+    _orch_write_json_atomic). Two saves at once are both published whole, the later replacing the earlier,
+    so one update can be lost (the read-modify-write is not serialized)."""
     return _orch_write_json_atomic(os.path.join(_orch_state_dir_for_root(root), "turn-state.json"), state)
 
 
@@ -8787,9 +8791,10 @@ def _orch_mode_read(path):
     also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
     could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
     O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
-    at that open (it reports ENXIO on Linux, so the reason is the open's OSError); every other node opens,
-    and the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such as /dev/zero, a
-    directory) is bad without a read. The read asks for at most
+    at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
+    open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
+    after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
+    as /dev/zero, a directory) is bad without a read. The read asks for at most
     _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
     a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
     bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can

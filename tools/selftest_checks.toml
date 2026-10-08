@@ -543,6 +543,9 @@ expected-check-ids = [
   "recwrite4/parent-swapped-during-fsync-never-publishes-foreign-content",
   "recwrite4/fsync-failure-after-parent-swap-removes-its-own-temporary-file",
   "recwrite4/fsync-failure-returns-its-reason-prior-target-unchanged-no-temporary-file",
+  "recwrite5/search-only-state-dir-saves-and-stop-deny-stands",
+  "recwrite5/parent-swapped-at-the-stat-stat-and-create-stay-on-the-descriptor",
+  "recwrite5/each-save-descriptor-closed-exactly-once-on-success-and-failure",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

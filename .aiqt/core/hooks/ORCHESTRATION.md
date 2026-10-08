@@ -199,22 +199,27 @@ own row, each normally raised once, at least once if recording that it was raise
 companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
 `forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
-directory descriptor and binds every later step (the read of the target's permission bits, the create, the
-rename and the cleanup removal) to it, so a symlink swapped in for that directory after the open can
-neither make the writer publish foreign content under the target's name nor hide the writer's own temporary
-file (the directory path itself is resolved once, at that open, and the writing uid is not a boundary); it
-creates a temporary file of its own beside the target (an exclusive create under a random name that never
-follows a symlink, so a file or symlink already at a temporary-like name is never opened, written or
-removed), gives it the existing target's
-permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the target. A reader
+directory descriptor (with `O_PATH` where the platform has it, so the open needs only search permission and
+a write-and-search-only state directory saves; where `O_PATH` is absent the fallback open also needs read
+permission on that directory) and binds every later step (the read of the target's permission bits, the
+create, the rename and the cleanup removal) to it, so a symlink swapped in for that directory after the open
+can neither make the writer publish foreign content under the target's name nor hide the writer's own
+temporary file (the directory path itself is resolved once, at that open, a directory moved after the open
+still receives the save under its new name, and the writing uid is not a boundary); it creates a temporary
+file of its own beside the target (an exclusive create under a random name that never follows a symlink, so
+a file or symlink already at a temporary-like name is never opened, written or removed), gives it the
+existing target's permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the
+target. A reader
 therefore sees the previous file or the new one, never a part of either, and a failed save leaves the
 previous file (or its absence) in place. A failed save is named with its error in the hook's output, except
 for the forced-exit surfaced set, whose failed advance raises those rows again at the next resume audit; a
-temporary file whose removal after a failure also fails is left beside the target and named there too, and
-one left by a process killed mid-save is removed by nothing. Concurrent saves never share a temporary file,
+temporary file whose removal after a failure also fails is left beside the target and named there too, by
+the state directory path as given, which after a swap may no longer lead to it, and one left by a process
+killed mid-save is removed by nothing. Concurrent saves never share a temporary file,
 so one save cannot corrupt or remove another's, but the last rename wins: two hooks that read, modify and
 save the same file at once can lose one update (the read-modify-write is not serialized), and each reports
-its own save as succeeded. The save needs a writable state directory, so a writable `turn-state.json` in a
+its own save as succeeded. The save needs a writable state directory (and, where `O_PATH` is absent, a
+readable one), so a writable `turn-state.json` in a
 state directory the hook cannot write is not saved: a Stop or TeammateIdle deny there now fails open with
 findings (the earlier in-place overwrite let it stand), and a scheduling deny says its counter was not
 written. A symlink at the target is replaced, not written through, and the new file is owned by the writing
