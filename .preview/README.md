@@ -166,7 +166,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `e283ee0b0dd32d98a94cbd7116029696ec5665eed74461e23c251aaf23d3238d` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `6b199c7ac99817d00c52074f5d10c65fa14d44546c887ee527ebeb98438e2565` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -330,32 +330,42 @@ fails and report it; do not work around a failed check.
    `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
-   for byte with the gate's; checks, by a static walk of both files' module-level statements, that none
-   outside the region rebinds a name the region binds or reads (or `__builtins__`), or makes an attribute or
-   item store whose target chain starts from such a name, `json`, `builtins`, `sys.modules` or this module,
-   or from a name that an import of this module (`import __main__`, the gate imported under any name), a
-   from-import from it, or a `for`, `with`, comprehension or `match` target over a source that mentions one
-   of those names binds; and compares a sample of policies and its scope test with the gate. Conservatively,
-   whatever the stored value, the walk also fails on a store whose chain starts from anything but a name (a
-   call such as `__import__("json")`, `globals()` or the `logging.getLogger("app")` of
-   `logging.getLogger("app").level = 20`, a conditional expression) or has a link (an attribute or a
-   constant string key) named `sys`, `json`, `builtins` or `modules`, such as `os.environ["json"] = ...`.
-   Ordinary stores are not flagged: `sys.path[0] = ...`, an item of `os.environ` or of a module-level dict
-   under a key not named `sys`, `json`, `builtins` or `modules`, and a store to an attribute not so named of
-   any other name (`_Options.verbose = True`). That walk catches accidental drift between the two copies. It
-   does not catch every deliberate edit that replaces behaviour through a path it does not model. Examples,
-   not a complete list: an alias made by plain assignment or a walrus, whose value the walk does not trace,
-   and a store through it whose chain has no such link (`m = sys.modules[__name__]`, then `m.validate_policy
-   = ...`); an item key that is not a constant string; a call such as `setattr(...)` or `exec(...)`; an
-   in-place method call such as `globals().update(...)`, `sys.modules.update(...)` or
-   `json.__dict__.update(...)`; a store in a function or lambda body; reflective access through an object
-   the walk cannot name; another module patching the file; and a module that shadows a standard library
-   module, such as a `json.py`: the gate imports `json` before it puts `tools/` on `sys.path`, which keeps
-   out a `tools/json.py` under `python3 -I`, as CI runs it, but not in a run without `-I`. Diff review is
-   the control for a deliberate edit; the hashes recorded in `SHA256SUMS` and the release manifest
-   `.aiqt/manifest.toml` let an installer or a release check detect a shipped copy that differs from the
-   reviewed one. It finds the gate at `../tools/` from the hook's folder, as in a checkout of this
-   repository; installed on its own, that comparison reports skipped.
+   for byte with the gate's, and a sample of policies and its scope test with the gate. The hook's self-test
+   H12 walks both files' module-level statements, compound statements' bodies included, and fails when one
+   outside the copied region binds a name the region binds or reads, or `__builtins__`, at module scope, or a
+   function outside it declares one global; or when one makes an attribute or item store (an assignment, an
+   augmented or annotated assignment, a for, with or comprehension target) or deletion, at module scope, in a
+   class body or in a def's or lambda's decorators or defaults, whose target chain starts from such a name,
+   `json`, `builtins`, `sys.modules`, this module or an alias of one of them. Conservatively, whatever the
+   stored value, it also fails on a store whose chain starts from anything but a name (a call such as
+   `__import__("json")`, `globals()` or `logging.getLogger("app")`, a conditional expression) or has a link
+   (an attribute or a constant string key) named `sys`, `json`, `builtins` or `modules`. An alias is a name
+   bound, at module scope (a class body included) or in a def that declares it global, by one of these forms:
+   an import of `json`, `builtins` or `sys`, of a submodule of one or of a name from one (`from sys import
+   modules` binds an alias of `sys.modules`); an import of this module (`import __main__`, or the gate's
+   module `check_no_dashes` imported under any name); a from-import from this module, whose name is an alias
+   of the name it imports; and a for, with, comprehension or match target whose source is such a name or
+   alias, `sys.modules` (`sys` or an alias of `sys`, then `.modules`), or an item of `sys.modules`, which
+   counts as this module. The source is the iterable, the context expression or the subject and, recursively,
+   each element of a tuple, list or set display, the element of a comprehension and each positional argument
+   of a call, never the function called or a keyword argument. Every other aliasing form is out of scope; diff
+   review is the control. Ordinary stores are not flagged: `sys.path[0] = ...`, an item of `os.environ` or of
+   a module-level dict under a key not named `sys`, `json`, `builtins` or `modules`, a store to an attribute
+   not so named of any other name (`_Options.verbose = True`), and a store whose chain has no link so named
+   and starts from a target whose source is none of those (`for _row in sorted(_rows, key=len): _row[0] = 2`).
+   That walk catches accidental drift between the two copies; it is not a defence against a deliberate edit
+   that replaces behaviour through a path the walk does not model. Examples, not a complete list: an alias
+   made by plain assignment or a walrus (`m = sys.modules[__name__]`, then `m.validate_policy = ...`) or by a
+   target over a call's result (`for m in (importlib.import_module("__main__"),): ...`); an item key that is
+   not a constant string; a call such as `setattr` or `exec`; an in-place method call such as
+   `globals().update`, `sys.modules.update` or `json.__dict__.update`; a store in a function or lambda body;
+   reflective access through an object the walk cannot name; another module patching the file; and a module
+   that shadows a standard library module, such as a `json.py`. The gate imports `json` before it puts
+   `tools/` on `sys.path`, which keeps out a `tools/json.py` under `python3 -I`, as CI runs it, but not in a
+   run without `-I`. Diff review is the control for a deliberate edit; the hashes recorded in `SHA256SUMS` and
+   the release manifest `.aiqt/manifest.toml` let an installer or a release check detect a shipped copy that
+   differs from the reviewed one. It finds the gate at `../tools/` from the hook's folder, as in a checkout of
+   this repository; installed on its own, that comparison reports skipped.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
