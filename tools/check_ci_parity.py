@@ -4430,6 +4430,11 @@ def self_test():
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
+            # The suite's own source, parsed for ast to count the with
+            # statements in _close_members: no runner text. The path is
+            # _close_members.__code__.co_filename, the file that defined
+            # it, so no caller input reaches the read.
+            ("_close_lock_sites", "open-text"): 1,
             ("_maintenance_pin_scan", "read_text"): 1,
             ("_manifest_extra_setup_failures", "read_text"): 1,
             # The member-timeout control's fixture pid file: no runner text.
