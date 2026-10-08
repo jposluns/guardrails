@@ -6059,8 +6059,8 @@ def _main_isolated(monitor):
             # step 6, precedence
             ("(gw-ct-o1) a later --no-verify deny keeps precedence (still deny)",
              "pytest | tail; git commit -n -m x", "deny"),
-            ("(gw-ct-o2) set -o pipefail gives no exemption, denies", "set -o pipefail; pytest -q | tail -20",
-             "deny"),
+            ("(gw-ct-o2) an earlier set (any option, pipefail too) is not a known-benign command, notes",
+             "set -o pipefail; pytest -q | tail -20", "allow-note"),
             # step 7, the parse-error path
             ("(gw-ct-e1) a recovered prefix proves the sink before an unquoted heredoc, denies",
              "pytest | tail; cat <<EOF\nx\nEOF", "deny"),
@@ -6379,10 +6379,10 @@ def _main_isolated(monitor):
              'case x in a) pytest;; if|for) :;; esac | tail', 'allow-note'),
             ('(gw-ct-k58) a checker-named pattern word is not a run, notes (outside the canonical deny shape)',
              'case x in a|pytest) echo | tail;; esac', 'allow-note'),
-            ('(gw-ct-k59) a check after a closed case (esac after ;;) is not a pattern, denies',
-             'case x in a) :;; esac; pytest | tail', 'deny'),
-            ('(gw-ct-k60) a check after a closed case (esac after an arm) is not a pattern, denies',
-             'case x in a) :; esac; pytest | tail', 'deny'),
+            ('(gw-ct-k59) an earlier case compound (esac after ;;) is not a known-benign command, notes',
+             'case x in a) :;; esac; pytest | tail', 'allow-note'),
+            ('(gw-ct-k60) an earlier case compound (esac after an arm) is not a known-benign command, notes',
+             'case x in a) :; esac; pytest | tail', 'allow-note'),
             ('(gw-ct-k61) a check in the case subject is captured, not piped, notes (outside the canonical deny shape)',
              'case $(pytest) in a) echo | tail;; esac', 'allow-note'),
             ("(gw-ct-k62) an 'in' inside the subject's substitution is not the header's, notes (outside the canonical deny shape)",
@@ -6613,8 +6613,8 @@ def _main_isolated(monitor):
              'python3 -I -B tools/selftest_aiqt_hooks.py 2>&1 | tail -5', 'deny'),
             ('(gw-r4-canon.5) denies',
              'npm run lint |& tail', 'deny'),
-            ('(gw-r4-canon.6) denies',
-             'case x in a) :;; esac; pytest | tail', 'deny'),
+            ('(gw-r4-canon.6) an earlier case compound, notes',
+             'case x in a) :;; esac; pytest | tail', 'allow-note'),
             ('(gw-r4-canon.7) notes',
              'pytest | head file.txt', 'allow-note'),
             ('(gw-r4-canon.8) notes',
@@ -7078,7 +7078,7 @@ def _main_isolated(monitor):
                                   ("pytest | head", "which passes on only the first 10 lines of its input"),
                                   ("pytest | grep -q ok", "which prints nothing at all"),
                                   ("pytest | grep -m 2 FAIL", "which passes on only the first 2 lines that match"),
-                                  ("pytest | rg -c FAIL", "which prints only a count of the lines that match"),
+                                  ("pytest | rg -c FAIL", "which normally prints only a count of the lines that match"),
                                   ("pytest | grep -L x", "which prints only a name when no line matches")):
             _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
                                             tool_input=dict(command=_r6_cmd)))
@@ -7091,7 +7091,7 @@ def _main_isolated(monitor):
                                   ("pytest | awk 1", "('awk program')"),
                                   ("pytest | sort | head", "('head')"),
                                   ("pytest --collect-only | grep -c x", "('grep -c')"),
-                                  ("echo $(pytest) | tail", "a command substitution in this command runs"),
+                                  ("echo $(pytest) | tail", "appears to contain a command substitution"),
                                   ("pytest | tail -n +1", "may pass on only part of its output")):
             _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
                                             tool_input=dict(command=_r6_cmd)))
@@ -7100,6 +7100,210 @@ def _main_isolated(monitor):
                     or "a truncating sink whose" in _ct_note):
                 failures.append("(gw-r6-msg2) the note for {!r} must say {!r} and claim no truncation or "
                                 "compound; got {!r}".format(_r6_cmd, _r6_want, _ct_note))
+        # Round 7: the deny tier holds only when every top-level segment before the producer pipeline is a known-benign
+        # command (cd DIR, echo or printf with no option argument, true, ':', pwd); the sink option grammar is the
+        # installed tools' --help, an option of unknown arity notes, and a count is judged lexically (r7-c: claude,
+        # r7-x: codex, r7-p: clauses).
+        _ct_r7 = [
+            ('(gw-r7-c1.1) an earlier export sets the run environment, notes',
+             'export PYTEST_ADDOPTS=--collect-only; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.2) an assignment then an export, notes',
+             'PYTEST_ADDOPTS=--co; export PYTEST_ADDOPTS; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.3) export MAKEFLAGS=n before make test, notes',
+             'export MAKEFLAGS=n && make test | head', 'allow-note'),
+            ('(gw-r7-c1.4) typeset -x, notes',
+             'typeset -x PYTEST_ADDOPTS=--co; pytest | head', 'allow-note'),
+            ('(gw-r7-c1.5) set -a then an assignment, notes',
+             'set -a; PYTEST_ADDOPTS=--co; pytest | head', 'allow-note'),
+            ('(gw-r7-p1) every known-benign earlier command, denies',
+             'cd /x; true; :; pwd; printf hi; echo; pytest | head', 'deny'),
+            ('(gw-r7-p2) cd DIR && the run, denies',
+             'cd /x && pytest | head', 'deny'),
+            ('(gw-r7-p3) an empty newline segment before the run, denies',
+             'true\n\npytest | head', 'deny'),
+            ('(gw-r7-p4) a background cd before the run, denies',
+             'cd x & pytest | head', 'deny'),
+            ('(gw-r7-p5) echo with an option argument, notes',
+             'echo -n x; pytest | head', 'allow-note'),
+            ('(gw-r7-p6) printf -v assigns a variable, notes',
+             'printf -v X y; pytest | head', 'allow-note'),
+            ('(gw-r7-p7) a ${X:=v} expansion assigns a variable, notes',
+             'echo ${X:=1}; pytest | head', 'allow-note'),
+            ("(gw-r7-p8) ': ${X:=v}' assigns a variable, notes",
+             ': ${X:=1}; pytest | head', 'allow-note'),
+            ('(gw-r7-p9) a $[X=v] arithmetic assigns a variable, notes',
+             'echo $[X=1]; pytest | head', 'allow-note'),
+            ('(gw-r7-p10) a redirection can write a configuration file, notes',
+             'echo x > pytest.ini; pytest | head', 'allow-note'),
+            ('(gw-r7-p11) a function definition, notes',
+             'f() { :; }; pytest | head', 'allow-note'),
+            ('(gw-r7-p12) cd -, notes',
+             'cd -; pytest | head', 'allow-note'),
+            ('(gw-r7-p13) cd with two operands, notes',
+             'cd a b; pytest | head', 'allow-note'),
+            ('(gw-r7-p14) source, notes',
+             'source x; pytest | head', 'allow-note'),
+            ("(gw-r7-p15) '.', notes",
+             '. x; pytest | head', 'allow-note'),
+            ('(gw-r7-p16) unset, notes',
+             'unset X; pytest | head', 'allow-note'),
+            ('(gw-r7-p17) alias, notes',
+             'alias x=y; pytest | head', 'allow-note'),
+            ('(gw-r7-p18) declare -x, notes',
+             'declare -x A=1; pytest | head', 'allow-note'),
+            ('(gw-r7-p19) a bare assignment, notes',
+             'X=1; pytest | head', 'allow-note'),
+            ('(gw-r7-p20) pwd -P, notes',
+             'pwd -P; pytest | head', 'allow-note'),
+            ('(gw-r7-p21) true with an argument, notes',
+             'true x; pytest | head', 'allow-note'),
+            ('(gw-r7-p22) a subshell, notes',
+             '(cd x); pytest | head', 'allow-note'),
+            ('(gw-r7-p23) a brace group, notes',
+             '{ cd x; }; pytest | head', 'allow-note'),
+            ('(gw-r7-p24) an earlier pipeline, notes',
+             'pytest | grep -m1 x; pytest | head', 'allow-note'),
+            ('(gw-r7-p25) set -e, notes',
+             'set -e; pytest | head', 'allow-note'),
+            ('(gw-r7-p26) a later command does not matter, denies',
+             'pytest | head; export X=1', 'deny'),
+            ("(gw-r7-x2.1) a quoted '$(...) | tail' is text, notes (raw-text evidence, worded 'appears')",
+             "echo '$(pytest) | tail'", 'allow-note'),
+            ("(gw-r7-x2.2) '||' is not a pipe, allows (as main does)",
+             'x=$(pytest --co) || head -n1 notes.txt', 'allow'),
+            ('(gw-r7-x2.3) a lexed check after the sink, allows (as main does)',
+             'echo x | sed 5q; echo $(pytest)', 'allow'),
+            ('(gw-r7-x2.4) a backquote check after the sink, notes without an order claim',
+             'echo x | sed 5q; echo `pytest`', 'allow-note'),
+            ('(gw-r7-x3.1) rg --color takes a value, notes',
+             'pytest | rg --color never -m 1 .', 'allow-note'),
+            ('(gw-r7-x3.2) grep --binary-files takes a value, notes',
+             'pytest | grep --binary-files text -m 1 .', 'allow-note'),
+            ('(gw-r7-x3.3) a known value option before a named file, allows',
+             'pytest | grep --binary-files text -m 1 x file.txt', 'allow'),
+            ('(gw-r7-x3.4) an abbreviated long option (--max for --max-count), notes',
+             'pytest | grep --max=1 x', 'allow-note'),
+            ('(gw-r7-x3.5) a short letter outside GNU grep (ugrep -g takes a value), notes',
+             "pytest | grep -g '*.py' -m 1 x", 'allow-note'),
+            ('(gw-r7-x3.6) a long option outside the rg grammar, notes',
+             'pytest | rg --unknown-opt x -m 1 y', 'allow-note'),
+            ('(gw-r7-x4.1) a 4,400-digit zero count, notes',
+             'pytest | head -n ' + '0' * 4400, 'allow-note'),
+            ('(gw-r7-x4.2) a 4,400-digit zero grep count, notes',
+             'pytest | grep -m ' + '0' * 4400 + ' x', 'allow-note'),
+            ('(gw-r7-x4.3) a leading-zero count, denies',
+             'pytest | head -n 0001', 'deny'),
+            ('(gw-r7-x4.4) a 4,401-digit positive count, denies',
+             'pytest | tail -n ' + '9' * 4401, 'deny'),
+            ('(gw-r7-c3.1) a long grep count on a collect-only run, notes',
+             'pytest --co | grep -m 1' + '0' * 4400 + ' x', 'allow-note'),
+            ('(gw-r7-c3.2) a long grep count after a substitution, notes',
+             'echo $(pytest) | grep -m ' + '1' * 4401 + ' x', 'allow-note'),
+            ('(gw-r7-x5.1) a sink that is not the final stage, denies',
+             'pytest | head | false', 'deny'),
+            ('(gw-r7-c8.1) eslint --no-config-lookup is not an eslint 6.4.0 option, notes',
+             'eslint --no-config-lookup . | head', 'allow-note'),
+            ('(gw-r7-c8.2) eslint --no-error-on-unmatched-pattern is not an eslint 6.4.0 option, notes',
+             'eslint --no-error-on-unmatched-pattern . | head', 'allow-note'),
+            ('(gw-r7-c4.1) eslint --rule stays listed, denies',
+             "eslint --rule 'no-undef: off' . | head", 'deny'),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_r7:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        # The deny message, the deny banner and each note text, pinned in full (or, for a sink, its whole clause from
+        # "piped into" to "The rule:"), so any change to a text fails here.
+        _r7_rule = (" The rule: no piping a check to a truncating sink. The sink can cut the lines that explain a "
+                    "failure, and by default a pipeline's exit status is that of its final stage, not the check's, so "
+                    "a failing check can read as a pass ('set -o pipefail' makes the pipeline fail when any stage "
+                    "fails, though not always with the check's own status, and the output is still cut). ")
+        _r7_fix = ("Run the check alone with its full output in a file at an absolute path and no pipe after it, for "
+                   "example `<command> > /abs/path/check.log 2>&1`, take the verdict from that command's own exit "
+                   "status, then read the file in a separate step.")
+        _r7_head = ("AIQT rule gatdis (gate-discipline): this 'pytest' command is on the hook's list of known "
+                    "verification runs, and its output is piped into ")
+        _r7_deny_texts = (
+            ("pytest | head -5",
+             _r7_head + "'head -5', which passes on only the first 5 lines of its input." + _r7_rule + _r7_fix),
+            ("pytest | head | false",
+             _r7_head + "'head', which passes on only the first 10 lines of its input." + _r7_rule + _r7_fix),
+            ("pytest | tee /var/tmp/x/l | tail -n 010",
+             _r7_head + "'tail -n 010', which passes on only the last 10 lines of its input." + _r7_rule
+             + "The tee stage writes '/var/tmp/x/l', but by default the pipeline's status is still not the check's. "
+             + _r7_fix),
+            ("pytest | uniq | tee /var/tmp/x/l | tail",
+             _r7_head + "'tail', which passes on only the last 10 lines of its input." + _r7_rule
+             + "The tee stage writes '/var/tmp/x/l', but only what passed the filter stages before it, and by "
+             "default the pipeline's status is still not the check's. " + _r7_fix),
+        )
+        for _r7_cmd, _r7_want in _r7_deny_texts:
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+            if _ct_reason != _r7_want:
+                failures.append("(gw-r7-msg1) the deny for {!r} must read exactly {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, _ct_reason))
+        _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                        tool_input=dict(command="pytest | head -5")))
+        _r7_banner = ("AIQT guardrail: denied a known verification run piped into a truncating sink (head -5) (rule "
+                      "gatdis); write the full output to a file and read it.")
+        if (_ct_out or dict()).get("systemMessage") != _r7_banner:
+            failures.append("(gw-r7-msg2) the deny banner must read exactly {!r}; got {!r}".format(
+                _r7_banner, (_ct_out or dict()).get("systemMessage")))
+        _r7_rgcfg = " (an rg configuration file named by RIPGREP_CONFIG_PATH can add an option that changes this, as "
+        for _r7_cmd, _r7_want in (
+                ("pytest | head", "'head', which passes on only the first 10 lines of its input."),
+                ("pytest | head -n 010", "'head -n 010', which passes on only the first 10 lines of its input."),
+                ("pytest | tail -n 0001", "'tail -n 0001', which passes on only the last line of its input."),
+                ("pytest | head --lines=3", "'head --lines=3', which passes on only the first 3 lines of its input."),
+                ("pytest | grep -m 007 x",
+                 "'grep -m 007', which passes on only the first 7 lines that match its pattern."),
+                ("pytest | grep -m 1 x", "'grep -m 1', which passes on only the first line that matches its pattern."),
+                ("pytest | egrep -q x", "'egrep -q', which prints nothing at all."),
+                ("pytest | grep -c x", "'grep -c', which prints only a count of the lines that match its pattern."),
+                ("pytest | grep -l x", "'grep -l', which prints only a name when a line matches its pattern."),
+                ("pytest | fgrep -L x", "'fgrep -L', which prints only a name when no line matches its pattern."),
+                ("pytest | rg -q x", "'rg -q', which normally prints nothing at all" + _r7_rgcfg + "--stats does)."),
+                ("pytest | rg -c x", "'rg -c', which normally prints only a count of the lines that match its "
+                                      "pattern" + _r7_rgcfg + "--stats or --invert-match does)."),
+                ("pytest | rg -l x", "'rg -l', which normally prints only a name when a line matches its pattern"
+                                      + _r7_rgcfg + "--stats or --invert-match does).")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            _ct_reason = ((_ct_out or dict()).get("hookSpecificOutput") or dict()).get("permissionDecisionReason", "")
+            if "piped into " + _r7_want + " The rule:" not in _ct_reason:
+                failures.append("(gw-r7-msg3) the deny for {!r} must say {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, _ct_reason))
+        _r7_advice = (" If the check gates this work, run it alone with its full output in a file at an absolute path "
+                      "and read the file, so its failure signal is not cut; if this is only an output glance, this is "
+                      "allowed.")
+        _r7_subst = ("AIQT guardrail (rule gatdis, gate-discipline): the text of this command appears to contain a "
+                     "command substitution whose first word looks like a check")
+        for _r7_cmd, _r7_want in (
+                ("echo '$(pytest) | tail'",
+                 _r7_subst + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw text, "
+                 "where either may be quoted text, so it does not prove that the substitution runs, that the pipe "
+                 "exists, or that any output is dropped; this is a note, not a refusal." + _r7_advice),
+                ("echo x | sed 5q; echo `pytest`",
+                 _r7_subst + ", and the command has a pipe followed, later, by a stage that may pass on only part of "
+                 "what it reads ('sed program'). The hook reads the substitution from the raw text, where it may be "
+                 "quoted text, so it does not prove that the substitution runs, that this stage receives its output, "
+                 "or that the stage drops any of it; this is a note, not a refusal." + _r7_advice),
+                ("pytest | rg --color never -m 1 .",
+                 "AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+                 "pipe and, later in this command, by a stage that may pass on only part of what it reads ('rg -m'). "
+                 "The hook does not prove that this stage receives the check's output or that it drops any of it, so "
+                 "this is a note, not a refusal." + _r7_advice),
+                ("export PYTEST_ADDOPTS=--collect-only; pytest | head",
+                 "AIQT guardrail (rule gatdis, gate-discipline): 'pytest' looks like a verification gate and is piped "
+                 "into 'head', which may pass on only part of its output, and under default pipeline semantics a "
+                 "pipeline's exit status is that of its final stage, not the checker's. If it gates this work, run it "
+                 "bare (or redirect the output to a file and read that) so its failure signal is not discarded; if it "
+                 "is only a benign output glance, this is allowed.")):
+            _ct_code, _ct_out, _ = gwg(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                            tool_input=dict(command=_r7_cmd)))
+            if (_ct_out or dict()).get("systemMessage") != _r7_want:
+                failures.append("(gw-r7-msg4) the note for {!r} must read exactly {!r}; got {!r}".format(
+                    _r7_cmd, _r7_want, (_ct_out or dict()).get("systemMessage")))
         # The deny message names an ABSOLUTE capture path (bash_absolute_paths denies a relative one), never
         # suggests an exit-status echo trailer, and points a tee stage at its own file.
         _ct_code, _ct_out, _ = gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
