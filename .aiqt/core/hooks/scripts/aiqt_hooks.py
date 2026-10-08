@@ -8609,7 +8609,9 @@ def _orch_write_json_atomic(path, obj):
     else a short failure detail the caller names in its output (the caller decides what a failure means).
     It serializes obj first (a value json cannot encode fails before any file is created), creates the
     parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
-    open needs only search permission, so a write-and-search-only (0300) state directory saves; where O_PATH
+    open needs no permission on that directory itself, only search permission on its ancestors, while the
+    later lstat, create, replace and cleanup unlink need search permission on it, the last three write
+    permission too, so a write-and-search-only (0300) state directory saves; where O_PATH
     is absent the O_RDONLY fallback also needs READ permission on that directory, so there such a directory
     fails every save, named with its error); every later step is bound to that directory descriptor through
     dir_fd, so a parent path swapped for a symlink or another directory after the open cannot redirect the
@@ -8747,9 +8749,9 @@ def _orch_save_turn_state(root, state):
     """Save turn-state.json through _orch_write_json_atomic: None on success, else the failure detail the
     caller names in its output (the caller decides what a failure means). A failed save, mid-write
     included, leaves the previous turn-state.json (or its absence) in place unchanged, and a reader sees
-    the previous file or the new one, never a part of either. The save needs a writable state directory
-    (its temporary file is created there), so a writable turn-state.json in a directory the hook cannot
-    write is not saved; where O_PATH is absent the directory must also be readable (see
+    the previous file or the new one, never a part of either. The save needs a writable and searchable
+    state directory (its temporary file is created there), so a writable turn-state.json in a directory
+    the hook cannot write is not saved; where O_PATH is absent the directory must also be readable (see
     _orch_write_json_atomic). Two saves at once are both published whole, the later replacing the earlier,
     so one update can be lost (the read-modify-write is not serialized)."""
     return _orch_write_json_atomic(os.path.join(_orch_state_dir_for_root(root), "turn-state.json"), state)
