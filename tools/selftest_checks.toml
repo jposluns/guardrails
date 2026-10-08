@@ -1151,6 +1151,7 @@ expected-check-ids = [
   "launcher/modes-differ-finding",
   "launcher/empty-registration-finding",
   "launcher/registration-site-module-finding",
+  "launcher/registration-delimiter-dash-operand",
   "launcher/readme-declared-by-launcher",
   "launcher/preview-conformant-passes",
   "launcher/preview-modes-pin-finding",

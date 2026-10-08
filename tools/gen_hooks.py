@@ -68,9 +68,11 @@ LAUNCHER_PLUGIN_PATH = SCRIPT_PLUGIN_PATH.rsplit("/", 1)[0] + "/" + LAUNCHER_NAM
 # registered form: -I (isolated: no PYTHON* variable, no user site directory, neither the script's nor
 # the working directory on sys.path), -S (no site module, so no site-packages .pth file and no
 # sitecustomize or usercustomize of the interpreter that PATH selects, a project virtual environment for
-# example, runs before the launcher's first line; a ._pth file beside that interpreter still turns the
-# site module back on, which no option prevents, so it stays with the interpreter itself) and -B (no
-# bytecode written).
+# example, runs before the launcher's first line; no option excludes what CPython reads to compute its
+# startup configuration and module search path before that line, the interpreter's directory, a ._pth
+# file there, the pyvenv.cfg above it and the home it names, and the standard library and zip locations
+# those resolve to for example, which stays with whoever can write those locations) and -B (no bytecode
+# written).
 LAUNCHER_FLAGS = ("-I", "-S", "-B")
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
@@ -246,8 +248,9 @@ def render_hooks_json(hooks):
     args begins with LAUNCHER_FLAGS ("-I", "-S", "-B"), placed before the script path, so a file
     written beside the dispatcher cannot shadow a standard-library import and silently neuter the hook,
     and no site-packages .pth file, sitecustomize or usercustomize of the interpreter PATH selects runs
-    before the launcher's first line (a ._pth file beside that interpreter is outside what -S stops; it
-    stays with the interpreter itself). The path is the launcher
+    before the launcher's first line (what CPython reads to compute its startup configuration and module
+    search path, a ._pth file beside that interpreter or the home its pyvenv.cfg names for example, is
+    outside what -S stops; it stays with whoever can write those locations). The path is the launcher
     (LAUNCHER_NAME), never the dispatcher itself, so an interpreter below the floor refuses with the
     event's exit instead of failing to compile the dispatcher. The generator asserts this invariant
     in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
@@ -502,8 +505,10 @@ def self_test_main():
         # 1b. Every rendered launcher runs isolated and without the site module: args begins with
         #     exactly LAUNCHER_FLAGS ("-I", "-S", "-B"), before the script path, so a sibling file
         #     cannot shadow a stdlib import and neuter the hook, and no site-packages .pth file of the
-        #     interpreter PATH selects runs code before the launcher's first line (a ._pth file beside
-        #     the interpreter is outside what -S stops). A regression in the generator
+        #     interpreter PATH selects runs code before the launcher's first line (what CPython reads
+        #     to compute its startup configuration and module search path, a ._pth file beside the
+        #     interpreter or a pyvenv.cfg home for example, is outside what -S stops). A regression in
+        #     the generator
         #     (dropping a flag or misplacing it) fails the generator's own self-test.
         if LAUNCHER_FLAGS != ("-I", "-S", "-B"):
             failures.append("isolation invariant: LAUNCHER_FLAGS must be ('-I', '-S', '-B'), got {!r}"

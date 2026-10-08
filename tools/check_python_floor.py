@@ -111,8 +111,11 @@ Legs, in order:
                  README) is present and names a registration; an undeclared entry adds nothing; each
                  registration must run the launcher with exactly the options REGISTRATION_FLAGS
                  (-I -S -B) before it, so no site-packages .pth file, sitecustomize or
-                 usercustomize runs first (a ._pth file beside the interpreter re-enables the site
-                 module despite -S; launcher/registered-options-skip-site-pth shows it). A
+                 usercustomize runs first (what CPython reads to compute its startup configuration
+                 and module search path is outside what -S stops: a ._pth file beside the interpreter
+                 replaces the module search path and, with an import site line, turns the site
+                 module back on, and a pyvenv.cfg home elsewhere supplies the standard library;
+                 launcher/registered-options-skip-site-pth shows both). A
                  declared launcher must be present and listed, stay inside the LAUNCHER-SUBSET
                  ALLOWLIST (launcher_subset_findings: a CLOSED, MINIMAL list of the node types and
                  forms the launchers need, each compiled identically by Python 3.4, the first to
@@ -240,6 +243,7 @@ import tempfile
 import tokenize
 import tomllib
 import warnings
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -457,10 +461,13 @@ README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
 # site directory, neither the script's nor the working directory on sys.path), -S (no site module, so no
 # .pth file in the site-packages of the interpreter PATH selects, and no sitecustomize or usercustomize,
 # runs before the launcher's first line) and -B (no bytecode written), the form tools/gen_hooks.py
-# renders and the preview README registers. -S does not hold against a ._pth file beside that
-# interpreter (python3._pth beside python3), which turns the site module back on and replaces the module
-# search path; no option prevents it, so it stays with the interpreter itself (whoever can write its
-# directory), and launcher/registered-options-skip-site-pth pins it as a disclosed witness.
+# renders and the preview README registers. No option excludes what CPython reads to compute its startup
+# configuration and module search path before the launcher's first line: the interpreter binary and the
+# directory it sits in, a ._pth file there (python3._pth beside python3 replaces the module search path
+# and, with an import site line, turns the site module back on), the pyvenv.cfg above it and the home it
+# names, and the standard library and zip locations those resolve to (examples, not an exhaustive list).
+# That stays with whoever can write those locations, and launcher/registered-options-skip-site-pth pins
+# a ._pth file and a pyvenv.cfg home as disclosed witnesses.
 REGISTRATION_FLAGS = ("-I", "-S", "-B")
 SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.py\b")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
@@ -3389,10 +3396,15 @@ def _self_test_cases(base):
     # with empty stdout, a silent pass, so the row shows that the options are what hold it. A third
     # run, the disclosed witness, writes python3._pth beside the venv's python3 (its own sys.path under
     # -I -S, the site-packages directory and `import site`) and runs the registered options again: the
-    # ._pth turns the site module back on despite -S, so the .pth runs and the launcher exits 0 with
-    # empty stdout. No option prevents that; the file belongs with the interpreter itself (whoever can
-    # write its directory), as the launchers' FAULTS paragraph states, and the row keeps that text
-    # honest. The ._pth is removed after each such run.
+    # ._pth replaces the module search path and its `import site` line turns the site module back on
+    # despite -S, so the .pth runs and the launcher exits 0 with empty stdout. A fourth run, the second
+    # disclosed witness, points the `home` of the venv's pyvenv.cfg at a scratch installation whose
+    # python<major><minor>.zip and standard library directory carry an encodings package that writes
+    # HOME_RAN and exits 0, and runs the registered options again: that code runs before the launcher's
+    # first line, so the launcher exits 0 with empty stdout. No option prevents either; what CPython
+    # reads to compute its startup configuration and module search path stays with whoever can write
+    # those locations, as the launchers' FAULTS paragraph states, and the row keeps that text honest.
+    # The ._pth is removed, and the pyvenv.cfg restored, after each such run.
     pth_module = (
         "import os, sys\n"
         "os.write(2, b'PTH_RAN\\n')\n"
@@ -3429,6 +3441,23 @@ def _self_test_cases(base):
             raise CannotEvaluate("the .pth row's interpreter path was not read: exit {}".format(
                 venv_path.returncode))
         beside_pth = venv_python.parent / (venv_python.name + "._pth")
+        venv_cfg = venv_dir / "pyvenv.cfg"
+        cfg_text = venv_cfg.read_text(encoding="utf-8")
+        fake_home = base / "pth-home"
+        home_payload = "import posix\nposix.write(2, b'HOME_RAN\\n')\nposix._exit(0)\n"
+        home_stdlib = fake_home / sys.platlibdir / "python{}.{}".format(*sys.version_info[:2])
+        (home_stdlib / "encodings").mkdir(parents=True)
+        (fake_home / "bin").mkdir()
+        (home_stdlib / "os.py").write_text("", encoding="utf-8")
+        (home_stdlib / "encodings" / "__init__.py").write_text(home_payload, encoding="utf-8")
+        with zipfile.ZipFile(str(fake_home / sys.platlibdir / "python{}{}.zip".format(
+                *sys.version_info[:2])), "w") as home_zip:
+            home_zip.writestr("encodings/__init__.py", home_payload)
+        home_cfg = "".join(("home = {}\n".format(fake_home / "bin")
+                             if line.split("=", 1)[0].strip() == "home" else line + "\n")
+                            for line in cfg_text.splitlines())
+        if home_cfg == cfg_text or "home = " not in home_cfg:
+            raise CannotEvaluate("the .pth row's pyvenv.cfg names no home to redirect: {!r}".format(cfg_text))
         beside_text = "".join(line + "\n" for line in (
             venv_path.stdout.decode("utf-8", "surrogateescape").splitlines() + [str(site_dirs[0]),
                                                                                 "import site"]))
@@ -3446,13 +3475,17 @@ def _self_test_cases(base):
             for options in options_seen:
                 for label, used in (("registered", list(options)),
                                     ("without -S", [option for option in options if option != "-S"]),
-                                    ("registered, ._pth beside the interpreter", list(options))):
+                                    ("registered, ._pth beside the interpreter", list(options)),
+                                    ("registered, pyvenv.cfg home elsewhere", list(options))):
                     spot = Path(tempfile.mkdtemp(prefix="pth-", dir=base))
                     (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
                     beside = label.endswith("beside the interpreter")
+                    home = label.endswith("home elsewhere")
                     try:
                         if beside:
                             beside_pth.write_text(beside_text, encoding="utf-8", errors="surrogateescape")
+                        if home:
+                            venv_cfg.write_text(home_cfg, encoding="utf-8")
                         proc = subprocess.run([str(venv_python), *used, str(spot / Path(rel).name),
                                                _hook_kind_mode(rel, "blocking")], cwd=spot,
                                               stdin=subprocess.DEVNULL, capture_output=True, env=CHILD_ENV,
@@ -3462,8 +3495,11 @@ def _self_test_cases(base):
                     finally:
                         if beside and os.path.lexists(beside_pth):
                             beside_pth.unlink()
+                        if home:
+                            venv_cfg.write_text(cfg_text, encoding="utf-8")
                     pth_got.append((rel, label, proc.returncode,
-                                    proc.stdout.decode("utf-8", "backslashreplace"), b"PTH_RAN" in proc.stderr))
+                                    proc.stdout.decode("utf-8", "backslashreplace"),
+                                    (b"HOME_RAN" if home else b"PTH_RAN") in proc.stderr))
                     pth_want.append((rel, label) + ((REFUSAL_EXIT, "", False) if label == "registered"
                                                     else (0, "", True)))
     check("launcher/registered-options-skip-site-pth", pth_got, pth_want)
@@ -3599,6 +3635,17 @@ def _self_test_cases(base):
         for options in (["-I"], ["-I", "-B"], ["-I", "-B", "--"])] + [
         ["{}:3: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
             readme, Path(preview).name, ["-I", "-B"], list(REGISTRATION_FLAGS), site_note)]])
+    # A dash-prefixed script operand after `--` is still the operand, as the interpreter reads it: the
+    # option list stops at `--`, so `-I -S -B -- -/p/<launcher>` names the launcher with the options
+    # ['-I', '-S', '-B', '--'] (a finding, not the registered form). Without the stop at `--` the
+    # operand would be read as one more option and the next argument as the script.
+    dash_operand = ["-I", "-S", "-B", "--", "-/p/hooks/scripts/" + Path(plugin_launcher).name,
+                    "absolute_paths"]
+    check("launcher/registration-delimiter-dash-operand", leg(dict(conformant, **{plugin_json: json.dumps(
+        dict(hooks=dict(PreToolUse=[dict(hooks=[dict(args=dash_operand)])])))})),
+        ["{} PreToolUse: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
+            plugin_json, Path(plugin_launcher).name, ["-I", "-S", "-B", "--"], list(REGISTRATION_FLAGS),
+            site_note)])
     check("launcher/readme-declared-by-launcher", [line.split(": ", 1)[1] for line in leg(
         {preview: _entry(guard_text(Path(preview).name, floor, modes), after="")},
         source=_source_text(surfaces=[preview]))],

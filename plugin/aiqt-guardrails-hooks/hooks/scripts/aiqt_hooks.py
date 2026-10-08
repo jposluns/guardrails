@@ -6132,9 +6132,10 @@ def _commit_line(text):
 
 # No filesystem access that supplies proof runs in the hook process itself.
 # This helper is isolated Python without the site module (-I -S -B, the hook's own registered form,
-# so no .pth file of the interpreter's site-packages runs in it; a ._pth file beside the interpreter
-# would turn the site module back on, a residual the launcher's FAULTS paragraph places with the
-# interpreter itself), takes literal argv, and prints one JSON payload.
+# so no .pth file of the interpreter's site-packages runs in it; what CPython reads to compute its
+# startup configuration and module search path, a ._pth file beside the interpreter or a pyvenv.cfg
+# home for example, is outside what -S stops, a residual the launcher's FAULTS paragraph places with
+# whoever can write those locations), takes literal argv, and prints one JSON payload.
 _COMMIT_FS_PROBE = r"""
 import json, os, pathlib, stat, sys
 def directory(value):
