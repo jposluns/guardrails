@@ -128,6 +128,7 @@ guarded-surfaces = [
     "tools/check_sized_instructions.py",
     "tools/check_standards_currency.py",
     "tools/check_standards_urls_live.py",
+    "tools/check_verifier_delivery.py",
     "tools/check_version_monotonicity.py",
     "tools/check_versions.py",
     "tools/conformance.py",
