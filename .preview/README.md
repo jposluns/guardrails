@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Six hooks are published here, each listed with its checksum and link in the integrity table below.
+Eight hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -17,7 +17,12 @@ not apply to it.
 
 The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
 rule that a current timestamp is read from the clock, never recalled or guessed
-([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). The other hooks guard completion
+([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). `constraint-reread.py` backs the
+rule that a standing constraint persists across context loss
+([the rule text](../.claude/rules/aiqt/10-TRUST-standing-constraints-persist.md)), and `rerun-pass-check.py`
+backs the rule that a rerun pass does not erase an earlier failure
+([the rule text](../.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)); both are linked in the
+[enforcement register](../ENFORCEMENT.md). The other hooks guard completion
 records, background polling loops, and existing working-record files. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
 error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
@@ -62,6 +67,71 @@ the authority, and the summary further down this page only points to it.
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
+- **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
+  refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
+  (while it can keep its state: if its state lock cannot be taken at all, it reminds of a compaction once
+  and refuses no turn end, as its limits below say); it cannot make the assistant honour them. When Claude Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
+  record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
+  compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
+  with a warning, so a turn end is not held past the cap, unless the host sends `stop_hook_active` false
+  on a turn end that continues a refusal. The count is kept in its state
+  file, so the cap holds when the `stop_hook_active` input field is absent or true; it restarts only at
+  the next prompt you submit (`UserPromptSubmit`), a new compaction, or a turn end whose
+  `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the cap does not hold
+  against a host that sends false on a turn end that continues a refusal). If the hook's state location
+  cannot be examined, it keeps reminding but says that no entry can clear the reminder, and it does not
+  refuse the turn end. It detects a compaction by the platform's own markers: the `SessionStart` input field
+  `source` with the value `compact`, and the `PreCompact` event, both described in the
+  [Claude Code hooks reference](https://code.claude.com/docs/en/hooks). Events: `SessionStart`,
+  `PreCompact` (optional), `UserPromptSubmit`, and `Stop`.
+- **`rerun-pass-check.py`** keeps an earlier failure in view after a rerun passes. After a CI rerun call
+  that succeeds (`gh run rerun`, `glab ci retry`), or a test or check command that failed and then passed
+  with the same words, each as written with its quoting, and no recorded change between (a certain rerun;
+  a check whose words hold an expansion, such as `$LINENO` or `tests/test_*.py`, is never compared), it
+  adds a note to the assistant's context; at turn end it refuses, at most twice in a row, a final
+  message that calls a pass conclusive without naming the earlier failure. The count is kept in its
+  state file, so the cap holds when the `stop_hook_active` input field is absent or true; it restarts
+  only at the next prompt you submit (`UserPromptSubmit`), a final message that names a disclosure word,
+  or a turn end whose `stop_hook_active` is explicitly false, which the hook trusts as a new turn (so the
+  cap does not hold against a host that sends false on a turn end that continues a refusal). A state
+  file that is missing, unreadable or malformed gives an unknown count, never 0. While the state file
+  cannot be read or is malformed, a turn end whose final message calls a pass conclusive, or that has no
+  final message, is allowed with a warning that the hook's state file could not be read. Once it is
+  missing, or a tool call has written back a lost or unreadable one, until one of those restarts a
+  conclusive turn end is allowed with a warning instead of refused only while a rerun seen since is
+  outstanding; any other is silent, and a lost record of earlier reruns is silent (a missed refusal).
+  Events: `PostToolUse` and
+  `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and
+  `Stop`. Its shell reading
+  is exact only for a small closed grammar (listed in its docstring) and for commands of at most 8192
+  characters. Inside it, a CI rerun is missed only when its words come into existence when the command
+  runs, or bash runs `gh` under another name (an expansion that has a value, a tilde expansion such as
+  `~`, `~+` or `~-`, which bash expands though the hook reads `~` as a plain character, a pathname
+  expansion, an alias, a shell function, a hashed command name from `hash -p`, or a command string handed
+  to another program), and a simple command that names `gh`, `run` and `rerun` in order without running
+  them is noted anyway (a false note, and a false refusal when its call succeeds). It reads an exit
+  status only from an integer exit-code field of the tool response, where one is present, and that status
+  is the whole call's: a later command, `|| true`, a background `&`, a `!` or an `if` or `while`
+  condition can hide a `gh` call the server refused, with or without `pipefail` set, and so can a pipe
+  under default bash options, so `gh run rerun 7 2>&1 | tail -5` exits 0 and is kept as certain (a false
+  refusal); with `pipefail` set, that pipe exits nonzero and gets only the uncertain note. The note for a
+  CI rerun call that is not reported as failed says only that and asserts neither a rerun nor an earlier
+  failure; the refusal asks the assistant to state any earlier failure, and neither it nor the warning
+  given when a refusal is capped asserts a CI rerun (of CI, each says only that a command naming a CI
+  rerun was not reported as failed). An uncertain
+  rerun gets a note and is never kept, so it never brings a refusal: every command outside the grammar
+  (including `echo "$(date)"`, a here-document, and any longer command), a possible CI rerun by
+  construction because the hook could not parse it, even when it fails; and a CI rerun call that fails,
+  since the rerun may or may not have started. That note says that a CI rerun cannot be ruled out and
+  asserts no rerun and no earlier check failure. A blank command gets no note. This is a deliberate cost:
+  an off-grammar command that reruns nothing, such as a here-document commit, gets a false note, and a
+  real CI rerun written outside the grammar, a failed CI rerun call that did start a rerun, or an
+  off-grammar check that fails and then passes gets only its note, with no refusal. A state file written
+  by an earlier revision of the hook is discarded, so none of its flags arms a refusal, and one of the
+  current revision holding a flag of a kind it never keeps is malformed. Read-only is
+  decided only inside the grammar: `env` with any argument, an assignment prefix, a command word holding
+  an expansion, and any output redirection whose target is not the unquoted word `/dev/null` count as a
+  change; an input redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
 
 ## Integrity
 
@@ -72,12 +142,14 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b` | [ungated-record.py](ungated-record.py) |
+| `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
+| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -120,7 +192,8 @@ fails and report it; do not work around a failed check.
    If it prints anything other than `<file>: OK`, delete the downloaded file and stop. A mismatch means
    the file is not the one this page describes.
 
-3. Run the hook's own self-test and require it to pass:
+3. Check that `python3 --version` reports at least Python 3.14, which the hooks require; if it does not,
+   stop. Then run the hook's own self-test and require it to pass:
 
    ```sh
    python3 -I -S -B ~/.claude/hooks/<file> --self-test
@@ -138,7 +211,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the six hooks:
+   Use this launch line for each of the eight hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -151,38 +224,67 @@ fails and report it; do not work around a failed check.
    - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
      of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
-     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
-     a `REGISTRATION` constant; use this same guard for them.
+     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
+     `constraint-reread.py`, and `rerun-pass-check.py` do not define a `REGISTRATION` constant; use this
+     same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
-     check that `python3` with `python3 --version` before step 3. On an older interpreter each hook reads
-     no input, writes one `error: <file> requires Python 3.14 or newer` line to standard error, and
-     exits. Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
+     Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
+     `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
+     start the hook, each hook reads no input, writes one line beginning
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
+     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
-     tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
-     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
-     stops before its loop guard runs). If you see that line, upgrade Python or remove the hook's entry.
+     tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
+     `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
+     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
+     added and every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap
+     would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
+     the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
+     that predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates
+     f-strings cannot compile the three clock hooks, which use them, and exits 1. Exit 1 is a
+     non-blocking error on every event, so a `PreToolUse` hook then allows every tool call unchecked;
+     exit 2 on `Stop` blocks the stop, and the hook's own block cap never runs, and exit 2 on
+     `UserPromptSubmit` blocks the prompt. If you see any of these errors, upgrade Python or remove the
+     hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the six hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the eight hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
    `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
+   `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
+   `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
+   `Bash|Write|Edit|MultiEdit|NotebookEdit`), `UserPromptSubmit`, and `Stop`.
 
    ```json
    {
      "hooks": {
        "PostToolUse": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
+         { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PostToolUseFailure": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
+         { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
+       ],
+       "SessionStart": [
+         { "matcher": "compact", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
+       ],
+       "PreCompact": [
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
+       ],
+       "UserPromptSubmit": [
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "Stop": [
-         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PreToolUse": [
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
@@ -205,12 +307,12 @@ fails and report it; do not work around a failed check.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other five, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other seven, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the six above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the eight above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -252,6 +354,8 @@ command. Their reasons are optional; text inside quotes does not opt out.
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
+| `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
+| `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
@@ -302,6 +406,97 @@ section of its opening docstring. Read that section before relying on a hook; in
   misses sleeps run through unlisted launchers, such as `flock`, `xargs`, or `ssh`. A counter or clock
   marker is enough to allow a loop even if it never limits the wait. It does not verify that a
   foreground process ends when the tool's timeout expires.
+- **`constraint-reread.py`** proves only that a re-read entry was written after the compaction, not that
+  the record was read or a constraint honoured, and it names only the constraints written in the record.
+  It sees a compaction only through the platform markers named above, so a context lost without one (a
+  new session, a host without those events, a hook not registered for them) is not seen. Without a state
+  folder or a session id it reminds once and then forgets, and a state file deleted after a compaction
+  forgets that compaction: the reminder and the refusals stop silently. Its turn-end refusal is capped at
+  three in a row, after which the stop is allowed with a warning, unless the host sends `stop_hook_active`
+  false on a turn end that continues a refusal (each such turn end is refused again). A refusal whose count
+  cannot be saved is allowed with a warning, also on an explicit false. Its state updates are serialized by
+  a lock file beside the state file, and a call saves only while that lock file and the state file are the
+  ones it locked and loaded. A call that cannot take the lock within two seconds saves nothing, and a turn
+  end it would refuse is allowed with a warning that names the lock. A call whose lock file is deleted or
+  replaced while it holds it (also one moved away and put back after another call saved), or whose state
+  file another call saved meanwhile, saves nothing, and a turn end it would refuse is allowed with a warning
+  that the refusal count cannot be saved (a deletion, replacement or save that lands in the few system calls
+  between its last check and its write can still let one stale save through, and so can a save whose state
+  file matches the loaded one in device, inode, size, modification time and change time, all five fields it
+  compares, as when an inode number is reused within the filesystem's timestamp granularity). While the lock
+  cannot be taken at all (a lock path
+  that is a symbolic link or not a regular file, a lock file it cannot open, a filesystem that refuses
+  `flock`, a platform without it), it keeps no state: a compaction is reminded once and then forgotten, and
+  with no compaction saved before then every turn end passes silently (a missed reminder and a missed
+  refusal); a compaction saved before then is still reminded, and each turn end is allowed with a warning. A
+  state folder moved away or deleted during a session forgets the compaction silently, like a deleted state
+  file. Once a record is declared, every call it handles creates its state folder and an empty lock file for
+  the session, and nothing removes them. Without `UserPromptSubmit`
+  registered
+  and without a `stop_hook_active` field in the input, the count stays at the cap, so every later turn end
+  until the next compaction is allowed with the warning (a missed refusal); a state file that cannot be
+  parsed gives an unknown count with the same effect from its first turn end.
+- **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
+  through the shell tool, with the same words, each as written with its quoting (a word quoted another way
+  is a different check, and so is an operator spelled another way, such as a newline in place of `;`
+  between two commands; blanks, comments, leading and trailing newlines and a final `;` do not count). A
+  check whose words hold an expansion (a `$` expansion, or an unquoted `*`, `?` or `~`) is never compared
+  with another run, so its fail-then-pass gets no note (a missed note, never a false one). A command is
+  shown in a note as written, or, when it holds a tab, a newline or another control character (C0, DEL
+  or C1), as one `$'...'` string with those characters escaped, and is cut after 160 characters. A rerun
+  through a web page, a runner's own retry option, or a change made outside the tool calls it sees is
+  missed or misread. A command its shell reader cannot parse (a here-document,
+  ANSI-C quoting such as `$'...'`, a command substitution, a line continuation, or a command over 8192
+  characters, notably) is always noted as a possible CI rerun, even when it fails, and counted as a change
+  unless it fails, even when it reruns nothing (a false note). Such a command, and a CI rerun call that
+  fails, is an uncertain rerun: it gets that note only and never a turn-end refusal, so a real CI rerun
+  written that way, a failed call that did start a rerun, or an off-grammar check that fails and then
+  passes is not refused (a missed refusal). A blank command gets no note. Inside its grammar, a rerun
+  whose words come into existence only when the command runs (an expansion with a value, a tilde expansion
+  such as `~`, `~+` or `~-`, an alias) or that runs `gh` under a hashed name (`hash -p`) is missed. The
+  exit status it reads, only from an integer exit-code field where one is present, is the whole call's, so a
+  refused `gh` call that a pipe (under default bash options, not under `pipefail`), `|| true`, a later
+  command, a background `&`, a `!` or an `if` or `while` condition (each also under `pipefail`) can hide
+  is kept as a CI rerun call that was not reported as failed (a false refusal). Its turn-end check reads
+  only the final message against fixed phrase lists: any disclosure word such as `flaky` or `rerun`
+  clears it wherever the word stands, even inside a denial such as `I did not rerun CI`, whether or not
+  the failure is recorded; it does not record or investigate the failure itself. It fails open on its own
+  failure, by design for an advisory hook: an internal error or an unwritable stdout gives no note and no
+  refusal; an unreadable state file is read as no earlier runs, so a local rerun across it is missed (a
+  turn end that reads it is allowed with a warning that the state could not be read when the final message
+  calls a pass conclusive or is missing), but the current call's own CI rerun or possible CI rerun note is
+  still given. A refusal whose count cannot be saved is allowed with a warning, also on an explicit
+  `stop_hook_active` false. Its state updates are serialized by a lock file beside the state file, and a run
+  saves only while that lock file and the state file are the ones it locked and loaded. A run that cannot
+  take the lock within two seconds saves nothing, and a turn end it would refuse is allowed with a warning
+  that names the lock. A run whose lock file is deleted or replaced while it holds it (also one moved away
+  and put back after another run saved), or whose state file another run saved meanwhile, saves nothing, and
+  a turn end it would refuse is allowed with a warning that the refusal count cannot be saved (a deletion,
+  replacement or save that lands in the few system calls between its last check and its write can still
+  let one stale save through, and so can a save whose state file matches the loaded one in device, inode,
+  size, modification time and change time, all five fields it compares, as when an inode number is reused
+  within the filesystem's timestamp granularity). While the lock cannot be taken at all (a lock path that is
+  a symbolic link or not a regular
+  file, a lock file it cannot open, a filesystem that refuses `flock`, a platform without it), it keeps no
+  state: it only notes after each tool call, and with no state saved before then every turn end passes
+  silently (a missed refusal); the outstanding reruns of a state saved before then still bring a warning. A
+  state folder moved away or deleted during a session is read as no state, so the next turn end passes
+  silently (a missed refusal). Nothing removes its state and lock files, one of each per session. A state
+  file written by an
+  earlier revision of the hook is read as
+  no earlier runs too, so
+  none of its flags arms a refusal. The state file is trusted: a hand-edited state of the current revision
+  whose flags are of the kinds it keeps still arms a refusal. A state file that is missing (first use
+  cannot be told from a lost file), unreadable or malformed gives an unknown count. While it cannot be read
+  or is malformed, a conclusive turn end, or one with no final message, is allowed with a warning that the
+  state could not be read. Once it is missing, or a tool call has written back a lost or unreadable one,
+  until a prompt you submit, a disclosure word or an explicit `stop_hook_active` false, a conclusive turn
+  end is allowed with a warning instead of refused only while a rerun seen since is outstanding; any other
+  is silent, and a lost record of earlier reruns is silent (a missed refusal). Without `UserPromptSubmit`
+  registered and
+  without a `stop_hook_active`
+  field in the input, once it has refused twice in a row every later conclusive turn end is allowed with
+  the warning until a final message names a disclosure word (a missed refusal).
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

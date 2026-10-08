@@ -2727,10 +2727,14 @@ def self_test():
         # open record, a close release or fire the injection, or a left-open check find or close anything
         # (these legs do not fork; a forked child would hold its own copy of the numbers, never the leg's).
         def _r7_ident(fd):
+            """fd's (st_dev, st_ino); None once fd is closed (EBADF, the only error read as closed). Any other
+            fstat error returns a cannot-evaluate string naming fd, never None that a caller reads as released."""
             try:
                 st = os.fstat(fd)
-            except OSError:
-                return None
+            except OSError as exc:
+                if exc.errno == 9:                      # EBADF
+                    return None
+                return "cannot evaluate descriptor {}: {!r}".format(fd, exc)
             return st.st_dev, st.st_ino
 
         def _r7_ledger():
@@ -2769,16 +2773,30 @@ def self_test():
             return False
 
         def _r7_left_open(ledger):
-            """The opens no close released whose number still names the file recorded at the open (none
-            outside the ledger's own process)."""
+            """The opens no close released whose number still names the file recorded at the open, or whose
+            number fstat cannot read (cannot-evaluate, never read as released: the entry is returned with the
+            descriptor named under "unreadable"); none outside the ledger's own process."""
             if os.getpid() != ledger["owner"]:
                 return []
-            return [entry for entry in ledger["opens"]
-                    if not entry["released"] and _r7_ident(entry["fd"]) == entry["ident"]]
+            left = []
+            for entry in ledger["opens"]:
+                if entry["released"]:
+                    continue
+                ident = _r7_ident(entry["fd"])
+                if isinstance(ident, str):
+                    entry["unreadable"] = ident
+                    left.append(entry)
+                elif ident == entry["ident"]:
+                    left.append(entry)
+            return left
 
         def _r7_close_left(ledger):
-            """Close each open _r7_left_open finds (a regressed run's leak), so the failing suite stays clean."""
+            """Close each open _r7_left_open finds (a regressed run's leak), so the failing suite stays clean. A
+            number fstat cannot read is never closed (its file is unknown) and fails the suite naming it."""
             for entry in _r7_left_open(ledger):
+                if "unreadable" in entry:
+                    failures.append("r7-left-open-cannot-evaluate: " + entry["unreadable"])
+                    continue
                 entry["released"] = True
                 try:
                     os.close(entry["fd"])
@@ -2789,6 +2807,28 @@ def self_test():
         _r7_other_path.write_bytes(b"")
         _r7_other_fd = os.open(str(_r7_other_path), os.O_RDONLY)
         _r7_other = _r7_ident(_r7_other_fd)
+
+        # The left-open check fails closed: a recorded, unreleased descriptor still open whose fstat fails EIO
+        # is returned naming it, never read as released. An independent fstat must still see it open, else
+        # the check proves nothing.
+        _r7_eio_ledger = _r7_ledger()
+        _r7_eio_fd = _r7_opened(_r7_eio_ledger, os.open(os.devnull, os.O_RDONLY), os.close)
+        _r7_eio_real_fstat = os.fstat
+
+        def _r7_eio_fstat(fd, *args, **kwargs):
+            if fd == _r7_eio_fd:
+                raise OSError(5, "injected census read failure")
+            return _r7_eio_real_fstat(fd, *args, **kwargs)
+        os.fstat = _r7_eio_fstat
+        try:
+            _r7_eio_left = _r7_left_open(_r7_eio_ledger)
+        finally:
+            os.fstat = _r7_eio_real_fstat
+        check("r7-left-open-census-eio-fails-closed",
+              [entry["fd"] for entry in _r7_eio_left] == [_r7_eio_fd]
+              and "descriptor {}:".format(_r7_eio_fd) in _r7_eio_left[0].get("unreadable", "")
+              and _r7_ident(_r7_eio_fd) == _r7_eio_ledger["opens"][0]["ident"])
+        os.close(_r7_eio_fd)
 
         def _r7_fire(fd, real_close, reuse):
             """The injected close: release fd, or under `reuse` put the other-lane file on it, then raise."""
@@ -2811,7 +2851,7 @@ def self_test():
         def _r7_reuse_kept(fd):
             """Whether fd, after a `reuse` run, still names the other-lane file: then nothing closed it again,
             and the leg closes it, its own other-lane descriptor."""
-            if fd is None or _r7_ident(fd) != _r7_other:
+            if fd is None or isinstance(_r7_other, str) or _r7_ident(fd) != _r7_other:
                 return False
             os.close(fd)
             return True
@@ -3178,8 +3218,10 @@ def self_test():
             if not quiet:
                 raise first
 
-        def _r7w_vector(err):
-            """The failed tags of one V1 run (empty: green)."""
+        def _r7w_vector(err, census=None, leak=False):
+            """The failed tags of one V1 run (empty: green). `census` replaces the leak check's fstat of the
+            child, and `leak` keeps the child's close from releasing it (a regressed body), so a case can
+            meet a still-open child whose census read fails."""
             seen = dict(closes=0, probes=0)
             other = _r7w_real_open(str(base / "r7-unrelated"), os.O_RDONLY)
             want = _r7w_real_fstat(other)
@@ -3196,6 +3238,8 @@ def self_test():
                 return fd
 
             def close(fd):
+                if leak and fd == seen.get("wfd"):
+                    return                    # the regressed body: the child is never released
                 if fd == seen.get("pfd"):
                     seen["closes"] += 1
                     if "fired" not in seen:
@@ -3239,9 +3283,10 @@ def self_test():
                         _r7w_real_close(seen["pfd"])   # still the unrelated file this vector put there
             if "wfd" in seen:
                 try:
-                    _r7w_real_fstat(seen["wfd"])
-                except OSError:
-                    pass
+                    (census or _r7w_real_fstat)(seen["wfd"])
+                except OSError as exc:
+                    if exc.errno != 9:        # only EBADF reads as closed; any other error fails naming it
+                        failed.append("census-cannot-evaluate-fd-{}".format(seen["wfd"]))
                 else:
                     failed.append("leak")
                     _r7w_real_close(seen["wfd"])
@@ -3257,6 +3302,22 @@ def self_test():
                 globals()["_close_fd_exc_safe"] = _r7w_p1
             check("r7-working-reclose-flip-red-by-reuse-" + _r7w_tag,
                   "reuse" in _r7w_red and set(_r7w_red) <= set(("reuse", "probe")))
+        # The leak check fails closed: a child left open whose census read fails EIO fails the vector naming
+        # it, never read as closed. An independent fstat must still see it open, else the case proves nothing.
+        _r7w_eio = []
+
+        def _r7w_census(fd, *args, **kwargs):
+            _r7w_eio.append(fd)
+            raise OSError(5, "injected census read failure")
+        _r7w_eio_got = _r7w_vector(5, _r7w_census, leak=True)
+        try:
+            _r7w_eio_open = bool(_r7w_eio) and _r7w_real_fstat(_r7w_eio[0]) is not None
+        except OSError:
+            _r7w_eio_open = False
+        check("r7-working-leak-census-eio-fails-closed",
+              _r7w_eio_open and _r7w_eio_got == ["census-cannot-evaluate-fd-{}".format(_r7w_eio[0])])
+        if _r7w_eio_open:
+            _r7w_real_close(_r7w_eio[0])      # the child the regressed body left open
         os.close(_r7w_root)
 
         # ROUND-7 sibling on open_journal_root_from_path: the operator-root close raising after releasing

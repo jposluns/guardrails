@@ -1284,6 +1284,8 @@ def _cancellation_self_test():
     """
     import builtins
     import dis
+    import errno
+    import fcntl
     import gzip
     import inspect
     import textwrap
@@ -1411,16 +1413,117 @@ def _cancellation_self_test():
         return original_import(name, *args, **kwargs)
 
     def descriptors():
+        # (number, identity) pairs, identity (st_dev, st_ino, file type bits
+        # of st_mode, access mode), each fixed while a descriptor stays open:
+        # permission bits are left out (a chmod changes them under a kept
+        # descriptor) and the access-mode bits are the F_GETFL bits F_SETFL
+        # cannot change. A number closed and reopened on another file, or with
+        # another access mode, between two censuses is a new pair.
+        # Coverage boundary: an anonymous-inode descriptor (eventfd, signalfd,
+        # timerfd, epoll and the like share one inode) re-created at the same
+        # number, the same file reopened at the same number with the same
+        # access mode, and a deleted file closed at a number with a new file
+        # of the same type opened there with the same access mode after
+        # taking the deleted file's freed inode number on the same device
+        # (st_ino names a file only while it exists, and a filesystem may give
+        # a freed number to the next file it creates), read as unchanged. The
+        # offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and
+        # flags lines are not compared: they change under a kept descriptor
+        # that is read, written or given F_SETFL, so a kept descriptor would
+        # read as a leak. Only
+        # EBADF reads as closed (the listing's own descriptor); any other read
+        # failure refuses naming the descriptor.
+        try:
+            names = os.listdir("/proc/self/fd")
+        except OSError as exc:
+            raise AssertionError("descriptor census: cannot list /proc/self/fd: "
+                                 + str(exc)) from exc
+        access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
         present = set()
-        for value in os.listdir("/proc/self/fd"):
+        for value in names:
+            fd = int(value)
             try:
-                os.fstat(int(value))
+                info = os.fstat(fd)
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             except OSError as exc:
-                if exc.errno != 9:
-                    raise
+                if exc.errno != errno.EBADF:
+                    raise AssertionError("descriptor census: cannot read descriptor "
+                                         + str(fd) + ": " + str(exc)) from exc
             else:
-                present.add(value)
+                present.add((fd, (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                                  flags & access)))
         return present
+
+    def census_self_check():
+        # The leak comparison below must see a number closed and reopened on a
+        # different file or with another access mode, must not see a chmod of a
+        # kept descriptor, and an unreadable census (listing, fstat or F_GETFL)
+        # must refuse, never pass.
+        with tempfile.TemporaryDirectory(prefix="opf-census-", dir="/dev/shm") as temp:
+            paths = [os.path.join(temp, name) for name in ("a", "b")]
+            for path in paths:
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+            held = []
+            try:
+                for second, mode in ((paths[1], os.O_RDONLY), (paths[0], os.O_RDWR)):
+                    held.append(os.open(paths[0], os.O_RDONLY))
+                    first = held[0]
+                    before = descriptors()
+                    os.close(held.pop())
+                    held.append(os.open(second, mode))
+                    if held[0] != first or not descriptors() - before:
+                        raise AssertionError("descriptor census missed a number reused for "
+                                             + ("another file" if second == paths[1]
+                                                else "another access mode"))
+                    os.close(held.pop())
+                held.append(os.open(paths[0], os.O_RDONLY))
+                # An explicit starting mode: the chmod below then changes the
+                # permission bits whatever umask created the file.
+                os.fchmod(held[0], 0o644)
+                before = descriptors()
+                os.fchmod(held[0], 0o600)
+                if stat.S_IMODE(os.fstat(held[0]).st_mode) != 0o600:
+                    raise AssertionError("the chmod of a kept descriptor left its mode unchanged")
+                if descriptors() != before:
+                    raise AssertionError("descriptor census read a chmod of a kept descriptor as a change")
+                real_listdir, real_fstat, real_fcntl = os.listdir, os.fstat, fcntl.fcntl
+
+                def eio_listdir(path=".", *args):
+                    if str(path) == "/proc/self/fd":
+                        raise OSError(errno.EIO, "injected")
+                    return real_listdir(path, *args)
+
+                def eio_fstat(fd, *args):
+                    if fd == held[0]:
+                        raise OSError(errno.EIO, "injected")
+                    return real_fstat(fd, *args)
+
+                def eio_fcntl(fd, cmd, *args):
+                    if fd == held[0] and cmd == fcntl.F_GETFL:
+                        raise OSError(errno.EIO, "injected")
+                    return real_fcntl(fd, cmd, *args)
+
+                for target, name, fake, needle in (
+                        (os, "listdir", eio_listdir, "cannot list"),
+                        (os, "fstat", eio_fstat, "cannot read descriptor " + str(held[0]) + ":"),
+                        (fcntl, "fcntl", eio_fcntl, "cannot read descriptor " + str(held[0]) + ":")):
+                    setattr(target, name, fake)
+                    try:
+                        descriptors()
+                    except AssertionError as exc:
+                        if needle not in str(exc):
+                            raise AssertionError("descriptor census refusal did not name "
+                                                 + needle) from exc
+                    else:
+                        raise AssertionError("descriptor census passed an injected " + name + " EIO")
+                    finally:
+                        os.listdir, os.fstat, fcntl.fcntl = real_listdir, real_fstat, real_fcntl
+            finally:
+                for fd in held:
+                    os.close(fd)
+
+    census_self_check()
 
     scope_files = {__file__, schema.__file__}
     exemption_reasons = {
@@ -1716,9 +1819,9 @@ def _cancellation_self_test():
                 sys.dont_write_bytecode = original_bytecode
                 os.environ.clear()
                 os.environ.update(original_environment)
-                for value in descriptors() - before_fds:
+                for value, _identity in descriptors() - before_fds:
                     try:
-                        os.close(int(value))
+                        os.close(value)
                     except OSError as exc:
                         if exc.errno != 9:  # already-closed enumeration fd
                             raise

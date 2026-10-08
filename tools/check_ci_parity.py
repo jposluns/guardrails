@@ -4436,7 +4436,6 @@ def self_test():
             ("_scrub_scoped_first", "read_text"): 1,
             ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
-            ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
             ("run", "splitlines"): 1,
         },

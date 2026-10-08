@@ -30,6 +30,7 @@
       "sources": [
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/core/hooks/preview.toml",
         ".aiqt/core/gates/manifest.toml"
       ],
       "target": ".aiqt/enforceability.json"
@@ -73,6 +74,15 @@
         "CLAUDE.md"
       ],
       "target": ".aiqt/release/announce-snippet.txt"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_first_pin_demo.py",
+      "sources": [
+        "AGENTS.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/release/first-pin-demonstration.toml"
     },
     {
       "kind": "file",

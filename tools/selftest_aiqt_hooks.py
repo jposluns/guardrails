@@ -763,8 +763,9 @@ def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's two
-    (an armed barrier, and one that is unreadable or malformed, which reads as armed);
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
+    review_dispatch_pin's;
     the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
     fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
     are selftest_orch_hooks.Fixture repos under tmp."""
@@ -857,6 +858,9 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+    rd = orch.RdpFixture(base, "review-dispatch")
+    note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
+         rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
 
 
 def _shape_mutant(source, func_name, lines):
@@ -1537,11 +1541,32 @@ def _main_with_recorder():
         monitor.stop()
 
 
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-hooks-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-hooks-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2

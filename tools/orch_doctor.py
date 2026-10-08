@@ -3,7 +3,9 @@
 contract, and the state directory; and re-run the resume audit to clear (or re-arm) the barrier.
   orch_doctor.py                 validate everything; exit 0 clean, 1 findings, 2 no registry
   orch_doctor.py --resume-audit  re-run the resume probes; a clean run clears the barrier
-  An interpreter older than Python 3.14 is refused at exit 2 before anything runs.
+  An interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything
+  runs. One that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a
+  compile failure, which reads as findings, or 2 for an interpreter predating -I when run with it.
 """
 import sys
 

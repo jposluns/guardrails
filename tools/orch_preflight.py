@@ -4,7 +4,9 @@ would act on, so the orchestrator sees per-item (id, class, proof) BEFORE yieldi
 re-enumerate authoritatively at yield time; this CLI adds visibility, never enforcement, and
 escalating it to a required permit is a recorded phase-2 option.
   orch_preflight.py [stop|idle|drain]   exit 0 with the table; exit 2 on no registry or a bad operation
-  An interpreter older than Python 3.14 is refused at exit 2 before anything runs.
+  An interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything
+  runs. One that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a
+  compile failure, or 2 for an interpreter predating -I when run with it.
 """
 import sys
 
