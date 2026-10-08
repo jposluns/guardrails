@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0275810737b4e227ebc825c78e355beaae46756572f2ea45c85a57664568db8b"
+tree-sha256 = "d4e184c13b60305f09196a6171565290ac36c92bf1c55b9a05f9d4c79be577c8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 263973
-sha256 = "a33147f41ce464ba365ecfcf3928a38037100279d7f7818d66c3d8e4f04b8be9"
+bytes = 264668
+sha256 = "8570b52ce2ad243588e39b8094814e31b006d9d554a3c33c6c1f182b4add43c6"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2261,18 +2261,18 @@ sha256 = "63756c13461306fe49528a3506eac77652bd48c9ee2703a1bc1b02317d0715aa"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 53923
-sha256 = "cfaecbd4c7ecf0eed1bb6c581c4a7bbd14edf5f23822b3fb0dc31adeac799207"
+bytes = 54581
+sha256 = "c3d46dce4cf03e06bd48e77c24fc7c8bb31da19a09664e938b1fb883a7e0ea20"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 896
-sha256 = "7fe60a963d1e9c2d40e27623a6c07974f6229aba379621724d8cead7bd058ff1"
+sha256 = "9328bd7aa44aa9f1ddbb3a376db470fa54964f62a602f4df6c42fb5b57f7b0f7"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
-bytes = 111406
-sha256 = "6b199c7ac99817d00c52074f5d10c65fa14d44546c887ee527ebeb98438e2565"
+bytes = 124379
+sha256 = "b41e44d09bc21b7e7df6202f40a99496a8cece6e6fc30d74d2432c2ec8afc103"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -3351,8 +3351,8 @@ sha256 = "77630d67cd5c896131a29a57101a623b59921c71f4ee432c270a14728fd37c8c"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
-bytes = 37057
-sha256 = "da2d1e36cdcbd766bf744b057aa1f143f428923a0e139b73cc53779ecbbc6b74"
+bytes = 37704
+sha256 = "13355bdb67d9a1bea62d6e3e2e40f93b80ea15897bb94a24801d86a2738f8a2d"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
@@ -3491,8 +3491,8 @@ sha256 = "23504e08f124f7f240473fa1876c7739a156b36846d16cb2a31c4b0a13764cbc"
 
 [[sources]]
 path = "tools/gen_char_policy.py"
-bytes = 12364
-sha256 = "6fc7c5dd81bbc2741051e2c02f26f9cddf6b4fec164eb05ed3199e711ed8d9c3"
+bytes = 12999
+sha256 = "3789c128fbdebefae12cbd176afb87ddf7bf4d1f1d98161e73359ec82e1f332f"
 
 [[sources]]
 path = "tools/gen_claude.py"

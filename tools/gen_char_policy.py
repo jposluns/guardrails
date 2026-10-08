@@ -20,36 +20,41 @@ marker ("a marker line is not the expected text").
 
 Byte equality covers the region only. The hook's self-test H12 walks both files' module-level statements, compound
 statements' bodies included, and fails when one outside the copied region binds a name the region binds or reads, or
-__builtins__, at module scope, or a function outside it declares one global; or when one makes an attribute or item
-store (an assignment, an augmented or annotated assignment, a for, with or comprehension target) or deletion, at
-module scope, in a class body or in a def's or lambda's decorators or defaults, whose target chain starts from such
-a name, json, builtins, sys.modules, this module or an alias of one of them. Conservatively, whatever the stored
-value, it also fails on a store whose chain starts from anything but a name (a call such as __import__("json"),
-globals() or logging.getLogger("app"), a conditional expression) or has a link (an attribute or a constant string
-key) named sys, json, builtins or modules. An alias is a name bound, at module scope (a class body included) or in a
-def that declares it global, by one of these forms: an import of json, builtins or sys, of a submodule of one or of
-a name from one (from sys import modules binds an alias of sys.modules); an import of this module (import __main__,
-or the gate's module check_no_dashes imported under any name); a from-import from this module, whose name is an
-alias of the name it imports; and a for, with, comprehension or match target whose source is such a name or alias,
-sys.modules (sys or an alias of sys, then .modules), or an item of sys.modules, which counts as this module. The
-source is the iterable, the context expression or the subject and, recursively, each element of a tuple, list or set
-display, the element of a comprehension and each positional argument of a call, never the function called or a
-keyword argument. Every other aliasing form is out of scope; diff review is the control. Ordinary stores are not
-flagged: sys.path[0] = ..., an item of os.environ or of a module-level dict under a key not named sys, json,
-builtins or modules, a store to an attribute not so named of any other name (_Options.verbose = True), and a store
-whose chain has no link so named and starts from a target whose source is none of those (for _row in sorted(_rows,
-key=len): _row[0] = 2). That walk catches accidental drift between the two copies; it is not a defence against a
-deliberate edit that replaces behaviour through a path the walk does not model. Examples, not a complete list: an
-alias made by plain assignment or a walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target
-over a call's result (for m in (importlib.import_module("__main__"),): ...); an item key that is not a constant
-string; a call such as setattr or exec; an in-place method call such as globals().update, sys.modules.update or
-json.__dict__.update; a store in a function or lambda body; reflective access through an object the walk cannot
-name; another module patching the file; and a module that shadows a standard library module, such as a json.py. The
-gate keeps a tools/json.py out only under python3 -I, as CI runs it. The hashes recorded in .preview/SHA256SUMS and
-.aiqt/manifest.toml let an installer or a release check detect a shipped copy that differs from the reviewed one,
-and whoever makes an edit can record new hashes in the same change. After regenerating, the hook's SHA-256 in
-.preview/SHA256SUMS and the .preview/README.md table changes too; tools/check_hooks_preview.py fails until both are
-updated.
+__builtins__, at module scope, or a def or class body outside it declares one global; or when one makes an attribute
+or item store (an assignment, an augmented or annotated assignment, a for, with or comprehension target) or
+deletion, at module scope, in a class body or in a def's or lambda's decorators or defaults, whose target chain
+starts from such a name, json, builtins, sys.modules, this module or an alias of one of them. Conservatively,
+whatever the stored value, it also fails on a store whose chain starts from anything but a name (a call such as
+__import__("json"), globals() or logging.getLogger("app"), a conditional expression) or has a link (an attribute or
+a constant string key) named sys, json, builtins or modules. An alias is a name bound by one of these forms: an
+import of json, builtins or sys, of a submodule of one or of a name from one (from sys import modules binds an alias
+of sys.modules); an import of this module (import __main__, or the gate's module check_no_dashes imported under any
+name); a from-import from this module, whose name is an alias of the name it imports; and a for, with, comprehension
+or match target whose source is such a name or alias, sys.modules (sys or an alias of sys, then .modules), or an
+item of sys.modules, which counts as this module. The source is the iterable, the context expression or the subject
+and, recursively, each element of a tuple, list or set display, the element of a comprehension and each positional
+argument of a call but a bare name of a builtin function or class that the file does not bind (map(list, _rows)),
+never the function called or a keyword argument. Scope follows Python's rules: a binding is module-level only at
+module scope or in a def or class body whose own scope declares the name global (an enclosing def's declaration does
+not count); any other binding is local to its def or class body, a comprehension target to its comprehension and a
+nonlocal name to the enclosing def, and none aliases the module-level name of the same spelling. A name in a source
+or a store's chain counts as the binding its scope reads, its own or else the nearest enclosing def's or the
+module's; in a class body, which can read a name before binding it, conservatively both. Every other aliasing form
+is out of scope; diff review is the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of
+os.environ or of a module-level dict under a key not named sys, json, builtins or modules, a store to an attribute
+not so named of any other name (_Options.verbose = True), and a store whose chain has no link so named and starts
+from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That walk catches
+accidental drift between the two copies; it is not a defence against a deliberate edit that replaces behaviour
+through a path the walk does not model. Examples, not a complete list: an alias made by plain assignment or a walrus
+(m = sys.modules[__name__], then m.validate_policy = ...) or by a target over a call's result (for m in
+(importlib.import_module("__main__"),): ...); an item key that is not a constant string; a call such as setattr or
+exec; an in-place method call such as globals().update, sys.modules.update or json.__dict__.update; a store in a
+function or lambda body; reflective access through an object the walk cannot name; another module patching the file;
+and a module that shadows a standard library module, such as a json.py. The gate keeps a tools/json.py out only
+under python3 -I, as CI runs it. The hashes recorded in .preview/SHA256SUMS and .aiqt/manifest.toml let an installer
+or a release check detect a shipped copy that differs from the reviewed one, and whoever makes an edit can record
+new hashes in the same change. After regenerating, the hook's SHA-256 in .preview/SHA256SUMS and the
+.preview/README.md table changes too; tools/check_hooks_preview.py fails until both are updated.
 """
 import sys
 

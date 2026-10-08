@@ -40,27 +40,33 @@ POLICY FILE
     policy path, a sample of policies through both validators, and this hook's scope test with the gate's
     walk. The hook's self-test H12 walks both files' module-level statements, compound statements' bodies
     included, and fails when one outside the copied region binds a name the region binds or reads, or
-    __builtins__, at module scope, or a function outside it declares one global; or when one makes an
+    __builtins__, at module scope, or a def or class body outside it declares one global; or when one makes an
     attribute or item store (an assignment, an augmented or annotated assignment, a for, with or comprehension
     target) or deletion, at module scope, in a class body or in a def's or lambda's decorators or defaults,
     whose target chain starts from such a name, json, builtins, sys.modules, this module or an alias of one of
     them. Conservatively, whatever the stored value, it also fails on a store whose chain starts from anything
     but a name (a call such as __import__("json"), globals() or logging.getLogger("app"), a conditional
     expression) or has a link (an attribute or a constant string key) named sys, json, builtins or modules. An
-    alias is a name bound, at module scope (a class body included) or in a def that declares it global, by one
-    of these forms: an import of json, builtins or sys, of a submodule of one or of a name from one (from sys
-    import modules binds an alias of sys.modules); an import of this module (import __main__, or the gate's
-    module check_no_dashes imported under any name); a from-import from this module, whose name is an alias of
-    the name it imports; and a for, with, comprehension or match target whose source is such a name or alias,
-    sys.modules (sys or an alias of sys, then .modules), or an item of sys.modules, which counts as this
-    module. The source is the iterable, the context expression or the subject and, recursively, each element
-    of a tuple, list or set display, the element of a comprehension and each positional argument of a call,
-    never the function called or a keyword argument. Every other aliasing form is out of scope; diff review is
-    the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of os.environ or of a
-    module-level dict under a key not named sys, json, builtins or modules, a store to an attribute not so
-    named of any other name (_Options.verbose = True), and a store whose chain has no link so named and starts
-    from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That walk
-    catches accidental drift between the two copies; it is not a defence against a deliberate edit that
+    alias is a name bound by one of these forms: an import of json, builtins or sys, of a submodule of one or
+    of a name from one (from sys import modules binds an alias of sys.modules); an import of this module
+    (import __main__, or the gate's module check_no_dashes imported under any name); a from-import from this
+    module, whose name is an alias of the name it imports; and a for, with, comprehension or match target
+    whose source is such a name or alias, sys.modules (sys or an alias of sys, then .modules), or an item of
+    sys.modules, which counts as this module. The source is the iterable, the context expression or the
+    subject and, recursively, each element of a tuple, list or set display, the element of a comprehension and
+    each positional argument of a call but a bare name of a builtin function or class that the file does not
+    bind (map(list, _rows)), never the function called or a keyword argument. Scope follows Python's rules: a
+    binding is module-level only at module scope or in a def or class body whose own scope declares the name
+    global (an enclosing def's declaration does not count); any other binding is local to its def or class
+    body, a comprehension target to its comprehension and a nonlocal name to the enclosing def, and none
+    aliases the module-level name of the same spelling. A name in a source or a store's chain counts as the
+    binding its scope reads, its own or else the nearest enclosing def's or the module's; in a class body,
+    which can read a name before binding it, conservatively both. Every other aliasing form is out of scope;
+    diff review is the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of os.environ or
+    of a module-level dict under a key not named sys, json, builtins or modules, a store to an attribute not
+    so named of any other name (_Options.verbose = True), and a store whose chain has no link so named and
+    starts from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That
+    walk catches accidental drift between the two copies; it is not a defence against a deliberate edit that
     replaces behaviour through a path the walk does not model. Examples, not a complete list: an alias made by
     plain assignment or a walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over
     a call's result (for m in (importlib.import_module("__main__"),): ...); an item key that is not a constant
@@ -82,8 +88,9 @@ DECISION
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
       holding a control character, or naming a path that does not exist, cannot be examined or is not a
       directory: allow with a note naming the variable and the reason. Armed, but launched with a
-      command-line argument other than --self-test alone: allow with a note saying so, without reading the
-      payload.
+      command-line argument other than --self-test alone, or given an argument list that is not a non-empty
+      list of strings (main() called from other code; a real launch passes sys.argv, which always is one):
+      allow with a note saying so, without reading the payload.
     - A tool_name string naming a tool other than Write, Edit or MultiEdit: allow, silently.
     - Fail-open, made visible: the preview channel allows what it cannot evaluate (the hook is opt-in and the
       CI gate is the backstop), but always with a note naming the reason, never silently and never with an ask.
@@ -191,34 +198,40 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 # --- BEGIN COPY: generated from tools/check_no_dashes.py by tools/gen_char_policy.py; do not edit ---
 # The policy validator. Every module-level name it reads is bound in this region or is a builtin. The hook's
 # self-test H12 walks both files' module-level statements, compound statements' bodies included, and fails when one
-# outside the copied region binds a name the region binds or reads, or __builtins__, at module scope, or a function
-# outside it declares one global; or when one makes an attribute or item store (an assignment, an augmented or
-# annotated assignment, a for, with or comprehension target) or deletion, at module scope, in a class body or in a
-# def's or lambda's decorators or defaults, whose target chain starts from such a name, json, builtins, sys.modules,
-# this module or an alias of one of them. Conservatively, whatever the stored value, it also fails on a store whose
-# chain starts from anything but a name (a call such as __import__("json"), globals() or logging.getLogger("app"), a
-# conditional expression) or has a link (an attribute or a constant string key) named sys, json, builtins or
-# modules. An alias is a name bound, at module scope (a class body included) or in a def that declares it global, by
-# one of these forms: an import of json, builtins or sys, of a submodule of one or of a name from one (from sys
-# import modules binds an alias of sys.modules); an import of this module (import __main__, or the gate's module
-# check_no_dashes imported under any name); a from-import from this module, whose name is an alias of the name it
-# imports; and a for, with, comprehension or match target whose source is such a name or alias, sys.modules (sys or
-# an alias of sys, then .modules), or an item of sys.modules, which counts as this module. The source is the
-# iterable, the context expression or the subject and, recursively, each element of a tuple, list or set display,
-# the element of a comprehension and each positional argument of a call, never the function called or a keyword
-# argument. Every other aliasing form is out of scope; diff review is the control. Ordinary stores are not flagged:
-# sys.path[0] = ..., an item of os.environ or of a module-level dict under a key not named sys, json, builtins or
-# modules, a store to an attribute not so named of any other name (_Options.verbose = True), and a store whose chain
-# has no link so named and starts from a target whose source is none of those (for _row in sorted(_rows, key=len):
-# _row[0] = 2). That walk catches accidental drift between the two copies; it is not a defence against a deliberate
-# edit that replaces behaviour through a path the walk does not model. Examples, not a complete list: an alias made
-# by plain assignment or a walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over a
-# call's result (for m in (importlib.import_module("__main__"),): ...); an item key that is not a constant string; a
-# call such as setattr or exec; an in-place method call such as globals().update, sys.modules.update or
-# json.__dict__.update; a store in a function or lambda body; reflective access through an object the walk cannot
-# name; another module patching the file; and a module that shadows a standard library module, such as a json.py.
-# The recorded hashes (.preview/SHA256SUMS for the hook, .aiqt/manifest.toml for both files) let an installer or a
-# release check detect a shipped copy that differs from the reviewed one.
+# outside the copied region binds a name the region binds or reads, or __builtins__, at module scope, or a def or
+# class body outside it declares one global; or when one makes an attribute or item store (an assignment, an
+# augmented or annotated assignment, a for, with or comprehension target) or deletion, at module scope, in a class
+# body or in a def's or lambda's decorators or defaults, whose target chain starts from such a name, json, builtins,
+# sys.modules, this module or an alias of one of them. Conservatively, whatever the stored value, it also fails on a
+# store whose chain starts from anything but a name (a call such as __import__("json"), globals() or
+# logging.getLogger("app"), a conditional expression) or has a link (an attribute or a constant string key) named
+# sys, json, builtins or modules. An alias is a name bound by one of these forms: an import of json, builtins or
+# sys, of a submodule of one or of a name from one (from sys import modules binds an alias of sys.modules); an
+# import of this module (import __main__, or the gate's module check_no_dashes imported under any name); a
+# from-import from this module, whose name is an alias of the name it imports; and a for, with, comprehension or
+# match target whose source is such a name or alias, sys.modules (sys or an alias of sys, then .modules), or an item
+# of sys.modules, which counts as this module. The source is the iterable, the context expression or the subject
+# and, recursively, each element of a tuple, list or set display, the element of a comprehension and each positional
+# argument of a call but a bare name of a builtin function or class that the file does not bind (map(list, _rows)),
+# never the function called or a keyword argument. Scope follows Python's rules: a binding is module-level only at
+# module scope or in a def or class body whose own scope declares the name global (an enclosing def's declaration
+# does not count); any other binding is local to its def or class body, a comprehension target to its comprehension
+# and a nonlocal name to the enclosing def, and none aliases the module-level name of the same spelling. A name in a
+# source or a store's chain counts as the binding its scope reads, its own or else the nearest enclosing def's or
+# the module's; in a class body, which can read a name before binding it, conservatively both. Every other aliasing
+# form is out of scope; diff review is the control. Ordinary stores are not flagged: sys.path[0] = ..., an item of
+# os.environ or of a module-level dict under a key not named sys, json, builtins or modules, a store to an attribute
+# not so named of any other name (_Options.verbose = True), and a store whose chain has no link so named and starts
+# from a target whose source is none of those (for _row in sorted(_rows, key=len): _row[0] = 2). That walk catches
+# accidental drift between the two copies; it is not a defence against a deliberate edit that replaces behaviour
+# through a path the walk does not model. Examples, not a complete list: an alias made by plain assignment or a
+# walrus (m = sys.modules[__name__], then m.validate_policy = ...) or by a target over a call's result (for m in
+# (importlib.import_module("__main__"),): ...); an item key that is not a constant string; a call such as setattr or
+# exec; an in-place method call such as globals().update, sys.modules.update or json.__dict__.update; a store in a
+# function or lambda body; reflective access through an object the walk cannot name; another module patching the
+# file; and a module that shadows a standard library module, such as a json.py. The recorded hashes
+# (.preview/SHA256SUMS for the hook, .aiqt/manifest.toml for both files) let an installer or a release check detect
+# a shipped copy that differs from the reviewed one.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -645,13 +658,17 @@ def _emit_line(text):
 
 
 def main(argv):
-    """The hook: always 0. `--self-test` alone runs the self-test instead."""
-    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
-        return 0
-    if list(argv[1:]) == ["--self-test"]:
+    """The hook: always 0. `--self-test` alone runs the self-test instead. A real launch passes sys.argv, a
+    non-empty list of strings; any other argv (a call from other code) is treated like an unknown argument."""
+    readable = isinstance(argv, (list, tuple)) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
+    if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()
     if not os.environ.get(ROOT_VAR):
         return 0  # unset or empty: the hook is not armed, so it reads nothing and says nothing
+    if not readable:  # armed but given an argument list it cannot read: it checks nothing, and says so
+        _emit_line(json.dumps(_unchecked("the hook was given an argument list that is not a non-empty list of "
+                                         "strings")))
+        return 0
     if len(argv) > 1:  # armed but launched with an argument it does not know: it checks nothing, and says so
         _emit_line(json.dumps(_unchecked(f"the hook was launched with {len(argv) - 1} unexpected command-line "
                                          "argument(s) (only --self-test is known)")))
@@ -674,6 +691,7 @@ def main(argv):
 
 def _self_test():
     import ast
+    import builtins
     import importlib.util
     import io
     import shutil
@@ -721,8 +739,9 @@ def _self_test():
     def bindings(node, out):
         """Add to out each name node binds in the scope it runs in. Nested statements and expressions are walked
         (an if, try, for, while, with or match body included); a def, class or lambda body, a scope of its own,
-        is not, though its name, decorators, defaults and bases are. A comprehension's own targets count too
-        (conservative), and a wildcard import adds "*"."""
+        is not, though its name, decorators, defaults and bases are, and nor is a comprehension's target, which
+        binds in the comprehension (a walrus in a comprehension, which binds outside it, is). A wildcard import
+        adds "*"."""
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
             if not isinstance(node, ast.Lambda):
                 out.add(node.name)
@@ -732,6 +751,10 @@ def _self_test():
             else:
                 inner += node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
             for child in inner:
+                bindings(child, out)
+            return
+        if isinstance(node, ast.comprehension):  # Python forbids a walrus in its target
+            for child in [node.iter] + node.ifs:
                 bindings(child, out)
             return
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -753,15 +776,19 @@ def _self_test():
     through_watched = "<a store whose target chain has a link named sys, json, builtins or modules>"
     this_module = "<a store through an alias of this module>"
     watched = frozenset(("sys", "json", "builtins", "modules"))
+    # The builtin functions and classes, none of which takes an attribute or item store: a call's positional
+    # argument naming one that the file does not bind (map(list, _rows)) is not a source (see sources()).
+    builtin_names = frozenset(name for name, value in vars(builtins).items() if isinstance(value, (type, type(len))))
     own_modules = frozenset(("__main__", GATE.rpartition("/")[2].rpartition(".")[0]))
 
-    def stores(node, out, aliases):
+    def stores(node, out, counts):
         """Add to out, for each attribute or item store or deletion node makes at module scope (an assignment,
         an augmented or annotated assignment, a del, or a for, with or comprehension target; a walrus or
-        import-as target is always a plain name), the name its target chain starts from and everything the alias
-        map aliases (built by rebound()) says that name counts as: json, builtins, sys, sys.modules, this_module
-        and the names an alias's source names; "sys" becomes "sys.modules" when the chain's first link is
-        .modules. It also adds, conservatively and whatever the value,
+        import-as target is always a plain name), whatever counts (built by rebound()) says the name its target
+        chain starts from counts as where it runs: the name itself when it reads the module-level binding, and
+        json, builtins, sys, sys.modules, this_module and the module-level names an alias's source names; "sys"
+        becomes "sys.modules" when the chain's first link is .modules. It also adds, conservatively and whatever
+        the value,
         from_expression for a chain that starts from anything but a name (a call such as __import__("json"),
         getattr(sys, "modules"), globals() or vars(json), a conditional expression, a list, a walrus), and
         through_watched for a chain with a link, the stored one included, that is an attribute or a constant
@@ -771,7 +798,7 @@ def _self_test():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             inner = list(getattr(node, "decorator_list", [])) + node.args.defaults
             for child in inner + [d for d in node.args.kw_defaults if d is not None]:
-                stores(child, out, aliases)
+                stores(child, out, counts)
             return
         if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
             first, links = node, []
@@ -786,87 +813,184 @@ def _self_test():
             if watched.intersection(links):
                 out.add(through_watched)
             if isinstance(first.value, ast.Name):
-                for base in {first.value.id} | aliases.get(first.value.id, set()):
+                for base in counts(first.value):
                     if base == "sys" and isinstance(first, ast.Attribute) and first.attr == "modules":
                         base = "sys.modules"
                     out.add(base)
             else:
                 out.add(from_expression)
         for child in ast.iter_child_nodes(node):
-            stores(child, out, aliases)
+            stores(child, out, counts)
 
-    def scoped(node, declared=None):
-        """Yield node and each node below it, each with declared: None where it runs at module scope or in a
-        class body, and otherwise the names its innermost enclosing def declares global (none for a lambda). A
-        def's or lambda's decorators, defaults, annotations and type parameters run where it is defined."""
-        yield node, declared
-        body = []
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            body = [node.body] if isinstance(node, ast.Lambda) else node.body
-        names, todo = set(), list(body)
-        while todo:
-            child = todo.pop()
-            if isinstance(child, ast.Global):
-                names.update(child.names)
-            elif not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                todo.extend(ast.iter_child_nodes(child))
-        for child in ast.iter_child_nodes(node):
-            yield from scoped(child, frozenset(names) if any(child is b for b in body) else declared)
+    def resolver(tree):
+        """(where, home, visible) for tree, with scope resolved by Python's rules. where maps id(node) to the scope
+        node runs in, for every node of tree; a scope is a dict holding its number (the module's is 0), its kind
+        (module, def, class or comprehension; a lambda is a def), its parent, and the names its own body binds,
+        declares global and declares nonlocal. A def's or lambda's decorators, defaults, annotations and type
+        parameters, a class's decorators, bases and keywords, and a comprehension's first iterable run in the
+        enclosing scope; a walrus binds in the nearest enclosing scope that is not a comprehension. home(scope,
+        name) is the scope a binding of name made in scope lands in: the module's at module scope or when the
+        scope's own body declares name global (an enclosing def's declaration does not count), the enclosing def
+        that binds it for a nonlocal name, and otherwise scope itself (a def or class body, or a comprehension for
+        its target). visible(scope, name) lists the numbers of the scopes whose binding of name a read in scope
+        can find: its own scope's when it binds name, and otherwise the nearest enclosing def's or the module's,
+        class bodies skipped; a class body, which can read a name before binding it, conservatively lists both."""
+        where, made = {}, []
 
-    def sources(node, aliases):
+        def scope_of(kind, parent):
+            made.append({"number": len(made), "kind": kind, "parent": parent, "bound": set(), "global": set(),
+                         "nonlocal": set()})
+            return made[-1]
+
+        def place(node, scope):
+            where[id(node)] = scope
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                inner = scope_of("class" if isinstance(node, ast.ClassDef) else "def", scope)
+                body = [node.body] if isinstance(node, ast.Lambda) else node.body
+                if not isinstance(node, ast.Lambda):
+                    scope["bound"].add(node.name)
+                if not isinstance(node, ast.ClassDef):
+                    args = node.args
+                    inner["bound"].update(arg.arg for arg in args.posonlyargs + args.args + args.kwonlyargs
+                                          + [args.vararg, args.kwarg] if arg is not None)
+                for child in ast.iter_child_nodes(node):
+                    place(child, inner if any(child is b for b in body) else scope)
+                return
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                inner = scope_of("comprehension", scope)
+                for number, generator in enumerate(node.generators):
+                    where[id(generator)] = inner
+                    place(generator.iter, inner if number else scope)
+                    for child in [generator.target] + generator.ifs:
+                        place(child, inner)
+                for child in ast.iter_child_nodes(node):
+                    if not isinstance(child, ast.comprehension):
+                        place(child, inner)
+                return
+            if isinstance(node, ast.NamedExpr):
+                outer = scope
+                while outer["kind"] == "comprehension":
+                    outer = outer["parent"]
+                outer["bound"].add(node.target.id)
+                where[id(node.target)] = scope
+                place(node.value, scope)
+                return
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                scope["global" if isinstance(node, ast.Global) else "nonlocal"].update(node.names)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                scope["bound"].add(node.id)
+            elif isinstance(node, ast.alias) and node.name != "*":
+                scope["bound"].add(node.asname or node.name.partition(".")[0])
+            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+                scope["bound"].add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                scope["bound"].add(node.rest)
+            for child in ast.iter_child_nodes(node):
+                place(child, scope)
+
+        place(tree, scope_of("module", None))
+        module = made[0]
+        for scope in made:
+            module["bound"] |= scope["bound"] & scope["global"]
+
+        def home(scope, name):
+            if scope["kind"] == "module" or name in scope["global"]:
+                return module
+            if name in scope["nonlocal"]:
+                outer = scope["parent"]
+                while outer["kind"] != "module":
+                    if outer["kind"] == "def" and name in outer["bound"] and name not in outer["nonlocal"]:
+                        return outer
+                    outer = outer["parent"]
+            return scope
+
+        def visible(scope, name):
+            if scope["kind"] == "module" or name in scope["global"]:
+                return [0]
+            if name in scope["nonlocal"]:
+                return [home(scope, name)["number"]]
+            own = [scope["number"]] if name in scope["bound"] else []
+            if own and scope["kind"] != "class":
+                return own
+            outer = scope["parent"]
+            while outer["kind"] == "class":
+                outer = outer["parent"]
+            return own + visible(outer, name)
+
+        return where, home, visible
+
+    def sources(node, counts, builtin):
         """What a name that a for, with, comprehension or match target binds over the source node counts as: a
-        name, with everything the alias map aliases says it counts as; "sys.modules" for the attribute modules
-        of something that counts as sys; this_module for an item of something that counts as sys.modules; and,
-        recursively, whatever each element of a tuple, list or set display, the element of a comprehension, and
-        each positional argument of a call counts as (never the function called or a keyword argument: the walk
-        does not trace a call's result). Anything else counts as nothing."""
+        name, whatever counts (built by rebound()) says it counts as where it runs; "sys.modules" for the
+        attribute modules of something that counts as sys; this_module for an item of something that counts as
+        sys.modules; and, recursively, whatever each element of a tuple, list or set display, the element of a
+        comprehension, and each positional argument of a call counts as, but a bare name that builtin says is a
+        builtin function or class the file does not bind (map(list, _rows)), and never the function called or a
+        keyword argument (the walk does not trace a call's result). Anything else counts as nothing."""
         if isinstance(node, ast.Name):
-            return {node.id} | aliases.get(node.id, set())
+            return counts(node)
         if isinstance(node, ast.Attribute):
-            return {"sys.modules"} if node.attr == "modules" and "sys" in sources(node.value, aliases) else set()
+            return ({"sys.modules"} if node.attr == "modules" and "sys" in sources(node.value, counts, builtin)
+                    else set())
         if isinstance(node, ast.Subscript):
-            return {this_module} if "sys.modules" in sources(node.value, aliases) else set()
+            return {this_module} if "sys.modules" in sources(node.value, counts, builtin) else set()
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
             parts = node.elts
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
             parts = [node.elt]
         elif isinstance(node, ast.Call):
-            parts = node.args
+            parts = [arg for arg in node.args if not (isinstance(arg, ast.Name) and builtin(arg))]
         else:
             return set()
-        return set().union(*(sources(part, aliases) for part in parts))
+        return set().union(*(sources(part, counts, builtin) for part in parts))
 
     def rebound(text):
         """The names the marked region binds or reads (every name in it, function bodies included), with
-        __builtins__, that the rest of the module binds at module scope or that a function outside the region
-        declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item store
-        outside the region, at module scope, whose base is one of those names, builtins, sys.modules or
+        __builtins__, that the rest of the module binds at module scope or that a def or class body outside the
+        region declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item
+        store outside the region, at module scope, whose base is one of those names, builtins, sys.modules or
         this_module or counts as one, plus the conservative findings of stores() (from_expression and
-        through_watched). The alias map aliases says what a name counts as. Only a binding that runs at module
-        scope (a class body included) or in a def that declares the name global makes an entry, and only in
-        these forms: an import of json, builtins or sys (that module, or sys.modules); an import of this module,
-        a module named in own_modules (this_module); a from-import from this module (the name it imports); and a
-        for, with, comprehension or match target in a statement outside the region (whatever sources() says its
-        iterable, context expression or subject counts as); each name also counts as whatever the names it
-        counts as count as, to a fixed point. Each module-level statement must lie wholly on one side."""
+        through_watched). The alias map aliases says what a binding counts as; its key is (the number of the
+        scope the binding lands in, by resolver()'s home, the name). Only these forms make an entry: an import of
+        json, builtins or sys (that module, or sys.modules); an import of this module, a module named in
+        own_modules (this_module); a from-import from this module (the module-level name it imports); and a for,
+        with, comprehension or match target in a statement outside the region (whatever sources() says its
+        iterable, context expression or subject counts as). A name read where it runs counts as each binding
+        resolver()'s visible lists, the module-level one as the name itself too; each binding also counts as
+        whatever the bindings it counts as count as, to a fixed point. Each module-level statement must lie
+        wholly on one side."""
         first, last, _ = marked(text)
         inside, outside, stored, aliases, links, others = {"*", "__builtins__"}, set(), set(), {}, [], []
         tree = ast.parse(text)
-        for node, declared in scoped(tree):
+        where, home, visible = resolver(tree)
+        module = where[id(tree)]
+
+        def counts(name):
+            found = set()
+            for number in visible(where[id(name)], name.id):
+                found |= ({name.id} if number == 0 else set()) | aliases.get((number, name.id), set())
+            return found
+
+        def builtin(name):
+            return (name.id in builtin_names and name.id not in module["bound"]
+                    and visible(where[id(name)], name.id) == [0])
+
+        for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                module = (node.module or "") if isinstance(node, ast.ImportFrom) else None
+                module_name = (node.module or "") if isinstance(node, ast.ImportFrom) else None
                 for alias in node.names:
-                    whole = alias.name if module is None else f"{module}.{alias.name}"
-                    bound = alias.asname or (alias.name if module is not None else whole.partition(".")[0])
-                    if declared is not None and bound not in declared:
-                        continue
+                    whole = alias.name if module_name is None else f"{module_name}.{alias.name}"
+                    bound = alias.asname or (alias.name if module_name is not None else whole.partition(".")[0])
+                    key = (home(where[id(node)], bound)["number"], bound)
                     if whole.partition(".")[0] in ("json", "builtins", "sys"):
-                        aliases.setdefault(bound, set()).add(
+                        aliases.setdefault(key, set()).add(
                             "sys.modules" if whole == "sys.modules" else whole.partition(".")[0])
                     elif whole.rpartition(".")[2] in own_modules:
-                        aliases.setdefault(bound, set()).add(this_module)
-                    elif module is not None and module.rpartition(".")[2] in own_modules:
-                        links.append(({bound}, ast.Name(alias.name)))
+                        aliases.setdefault(key, set()).add(this_module)
+                    elif module_name is not None and module_name.rpartition(".")[2] in own_modules:
+                        imported = ast.Name(alias.name)
+                        where[id(imported)] = module
+                        links.append(({key}, imported))
         for stmt in tree.body:
             start = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
             if first <= start and stmt.end_lineno <= last:
@@ -877,7 +1001,7 @@ def _self_test():
             else:
                 raise AssertionError(f"the statement at line {start} straddles a copy marker")
         for stmt in others:
-            for node, declared in scoped(stmt):
+            for node in ast.walk(stmt):
                 pairs = []
                 if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
                     pairs.append((node.target, node.iter))
@@ -888,21 +1012,20 @@ def _self_test():
                 for target, source in pairs:
                     bound = set()
                     bindings(target, bound)
-                    links.append((bound if declared is None else bound & declared, source))
+                    links.append(({(home(where[id(node)], name)["number"], name) for name in bound}, source))
         changed = True
         while changed:
             changed = False
-            for bound, source in links:
-                reach = sources(source, aliases)
-                for name in bound:
-                    if not reach <= aliases.setdefault(name, set()):
-                        aliases[name] |= reach
+            for keys, source in links:
+                reach = sources(source, counts, builtin)
+                for key in keys:
+                    if not reach <= aliases.setdefault(key, set()):
+                        aliases[key] |= reach
                         changed = True
         for stmt in others:
             bindings(stmt, outside)
-            outside.update(name for n in ast.walk(stmt) if isinstance(n, (ast.Global, ast.Nonlocal))
-                           for name in n.names)
-            stores(stmt, stored, aliases)
+            outside.update(name for n in ast.walk(stmt) if isinstance(n, ast.Global) for name in n.names)
+            stores(stmt, stored, counts)
         return (inside & outside) | (stored & (inside | {"builtins", "sys.modules", from_expression,
                                                           through_watched, this_module}))
 
@@ -933,7 +1056,14 @@ def _self_test():
     # (this module), each way of naming sys.modules in a source (the name, sys imported under another name,
     # modules imported from sys), a comprehension as a source, a match on sys.modules, an async for and an
     # async with target (a vector each, in a def that declares the name global, with the source a name and a
-    # call), and an import in a def that declares its name global and in a class body. A vector's first item is
+    # call), and an import in a def that declares its name global and in a class body; then QA round 9's scope
+    # cases: a class body in a def whose own scope declares the name global (an import and a for, the
+    # reviewer's reproductions), a def-local or class-local alias as the source of a target declared global, a
+    # store in a class body through a class-local for target and through a comprehension's own target, and a
+    # call's positional argument named like a builtin that the file binds (at module scope, in a class body,
+    # and in a def that declares it global), a store in a class body before the class binds the name, a
+    # comprehension's first iterable read in the class body around it, a def's default read outside the def,
+    # and a store in a comprehension through a name a walrus in it binds outside it. A vector's first item is
     # the one finding it must give, or a tuple of every finding it must give.
     rebindings = (
         ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
@@ -1066,6 +1196,24 @@ def _self_test():
                             "    async with _cm(validate_policy) as _v:\n        pass\n_v.__code__ = None"),
         ("json", "def _helper():\n    global _j\n    import json as _j\n_j.loads = None"),
         ("json", "class _Patch:\n    import json as _j\n    _j.loads = None"),
+        ("json", "def _setup():\n    class _Holder:\n        global _cfg\n        import json as _cfg\n"
+                 "_cfg.loads = None"),
+        ("json", "def _setup():\n    class _Holder:\n        global _cfg\n        for _cfg in (json,):\n"
+                 "            pass\n_cfg.loads = None"),
+        ("json", "def _h():\n    global _y\n    import json as _x\n    for _y in (_x,):\n        pass\n"
+                 "_y.loads = None"),
+        ("json", "class _P:\n    global _y\n    import json as _x\n    for _y in (_x,):\n        pass\n"
+                 "_y.loads = None"),
+        ("json", "class _P:\n    for _j in (json,):\n        _j.loads = None"),
+        ("json", "class _P:\n    [0 for _j in (json,) for _j.loads in [None]]"),
+        ("json", "import json as filter\nfor _x in map(filter, ()):\n    _x.loads = None"),
+        ("json", "class _P:\n    import json as filter\n    for _x in map(filter, ()):\n        _x.loads = None"),
+        ("json", "def _h():\n    global filter\n    import json as filter\nfor _x in map(filter, ()):\n"
+                 "    _x.loads = None"),
+        ("json", "class _Patch:\n    json.loads = None\n    json = None"),
+        ("json", "class _P:\n    import json as _x\n    [0 for _j in (_x,) for _j.loads in [None]]"),
+        ("json", "def _unrelated(json=[0 for json.loads in [None]]):\n    pass"),
+        ("json", "import json as _j\n[(_j := _j) for _q in [0] for _j.loads in [None]]"),
     )
     # Ordinary module-level code that H12 must not flag, in either file, before the region and after it: a
     # store to an item of sys.path or os.environ, to an item of a module-level dict, to a class attribute, and
@@ -1073,7 +1221,12 @@ def _self_test():
     # both reviewers listed: a for or match target over a call to a builtin the region reads (list, dict,
     # sorted, len as a keyword argument), and a function-local loop target or import, with no global
     # declaration (a nested def's own declaration does not count), whose name module-level code then binds
-    # and stores through.
+    # and stores through; then QA round 9's: a class-local import and for target (the reviewer's
+    # reproductions), a comprehension's target and a class body's loop target, each later bound and stored
+    # through at module scope, a comprehension target named like a region name, a nonlocal name (an
+    # assignment and an import, in a def and in a class body), a builtin passed as a positional argument
+    # (map(list, ...), map(dict, ...), filter(len, ...)), a target over sys.path and over a slice of an alias
+    # of sys.path, and a comprehension's later iterable in a class body, which skips the class's own names.
     ordinary = (
         "sys.path[0] = os.path.dirname(os.path.abspath(__file__))",
         'os.environ["AIQT_CHAR_POLICY_EXAMPLE"] = "1"',
@@ -1094,6 +1247,23 @@ def _self_test():
         "def _helper():\n    import __main__ as _o\nclass _o:\n    pass\n_o.verbose = True",
         "_items = [[0]]\nfor _item in sorted(_items, key=len):\n    _item[0] = 1",
         "def _outer():\n    def _inner():\n        global _cfg\n    import json as _cfg\n_cfg = {}\n_cfg['mode'] = 1",
+        "class _Holder:\n    import json as _cfg\n_cfg = {}\n_cfg['mode'] = 1",
+        "class _Holder:\n    for _cfg in (json,):\n        pass\n_cfg = {}\n_cfg['mode'] = 1",
+        "[0 for _cfg in (json,)]\n_cfg = {}\n_cfg['mode'] = 1",
+        "class _Holder:\n    for _m in (sys.modules[__name__],):\n        pass\n_m = type('O', (), {})\n"
+        "_m.validate_policy = None",
+        "[0 for _TOP_KEYS in ()]",
+        "def _outer():\n    POLICY_CAP = 0\n    def _inner():\n        nonlocal POLICY_CAP\n        POLICY_CAP = 1",
+        "def _outer():\n    _cfg = None\n    def _inner():\n        nonlocal _cfg\n        import json as _cfg\n"
+        "_cfg = {}\n_cfg['mode'] = 1",
+        "def _outer():\n    _cfg = None\n    class _H:\n        nonlocal _cfg\n        import json as _cfg\n"
+        "_cfg = {}\n_cfg['mode'] = 1",
+        "_rows = [[0]]\nfor _row in map(list, _rows):\n    _row[0] = 1",
+        "_pairs = [[('a', 0)]]\nfor _row in map(dict, _pairs):\n    _row['a'] = 1",
+        "_rows = [[0]]\nfor _row in filter(len, _rows):\n    _row[0] = 1",
+        "for _p in (sys.path,):\n    _p[0] = 1",
+        "from sys import path as _sp\nfor _first in (_sp[0:1],):\n    _first[0] = 1",
+        "class _P:\n    import json as _x\n    [0 for _i in (0,) for _j in (_x,) for _j.y in [1]]",
     )
 
     class T(unittest.TestCase):
@@ -1688,6 +1858,19 @@ def _self_test():
                 self.assertEqual(run_main(env, boom), (0, ""))
             rc, out = run_main({ROOT_VAR: self.root})
             self.is_deny(json.loads(out))
+            # an argument list that is not a non-empty list of strings: a note when armed, without reading the
+            # payload; silence when not armed
+            for argv in (None, [], (), "char-policy-write.py", ["char-policy-write.py", 1], [b"char-policy-write.py"]):
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, {ROOT_VAR: self.root}, clear=True), \
+                        mock.patch.dict(globals(), {"_read_payload": boom}), redirect_stdout(out):
+                    rc = main(argv)
+                self.assertEqual(rc, 0, argv)
+                self.is_unchecked(json.loads(out.getvalue()), "not a non-empty list of strings")
+                for env in ({}, {ROOT_VAR: ""}):
+                    out = io.StringIO()
+                    with mock.patch.dict(os.environ, env, clear=True), redirect_stdout(out):
+                        self.assertEqual((main(argv), out.getvalue()), (0, ""), (argv, env))
             # a payload over the read bound (lowered here to 64 bytes) is allowed with a note, not silently
             bounded = ("import importlib.util, sys\n"
                        "spec = importlib.util.spec_from_file_location('bounded_hook', sys.argv[1])\n"
