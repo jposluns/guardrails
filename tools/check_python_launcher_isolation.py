@@ -31,7 +31,9 @@ command word is out of scope, neither pass nor fail, except that a hooks.json ar
 python word fails closed). Interpreter options are the tokens after the command word up to the first
 non-option, ``-m``, ``-c``, ``--``, or long ``--option``; single-dash clusters expand letter by letter,
 and a ``-`` inside a cluster starts a long option there, as CPython reads it (``-I-check-hash-based-pycs
-default`` is ``-I`` then ``--check-hash-based-pycs default``). ``--`` ends the options the way a
+default`` is ``-I`` then ``--check-hash-based-pycs default``; a bare trailing ``-``, as in ``-IS- x.py``,
+names no long option, and CPython prints "Expected long option" and ends the options there, so the next
+token is the script operand, as after ``--``). ``--`` ends the options the way a
 non-option does: the token after it is the script operand (``python3 -I -B -- x.py`` runs ``x.py``), so
 a rule that reads the script operand still sees it. ``-c`` and ``-m`` terminate the option scan in every
 form, separate (``-c CMD``, ``-m MOD``), attached (``-cCMD``, ``-mMOD``), or mid-cluster (``-Ic...``):
@@ -48,25 +50,43 @@ like) cluster and are letter-scanned. A launcher is isolated iff ``I`` is among 
 all of ``P``, ``E``, and ``s`` are. Options after the script are never credited, and environment
 variables (PYTHONSAFEPATH and the like) are never credited.
 
-NO-SITE RULE. A python launcher, in the plugin hooks.json args form or in a settings.json shell-string,
-any of whose tokens after the interpreter word names the core hook launcher (gen_hooks.LAUNCHER_NAME,
-aiqt_hooks_launch.py) as its basename or as a path component (a ``-c`` or ``-m`` operand included), is
-held to this rule, and it PASSES only when that token is the one token naming the launcher, the option
-scan reached it cleanly as the script operand (the first token after the interpreter options, or the
-token after ``--``), and ``S`` is among the option letters before it (``-S``, alone or in a cluster).
-Every other spelling FAILS, never falls out of scope: a scan that stops early (``-m`` with a runner such
-as ``-m cProfile <launcher>``, ``-c``, an unrecognized or ``=VALUE`` long option, a ``-`` inside a cluster
-other than ``-check-hash-based-pycs``) with the launcher later in the argv, and the launcher named as an
-argument of another script. Without ``-S`` the site module runs before the launcher's
+NO-SITE RULE. Its scope is the two surfaces whose job is to launch hooks: the plugin hooks.json (the args
+form) and a settings.json hook command (a shell-string). There, a python launcher any of whose tokens
+after the interpreter word names the core hook launcher (gen_hooks.LAUNCHER_NAME, aiqt_hooks_launch.py)
+as its basename or as a path component (a ``-c`` or ``-m`` operand included) is held to this rule, and it
+PASSES only when the option scan reached the script operand cleanly (the first token after the
+interpreter options, the token after ``--``, or the token after a cluster's bare trailing ``-``), that
+operand names the launcher, and ``S`` is among the option letters before it (``-S``, alone or in a
+cluster). A further mention after that operand is the launcher's own argument and cannot turn the site
+module back on, so it is not a failure. Every other spelling FAILS, never falls out of scope: a scan that
+stops early (``-m`` with a runner such as ``-m cProfile <launcher>``, ``-c``, an unrecognized or
+``=VALUE`` long option, a long option inside a cluster other than ``-check-hash-based-pycs``) with the
+launcher later in the argv, and the launcher named as an argument of another script, a benign tool that
+only reads the launcher's path included (a deliberate restriction; lifting it needs a reviewed
+exemption). On the CI surfaces (tools/run_all_checks.sh and a workflow ``run:`` line), whose lines
+compile, hash or lint the launcher rather than launch hooks, the rule reads only the script operand: a
+launcher whose script operand has the core hook launcher's basename must carry ``S`` before it, and a
+mention anywhere else (``python3 -I -B -m py_compile <launcher>``, a hashing or lint script given the
+launcher as its argument) is not held to it. Without ``-S`` the site module runs before the launcher's
 first line, and with it every .pth file in the interpreter's site-packages (a PATH-selected project
 virtual environment's included), sitecustomize and usercustomize, any of which can install a line trace
-that ends a blocking hook with exit 0. ``-I`` does not exclude them. No option excludes what CPython
-reads to compute its startup configuration and module search path before the launcher's first line: the
-interpreter binary and the directory it sits in, a ._pth file there (``python3._pth`` beside the
-``python3`` PATH selects replaces the module search path and, with an ``import site`` line, turns the
-site module back on), the pyvenv.cfg above it and the home it names, and the standard library and zip
-locations those resolve to (examples, not an exhaustive list). That stays with whoever can write those
-locations, not with this rule. A launcher that names no core hook launcher is not held to this rule.
+that ends a blocking hook with exit 0. ``-I`` does not exclude them. No option excludes the files CPython
+reads to compute its startup configuration and module search path before the launcher's first line (the
+environment, which ``-I`` excludes, aside): the interpreter binary and the directory it sits in, a ._pth
+file there (``python3._pth`` beside the ``python3`` PATH selects replaces the module search path and,
+with an ``import site`` line, turns the site module back on), a pyvenv.cfg beside the binary or in the
+directory above it and the home it names, and the standard library and zip locations those resolve to
+(examples, not an exhaustive list). That stays with whoever can write those locations, not with this rule.
+
+NAME, NOT IDENTITY. The rule matches the core hook launcher's NAME in the configured argv; it does not
+establish which file the interpreter executes. A renamed copy or a symlink of the launcher under another
+name, a glob (``aiqt_hooks_launc?.py``), an ANSI-C quoted name that spells a letter as an escape, an
+alternate-case name on a case-insensitive filesystem, a compiled ``.pyc`` of it, and its source fed on
+stdin by another command (``cat <launcher> | python3 -I -B - x``) each pass without ``-S``, and a launcher
+that names no core hook launcher is not held to this rule. A ``-h``, ``-?`` or ``-V`` letter, alone or in
+a cluster (``-ISh <launcher>``), makes CPython print help or its version and exit 0 without running the
+hook, so a blocking hook registered that way is silently allowed; the option scan credits such a cluster
+and this rule does not catch it.
 
 EXIT CONVENTION: 0 every recognized launcher is isolated (and each core hook launcher also runs without
 the site module); 1 at least one recognized launcher is not isolated, or a core hook launcher runs with
@@ -85,10 +105,14 @@ three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, 
 insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
 runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
 YAML or shell constructs beyond the supported line grammar, and the PATH provenance of ``python3``
-itself, and everything CPython reads to compute its startup configuration and module search path
-before the launcher's first line (the interpreter binary and its directory, a ._pth file there, the
-pyvenv.cfg above it and the home it names, and the standard library and zip locations those resolve to;
-examples, not an exhaustive list), which stays with whoever can write those locations. A
+itself, and every file CPython reads to compute its startup configuration and module search path
+before the launcher's first line (the interpreter binary and its directory, a ._pth file there, a
+pyvenv.cfg beside the binary or in the directory above it and the home it names, and the standard library
+and zip locations those resolve to; examples, not an exhaustive list), which stays with whoever can write
+those locations. The no-site rule matches the launcher's name, not executable identity (a renamed copy or
+symlink, a glob, an ANSI-C quoted name, an alternate-case name on a case-insensitive filesystem, a
+``.pyc`` or stdin-fed source passes without ``-S``), and a ``-h``, ``-?`` or ``-V`` letter in the
+registered cluster (``-ISh``) prints help or the version and exits 0 without running the hook. A
 ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
 
@@ -166,7 +190,8 @@ ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")  # a shell VAR=val inline as
 # YAML `run:` key, optionally under a `- ` sequence dash; captures the leading indent and the scalar value.
 RUN_RE = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:(?:[ \t]+(?P<val>.*))?$")
 BLOCK_INDICATORS = {"|", ">", "|-", ">-", "|+", ">+"}
-# Shell separators (as whole tokens after shlex) that end one simple command and begin the next.
+# Shell separators that end one simple command and begin the next, when the token was an unquoted,
+# unescaped operator in the source (a _ShellOperator); the same text quoted or escaped is an argument.
 SEPARATORS = {";", ";;", "|", "||", "&&", "&"}
 # Unquoted shell operators separated from adjacent words before tokenizing, longest first so `;;`,
 # `&&`, and `||` win over their single-character prefixes. shlex.split leaves an operator glued to a
@@ -232,7 +257,9 @@ VALUE_SHORT_OPTS = frozenset("WX")               # short options that take a val
 VALUE_LONG_OPTS = frozenset({"--check-hash-based-pycs"})  # long options that take a separate value
 # A token that names a NO_SITE_SCRIPTS launcher as a path component: split on every character that is
 # not part of a file name, so a -c/-m operand (`-c "runpy.run_path('/p/aiqt_hooks_launch.py')"`) names
-# it as well as a plain path does.
+# it as well as a plain path does. `-` stays inside a component (it is a file-name character), so a name
+# glued to option letters (`-caiqt_hooks_launch.py`) is one component that does not match; an attached
+# -cCMD names the launcher only where a non-name character (a quote, a slash, a parenthesis) sets it apart.
 NAME_COMPONENT_SPLIT_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 
 
@@ -246,9 +273,13 @@ def _option_letters(after_interpreter):
     at `-m`, `-c`, an unrecognized long option or the end of the tokens). `--` ends the options but,
     unlike `-m` and `-c`, is followed by the script operand itself, so its index is the token after
     `--` (None only when `--` is the last token). A `-` inside a cluster starts a long option, as
-    CPython reads it: `-I-check-hash-based-pycs` is `-I` plus the long option, whose value is the next
-    token; any other long option there (an `=VALUE` form included, which CPython does not accept)
-    stops the scan with no script operand."""
+    CPython 3.14 reads it: `-I-check-hash-based-pycs` is `-I` plus the long option, whose value is the
+    next token. A bare trailing `-` (`-I-`, `-IS-`) names no long option: CPython prints "Expected long
+    option" and ends the options there, so the next token is the script operand, exactly as after `--`
+    (the letters before the `-` still count). Any other long option inside a cluster stops the scan
+    with no script operand: it is an unknown option (exit 2; an `=VALUE` form included, which CPython
+    does not accept, and `-help` and `-version`) or one of `-help-all`, `-help-env` and
+    `-help-xoptions` (help printed, exit 0)."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
@@ -271,9 +302,13 @@ def _option_letters(after_interpreter):
                 letter = tok[j]
                 if letter == "-":
                     # A long option inside a cluster (`-I-check-hash-based-pycs default`): CPython
-                    # reads the rest of the token as the long option's name. The only one that runs
-                    # a script takes the next token as its value; anything else is an unknown option
-                    # (or --help/--version), so no script operand is reached.
+                    # reads the rest of the token as the long option's name. A bare trailing `-` names
+                    # none: CPython prints "Expected long option" and ends the options, so the next
+                    # token is the script operand, as after `--`. The only long option that runs a
+                    # script takes the next token as its value; anything else is an unknown option
+                    # (exit 2) or a help option (`-help-all`, exit 0), so no script operand is reached.
+                    if j == len(tok) - 1:
+                        return flags, (i + 1 if i + 1 < len(tokens) else None)
                     if tok[j + 1:] in (opt[2:] for opt in VALUE_LONG_OPTS):
                         skip_next = True
                         break
@@ -313,20 +348,28 @@ def _names_no_site_script(token):
             or any(part in NO_SITE_SCRIPTS for part in NAME_COMPONENT_SPLIT_RE.split(token)))
 
 
-def _no_site_verdict(rest):
-    """The NO-SITE RULE for one launcher (rest: the command word onward). None when no token after the
-    command word names a NO_SITE_SCRIPTS launcher (out of scope). Otherwise True only when exactly one
-    token names it, the option scan reached that token cleanly as the script operand, and `S` is among
-    the option letters before it; every other case is False (a FAIL, never out of scope): a scan that
-    stops early (-m, -c, an unrecognized or =VALUE long option, a non-value long option inside a
-    cluster) with the launcher later in the argv, or the launcher named anywhere but the script
-    operand."""
+def _no_site_verdict(rest, launch_surface):
+    """The NO-SITE RULE for one launcher (rest: the command word onward). On a hook-launching surface
+    (launch_surface: the plugin hooks.json, a settings.json hook command), None when no token after the
+    command word names a NO_SITE_SCRIPTS launcher (out of scope); otherwise True only when the option
+    scan reached the script operand cleanly, that operand names the launcher, and `S` is among the option
+    letters before it. Every other case there is False (a FAIL, never out of scope): a scan that stops
+    early (-m, -c, an unrecognized or =VALUE long option, a non-value long option inside a cluster) with
+    the launcher later in the argv, or the launcher named only where the script operand is not. A
+    further mention after a compliant operand is the launcher's own argument: the site module is decided
+    by the options before the operand, so it is not a failure. On a CI surface (run_all_checks.sh, a
+    workflow run: line), which compiles, hashes or lints the launcher rather than launching hooks, only
+    the script operand is read: None unless it has a NO_SITE_SCRIPTS basename, else True iff `S` is
+    among the option letters before it."""
     tokens = rest[1:]
-    named = [k for k, tok in enumerate(tokens) if _names_no_site_script(tok)]
-    if not named:
-        return None
     flags, at = _option_letters(tokens)
-    return named == [at] and "S" in flags
+    if not launch_surface:
+        if at is None or _basename(tokens[at]) not in NO_SITE_SCRIPTS:
+            return None
+        return "S" in flags
+    if not any(_names_no_site_script(tok) for tok in tokens):
+        return None
+    return at is not None and _names_no_site_script(tokens[at]) and "S" in flags
 
 
 def check_argv(argv):
@@ -339,10 +382,13 @@ def check_argv(argv):
 
 
 def _segments(tokens):
-    """Split a token list into simple-command segments at shell separator tokens."""
+    """Split a token list into simple-command segments at shell separator tokens. Only a token that was
+    an UNQUOTED, unescaped operator in the source (a _ShellOperator from _shell_split) separates: a quoted
+    or escaped `;`, `;;`, `|`, `||`, `&&` or `&` is an ordinary argument of the command it sits in, as a
+    real shell reads it, so it can never cut a launcher off from the arguments after it."""
     segments, cur = [], []
     for tok in tokens:
-        if tok in SEPARATORS:
+        if isinstance(tok, _ShellOperator) and tok in SEPARATORS:
             if cur:
                 segments.append(cur)
                 cur = []
@@ -363,13 +409,21 @@ def _strip_comment(line):
     return code
 
 
-def _space_shell_operators(s):
-    """Insert a space on each side of every UNQUOTED, UNESCAPED shell operator, so a later
-    shlex.split yields the operator as its own token even when it was glued to an adjacent word
-    (`prep;python3` -> `prep ; python3`, `(python3` -> `( python3`), matching how a real shell
-    segments. An operator inside single or double quotes, or preceded by a backslash escape, is left
-    untouched. Quote and escape state are tracked exactly so a `;` or `&` inside a string is never
-    mistaken for a separator; shlex then removes the quoting as usual.
+class _ShellOperator(str):
+    """A token that was an UNQUOTED, unescaped shell operator in the source line. Only _shell_split makes
+    one, and only one of these ends a simple command (_segments): after shlex removes quoting, a quoted
+    `';'` and a real `;` are the same text, so the provenance travels with the token instead."""
+    __slots__ = ()
+
+
+def _shell_operator_pieces(s):
+    """Cut the line at every UNQUOTED, UNESCAPED shell operator, returning the text between operators as
+    plain strings and each operator as a _ShellOperator, in order, so an operator glued to an adjacent
+    word (`prep;python3`, `(python3`) is still its own token, matching how a real shell segments. An
+    operator inside single or double quotes, or preceded by a backslash escape, stays inside its text
+    piece. Quote and escape state are tracked exactly so a `;` or `&` inside a string is never mistaken
+    for a separator; each text piece ends outside any quote or escape, so shlex then removes the quoting
+    of each piece as it would of the whole line.
 
     The `&` split is REDIRECTION-AWARE: an `&` that is part of a redirect operator, not a control
     operator, does NOT separate commands and is left glued to its redirect. That is an `&` that
@@ -381,7 +435,7 @@ def _space_shell_operators(s):
     redirect target given as a SEPARATE, space-separated token that is itself a launcher name
     (`>& python3`) is not glued and is left to the caller, where it surfaces as a cannot-evaluate
     rather than a fabricated failure or a silent pass."""
-    out = []
+    pieces, out = [], []
     i, n = 0, len(s)
     quote = None  # None, "'", or '"'
     prev_redirect = False  # the char just emitted was an unquoted, unescaped `>` or `<`
@@ -431,28 +485,41 @@ def _space_shell_operators(s):
                 i += 1
                 prev_redirect = False
                 continue
-            out.append(" " + matched + " ")
+            pieces.append("".join(out))
+            pieces.append(_ShellOperator(matched))
+            out = []
             i += len(matched)
             prev_redirect = False
             continue
         out.append(c)
         prev_redirect = c in "<>"
         i += 1
-    return "".join(out)
+    pieces.append("".join(out))
+    return pieces
 
 
 def _shell_split(s):
-    """shlex.split after separating unquoted shell operators from adjacent words, so an operator
-    glued to a word (`prep;python3`, `(python3`) tokenizes as a real shell would. Raises ValueError
-    on an unbalanced quote exactly as shlex.split does, so callers surface it as a parse failure."""
-    return shlex.split(_space_shell_operators(s), comments=False, posix=True)
+    """shlex.split each text piece between the unquoted shell operators (_shell_operator_pieces), with
+    each such operator kept as its own _ShellOperator token, so an operator glued to a word
+    (`prep;python3`, `(python3`) tokenizes as a real shell would and a quoted or escaped operator stays
+    a plain argument. Raises ValueError on an unbalanced quote exactly as shlex.split does, so callers
+    surface it as a parse failure."""
+    tokens = []
+    for piece in _shell_operator_pieces(s):
+        if isinstance(piece, _ShellOperator):
+            tokens.append(piece)
+        else:
+            tokens.extend(shlex.split(piece, comments=False, posix=True))
+    return tokens
 
 
-def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures):
+def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures, launch_surface):
     """Scan an already-split token list for python launchers across its simple-command segments. Every
     python word must resolve to a command-word position; if the launcher count does not match the python
     words present, a launcher is hidden in an unexpected construct and this is a cannot-evaluate, so it is
-    never silently passed. Each recognized launcher that is not isolated is a failure."""
+    never silently passed. Each recognized launcher that is not isolated is a failure, and so is one the
+    NO-SITE RULE refuses (launch_surface: True for a settings.json hook command, False for a CI shell
+    line, where only the script operand is read)."""
     py_word_count = sum(1 for t in tokens if _is_py_word(t))
     launchers = []
     for seg in _segments(tokens):
@@ -467,7 +534,7 @@ def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures
         if not _flags_isolated(rest[1:]):
             failures.append((rel, lineno, loc, "non-isolated launcher {!r}; requires {}"
                              .format(" ".join(rest), REQUIRED_FORM)))
-        if _no_site_verdict(rest) is False:
+        if _no_site_verdict(rest, launch_surface) is False:
             failures.append((rel, lineno, loc, NO_SITE_FAILURE.format(" ".join(rest), NO_SITE_FORM)))
 
 
@@ -493,7 +560,7 @@ def _check_shell_line(rel, lineno, line, errors, failures):
         errors.append((rel, lineno, "", "shell line may carry a python launcher but does not parse; "
                        "fail-closed: {}".format(exc)))
         return
-    _scan_command_tokens(rel, lineno, "", tokens, code.strip(), errors, failures)
+    _scan_command_tokens(rel, lineno, "", tokens, code.strip(), errors, failures, False)
 
 
 def _yaml_run_lines(text):
@@ -593,7 +660,8 @@ def _check_hooks_json(rel, text, errors, failures):
                     if verdict is False:
                         failures.append((rel, 0, hloc, "non-isolated launcher {!r}; requires {}"
                                          .format(" ".join(argv), REQUIRED_FORM)))
-                    if verdict is not None and _no_site_verdict(_strip_launcher_prefix(argv)) is False:
+                    if (verdict is not None
+                            and _no_site_verdict(_strip_launcher_prefix(argv), True) is False):
                         failures.append((rel, 0, hloc, NO_SITE_FAILURE.format(" ".join(argv),
                                                                              NO_SITE_FORM)))
                 else:
@@ -604,7 +672,7 @@ def _check_hooks_json(rel, text, errors, failures):
                     except ValueError as exc:
                         errors.append((rel, 0, hloc, "command string does not parse: {}".format(exc)))
                         continue
-                    _scan_command_tokens(rel, 0, hloc, tokens, command, errors, failures)
+                    _scan_command_tokens(rel, 0, hloc, tokens, command, errors, failures, True)
 
 
 def _read_required_text(root, rel, errors):
@@ -803,8 +871,9 @@ def main():
 #  35. the `--` delimiter does not hide the script operand: `-I -B -- <launcher>` fails the no-site rule
 #      (exit 1) in the plugin hooks.json args form and in a settings.json shell-string, and the same with
 #      -S before `--` passes (exit 0).
-#  36. the no-site rule is categorical: any token naming the core hook launcher FAILS (exit 1) unless the
-#      option scan reached exactly that token cleanly as the script operand with -S before it. Each
+#  36. the no-site rule is categorical on the hook-launching surfaces: any token naming the core hook
+#      launcher FAILS (exit 1) unless the option scan reached the script operand cleanly, that operand
+#      names the launcher, and -S is before it. Each
 #      spelling that stops the scan early with the launcher later in the argv (`=VALUE` long option,
 #      `-I-check-hash-based-pycs default`, `-IB-check-hash-based-pycs default`, `-m cProfile`, a `-c`
 #      runpy operand, an `=VALUE` long option inside a cluster), with or without -S, and the launcher as
@@ -814,6 +883,21 @@ def main():
 #      (exit 0); an args-form `/usr/bin/env` command word with `python3` in args fails closed (exit 2),
 #      as the settings shell-string does; and a real interpreter confirms CPython's reading of those
 #      spellings (a `-` in a cluster starts the long option, the `=VALUE` form is refused with exit 2).
+#  37. only an UNQUOTED, unescaped shell operator separates: for every member of SEPARATORS, the
+#      reproduction `python3 -I -B -v -c <runpy of sys.argv[2]> '<op>' <launcher>` fails (exit 1) in a
+#      settings.json hook command, single-quoted, double-quoted and backslash-escaped, and in the
+#      hooks.json args form; the unquoted controls still split (`echo a <op> python3 -I -S -B <launcher>`
+#      passes, `echo a <op> python3 /p/x.py` fails); real bash confirms the quoted operator is an argument
+#      and the runpy operand runs a launcher-named probe with the site module.
+#  38. the categorical rule is scoped to the hook-launching surfaces: a CI line that compiles or hashes
+#      the launcher passes (exit 0) in run_all_checks.sh and in a workflow run: line, the same line as a
+#      settings.json hook command fails (exit 1), and a CI line running the launcher still needs -S.
+#  39. a bare trailing `-` in a cluster ends the options and the next token is the script operand
+#      (`-I -S- <launcher>` and `-IS- <launcher>` pass, `-I- <launcher>` and `-I- -S <launcher>` fail),
+#      and a real interpreter confirms that reading, the cluster help and unknown long options, and that
+#      `-ISh <script>` prints help and exits 0 without running the script.
+#  40. a second mention of the launcher after a compliant script operand is its own argument: it passes
+#      with -S (exit 0) and fails without it (exit 1), in both forms.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1350,6 +1434,122 @@ def self_test_main():
             failures.append("no-site rule: a real interpreter should import site under -I and not under "
                             "-I -S -B (got {!r})".format(site_seen))
 
+        # 37. Only an UNQUOTED, unescaped shell operator separates. The reproduction is a settings.json
+        #     hook command whose -c runpy operand runs sys.argv[2], with a quoted separator as sys.argv[1]
+        #     and the core hook launcher as sys.argv[2]: a real shell passes both as arguments, so the
+        #     launcher runs with the site module. For every member of SEPARATORS, single-quoted,
+        #     double-quoted and backslash-escaped, it FAILs (exit 1), and so does the same argv in the
+        #     hooks.json args form. Splitting at the quoted operator cut the launcher off into a
+        #     non-python segment and passed (exit 0). The unquoted controls still split: `echo a <op>
+        #     python3 -I -S -B <launcher> x` passes (exit 0, one compliant launcher after the operator;
+        #     no split reads it as exit 2) and `echo a <op> python3 /p/x.py` fails (exit 1).
+        def settings_tree(label, cmd):
+            tree = _build(tmp / label)
+            sp = tree / ".claude" / "settings.json"
+            sp.parent.mkdir(parents=True)
+            sp.write_text(json.dumps(dict(hooks=dict(PreToolUse=[dict(hooks=[
+                dict(type="command", command=cmd)])]))) + "\n", encoding="utf-8")
+            return tree
+
+        runpy_code = 'import runpy,sys;runpy.run_path(sys.argv[2],run_name="__main__")'
+        for k, op in enumerate(sorted(SEPARATORS)):
+            spellings = (("squote", shlex.quote(op)), ("dquote", '"' + op + '"'),
+                         ("escaped", "".join("\\" + ch for ch in op)))
+            for style, spelled_op in spellings:
+                cmd = "python3 -I -B -v -c {} {} {}".format(shlex.quote(runpy_code), spelled_op, launch_arg)
+                if run_quiet(settings_tree("quoted-op-{}-{}".format(k, style), cmd)) != 1:
+                    failures.append("no-site rule: a {!r} argument ({}) must not split a settings hook "
+                                    "command (expected exit 1): {!r}".format(op, style, cmd))
+            args = ("-I", "-B", "-v", "-c", runpy_code, op, launch_arg)
+            if run_quiet(_build(tmp / "quoted-op-args-{}".format(k), hooks_args=args)) != 1:
+                failures.append("no-site rule: the {!r} argument in the hooks.json args form expected "
+                                "exit 1".format(op))
+            for want, after in ((0, "python3 -I -S -B {} x".format(launch_arg)), (1, "python3 /p/x.py")):
+                cmd = "echo a {} {}".format(op, after)
+                if run_quiet(settings_tree("unquoted-op-{}-{}".format(k, want), cmd)) != want:
+                    failures.append("an unquoted {!r} must still split a settings hook command (expected "
+                                    "exit {}): {!r}".format(op, want, cmd))
+        # 37b. Real bash runs the reproduction: for each quoted separator, the -c runpy operand reaches
+        #      a scratch file named like the core hook launcher, which reports that the site module is
+        #      loaded (stdout "1"). Skipped where bash is unavailable.
+        if bash_bin is None:
+            skipped.append("37b real-bash-quoted-operator (bash unavailable)")
+        else:
+            probe_dir = tmp / "quoted-op-probe"
+            probe_dir.mkdir()
+            probe = probe_dir / gen_hooks.LAUNCHER_NAME
+            probe.write_text("import sys\nsys.stdout.write(str(int('site' in sys.modules)))\n",
+                             encoding="utf-8")
+            for op in sorted(SEPARATORS):
+                bash_cmd = "{} -I -B -c {} {} {}".format(shlex.quote(sys.executable), shlex.quote(runpy_code),
+                                                        shlex.quote(op), shlex.quote(str(probe)))
+                proc = subprocess.run([bash_bin, "-c", bash_cmd], capture_output=True, text=True,
+                                      env=env, cwd=str(tmp), timeout=30)
+                if proc.returncode != 0 or proc.stdout != "1":
+                    failures.append("real bash: a quoted {!r} should be an argument, so the runpy operand "
+                                    "runs the launcher-named probe with site (got rc={}, out={!r}, err={!r})"
+                                    .format(op, proc.returncode, proc.stdout, proc.stderr[-120:]))
+
+        # 38. The categorical rule is scoped to the surfaces that launch hooks. A CI line that compiles or
+        #     hashes the launcher (run_all_checks.sh, a workflow run: line) passes (exit 0); the same line
+        #     as a settings.json hook command fails (exit 1). In CI the script-operand form still holds: a
+        #     line that runs the launcher without -S fails (exit 1) and with -S passes (exit 0).
+        core_launcher = ".aiqt/core/hooks/scripts/" + gen_hooks.LAUNCHER_NAME
+        ci_lines = ("python3 -I -B -m py_compile " + core_launcher,
+                    "python3 -I -B tools/hash_file.py " + core_launcher)
+        for k, line in enumerate(ci_lines):
+            run_all = "#!/usr/bin/env bash\nrun_gate \"launcher-ci\" {}\n".format(line)
+            if run_quiet(_build(tmp / "ci-scope-run-all-{}".format(k), run_all=run_all)) != 0:
+                failures.append("no-site rule: a run_all_checks.sh line {!r} expected exit 0".format(line))
+            workflow = "name: Q\njobs:\n  q:\n    steps:\n      - name: c\n        run: {}\n".format(line)
+            if run_quiet(_build(tmp / "ci-scope-workflow-{}".format(k), workflow=workflow)) != 0:
+                failures.append("no-site rule: a workflow run: line {!r} expected exit 0".format(line))
+            if run_quiet(settings_tree("ci-scope-settings-{}".format(k), line)) != 1:
+                failures.append("no-site rule: the settings hook command {!r} expected exit 1".format(line))
+        for want, opts in ((1, "-I -B"), (0, "-I -S -B")):
+            run_all = "#!/usr/bin/env bash\npython3 {} {} x\n".format(opts, core_launcher)
+            if run_quiet(_build(tmp / "ci-scope-operand-{}".format(want), run_all=run_all)) != want:
+                failures.append("no-site rule: a run_all_checks.sh line running the launcher with {} "
+                                "expected exit {}".format(opts, want))
+        # 39. A bare trailing `-` in a cluster ends the options and the next token is the script
+        #     operand (CPython prints "Expected long option" and runs it), and 40. a further mention of
+        #     the launcher after a compliant operand is its own argument, not a failure. Each row runs in
+        #     the hooks.json args form and as a settings.json hook command.
+        for label, args, want in (
+                ("trailing-dash-S", ["-I", "-S-", launch_arg, "x"], 0),
+                ("cluster-trailing-dash-S", ["-IS-", launch_arg, "x"], 0),
+                ("trailing-dash-no-S", ["-I-", launch_arg, "x"], 1),
+                ("trailing-dash-then-S", ["-I-", "-S", launch_arg, "x"], 1),
+                ("named-twice-S", ["-I", "-S", "-B", launch_arg, launch_arg], 0),
+                ("named-twice-no-S", ["-I", "-B", launch_arg, launch_arg], 1)):
+            if run_quiet(_build(tmp / ("dash-args-" + label), hooks_args=args)) != want:
+                failures.append("no-site rule: the {} hooks.json form expected exit {}".format(label, want))
+            cmd = " ".join(["python3"] + [shlex.quote(a) for a in args])
+            if run_quiet(settings_tree("dash-settings-" + label, cmd)) != want:
+                failures.append("no-site rule: the settings {} form expected exit {}".format(label, want))
+        # 39b. A real interpreter confirms that reading: `-I- <probe>` runs the probe with site, `-IS-
+        #      <probe>` without it, both after "Expected long option"; `-I- -S <probe>` takes `-S` as the
+        #      script (exit 2); in a cluster `-help-all` prints help (exit 0) and `-version` is an unknown
+        #      option (exit 2); and `-ISh <probe>` prints help and exits 0 without running the probe (the
+        #      disclosed help-cluster residual).
+        site_file = tmp / "site-probe.py"
+        site_file.write_text("import sys\nsys.stdout.write('RAN' + str(int('site' in sys.modules)))\n",
+                             encoding="utf-8")
+        dash_runs = [subprocess.run([sys.executable] + flags, capture_output=True, text=True, env=env,
+                                    cwd=str(tmp), timeout=30, stdin=subprocess.DEVNULL)
+                     for flags in (["-I-", str(site_file)], ["-IS-", str(site_file)],
+                                   ["-I-", "-S", str(site_file)], ["-I-help-all"], ["-I-version"],
+                                   ["-ISh", str(site_file)])]
+        got = [(p.returncode, p.stdout[:5]) for p in dash_runs]
+        if (got[:3] != [(0, "RAN1"), (0, "RAN0"), (2, "")]
+                or not all("Expected long option" in p.stderr for p in dash_runs[:3])
+                or got[3] != (0, "usage") or got[4][0] != 2 or "Unknown option" not in dash_runs[4].stderr
+                or got[5] != (0, "usage") or "RAN" in dash_runs[5].stdout):
+            failures.append("a real interpreter should read a bare trailing `-` as the end of the options, "
+                            "-help-all as help, -version as unknown, and -ISh as help without running the "
+                            "script (got {!r})".format([(p.returncode, p.stdout[:40], p.stderr[-80:])
+                                                       for p in dash_runs]))
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -1391,12 +1591,18 @@ def self_test_main():
           "fails closed (exit 2); the core hook launcher registered without -S before it fails (exit 1) "
           "while -I -S -B and -IS pass, and a real interpreter imports site under -I alone but not under "
           "-I -S -B; `-I -B -- <launcher>` fails the no-site rule in hooks.json args and in a settings "
-          "shell-string (exit 1) while -S before `--` passes; any token naming the core hook launcher "
-          "fails unless the option scan reaches it cleanly as the script with -S before it (=VALUE long "
-          "options, a long option inside a cluster, -m cProfile, a -c runpy operand and the launcher as "
-          "another script's argument each fail in both forms, the S-carrying clean spellings pass, an "
-          "args-form /usr/bin/env fails closed, and a real interpreter confirms those readings); and "
-          "the gate refuses to run non-isolated (exit 2)" + note)
+          "shell-string (exit 1) while -S before `--` passes; in hooks.json and settings any token naming "
+          "the core hook launcher fails unless the option scan reaches it cleanly as the script with -S "
+          "before it (=VALUE long options, a long option inside a cluster, -m cProfile, a -c runpy "
+          "operand and the launcher as another script's argument each fail in both forms, the S-carrying "
+          "clean spellings pass, an args-form /usr/bin/env fails closed, and a real interpreter confirms "
+          "those readings); a quoted or escaped shell operator is an argument, never a separator, so the "
+          "quoted-operator runpy reproduction fails for every separator while unquoted operators still "
+          "split, confirmed against real bash; a CI line that compiles or hashes the launcher passes while "
+          "the same line as a settings hook command fails; a bare trailing `-` in a cluster hands the next "
+          "token to the script operand, confirmed against a real interpreter; a second mention of the "
+          "launcher after a compliant operand passes; and the gate refuses to run non-isolated (exit 2)"
+          + note)
     return 0
 
 

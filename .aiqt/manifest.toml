@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dfcf21966caf22630fc4f60537c6d961c5cc688860c3e7fd25a4893331dc3e96"
+tree-sha256 = "2952de0ab534a69737e63008a7fa1bac9e33ac87de97d6c76e861a9515139b42"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 258604
-sha256 = "75b82194cdf2cac97f54862461e9bec8f947dc682cad571d5c89d48cdda8e6b5"
+bytes = 259559
+sha256 = "97c47584ed030510a6c6ea2f5ccff74b34613fcb26ec47aaaa0fb80eabe517b1"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -81,8 +81,8 @@ sha256 = "520d2a2fd96f4deb6d1b8c391690f4b82e33bf72208d423fba9b047e9a4f0ece"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py"
-bytes = 21272
-sha256 = "39e39fc5dbf26756fa438936494682598cc297544f487b4a01643a3c22c59699"
+bytes = 21357
+sha256 = "9ce748beda3550db6d6f8216bc2a6ca257f0f73b16f49f1ad1d6eb0dae7e134a"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 337062
-sha256 = "8677162eed7310b5da311e1adfda3c4c0323dfc47c8bddf082c9b9d80bbacb9a"
+bytes = 338017
+sha256 = "95f05e810173794b58b62acefcb351fbcc0323b94400b593ba01803f368acc82"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2257,12 +2257,12 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 [[sources]]
 path = ".preview/README.md"
 bytes = 25380
-sha256 = "c54c43450cc7a634fefc9af0c68d5c17e7e3c2264ffeb081c8feda5597f90974"
+sha256 = "93107810e001d3f4ae8a46db7e0860f6519c3e9721fb82773249c0628c922bb7"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 720
-sha256 = "758a8f991cbdc9b43719e129558491d8bb578d347ec3ad2bdb47e70cd881f16b"
+sha256 = "bfc24ca4b2cbffa5bc681cfe57d876e72a167021a109b0e2672937e950a1f13e"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2276,8 +2276,8 @@ sha256 = "4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a"
 
 [[sources]]
 path = ".preview/preview-launch.py"
-bytes = 40750
-sha256 = "529c8196e287645c1fb2f72d9a0a65a2f49ac376dc00b87e197236dbca799a2e"
+bytes = 40835
+sha256 = "6e4b72284d29527437bf2cc3f22f7ed5011691e37b4ab32ff10f28bf290d59cb"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
@@ -2316,8 +2316,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 192009
-sha256 = "2714c0c70a2dc1e0ef3b8818ebc5d98933aa442ede8d8c1d43b54187a291ed32"
+bytes = 192964
+sha256 = "01d2e882f3676c3b50964dc6cefc66d9648eee9d1add91c4ad5bddee57f32c48"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2986,8 +2986,8 @@ sha256 = "520d2a2fd96f4deb6d1b8c391690f4b82e33bf72208d423fba9b047e9a4f0ece"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py"
-bytes = 21272
-sha256 = "39e39fc5dbf26756fa438936494682598cc297544f487b4a01643a3c22c59699"
+bytes = 21357
+sha256 = "9ce748beda3550db6d6f8216bc2a6ca257f0f73b16f49f1ad1d6eb0dae7e134a"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3076,8 +3076,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 239881
-sha256 = "51f284a6aea708c25efa3b87e71db687913d8f7a872346a35f782bedb4a5189a"
+bytes = 240840
+sha256 = "19c7e421514f3a568ef5ee4398b8dcad25c71b6916b6e01bde51afe55566eccf"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3351,13 +3351,13 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 250702
-sha256 = "133f4af92678781d302fdb5df9b8c6627377fc00f9312a53bda976ac12f7fb4f"
+bytes = 250789
+sha256 = "cf4a921f8f7f1fbb86bcfd08ae9c7774017ab8afb132ae8d8881966d8666de19"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 85577
-sha256 = "6d50306f7ada97e93c0b11c73833f2aeca5b0720c0b4597a3377ddd03435ecb4"
+bytes = 102719
+sha256 = "a6a40d549077471e00c179f15968936e3d9c8ff4abb97b6a1d059a42ca15af76"
 
 [[sources]]
 path = "tools/check_record_drift.py"
@@ -3506,8 +3506,8 @@ sha256 = "f1c8ab469a3e9ca02c1159281fa159cb9d75ee19189d8e28cbdaf4bb74cdd2d5"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 40034
-sha256 = "019a7025862f76559b28e465e134b74ff76bf3a9c33ac179ddbedd97fba22227"
+bytes = 40124
+sha256 = "72d5bd7200bcba83f6e1ade6bbd683332c8733b54757b2bd035dfcb2eced02e9"
 
 [[sources]]
 path = "tools/gen_install.py"

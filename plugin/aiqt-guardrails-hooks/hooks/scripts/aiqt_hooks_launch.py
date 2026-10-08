@@ -84,11 +84,12 @@ included), the user site directory and the script's and the current directory on
 excludes the site module, so no .pth file in site-packages and no sitecustomize or usercustomize
 runs before the launcher's first line, whichever interpreter PATH selects (a project virtual
 environment's site-packages included; launcher/registered-options-skip-site-pth pins this). No
-option excludes what CPython reads to compute its startup configuration and module search path
-before that line: the interpreter binary PATH selects and the directory it sits in, a ._pth file
-there (python3._pth beside the python3 PATH selects replaces the module search path and, with an
-import site line, turns the site module back on), the pyvenv.cfg above it and the home it names, and
-the standard library and zip locations those resolve to, with the loader environment it starts under
+option excludes the files CPython reads to compute its startup configuration and module search path
+before that line (the environment, which -I excludes, aside): the interpreter binary PATH selects
+and the directory it sits in, a ._pth file there (python3._pth beside the python3 PATH selects
+replaces the module search path and, with an import site line, turns the site module back on), a
+pyvenv.cfg beside the binary or in the directory above it and the home it names, and the standard
+library and zip locations those resolve to, with the loader environment it starts under
 (examples, not an exhaustive list; the same row runs code before the launcher through a ._pth file
 and through a pyvenv.cfg home). That stays with whoever can write those locations (a user with the
 hook user's own rights included, who can write a project virtual environment): they can run code

@@ -461,10 +461,11 @@ README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
 # site directory, neither the script's nor the working directory on sys.path), -S (no site module, so no
 # .pth file in the site-packages of the interpreter PATH selects, and no sitecustomize or usercustomize,
 # runs before the launcher's first line) and -B (no bytecode written), the form tools/gen_hooks.py
-# renders and the preview README registers. No option excludes what CPython reads to compute its startup
-# configuration and module search path before the launcher's first line: the interpreter binary and the
-# directory it sits in, a ._pth file there (python3._pth beside python3 replaces the module search path
-# and, with an import site line, turns the site module back on), the pyvenv.cfg above it and the home it
+# renders and the preview README registers. No option excludes the files CPython reads to compute its
+# startup configuration and module search path before the launcher's first line (the environment, which
+# -I excludes, aside): the interpreter binary and the directory it sits in, a ._pth file there
+# (python3._pth beside python3 replaces the module search path and, with an import site line, turns the
+# site module back on), a pyvenv.cfg beside the binary or in the directory above it and the home it
 # names, and the standard library and zip locations those resolve to (examples, not an exhaustive list).
 # That stays with whoever can write those locations, and launcher/registered-options-skip-site-pth pins
 # a ._pth file and a pyvenv.cfg home as disclosed witnesses.
