@@ -8028,9 +8028,24 @@ def gensrc_guard(data):
 
 # --- the orchestrator-integrity suite ----------------------------------------------------------
 # One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
-# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: with no
-# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
-# gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
+# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: BY DEFAULT, with no
+# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session cwd's git-resolved toplevel
+# (_orch_root, the scope every component except orch_truncation_guard uses) it is inert (the gensrc.json
+# precedent), with two disclosed exceptions, both in orch_truncation_guard. First, that guard's scope is
+# not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
+# toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope denies (a malformed
+# tool_name, a Bash call's malformed cwd, an unwalkable cwd) apply before that scope in every session,
+# registry or not; a malformed tool_input is checked only after the scope (inert with no registry). Second, in the opt-in
+# registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
+# _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
+# checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
+# registry entry the discovery probe cannot confirm (_ORCH_REG_CANNOT_EVALUATE: a discovery fault is not a
+# registry). No other suite component reads that variable, so strict mode changes no other component's
+# outcome. Outside the suite, the write-scope guard locates its declaration through this registry and is
+# NOT inert on an absent one: _load_write_scope falls back to the XDG default state directory, and a
+# declaration there arms slice confinement (see _orch_registry for every caller's reading of 'absent'). The
+# backlog guards
+# additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
 # stop path fails OPEN on a guard's own error (which can never wedge a session) but DENIES on a backlog
 # cannot-evaluate (ignorance refuses the wind-down); the schedule path fails CLOSED on
@@ -8107,14 +8122,16 @@ def _orch_root(data):
 # Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
 # lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
 # dubious-ownership refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout)
-# never denies an ordinary session: with no registry on the walk and none at a git-resolved toplevel the
-# session is out of scope, while the same session inside an orchestrated tree still finds the registry on
+# never denies an ordinary session BY DEFAULT: with no registry on the walk and none at a git-resolved
+# toplevel the session is out of scope (denied instead in the opt-in registry-required mode,
+# _orch_registry_required), while the same session inside an orchestrated tree still finds the registry on
 # the walk and keeps the guard active. Leg two (restored from the rev-parse scoping after the round-4
 # finding) applies where git DOES resolve a toplevel for the cwd: core.worktree (set in a repository
 # config or a gitfile's gitdir target) can point the work tree OFF the cwd's physical ancestor chain,
 # where the walk alone would never visit its registry, so that toplevel's registry is consulted as well
-# (_orch_git_toplevel_has_registry); git success can only ADD a deny, and a git failure alone never
-# denies. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+# (_orch_git_toplevel_has_registry). BY DEFAULT git success can only ADD a deny and a git failure alone
+# never denies; in registry-required mode a git failure where the registry is reachable only through the
+# git toplevel reads as ABSENT and is denied, and git success can then remove that deny. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
 _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
 # O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
 # itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
@@ -8123,35 +8140,72 @@ _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk
 _ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 
 
+# The registry probe's THIRD value (round 5): a registry entry the no-follow lookups can neither cleanly rule
+# out nor confirm as a regular registry file. It is a non-empty string, so it is TRUTHY: every boolean
+# reading of the probe (the walk's stop test, the default-mode scope decision, and every caller outside the
+# truncation guard's registry-required branch) treats it as PRESENT exactly as before round 5, the deny-safe
+# direction there. Only orch_truncation_guard's registry-required mode tells it apart from a confirmed
+# registry, and DENIES it: a discovery fault never satisfies that mode.
+_ORCH_REG_CANNOT_EVALUATE = "cannot-evaluate"
+# The union leg's own fault value (round 6): git names a toplevel for the cwd but this process cannot open
+# it as a directory, so its registry entry is never reached. Truthy like _ORCH_REG_CANNOT_EVALUATE (IN
+# SCOPE by default, deny-safe) and denied in registry-required mode, with a reason naming the toplevel
+# rather than a .aiqt entry.
+_ORCH_REG_TOPLEVEL_UNOPENABLE = "toplevel-unopenable"
+
+
 def _orch_dirfd_has_registry(dirfd):
     """Whether the directory open at dirfd carries an orchestration registry entry, judged with NO-FOLLOW,
     DESCRIPTOR-ANCHORED lookups (openat semantics, so a path component swapped mid-walk cannot redirect the
-    probe). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both registry names inside a
-    real `.aiqt` directory, raise FileNotFoundError. EVERY other outcome returns True, reading as PRESENT
-    in the deny-safe direction: a successful no-follow stat of either registry name, whatever its file type
-    (presence, not validity, decides scope: a present-but-unreadable or malformed registry has always kept
-    the guard ACTIVE, never inert), and equally a `.aiqt` entry these lookups cannot cleanly rule out (a
-    symlink the O_NOFOLLOW open refuses, a regular file, an unreadable directory, or any other fault),
-    which must never read as absent - that would silently disarm an orchestrated tree."""
+    probe). THREE-VALUED (round 5). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both
+    registry names inside a real `.aiqt` directory, raise FileNotFoundError. Returns True (a CONFIRMED
+    registry) when the first registry name present inside a real `.aiqt` directory (the local name first,
+    the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
+    not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
+    guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
+    lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, or any other
+    fault), or a first present registry name that is not a regular file (a directory, a symlink, a FIFO, a
+    socket, a device) or whose no-follow stat faults. For a real `.aiqt` directory the deciding permission
+    is SEARCH (execute) on it, not read: the O_PATH open needs none, and each registry name is examined by
+    a no-follow stat relative to it, which needs search permission only. So, where _ORCH_O_WALK is O_PATH, a
+    `.aiqt` of mode 0o100 evaluates normally for its owner (no read bit needed; a process that is not the
+    owner and that the mode bits bind has no search bit there either, so for it the stat faults and the
+    value is _ORCH_REG_CANNOT_EVALUATE, while a process the mode bits do not bind, such as root or one
+    holding CAP_DAC_READ_SEARCH or CAP_DAC_OVERRIDE, evaluates it normally), and one of mode 0o600 or 0o000
+    (no search bit, so the stat faults with EACCES) is _ORCH_REG_CANNOT_EVALUATE for a process those modes
+    bind. Where O_PATH is unavailable the O_RDONLY fallback open of `.aiqt` also needs read permission, so
+    there a mode 0o100 `.aiqt` is _ORCH_REG_CANNOT_EVALUATE too for a process the mode bits bind, its owner
+    included (an over-deny, never an allow). That value is TRUTHY,
+    so every boolean caller reads it as PRESENT in the deny-safe direction it always had (it must never
+    read as absent - that would silently disarm an orchestrated tree), while the truncation guard's
+    registry-required mode denies it rather than counting a discovery fault as a registry."""
     try:
         aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
     except FileNotFoundError:
         return False
     except OSError:
-        return True  # a .aiqt entry this walk cannot examine is not cleanly absent: PRESENT (deny-safe)
+        return _ORCH_REG_CANNOT_EVALUATE  # a .aiqt entry this walk cannot examine: not absent, not confirmed
     try:
         for rel in _ORCH_REGISTRY_FILES:
             name = rel.rsplit("/", 1)[-1]
             try:
-                os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
+                st = os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
             except FileNotFoundError:
                 continue  # this registry name is cleanly not present: try the next one
             except OSError:
-                return True  # a name these lookups cannot stat is not cleanly absent: PRESENT (deny-safe)
-            return True
+                return _ORCH_REG_CANNOT_EVALUATE  # a name these lookups cannot stat: not absent, not confirmed
+            # The first present name decides (whole-file precedence): a regular file is a confirmed
+            # registry; any other file type is present but unconfirmable.
+            return True if stat.S_ISREG(st.st_mode) else _ORCH_REG_CANNOT_EVALUATE
         return False
     finally:
         os.close(aiqt_fd)
+
+
+def _orch_probe_scope(probe):
+    """Map a registry-probe result to a walk scope: 'cannot-evaluate' for _ORCH_REG_CANNOT_EVALUATE, else
+    'found' (called only on a truthy probe)."""
+    return "cannot-evaluate" if probe == _ORCH_REG_CANNOT_EVALUATE else "found"
 
 
 def _orch_registry_walk(cwd):
@@ -8165,8 +8219,12 @@ def _orch_registry_walk(cwd):
     identity) is stepped THROUGH rather than misread as the root, so a registry above such a mount point
     is still reached (verified by simulation; these test hosts cannot create mounts, and the path-anchored
     recheck below independently re-probes the textual chain, so an fd-walk miss at a mount edge surfaces
-    as a found or a deny, never an allow). Returns ('found', None) when a chain directory carries a
-    registry (or one the no-follow lookups cannot cleanly rule out); ('none', None) only when the walk
+    as a found or a deny, never an allow). The walk stops at the FIRST chain directory whose probe is not a
+    clean not-present and returns ('found', None) when that probe confirms a registry, or
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE (an entry the no-follow lookups can
+    neither rule out nor confirm; the default mode reads it exactly as 'found', the deny-safe direction,
+    and registry-required mode denies it without consulting the chain above it or the git toplevel);
+    ('none', None) only when the walk
     reaches the root with every lookup a clean not-present AND the post-walk recheck agrees
     (_orch_walk_recheck, the round-4 concurrent-move detection: descriptor anchoring preserves each opened
     directory's identity, not its parent relationship, so a mid-walk rename of an ancestor can redirect
@@ -8219,8 +8277,9 @@ def _orch_registry_walk(cwd):
         cur = os.fstat(fd)
         chain = [(cur.st_dev, cur.st_ino)]
         for _ in range(_ORCH_WALK_BOUND):
-            if _orch_dirfd_has_registry(fd):
-                return ("found", None)
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
             try:
                 parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except OSError as exc:
@@ -8241,7 +8300,8 @@ def _orch_registry_walk(cwd):
                     and (pst.st_dev, pst.st_ino) == root_id):
                 os.close(parent)
                 # The filesystem root with every lookup a clean not-present: confirm with the path-anchored
-                # recheck before reading the session as out of scope. A dev/ino repeat that is NOT the root
+                # recheck before reporting no registry on the chain ('none'; the git-toplevel union and the
+                # registry-required mode then decide the outcome). A dev/ino repeat that is NOT the root
                 # (a directory bind-mounted onto its own child) falls through and is stepped through below.
                 return _orch_walk_recheck(cwd, chain)
             os.close(fd)
@@ -8260,7 +8320,8 @@ def _orch_walk_recheck(cwd, chain):
     directory with the same registry probe the walk uses (_orch_dirfd_has_registry, so the deny-safe
     crafted-entry reads and the self-test ceiling apply identically), and compare the re-resolved
     (st_dev, st_ino) sequence against `chain`, the dev/ino sequence the descriptor walk actually visited.
-    A registry found on this second, path-anchored pass scopes the session IN (('found', None)): that is
+    A registry found on this second, path-anchored pass scopes the session IN (('found', None), or
+    ('cannot-evaluate', None) when the probe returns _ORCH_REG_CANNOT_EVALUATE there): that is
     the mid-walk-rename case, where the descriptor chain was redirected past a continuously present
     registry, and equally a registry that appeared while the walk ran. A sequence mismatch means an
     ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
@@ -8272,7 +8333,8 @@ def _orch_walk_recheck(cwd, chain):
     the walk AND the recheck can hide a registry: a registry relocated within the chain so it is never
     where either pass probes, or a sibling directory swapped in under a textual chain path during the
     recheck so it reports the same dev/ino the redirected walk recorded, leaves every probe a clean
-    not-present with the chains agreeing, and the call is allowed. (2) Any change AFTER the recheck
+    not-present with the chains agreeing, and the call is allowed (denied under registry-required
+    mode). (2) Any change AFTER the recheck
     returns, including a registry that appears only then, is out of view (the inherent pre-execution
     TOCTOU bound). Both are outside this guard's threat model: it stops ACCIDENTAL truncation in an
     orchestrated tree, and a party able to rename this host's ancestor directories concurrently with the
@@ -8299,8 +8361,9 @@ def _orch_walk_recheck(cwd, chain):
                                  .format(type(exc).__name__),
                                  "Re-issue the call once the cwd's directory tree is stable."))
             seen.append((rst.st_dev, rst.st_ino))
-            if _orch_dirfd_has_registry(fd):
-                return ("found", None)
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
         finally:
             os.close(fd)
         parent = os.path.dirname(path)
@@ -8326,15 +8389,25 @@ def _orch_git_toplevel_has_registry(cwd):
     to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
     can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
     metadata directory the old scoping read the external work tree's registry and denied, and the walk
-    alone never visits it (the round-4 finding). Returns True (IN SCOPE) when git resolves a toplevel and
-    the same no-follow registry probe the walk uses (_orch_dirfd_has_registry, so a crafted entry stays
-    deny-safe PRESENT and the self-test ceiling masks this leg identically) does not cleanly rule a
-    registry out there, and True when the resolved toplevel exists but cannot be opened as a directory (a
-    toplevel git can name but this probe cannot examine is not cleanly registry-free: deny-safe, matching
-    the old scoping's present-but-unreadable read). Returns False when git cannot resolve a toplevel at
-    all (git success can only ADD a deny; a git failure alone never denies), when the resolved toplevel is
-    cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
-    not-present."""
+    alone never visits it (the round-4 finding). FOUR-VALUED (round 6; the registry probe it reuses is
+    three-valued): returns True (IN SCOPE) when git resolves a toplevel and the same no-follow registry
+    probe the walk uses (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
+    there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
+    registry-required mode) when that probe neither rules a registry out nor confirms one, and
+    _ORCH_REG_TOPLEVEL_UNOPENABLE (truthy and denied in that mode the same way, with its own reason) when
+    opening the resolved toplevel as a directory fails with any error other than FileNotFoundError (it is
+    present but not a directory, or this process may not reach it: a toplevel git can name but this probe
+    cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable read).
+    Returns False when git cannot resolve a toplevel at all (BY DEFAULT git success can only ADD a deny
+    and a git failure alone never denies; in registry-required mode a False here with nothing on the walk
+    is the ABSENT registry the caller denies, so a git failure where the registry is reachable only
+    through the git toplevel is denied, and git success can then remove that deny), when its registry
+    probe is a clean not-present, and when the resolved toplevel DOES NOT EXIST (FileNotFoundError, e.g.
+    core.worktree naming a removed directory). That last case is deliberate (round 8): a directory that
+    does not exist holds no registry, exactly as the walk reads a missing `.aiqt` entry as a clean
+    not-present, so there is no fault to report. It still fails closed where that matters: with nothing
+    on the walk the scope is then ('none', None), which registry-required mode DENIES as an absent
+    registry, and the default mode is inert there exactly as for any other absent registry."""
     top = _recovery_toplevel(cwd)
     if top is None:
         return False
@@ -8343,16 +8416,40 @@ def _orch_git_toplevel_has_registry(cwd):
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
-        return True
+        return _ORCH_REG_TOPLEVEL_UNOPENABLE
     try:
-        return bool(_orch_dirfd_has_registry(fd))
+        probe = _orch_dirfd_has_registry(fd)
+        return _ORCH_REG_CANNOT_EVALUATE if probe == _ORCH_REG_CANNOT_EVALUATE else bool(probe)
     finally:
         os.close(fd)
 
 
+def _orch_truncation_scope(cwd):
+    """The truncation guard's registry scope for a non-empty string cwd (round 6: shared with
+    tools/orch_doctor.py so the doctor reports exactly what the guard decides): the ancestor walk
+    (_orch_registry_walk) and, only when the walk finds nothing on the chain, the git-toplevel union leg
+    (_orch_git_toplevel_has_registry). Returns the walk's ('fail', (detail, fix)), ('found', None) or
+    ('cannot-evaluate', None) as is; on a walk 'none' returns ('none', None) when the union leg is False,
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE, ('toplevel-unopenable', None)
+    when it returns _ORCH_REG_TOPLEVEL_UNOPENABLE, and ('found', None) when it confirms a registry. The
+    NEAREST non-absent entry decides: a walk 'found' or 'cannot-evaluate' never consults the chain above it
+    or the git toplevel."""
+    scope, found = _orch_registry_walk(cwd)
+    if scope != "none":
+        return scope, found
+    top_probe = _orch_git_toplevel_has_registry(cwd)
+    if not top_probe:
+        return ("none", None)
+    if top_probe == _ORCH_REG_CANNOT_EVALUATE:
+        return ("cannot-evaluate", None)
+    if top_probe == _ORCH_REG_TOPLEVEL_UNOPENABLE:
+        return ("toplevel-unopenable", None)
+    return ("found", None)
+
+
 def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
-    (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
+    (a clean lstat FileNotFoundError), ('ok', dict) on a schema-valid
     registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
     bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, a file that is not a
     regular file, or a non-version-1 object all fail closed rather than silently disarming a caller that
@@ -8361,7 +8458,19 @@ def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     symlinked registry is bad too (the review dispatch pin reads it that way). The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
     .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous. files narrows the read
-    to the named registry files (the review dispatch pin reads each file on its own)."""
+    to the named registry files (the review dispatch pin reads each file on its own).
+
+    WHAT 'absent' MEANS TO EACH CALLER (it is NOT inert everywhere): orch_stop_guard and
+    orch_teammate_idle (via _orch_stop_family), orch_yield_tool, orch_ask_guard, orch_untracked_wait_loop,
+    orch_dispatch_ledger, orch_prompt_stamp, orch_resume_audit and orch_resume_barrier ALLOW (inert);
+    _orch_state_dir_for_root resolves the XDG default state directory; _load_write_scope ALSO falls back
+    to that XDG default and reads the write-scope declaration there, so a declaration present at the XDG
+    default ARMS slice confinement on an ABSENT registry (by design: the harness writes the declaration);
+    _companion_stores yields no stores, so cross-repo writes deny exactly as with no stores declared.
+    orch_truncation_guard does not scope through this loader (its own ancestor walk unioned with the git
+    toplevel decides its scope, and its opt-in registry-required mode denies an absent registry).
+    review_dispatch_pin (_rdp_scope) reads each registry file on its own and skips an absent one, so its
+    search for a binding goes on."""
     for rel in files:
         path = os.path.join(root, *rel.split("/"))
         try:
@@ -8509,6 +8618,32 @@ def _orch_guard_event(root, kind, decision, detail):
     return _orch_append_jsonl(os.path.join(sd, "guard-events.jsonl"),
                               {"ts": _orch_now().isoformat(), "kind": kind,
                                "decision": decision, "detail": detail})
+
+
+def _orch_event_warn(root, kind, decision, detail):
+    """_orch_guard_event for a path that must not lose its row silently (a deny, an allow with findings,
+    or a recorded fact): returns '' when the append succeeded, else the short recording-failure warning
+    the caller appends to its output (the block reason of a denied Stop or TeammateIdle, else the
+    banner, and the deny reason too on a PreToolUse deny). The decision is never changed here."""
+    if _orch_guard_event(root, kind, decision, detail):
+        return ""
+    return ("Additionally, the guard-events row for this {} ({}) could not be written; record it "
+            "manually (nocncl).".format(decision, kind))
+
+
+def _orch_escape_event_warn(root, kind, reason):
+    """The guard-events row of an operator-escape ALLOW, the only record that the override was used:
+    returns '' when the append succeeded, else the warning the caller appends to its output (the ALLOW
+    stands)."""
+    if _orch_guard_event(root, kind, "allow", reason):
+        return ""
+    return ("Additionally, the guard-events row recording this operator-escape release ({}) could not be "
+            "written, so the override's use is unrecorded; record it manually (nocncl).".format(kind))
+
+
+def _orch_warn_tail(*warns):
+    """The recording-failure warnings of one hook call, each preceded by a space ('' when none)."""
+    return "".join(" " + w for w in warns if w)
 
 
 def _orch_turn_state(root):
@@ -9186,10 +9321,10 @@ def _orch_token_present(needle, hay):
     return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
 
 
-_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
+_ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged or warned about
 
 
-def _orch_checkpoint_union(root, payload, record=True):
+def _orch_checkpoint_union(root, payload, record=True, warnings=None):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
@@ -9205,7 +9340,9 @@ def _orch_checkpoint_union(root, payload, record=True):
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
     COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
-    preview makes no state change.
+    preview makes no state change. Each guard-events append made here (a bound-forced drop, an unwritable
+    checkpoint, an unwritable init marker) that fails adds its recording-failure warning to the caller's
+    warnings list, which the hook surfaces in its output, so none of the three rows is lost silently.
 
     FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
@@ -9260,31 +9397,35 @@ def _orch_checkpoint_union(root, payload, record=True):
     for it in payload:
         if it["state"] != "closed":
             union[it["id"]] = current[it["id"]]
+    events = []
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
         union = {iid: union[iid] for iid in sorted(union)[:_ORCH_CHECKPOINT_MAX]}
-        if record:
-            _orch_guard_event(root, "checkpoint-bound", "dropped",
-                              "{} id(s) past the {} bound: {}".format(
-                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
+        events.append(("checkpoint-bound", "dropped",
+                       "{} id(s) past the {} bound: {}".format(
+                           len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10]))))
     if record:
         if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
                                               "ids": union}):
-            _orch_guard_event(root, "checkpoint-unwritable", "recorded",
-                              "the checkpoint could not be rewritten; the next window compares "
-                              "against the prior state")
+            events.append(("checkpoint-unwritable", "recorded",
+                           "the checkpoint could not be rewritten; the next window compares "
+                           "against the prior state"))
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
             # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
             # never a silent gap, consistent with the other recorders.
             if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
-                _orch_guard_event(root, "checkpoint-marker-unwritable", "recorded",
-                                  "the checkpoint-init marker could not be written; a later "
-                                  "checkpoint deletion would be undetectable this window")
+                events.append(("checkpoint-marker-unwritable", "recorded",
+                               "the checkpoint-init marker could not be written; a later "
+                               "checkpoint deletion would be undetectable this window"))
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
+        for ev_kind, ev_decision, ev_detail in events:
+            warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
+            if warn and warnings is not None:
+                warnings.append(warn)
     return injected
 
 
@@ -9292,7 +9433,8 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
     (ctx, turn_state_or_None, basis). The C.1 escape unpack, the C.2 attestation threading, and the
     C.3 checkpoint injection all land HERE, never in decide_yield: the decision core's verdict
-    lattice is untouched, and ctx["escape_spoof"] is a recorder-only key decide_yield never reads."""
+    lattice is untouched, and ctx["escape_spoof"] and ctx["record_warn"] (the checkpoint's recording-failure
+    warnings, '' when none) are recorder-only keys decide_yield never reads."""
     staleness = _orch_validate("staleness", reg.get("staleness"))[1]
     task_hours = staleness["task_hours"]
     ts = _orch_turn_state(root)
@@ -9302,6 +9444,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
+    record_warn = []
     if status == "ok":
         live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
         classes = classify_backlog(payload, live_ids, ledger_readable,
@@ -9311,7 +9454,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
         # with no closed receipt is held (cannot-evaluate); the injected ids enter the class-tagged
         # basis below, so under D12 a shrink is a CHANGED basis, never premature cap relief.
         classes["cannot_evaluate"].extend(
-            _orch_checkpoint_union(root, payload, record=record_checkpoint))
+            _orch_checkpoint_union(root, payload, record=record_checkpoint, warnings=record_warn))
         enum_detail = ""
         # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
         # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
@@ -9336,6 +9479,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     basis_unchanged = tstate["schedule_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
+           "record_warn": " ".join(record_warn),
            "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
@@ -9369,10 +9513,14 @@ def _orch_record_escape_spoof(root, detail):
     """C.1 recorder: an ignored (foreign, symlinked, hardlinked, actor-owned, or writable) escape
     sentinel is a recorded fact, never a verdict input: the decision already proceeded exactly as with
     no sentinel. Appends a guard-events row and writes <state_dir>/escape-spoof.json so the next resume
-    audit surfaces it once. FIX 6: the recording is FAIL-LOUD: returns '' on success, else the warning
-    text the caller MUST append to its banner, so an ignored sentinel that could not be recorded is
-    never silently dropped (which would contradict the always-recorded-and-surfaced claim, and leave
-    the resume audit nothing to surface when both writes failed)."""
+    audit raises it: normally once, again at each later audit while its rename fails, and never where a
+    later sentinel overwrote escape-spoof.json before that audit (only the later one is raised from it;
+    the earlier one keeps only its guard-events row, where that append succeeded). FIX 6: the recording
+    is FAIL-LOUD: returns '' on success, else the warning text the caller MUST append to its output (its
+    banner, or the block reason of a denied Stop or TeammateIdle, which has no banner; a PreToolUse deny
+    carries it in both its reason and its banner), so an ignored sentinel whose guard-events row or
+    escape-spoof.json could not be written is never silently dropped: the warning names the failed write
+    and asks for a manual record (when both writes fail, the resume audit has nothing to raise)."""
     ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
     ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
                                {"ts": _orch_now().isoformat(), "detail": detail})
@@ -9400,11 +9548,11 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
     marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
     APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
-    unique key), so two forced exits before a resume are BOTH kept and each surfaced exactly once,
-    never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
-    ever suppresses this record. Returns '' on success, else the failure text the caller MUST append to
-    its banner (the one record this design leans on can never fail silently). The verdict is never
-    changed here."""
+    unique key), so two forced exits before a resume are BOTH kept and each normally raised once (at
+    least once if recording that it was raised fails), never clobbered into a single fixed file. No
+    register row, attestation, or escape-adjacent artefact ever suppresses this record. Returns '' on
+    success, else the failure text the caller MUST append to its banner (the one record this design
+    leans on can never fail silently). The verdict is never changed here."""
     open_ids = _orch_open_dispositions(ctx)
     enum_ok = ctx.get("enum_status") == "ok"
     key = _orch_now().isoformat() + "-" + os.urandom(6).hex()
@@ -9448,26 +9596,36 @@ def _orch_stop_family(data, event_name, kind):
         if not _orch_record_denial(root, ts, kind, basis):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
                     "failing OPEN with findings rather than re-denying. Underlying: " + reason)
-            _orch_guard_event(root, event_name, "allow_unpersistable", warn)
+            ev = _orch_event_warn(root, event_name, "allow_unpersistable", warn)
             return _stop_warn("AIQT guardrail ({}): {}{}".format(
-                event_name, warn, " " + spoof_warn if spoof_warn else ""))
-        _orch_guard_event(root, event_name, "deny", reason)
-        # a DENY blocks (exit 2); if the spoof record itself failed, surface it on the block reason too
-        return (2, None, reason + (" " + spoof_warn if spoof_warn else ""))
-    _orch_guard_event(root, event_name, verdict.lower(), reason)
+                event_name, warn, _orch_warn_tail(ev, spoof_warn, ctx["record_warn"])))
+        ev = _orch_event_warn(root, event_name, "deny", reason)
+        # a DENY blocks (exit 2) and carries no banner, so every recording-failure warning (the deny's own
+        # guard-events row, the spoof record, the checkpoint rows) goes on the block reason
+        return (2, None, reason + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, event_name, verdict.lower(), reason)
         extra = ""
         if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
             extra = _orch_record_forced_exit(root, event_name, ctx, reason)
-        tail = " ".join(x for x in (extra, spoof_warn) if x)
         return _stop_warn("AIQT guardrail ({}): {}{}".format(
-            event_name, reason, " " + tail if tail else ""))
-    if spoof_warn:
-        # a clean ALLOW whose spoof record FAILED still surfaces the failure (never a silent None)
-        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, spoof_warn))
+            event_name, reason, _orch_warn_tail(extra, ev, spoof_warn, ctx["record_warn"])))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, event_name, reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, event_name, verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _stop_warn("AIQT guardrail ({}):{}".format(event_name, tail))
     return _allow()
 
 
@@ -9544,23 +9702,26 @@ def orch_yield_tool(data):
                   "Re-issue without the unmeasured claim.".format(claim.group(1), measured_min))
         # The quiet-claim DENY has a trivial legit exit (re-issue without the claim), so it does NOT
         # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
-        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work). A recording-failure warning
+        # goes on both the deny reason and the banner.
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
+                               ctx["record_warn"])
+        return _deny(reason + tail,
                      "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
-                     "contradicts the measured figure.")
+                     "contradicts the measured figure." + tail)
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
         _orch_record_denial(root, ts, kind, basis)
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
-                     "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
+                               ctx["record_warn"])
+        return _deny(reason + tail,
+                     "AIQT guardrail: denied a {} call past the enumerated backlog.{}".format(tool, tail))
     if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
         _orch_register_wake(root, ts, tool_input.get("prompt"))
-    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
+        ev = _orch_event_warn(root, "yield-tool", verdict.lower(), reason)
         msg = "AIQT guardrail: {}".format(reason)
         forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
@@ -9572,11 +9733,20 @@ def orch_yield_tool(data):
             extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
             if extra:
                 msg += " " + extra
-        if spoof_warn:
-            msg += " " + spoof_warn
-        return _allow_note(msg)
-    if spoof_warn:
-        return _allow_note("AIQT guardrail: {}".format(spoof_warn))
+        return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
+    if ctx["escape"]:
+        # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
+        # so a failed append is surfaced (the ALLOW stands)
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "yield-tool", reason), spoof_warn,
+                               ctx["record_warn"])
+    else:
+        # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
+        # is not surfaced
+        _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+    if tail:
+        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        return _allow_note("AIQT guardrail:" + tail)
     return _allow()
 
 
@@ -9607,9 +9777,13 @@ def orch_ask_guard(data):
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
     mode = _orch_mode(reg, root)
     if mode is None or "unattended" not in mode:
-        if mode is None:
-            _orch_guard_event(root, "ask-guard", "fail-open",
-                              "mode record absent, empty, or prose with no declaration or JSON marker")
+        if mode is None and not _orch_guard_event(
+                root, "ask-guard", "fail-open",
+                "mode record absent, empty, or prose with no declaration or JSON marker"):
+            # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
+            return _allow_note("AIQT guardrail: the ask guard failed open (no operating-mode record it "
+                               "could read as a declaration), and the guard-events row recording that "
+                               "fail-open could not be written; record it manually (nocncl).")
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
@@ -9631,12 +9805,12 @@ def orch_ask_guard(data):
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
               "the mode record first, then re-issue.")
-    _orch_guard_event(root, "ask-guard", "deny",
-                      "pending key {}{}".format(key, "" if recorded else " (NOT persisted)"))
+    tail = _orch_warn_tail(_orch_event_warn(
+        root, "ask-guard", "deny", "pending key {}{}".format(key, "" if recorded else " (NOT persisted)")))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
               if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
               "pending row could NOT be persisted; record the decision manually (nocncl).")
-    return _deny(reason, banner)
+    return _deny(reason + tail, banner + tail)
 
 
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
@@ -9888,6 +10062,38 @@ def _orch_json_kind(value):
     return "an object" if isinstance(value, dict) else "a " + type(value).__name__
 
 
+_ORCH_REQUIRE_REGISTRY_ENV = "AIQT_ORCH_REQUIRE_REGISTRY"
+_ORCH_REQUIRE_REGISTRY_OFF_VALUES = ("", "0", "false", "no", "off")
+
+
+def _orch_registry_required():
+    """True when the adopter opted this session into REGISTRY-REQUIRED mode: the environment variable
+    AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
+    case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
+    nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
+    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
+    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
+    includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
+    there a git failure alone denies; a registry entry the discovery probe cannot confirm
+    (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or a directory this process
+    lacks search (execute) permission on, such as mode 0o600 or 0o000 for a process those modes bind (where
+    O_PATH exists, mode 0o100 evaluates normally for its owner and for a process the mode bits do not bind,
+    such as root, and cannot be evaluated by any other process; where O_PATH is unavailable, the O_RDONLY
+    fallback open also needs read permission, so mode 0o100 cannot be evaluated by any process the mode bits
+    bind, its owner included), or a
+    first present registry name that is not a regular file or cannot be stat'ed) is not a registry
+    either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
+    surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
+    located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
+    file-based key can never speak exactly when it is needed; the hook execution environment is the one
+    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction for
+    an explicitly configured strict mode."""
+    value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
+    if value is None:
+        return False
+    return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -9905,7 +10111,8 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call remains out of scope (the harness returns its output directly).
+    and wait); every other foreground call in registry scope remains out of scope (the harness returns its
+    output directly; in registry-required mode a cwd with no registry is denied before this point).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
@@ -9915,11 +10122,27 @@ def orch_truncation_guard(data):
     the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
     with its post-walk concurrent-move recheck) and, where git resolves a toplevel for the cwd, that
     toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
-    the ancestor chain; a git discovery failure alone - no git binary, a dubious-ownership refusal, a
-    broken config, a bare repository - still never denies), so with NO registry entry on that chain and
-    none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
-    pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
-    unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    the ancestor chain; by default a git discovery failure alone - no git binary, a dubious-ownership
+    refusal, a broken config, a bare repository - still never denies, while in registry-required mode one
+    that hides a registry reachable only through the git toplevel reads as absent and denies), so with NO registry entry on that chain and
+    none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
+    passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
+    unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
+    unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
+    off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
+    stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
+    leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
+    evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
+    toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
+    file, a symlink, or a directory without search (execute) permission, such as mode 0o600 or 0o000 for a
+    process those modes bind, while mode 0o100 evaluates normally for its owner where O_PATH exists and for
+    a process the mode bits do not bind, and cannot be evaluated by any other process (see
+    _orch_dirfd_has_registry); a first present registry name that is not a regular file or
+    whose no-follow stat faults) DENIES in that mode, never read as a registry, and so does a git
+    toplevel that exists but cannot be opened as a directory (_ORCH_REG_TOPLEVEL_UNOPENABLE, round 6,
+    with its own reason naming the toplevel), while by default each keeps the guard ACTIVE exactly as a
+    present registry does (a git toplevel that does not exist is absent: inert by default, denied as an
+    absent registry in that mode). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -9927,7 +10150,7 @@ def orch_truncation_guard(data):
     cannot open or examine, or an ancestor chain that changed while the walk read it:
     _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
     non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
-    are out of scope (allow)."""
+    are out of scope (allow; in registry-required mode that cwd is denied instead)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -9963,7 +10186,7 @@ def orch_truncation_guard(data):
             "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
             "the call with a string cwd.".format(kind),
             "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
-    scope, found = _orch_registry_walk(cwd)
+    scope, found = _orch_truncation_scope(cwd)
     if scope == "fail":
         detail, fix = found
         return _deny(
@@ -9974,12 +10197,65 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
             "registry (rule trkasy, fail-closed).")
     if scope == "none":
-        # No registry on the cwd's ancestor chain. UNION (round 4): where git resolves a toplevel for this
-        # cwd, that toplevel's registry is consulted too, because core.worktree can point the work tree
-        # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
-        # failure alone still never denies (the union leg reads False then and the allow stands).
-        if not _orch_git_toplevel_has_registry(cwd):
-            return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+        # No registry on the cwd's ancestor chain and none at a git-resolved toplevel (the UNION, round 4:
+        # core.worktree can point the work tree and its registry off the ancestor chain, so
+        # _orch_truncation_scope consults that toplevel too). BY DEFAULT git success can only add a deny
+        # and a git failure alone never denies (the union leg reads False and the allow stands); in
+        # registry-required mode that False is an ABSENT registry, so a git failure hiding a registry
+        # reachable only through the git toplevel is denied below, and git success removes that deny.
+        if _orch_registry_required():
+            # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
+            # absent registry fails closed instead of leaving the guard inert. Default unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+                "AIQT_ORCH_REQUIRE_REGISTRY is set, so an absent orchestration registry fails closed "
+                "instead of leaving this guard inert, and no .aiqt/orchestration.local.json or "
+                ".aiqt/orchestration.json was found on this cwd's ancestor chain or at a git-resolved "
+                "toplevel. Commit the orchestration registry at the repository root, run from a "
+                "directory under the orchestrated tree, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+                "restore the default scoping (inert allow with no registry).",
+                "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
+                "registry found (rule trkasy, fail-closed).")
+        return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+    if scope == "cannot-evaluate" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
+        # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
+        # must not satisfy the registry requirement, so it denies. Default unchanged.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry, and "
+            "the candidate that decided could not be confirmed as one. That candidate is EITHER the nearest "
+            "directory on this cwd's ancestor chain whose registry probe is not a clean not-present, OR, "
+            "only when every directory on that chain probes as a clean not-present, the toplevel git "
+            "resolves for this cwd, which can lie off the chain (core.worktree): so when every directory "
+            "on the chain probes as a clean not-present (no .aiqt entry, or a real .aiqt directory this "
+            "process can search holding neither registry name), the fault is at the git toplevel. At that candidate, its .aiqt is not a directory this process can "
+            "open without following a symlink and search, or its first present registry name "
+            "(orchestration.local.json, then orchestration.json) is not a regular file or cannot be "
+            "examined. A registry this guard cannot evaluate is not a registry, so the call is denied "
+            "rather than read as registry-present (check-fails-closed-on-unreadable). Make that .aiqt a "
+            "real directory with search (execute) permission holding a regular registry file, remove the "
+            "stray .aiqt entry, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such an entry keeps this "
+            "guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
+            "could not be evaluated (rule trkasy, fail-closed).")
+    if scope == "toplevel-unopenable" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 6: git names a toplevel for this cwd but this process cannot open it
+        # as a directory, so its registry entry is never reached. That is a fault in the toplevel itself,
+        # not in a .aiqt entry, so it carries its own reason and repair. Default unchanged (in scope).
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry; none "
+            "is on this cwd's ancestor chain, and the toplevel git resolves for this cwd could not be "
+            "opened as a directory, so its registry could not be looked up. A registry this guard cannot "
+            "reach is not a registry, so the call is denied rather than read as registry-present "
+            "(check-fails-closed-on-unreadable). Make the git toplevel (core.worktree) an existing "
+            "directory this process can open, run from a directory under the orchestrated tree, or unset "
+            "AIQT_ORCH_REQUIRE_REGISTRY to restore the default scoping (where such a toplevel keeps this "
+            "guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
+            "opened for the orchestration registry (rule trkasy, fail-closed).")
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
@@ -10097,7 +10373,8 @@ _ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
 
 # Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
 # reserved word or a '!' negation, and brace grouping. Any of these appearing raw-unquoted in the loop span
-# routes to 'indeterminate' (defer to the ASK) rather than a match the walk cannot soundly justify.
+# routes to 'indeterminate' (defer to the truncation guard's generic bare-& deny) rather than a match the walk
+# cannot soundly justify.
 _ORCH_POLL_FORBIDDEN = frozenset((
     "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
 
@@ -10235,7 +10512,8 @@ def _orch_bg_poll_loop(command):
     disclosed heuristic, not exhaustive). 'none' on a full parse that is simply not that shape and carries no
     ambiguity to defer: no bare `&`; a bare `&` that does not close a raw-unquoted `done` terminator; or a
     clean single loop that lacks the sleep or the probe. 'indeterminate' whenever the structure cannot be
-    soundly attributed to one canonical loop, so the guard defers to the ASK rather than risk a false deny:
+    soundly attributed to one canonical loop, so the guard defers to the truncation guard's generic bare-`&`
+    DENY-and-educate rather than risk a false match:
     an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
     trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
     grouping.
@@ -10247,8 +10525,8 @@ def _orch_bg_poll_loop(command):
     still counted (forcing 'indeterminate').
 
     The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
-    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&` ASK on the
-    same event. Residuals are disclosed in the manifest."""
+    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&`
+    DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -10271,13 +10549,24 @@ def _orch_bg_poll_loop(command):
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
-    is stranded while the session goes dark waiting on it. Registry-gated exactly like orch_truncation_guard
-    (inert with no orchestration registry present) but NOT lease-gated: a bounded worker building a
-    fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
-    registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
-    classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
-    guard. Only a positive 'match' DENIES. This is a deny-side companion to that ASK-side guard, defence in
-    depth on the same event: the ASK catches a generic detach, this DENIES the specific untracked poll loop."""
+    is stranded while the session goes dark waiting on it. Registry-gated, but with a NARROWER scope than
+    orch_truncation_guard: it roots via _orch_root (the session cwd's git-resolved toplevel ONLY, no
+    ancestor walk and no union) and loads the registry there (_orch_registry), so it is inert where git
+    resolves no toplevel or that toplevel has no registry, even where the truncation guard's ancestor walk
+    finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so registry-required mode does
+    not change it: it stays inert wherever _orch_registry reports no registry at the git toplevel, in either
+    mode. The truncation guard in that mode denies every call only where its own scope (the ancestor walk
+    unioned with the git toplevel, _orch_truncation_scope) finds no registry or cannot confirm one, or where
+    its pre-scope checks or its walk fail (those deny in every mode); where that walk finds
+    a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
+    allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
+    bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
+    or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
+    unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
+    the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
+    Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
+    depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
+    specific untracked poll loop with a reason about the stranded poll."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -10285,7 +10574,7 @@ def orch_untracked_wait_loop(data):
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
-        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is
+        return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
@@ -12680,6 +12969,80 @@ def orch_prompt_stamp(data):
                              .format(gap)}}, None)
 
 
+# The truncation guard's registry-required deny reasons for each scope it denies, as tools/orch_doctor.py
+# and the resume audit report them (_orch_truncation_scope decides the scope exactly as the guard does).
+_ORCH_STRICT_SCOPE_FINDINGS = dict((
+    ("none", "no orchestration registry on this repository root's ancestor chain or at its git "
+             "toplevel"),
+    ("cannot-evaluate", "the candidate that decided cannot be confirmed as a registry; it is EITHER the "
+                        "nearest directory on this repository root's ancestor chain whose registry probe "
+                        "is not a clean not-present, OR, only when every directory on that chain probes as "
+                        "a clean not-present, the root's git toplevel, which can lie off the chain "
+                        "(core.worktree), so when every directory on the chain probes as a clean not-present "
+                        "(no .aiqt entry, or a real .aiqt directory this process can search holding neither "
+                        "registry name) the fault is at the git toplevel: at that "
+                        "candidate, its .aiqt is not a directory openable without following a symlink and "
+                        "searchable (execute permission) by this process, or its first present registry name "
+                        "(orchestration.local.json, then orchestration.json) is not a regular file (a "
+                        "symlinked registry file included) or cannot be examined"),
+    ("toplevel-unopenable", "no registry on this repository root's ancestor chain, and its git toplevel "
+                            "cannot be opened as a directory (it is present but not an openable "
+                            "directory; a toplevel that does not exist reads as no registry there)"),
+))
+
+
+def _orch_guard_scope_report(root):
+    """What orch_truncation_guard decides at its scope check for a Bash call whose cwd is the repository
+    root, in the CURRENT mode: (report lines, denies). A cwd the walk cannot carry out denies in every mode;
+    an absent or unconfirmable registry denies only in registry-required mode. Shared by
+    tools/orch_doctor.py and _orch_resume_audit_findings, so both resume-barrier writers read one scope."""
+    scope, found = _orch_truncation_scope(root)
+    env = _ORCH_REQUIRE_REGISTRY_ENV
+    if scope == "fail":
+        return (["truncation guard: a Bash call from the repository root is denied in every mode: its "
+                 "cwd %s" % found[0]], True)
+    if _orch_registry_required() and scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        return (["truncation guard (registry-required mode, %s set to a value other than an off value): "
+                 "a Bash call from the repository root is DENIED: %s"
+                 % (env, _ORCH_STRICT_SCOPE_FINDINGS[scope])], True)
+    if scope == "none":
+        return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
+                 "ancestor chain or at its git toplevel; with registry-required mode enabled, %s set to a "
+                 "value other than an off value, such as 1, it denies instead)" % env], False)
+    if scope in _ORCH_STRICT_SCOPE_FINDINGS:
+        # Default mode reads a discovery fault as present (the deny-safe direction): the guard is active
+        # without a confirmed registry, which is reported as the fault it is, not as a registry found.
+        return (["truncation guard: ACTIVE for a Bash call from the repository root because its registry "
+                 "discovery hit a fault it reads as present, not because a registry was confirmed: %s "
+                 "(with registry-required mode enabled, %s set to a value other than an off value, such as "
+                 "1, it denies instead)" % (_ORCH_STRICT_SCOPE_FINDINGS[scope], env)], False)
+    return (["truncation guard: ACTIVE for a Bash call from the repository root (a registry entry was "
+             "found on its ancestor chain, which can lie above this repository, or at its git "
+             "toplevel)"], False)
+
+
+def _orch_resume_audit_findings(status, reg, root):
+    """The ONE resume-audit finding list both resume-barrier writers (orch_resume_audit at SessionStart and
+    tools/orch_doctor.py --resume-audit) arm or clear resume-barrier.json from (round 8), so neither clears
+    a barrier the other armed for a condition that still holds, PROVIDED both run in the same mode: a
+    registry the loader reports bad, the truncation guard's deny at its scope check for a Bash call from the
+    root (_orch_guard_scope_report), then the resume probes (over an empty registry when it is bad). Empty
+    means clean. The scope deny depends on the CURRENT process's AIQT_ORCH_REQUIRE_REGISTRY (a walk failure
+    denies in every mode; an absent or unconfirmable registry scope only in registry-required mode), and
+    the barrier does not record the mode, so a doctor run without the variable can clear a barrier a
+    registry-required SessionStart armed for a scope deny. Clearing it does not allow any Bash call: the
+    barrier only warns (stage BAKE) and the guard denies on its own scope check regardless."""
+    findings = []
+    if status == "bad":
+        findings.append("the orchestration registry could not be read ({})".format(reg))
+        reg = {}
+    scope_lines, scope_denies = _orch_guard_scope_report(root)
+    if scope_denies:
+        findings.extend(scope_lines)
+    findings.extend(_orch_resume_probes(reg, root))
+    return findings
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
     finding strings; empty means the recorded state matches observed reality."""
@@ -13027,7 +13390,7 @@ def _orch_validate_attestations(reg, root):
 
 
 def _orch_forced_exit_findings(sd):
-    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row exactly once. A companion
+    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row normally once. A companion
     forced-exit-surfaced.json records the keys already raised; a row whose key is not yet recorded
     becomes a finding, and the surfaced set advances only on a successful write. An unreadable log, a
     malformed line, or an unreadable/unwritable surfaced set re-fires next resume rather than losing
@@ -13068,10 +13431,17 @@ def _orch_forced_exit_findings(sd):
 
 
 def _orch_pending_artefact_findings(root):
-    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised once and renamed with
-    a .surfaced suffix, staying in the record; an unreadable one re-fires (chkfcl). Forced exits are an
-    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised exactly
-    once and never clobbered."""
+    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised, then renamed to
+    escape-spoof.json.surfaced, which replaces any earlier .surfaced file, so that file holds only the
+    latest sentinel whose rename succeeded; a failed rename leaves it at escape-spoof.json, raised again
+    next resume, as an unreadable one is (chkfcl). A second sentinel recorded before this probe runs
+    overwrites escape-spoof.json, so only the later one is raised from it. The lasting record of each
+    ignored sentinel is its append-only guard-events.jsonl row of kind escape-spoof
+    (_orch_record_escape_spoof) only where that append succeeded: a failed append was warned about in the
+    output of the hook that ignored the sentinel (its banner, or the block reason of a denied Stop or
+    TeammateIdle), which asks for a manual record, and no row exists for it. Forced exits are an
+    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each normally raised
+    once (at least once if recording that one was raised fails) and never clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "escape-spoof.json")
@@ -13094,10 +13464,84 @@ def _orch_pending_artefact_findings(root):
     return findings
 
 
+def _orch_barrier_write(path, obj):
+    """Replace the resume barrier file atomically; the one writer of resume-barrier.json (orch_resume_audit,
+    orch_resume_barrier's warned flag, and tools/orch_doctor.py --resume-audit). It creates the state
+    directory, creates a temporary file beside the barrier with O_CREAT|O_EXCL (open mode "x": mode 0o666
+    less the umask, as open(path, "w") creates the barrier), writes the JSON, flushes and fsyncs it, closes
+    it, then os.replace()s it onto the barrier path. It records whether this call created the temporary
+    file: on any failure after that (the write, flush, fsync, the close at the end of the with block, or
+    the replace) it unlinks the temporary file (an unlink that itself fails leaves it beside the barrier,
+    never in its place), and it never unlinks a temporary name it did not create (an "x" open of a name
+    that already exists raises FileExistsError first); then it re-raises, so the previous barrier file,
+    armed or clear, or its absence, is left byte-identical; the caller decides what the error means. A
+    process killed between the create and the replace (a hook timeout, for example) leaves its temporary
+    file beside the barrier, and nothing removes it. A directory at the barrier path cannot be replaced:
+    the replace raises IsADirectoryError and the directory stays until someone removes it. What it writes
+    always fits the reader's bound (_orch_barrier_fit): a finding list too long for it is stored as its
+    first findings plus one line counting the rest, and an object that still cannot fit raises ValueError
+    before any file is created."""
+    obj = _orch_barrier_fit(obj, os.path.dirname(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "{}.{}.{}.tmp".format(path, os.getpid(), os.urandom(8).hex())
+    created = False
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            created = True
+            json.dump(obj, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if created:
+            _orch_unlink_quiet(tmp)
+        raise
+
+
+def _orch_unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def orch_resume_audit(data):
     """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
-    clears it. Registry-scoped; silent with no registry."""
+    clears it. Arming and clearing are best-effort and atomic (_orch_barrier_write: a temporary file
+    beside the barrier, flushed and fsynced, then os.replace): where the barrier cannot be written (its
+    state directory cannot be created, the temporary file cannot be created or written, or the replace
+    fails, for example XDG_STATE_HOME naming a regular file, or a full disk), the error is swallowed so
+    SessionStart never wedges, the temporary file is removed, the previous barrier file (armed or clear)
+    or its absence is left byte-identical, and an audit with findings still returns its warning naming
+    them, which then says the barrier was not persisted (this audit did not arm it) and asks for a manual
+    record instead of saying a re-run clears the barrier; a clean audit's failed clear adds no warning,
+    since the PreToolUse barrier notes a barrier left armed (where opening the forced-exit log fails other
+    than as not-found, because the state directory cannot be searched or is not a directory, as with that
+    regular file, the forced-exit probe adds its cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
+    _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
+    does not swallow the error (its run ends with it, the previous barrier unchanged). Registry-scoped:
+    silent where _orch_registry reads the root's registry as absent; a root it cannot examine reads bad, not absent (below). With a registry
+    present it also arms on the truncation guard's deny at its scope check for a Bash call from the root
+    (_orch_resume_audit_findings), so it is mode-sensitive: a root git resolves but the walk cannot carry
+    out (one this process can enter but not read, for example) arms it in EVERY mode, and an absent or unconfirmable registry scope (a
+    symlinked registry, for example) arms it in registry-required mode. Where _orch_root returns None
+    (`if root is None: return _allow()`), this audit returns before it reads the registry, so it stays
+    silent in both modes. _orch_root returns None for a session cwd that is missing, empty or not a string,
+    without calling git, and wherever _recovery_toplevel returns None: git cannot run or exits non-zero (an
+    unreadable or broken config, a dangling gitfile, a dubious-ownership refusal, no git binary, a timeout,
+    or a cwd this process cannot enter), or its output cannot be decoded, is empty, or is not an absolute
+    path. The truncation guard denies a Bash call whose cwd is missing, empty or not a string in every
+    mode, before its scope check. For a Bash call from a non-empty string cwd where git resolves nothing,
+    whether its scope check denies depends only on its own ancestor walk of that cwd and the mode (its git
+    leg resolves nothing either); its other checks still read the call's tool_name, tool_input and command.
+    Git can still resolve a toplevel this process cannot enter (core.worktree read from a session cwd
+    inside the repository's git directory). Where that toplevel exists without search permission for this
+    process, or is not a directory, _orch_registry's lstat of a registry path under it raises an OSError
+    other than FileNotFoundError and returns bad, so this audit warns and (best-effort) arms the barrier in
+    both modes, as it does for a regular file named .aiqt at any root; where that toplevel does not
+    exist, the lstat raises FileNotFoundError for each registry name, _orch_registry
+    returns absent (`if status == "absent": return _allow()`), and this audit stays silent in both modes."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -13107,30 +13551,239 @@ def orch_resume_audit(data):
     barrier_path = os.path.join(_orch_state_dir_for_root(root), "resume-barrier.json")
     if status == "bad":
         _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
-        findings = ["the orchestration registry could not be read ({})".format(reg)]
-    else:
-        findings = _orch_resume_probes(reg, root)
+    # The same finding list tools/orch_doctor.py --resume-audit writes (round 8: one barrier truth), so a
+    # SessionStart run in the same mode never clears a barrier the doctor armed for a scope deny that still
+    # holds; the barrier does not record the mode, so a run in the other mode can (_orch_resume_audit_findings).
+    findings = _orch_resume_audit_findings(status, reg, root)
+    unwritten = None
     try:
-        os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump({"active": bool(findings), "findings": findings,
-                       "ts": _orch_now().isoformat(), "warned": False}, fh)
-    except OSError:
-        pass  # a barrier that cannot arm still surfaces below; never wedge SessionStart
+        _orch_barrier_write(barrier_path, {"active": bool(findings), "findings": findings,
+                                           "ts": _orch_now().isoformat(), "warned": False})
+    except (OSError, ValueError) as exc:
+        # never wedge SessionStart: the previous barrier file (or its absence) is left unchanged. A failed
+        # ARM is named in the warning below; a clean audit's failed CLEAR stays silent here, because the
+        # PreToolUse barrier reads a barrier still armed (or a directory in its place) as armed and notes it
+        unwritten = type(exc).__name__
     if findings:
-        _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
+        tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",
+                                                "; ".join(findings)[:1000]))
+        if unwritten is None:
+            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
+                   "acknowledgement alone does not clear it.")
+        else:
+            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' once the state directory "
+                   "is writable. Additionally, the resume barrier could not be written ({}), so it was "
+                   "not persisted: this audit did not arm it (any earlier barrier file is left unchanged); "
+                   "record these findings manually (nocncl).".format(unwritten))
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
-                          "observed reality: {}. Correct the record, then re-run "
-                          "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
-                          "acknowledgement alone does not clear it.".format("; ".join(findings)))
+                          "observed reality: {}. Correct the record, or for a truncation guard finding "
+                          "the condition it names (for example a directory's permissions, or the "
+                          "registry's file type), {}{}".format("; ".join(findings), nxt, tail))
     return _allow()
+
+
+_ORCH_BARRIER_KEYS = frozenset(("active", "findings", "warned", "ts"))
+
+
+def _orch_barrier_well_formed(barrier):
+    """True only for the documented barrier shape: a JSON object with a boolean "active" and a list of
+    string "findings" (both required; a missing "findings" is malformed, never an empty list), an optional
+    boolean "warned" and an optional string "ts", and no other key."""
+    if not isinstance(barrier, dict) or not set(barrier) <= _ORCH_BARRIER_KEYS:
+        return False
+    if not isinstance(barrier.get("active"), bool) or "findings" not in barrier:
+        return False
+    found = barrier["findings"]
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        return False
+    if "warned" in barrier and not isinstance(barrier["warned"], bool):
+        return False
+    return "ts" not in barrier or isinstance(barrier["ts"], str)
+
+
+_ORCH_BARRIER_MAX_BYTES = 64 * 1024  # _orch_barrier_write never stores more (_orch_barrier_fit); a larger file reads as armed
+_ORCH_BARRIER_FINDING_CHARS = 4000  # a stored finding is cut here, so the first one always fits the bound
+
+
+_ORCH_BARRIER_REST_RE = re.compile(
+    r"([0-9]+) more finding\(s\) not stored here \(the barrier file is bounded")
+
+
+def _orch_barrier_rest(count, sd):
+    """The last line _orch_barrier_fit stores in place of the findings that do not fit (sd is the state
+    directory holding the barrier). It points only at evidence that outlives the audit. A forced-exit
+    finding is normally raised once (at least once: _orch_forced_exit_findings advances its surfaced set
+    only where that write succeeds), so a later audit, the doctor's included, does not list it again once
+    that write has succeeded (a failed write leaves it to be listed again); the line names
+    forced-exit.jsonl, the append-only log that keeps every forced-exit record in full. An ignored escape
+    sentinel is raised from escape-spoof.json, which _orch_pending_artefact_findings then renames to
+    escape-spoof.json.surfaced: each later rename replaces that file, so it holds only the
+    latest sentinel whose rename succeeded, and a failed rename leaves the sentinel at escape-spoof.json,
+    where the next audit raises it again. So the line names guard-events.jsonl, whose append-only rows of
+    kind escape-spoof (_orch_record_escape_spoof) are the lasting record of each sentinel whose row was
+    written (a row that could not be written was warned about when the sentinel was ignored, with a
+    request to record it manually, and no row exists for it), and says what the .surfaced file and
+    escape-spoof.json hold. Every other finding is recomputed from the record by each audit, so
+    'python3 tools/orch_doctor.py --resume-audit' prints it again while its condition holds."""
+    return ("{} more finding(s) not stored here (the barrier file is bounded at {} bytes). A forced-exit "
+            "finding is normally raised once (at least once if recording that it was raised fails): read "
+            "every forced-exit record in full in {} (an ignored escape sentinel is likewise normally raised "
+            "once; its lasting record is its row of kind escape-spoof in {} where that row was written, "
+            "and a row that could not be written was warned about when the sentinel was ignored, with a "
+            "request to record it manually; {} holds only the latest sentinel whose rename succeeded, and "
+            "a failed rename leaves it at {}, where the next audit raises it again). Every other finding "
+            "still present is printed again by 'python3 tools/orch_doctor.py --resume-audit'".format(
+                count, _ORCH_BARRIER_MAX_BYTES, os.path.join(sd, "forced-exit.jsonl"),
+                os.path.join(sd, "guard-events.jsonl"), os.path.join(sd, "escape-spoof.json.surfaced"),
+                os.path.join(sd, "escape-spoof.json")))
+
+
+def _orch_barrier_fit(obj, sd):
+    """The object _orch_barrier_write stores, so that its JSON (json.dumps, ASCII) never exceeds
+    _ORCH_BARRIER_MAX_BYTES, the bound _orch_barrier_read refuses past. An object that already fits is
+    returned unchanged. Otherwise, for a dict whose "findings" is a list of strings, a copy keeps the
+    leading findings (each cut to _ORCH_BARRIER_FINDING_CHARS characters, marked " (cut)") that fit
+    together with one last line counting the findings not stored (_orch_barrier_rest), so the barrier
+    stays armed, well-formed and readable and its warned flag can be recorded. A list that already ends
+    with such a count line (one this function stored earlier; matched by _ORCH_BARRIER_REST_RE) is re-fit
+    without it and its count is carried forward, so the new line counts every finding not stored, never
+    the old line as one. Anything else that does not fit (another shape, or other keys too large on their
+    own) raises ValueError."""
+    if len(json.dumps(obj)) <= _ORCH_BARRIER_MAX_BYTES:
+        return obj
+    found = obj.get("findings") if isinstance(obj, dict) else None
+    if not (isinstance(found, list) and all(isinstance(f, str) for f in found)):
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    carried = 0
+    prior = _ORCH_BARRIER_REST_RE.match(found[-1]) if found else None
+    if prior:
+        carried, found = int(prior.group(1)), found[:-1]
+    cut = [f if len(f) <= _ORCH_BARRIER_FINDING_CHARS else f[:_ORCH_BARRIER_FINDING_CHARS] + " (cut)"
+           for f in found]
+    # With k findings the list encodes as the empty object's size plus each finding's encoding plus two
+    # bytes (", ") per separator; the rest line is reserved at its largest (no finding stored).
+    size = len(json.dumps(dict(obj, findings=[]))) + len(json.dumps(_orch_barrier_rest(len(found) + carried,
+                                                                                         sd)))
+    kept = []
+    for f in cut:
+        size += len(json.dumps(f)) + 2
+        if size > _ORCH_BARRIER_MAX_BYTES:
+            break
+        kept.append(f)
+    rest = len(found) - len(kept) + carried
+    fitted = dict(obj, findings=kept + ([_orch_barrier_rest(rest, sd)] if rest else []))
+    if len(json.dumps(fitted)) > _ORCH_BARRIER_MAX_BYTES:
+        raise ValueError("the resume barrier does not fit its {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    return fitted
+_ORCH_BARRIER_DIRECTORY = "not a regular file: a directory"
+
+
+def _orch_barrier_nonregular(path, opened=None):
+    """The detail for a barrier path that opened as something other than a regular file:
+    _ORCH_BARRIER_DIRECTORY only where os.lstat shows the entry itself is a directory (no audit can
+    replace that) and, where the caller passes the fstat result of the opened descriptor (opened), that
+    directory has the opened file's st_dev and st_ino (an entry swapped between the open and the lstat is
+    never named a directory); otherwise "not a regular file" (a FIFO, a device, or a symlink to either or
+    to a directory, which the writer's os.replace does replace, leaving the target intact). A UNIX socket
+    never reaches here: its open fails with ENXIO, which _orch_barrier_read reads as ('bad', 'OSError')."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return "not a regular file"
+    if stat.S_ISDIR(st.st_mode) and (opened is None
+                                     or (st.st_dev, st.st_ino) == (opened.st_dev, opened.st_ino)):
+        return _ORCH_BARRIER_DIRECTORY
+    return "not a regular file"
+
+
+def _orch_barrier_read(path):
+    """Read the resume barrier without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None), ('ok', the parsed JSON value) or ('bad', detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting
+    for one. It follows a symlink: a symlink to a regular file reads as that file (the writer's os.replace
+    later replaces the link, not its target). A FileNotFoundError or NotADirectoryError from the open (a
+    missing file, a dangling symlink, a state directory path through a regular file) is absent. A UNIX
+    socket fails the open with ENXIO and is ('bad', 'OSError'). The opened descriptor is fstat'ed and
+    anything not a regular file is bad without a read (_orch_barrier_nonregular names it). The read asks
+    for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all (65537: the 65536-byte bound plus one byte that
+    detects a longer file) and a longer file is bad. The descriptor is closed exactly once on every path
+    and never retried; a close that fails is bad, named by its type, so a close error never escapes to
+    the dispatcher (which would fail closed). Any other exception (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting) is bad, named by its type. Not bounded here: the path lookup of the
+    os.open (and of the os.lstat in _orch_barrier_nonregular) can stall on a hung mount for any file
+    type, a regular file on a stalled filesystem can stall the read, and what opening a device node does
+    is up to its driver; the hook timeout (10 seconds in hooks.json) bounds each such stall."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (FileNotFoundError, NotADirectoryError):
+        return ("absent", None)
+    except IsADirectoryError:
+        return ("bad", _orch_barrier_nonregular(path))  # a platform whose open refuses a directory
+    except Exception as exc:
+        return ("bad", type(exc).__name__)
+    chunks, total, early, close_error = [], 0, None, None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            early = ("bad", _orch_barrier_nonregular(path, opened))
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except Exception as exc:
+        early = ("bad", type(exc).__name__)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            close_error = ("bad", type(exc).__name__)
+    if early is not None:
+        return early
+    if close_error is not None:
+        return close_error
+    if total > _ORCH_BARRIER_MAX_BYTES:
+        return ("bad", "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES))
+    try:
+        return ("ok", json.loads(b"".join(chunks).decode("utf-8")))
+    except Exception as exc:  # any decode or parse failure (RecursionError from deep nesting too) is bad
+        return ("bad", type(exc).__name__)
 
 
 def orch_resume_barrier(data):
     """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
-    never obstructed."""
+    never obstructed. The barrier is read by _orch_barrier_read: a non-blocking open (a FIFO with no
+    writer does not wait for one), an fstat that refuses anything not a regular file before any read (so
+    a FIFO or a device such as /dev/zero is never read), and a read of at most _ORCH_BARRIER_MAX_BYTES + 1
+    bytes (65537: the bound plus one byte that detects a longer file); a close error is a bad result too.
+    A barrier file that is absent (its open raises FileNotFoundError
+    or NotADirectoryError, a dangling symlink included) reads as clear; a symlink to a regular file reads
+    as that file. A barrier is well-formed only when it is a JSON object whose keys are "active"
+    (required, a boolean), "findings" (required, never defaulted, a list of strings), and optionally
+    "warned" (a boolean) and "ts" (a string), and no other key. One that exists but is not a regular file
+    (a FIFO, a device such as /dev/zero, a directory, or a symlink to any of these; a UNIX socket, whose
+    open fails with ENXIO, reads as OSError), is larger than the bound, cannot be read, closed or parsed
+    for any reason (an OSError, a decode or JSON error, a
+    RecursionError from deep nesting, or any other exception the parse raises), or is not well-formed (a
+    truncated or partial write by an earlier writer, for example), reads as ARMED: every mutation outside
+    the allowlist surfaces a note naming the file as unreadable or malformed with the reason (there is no
+    readable "warned" flag to record, so it is not once per arming), and in BAKE that note blocks
+    nothing, and a mutation on the allowlist is allowed after the same read. Not bounded by the reader:
+    path lookup on a hung mount can stall its os.open (and the lstat naming a non-regular file, and the
+    os.path.realpath calls below) for any file type, a regular file on a stalled filesystem can stall the
+    read, and opening a device node does whatever its driver does; the hook timeout (10 seconds) bounds
+    each such stall. It clears where 'python3
+    tools/orch_doctor.py --resume-audit' or the next SessionStart audit replaces the file
+    (_orch_barrier_write, whose os.replace replaces a FIFO, a socket, a device node or a symlink at the
+    path and leaves a symlink's target intact), or where the user corrects or removes it (the state
+    directory is on the allowlist); where the state directory cannot be searched, that replace fails as
+    well, and the note persists until its permissions are restored. A directory at the barrier path
+    itself (os.lstat shows a directory) cannot be replaced by either audit, so its note says to remove
+    the directory; a symlink to a directory gets the generic note, since the audit replaces the link."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -13139,12 +13792,15 @@ def orch_resume_barrier(data):
         return _allow()
     sd = _orch_state_dir_for_root(root)
     barrier_path = os.path.join(sd, "resume-barrier.json")
-    try:
-        with open(barrier_path, "r", encoding="utf-8") as fh:
-            barrier = json.load(fh)
-    except (OSError, ValueError):
+    status, barrier = _orch_barrier_read(barrier_path)
+    if status == "absent":
         return _allow()
-    if not isinstance(barrier, dict) or not barrier.get("active"):
+    unreadable = None
+    if status == "bad":  # not a regular file, oversized, unreadable or unparseable: armed
+        barrier, unreadable = {}, barrier
+    elif not _orch_barrier_well_formed(barrier):
+        barrier, unreadable = {}, "not a well-formed barrier object"
+    elif not barrier["active"]:
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     file_path = tool_input.get("file_path")
@@ -13162,14 +13818,28 @@ def orch_resume_barrier(data):
             rp = os.path.realpath(p)
             if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
                 return _allow()  # the exit path (fixing the record) is always writable
+    if unreadable == _ORCH_BARRIER_DIRECTORY:
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed (not a regular file: it is a directory), so it is "
+            "read as armed and this mutation is outside the record surfaces. Neither 'python3 "
+            "tools/orch_doctor.py --resume-audit' nor the SessionStart audit can replace a directory: "
+            "remove the directory, then re-run 'python3 tools/orch_doctor.py --resume-audit'."
+            .format(barrier_path))
+    if unreadable is not None:
+        return _allow_note(
+            "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+            "barrier file {} is unreadable or malformed ({}), so it is read as armed and this mutation "
+            "is outside the record surfaces. Re-run 'python3 tools/orch_doctor.py --resume-audit' to "
+            "replace it (a clean audit clears it), or correct or remove the file."
+            .format(barrier_path, unreadable))
     if barrier.get("warned"):
         return _allow()  # surface once per arming, never a nag wall
     barrier["warned"] = True
     try:
-        with open(barrier_path, "w", encoding="utf-8") as fh:
-            json.dump(barrier, fh)
-    except OSError:
-        pass
+        _orch_barrier_write(barrier_path, barrier)
+    except (OSError, ValueError):
+        pass  # the previous barrier is left unchanged; it surfaces again on the next mutation
     return _allow_note(
         "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
@@ -13545,13 +14215,12 @@ def _wrtscp_target_companion_store(target, stores):
 
 
 def _wrtscp_deny(root, detail, reason, banner):
-    """A write-scope DENY that also makes a BEST-EFFORT guard-events append (the over-fire metric) when root
-    is resolvable. The append is best-effort: _orch_guard_event may return False and this ignores it, so a
-    failed append neither blocks nor alters the denial and the over-fire metric may be lost for that event."""
-    if root is not None:
-        _orch_guard_event(root, "wrtscp", "deny", detail)
-    return _deny("AIQT rule wrtscp (write-scope): {}".format(reason),
-                 "AIQT guardrail: {} (rule wrtscp).".format(banner))
+    """A write-scope DENY that also appends a guard-events row (the over-fire metric) when root is
+    resolvable. A failed append adds the recording-failure warning to the deny reason and the banner and
+    never alters the denial; with no resolvable root no row is attempted."""
+    tail = _orch_warn_tail(_orch_event_warn(root, "wrtscp", "deny", detail) if root is not None else "")
+    return _deny("AIQT rule wrtscp (write-scope): {}{}".format(reason, tail),
+                 "AIQT guardrail: {} (rule wrtscp).{}".format(banner, tail))
 
 
 def write_scope_guard(data):
@@ -13596,7 +14265,8 @@ def write_scope_guard(data):
     an un-armed session with a genuinely-absent floor leaves the frozen layer inert, so the frozen denial is
     not unconditionally always-on. Slice confinement is fail-open on a missing declaration; the principled
     fail-open is genuine ABSENCE (of a declaration or floor: no confinement in effect, the same inert
-    boundary gensrc and the orchestration suite use). A cannot-evaluate FAULT is not absence: a resolution
+    boundary gensrc and, by default, the orchestration suite use; its truncation guard denies an absent
+    registry in the opt-in registry-required mode). A cannot-evaluate FAULT is not absence: a resolution
     or probe ERROR (an unresolvable session root, a root or target canonicalization fault, a containment
     fault, or a nested-repo probe fault) on a covered write DENIES whether or not the session is armed, and
     never allows an unverified write; and once armed every cannot-evaluate resolves to DENY. Out-of-scope is a DENY, never an ASK:
@@ -13862,9 +14532,13 @@ def write_scope_guard(data):
                                     "orchestration-registry surface instead.".format(target),
                                     "denied a {} to a declared companion store's frozen orchestration "
                                     "registry file".format(tool_name))
-            _orch_guard_event(root, "wrtscp", "allow",
-                              "companion-store write to the declared store {} (target {})"
-                              .format(store, target))
+            ev = _orch_event_warn(root, "wrtscp", "allow",
+                                  "companion-store write to the declared store {} (target {})"
+                                  .format(store, target))
+            if ev:
+                # the allow stands; its unwritten audit row is surfaced, never lost silently
+                return _allow_note("AIQT guardrail: allowed a {} to the declared companion store {} "
+                                   "(rule wrtscp). {}".format(tool_name, store, ev))
             return _allow()                                                                   # companion store
         return _wrtscp_deny(root, "outside toplevel",
                             "the write target resolves OUTSIDE this repository ({}); a guarded-tool write "

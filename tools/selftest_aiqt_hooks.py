@@ -763,7 +763,8 @@ def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's and
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
     review_dispatch_pin's;
     the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
     fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
@@ -808,6 +809,25 @@ def _test_note_literal_sites(failures, tmp):
     note("(nl-barrier) an armed resume barrier allows an out-of-record Write with a note",
          aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
              file_path=str(r.root / "src.py"), content="x"))), "resume barrier")
+    barrier_file = state / "resume-barrier.json"
+    malformed = "barrier file " + str(barrier_file) + " is unreadable or malformed"
+    barrier_file.write_text(json.dumps(dict(active=True, findings=["nl-finding"]))[:20], encoding="utf-8")
+    note("(nl-barrier-truncated) a truncated resume barrier reads as armed and allows an out-of-record "
+         "Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.write_text(json.dumps(["nl-not-an-object"]), encoding="utf-8")
+    note("(nl-barrier-shape) a resume barrier that is not a barrier object reads as armed and allows an "
+         "out-of-record Write with a note naming the file as unreadable or malformed",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), malformed)
+    barrier_file.unlink()
+    barrier_file.mkdir()
+    note("(nl-barrier-directory) a directory at the resume barrier path reads as armed and allows an "
+         "out-of-record Write with a note saying to remove the directory, which no audit can replace",
+         aiqt_hooks.orch_resume_barrier(r.payload("PreToolUse", "Write", dict(
+             file_path=str(r.root / "src.py"), content="x"))), "remove the directory")
+    barrier_file.rmdir()
     note("(nl-ledger-unbound) a TaskOutput with no task_id is surfaced with a note",
          aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "TaskOutput", dict())), "UNBOUND")
     saved_append = aiqt_hooks._orch_append_jsonl
@@ -816,6 +836,12 @@ def _test_note_literal_sites(failures, tmp):
         note("(nl-ledger-write) a failed dispatch-ledger write is surfaced with a note",
              aiqt_hooks.orch_dispatch_ledger(r.payload("PostToolUse", "Bash", dict(
                  command="python3 build.py", run_in_background=True))), "dispatch-ledger write failed")
+        # the question guard's fail-open (an empty mode record) stands, and its unwritten guard-events row is noted
+        y.mode.write_text("", encoding="utf-8")
+        note("(nl-question-fail-open-unrecorded) the unattended-question guard's fail-open whose guard-events "
+             "row cannot be written allows with a note naming the unwritten row",
+             aiqt_hooks.orch_ask_guard(y.payload("PreToolUse", "AskUserQuestion", dict(questions=[]))),
+             "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
     s = orch.Fixture(base, "stop")
@@ -8077,6 +8103,32 @@ def _main_isolated(monitor):
         if not any(r.get("kind") == "wrtscp" and r.get("decision") == "allow"
                    and "companion-store" in r.get("detail", "") for r in cs_rows):
             failures.append("(ws-cs-audit) a companion-store ALLOW must emit a wrtscp allow guard-event row")
+        # A failed guard-events append changes no write-scope decision and is never silent: the companion-store
+        # write still allows, with a note naming the unwritten audit row, and an undeclared-repo write still
+        # denies, with the recording-failure warning in both its deny reason and its banner.
+        cs_saved_append = aiqt_hooks._orch_append_jsonl
+        try:
+            aiqt_hooks._orch_append_jsonl = lambda path, row: False
+            cs_note = aiqt_hooks.write_scope_guard({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                                    "tool_input": {"file_path": os.path.join(str(cs_store),
+                                                                                         "audit2.md")},
+                                                    "cwd": str(cs_sess)})
+            cs_deny = aiqt_hooks.write_scope_guard({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                                                    "tool_input": {"file_path": os.path.join(str(cs_other),
+                                                                                         "z.md")},
+                                                    "cwd": str(cs_sess)})
+        finally:
+            aiqt_hooks._orch_append_jsonl = cs_saved_append
+        if _reduce_result(cs_note[0], cs_note[1]) != "allow-note" \
+                or "(wrtscp) could not be written" not in cs_note[1].get("systemMessage", ""):
+            failures.append("(ws-cs-audit-unwritten) a companion-store ALLOW whose audit row cannot be written "
+                            "must allow with a note naming it, got {!r}".format(cs_note))
+        cs_deny_hso = (cs_deny[1] or {}).get("hookSpecificOutput") or {}
+        if _reduce_result(cs_deny[0], cs_deny[1]) != "deny" \
+                or "(wrtscp) could not be written" not in cs_deny_hso.get("permissionDecisionReason", "") \
+                or "(wrtscp) could not be written" not in cs_deny[1].get("systemMessage", ""):
+            failures.append("(ws-deny-unrecorded) a write-scope DENY whose guard-events row cannot be written must "
+                            "still deny, warning in its reason and banner, got {!r}".format(cs_deny))
         # Classifier discrimination: the matcher matches only the declared root, never an undeclared repo.
         _cs_stores = aiqt_hooks._wrtscp_companion_stores(aiqt_hooks._recovery_toplevel(str(cs_sess)))
         if aiqt_hooks._wrtscp_target_companion_store(
