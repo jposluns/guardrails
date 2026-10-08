@@ -646,6 +646,7 @@ expected-check-ids = [
   "config/member-close-on-interrupt",
   "config/member-close-handlers",
   "config/member-close-lock",
+  "config/member-close-signal-sweep",
   "config/member-close-unresolved-verdict",
   "config/member-failed-no-late-launch",
   "config/member-closing-refuses-start",

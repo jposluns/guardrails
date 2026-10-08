@@ -685,8 +685,9 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
             try:
                 with _MEMBERS_LOCK:
                     _MEMBERS["closing"] = True
-            except RegistryLockTimeout:
-                pass  # the plain store already refuses every later start; the close reports it
+            except RegistryLockTimeout as exc:
+                # The plain store already refuses every later start; the refusal is recorded.
+                _lock_refused("failed-member branch", exc)
             pool.shutdown(wait=False, cancel_futures=True)
             _signal_member_groups()
             raise
@@ -1494,9 +1495,11 @@ def _config_member_bound(member):
 # store, with no lock, so _close_on_signal is a no-op before the lock is ever taken there (a
 # handler raising between the acquire and the protected range of a with statement would leave the
 # lock held). Every acquire is also BOUNDED (_RegistryLock, REGISTRY_LOCK_SECONDS): one not granted
-# raises RegistryLockTimeout, which each caller reports (a problem of the close, so the run is
-# cannot-evaluate; a member start, so that member's run is a cannot-evaluate timeout), so no path
-# blocks forever on it. config/member-close-lock pins both.
+# raises RegistryLockTimeout, which each caller reports AND records in _MEMBERS["refused"]
+# (_lock_refused), so no path blocks forever on it and a refusal anywhere (a member start, a
+# release, a kill sweep, the close) makes the run cannot-evaluate (_final_verdict) even when a later
+# close gets the lock and ends cleanly. config/member-close-lock and
+# config/member-close-unresolved-verdict pin both.
 REGISTRY_LOCK_SECONDS = 60
 
 
@@ -1527,12 +1530,24 @@ class _RegistryLock:
 
 
 _MEMBERS_LOCK = _RegistryLock()
-# "held": the first SIGINT or SIGTERM _close_on_signal ignored because closing was already set
-# (raised again by _reopen_members, the one place that clears closing inside a run).
-_MEMBERS = {"closing": False, "held": None, "groups": set()}
+# "raised": the SIGINT or SIGTERM _close_on_signal raised (None until one has). "held": the first
+# SIGINT or SIGTERM _close_on_signal deferred because closing was set or one had already raised
+# (raised once by main() after its second close and the restore, _raise_held, or by
+# _reopen_members, the one place that clears closing inside a run). "refused": every registry lock
+# refusal of this run (_lock_refused).
+_MEMBERS = {"closing": False, "raised": None, "held": None, "refused": [], "groups": set()}
 # How often a member's wait (_run_member) looks at closing: a member whose wait sees it set stops
 # waiting and runs its own cleanup at once, instead of waiting on to its bound.
 MEMBER_WAIT_SLICE_SECONDS = 0.5
+
+
+def _lock_refused(what, exc):
+    """Record a registry lock refusal (exc, a RegistryLockTimeout, met by what) in
+    _MEMBERS["refused"] and return the message: main()'s verdict reads every refusal of the run,
+    so it stays cannot-evaluate even when a later close gets the lock and ends cleanly."""
+    message = "{}: {}".format(what, exc)
+    _MEMBERS["refused"].append(message)
+    return message
 
 
 class _MemberGroup:
@@ -1603,7 +1618,7 @@ def _signal_member_groups():
                     problems.append("group {} kill refused ({}: {})".format(
                         group.proc.pid, type(exc).__name__, exc))
     except RegistryLockTimeout as exc:
-        problems.append("no group signalled: {}".format(exc))
+        problems.append(_lock_refused("no group signalled", exc))
     return problems
 
 
@@ -1667,13 +1682,14 @@ def _member_group_empty(group):
 
 def _release_member_group(group):
     """Remove a group confirmed empty from the registry and close its pidfd, exactly once; None,
-    or the problem when the registry lock is not granted (the group then stays registered)."""
+    or the problem when the registry lock is not granted (the group then stays registered, and the
+    refusal is recorded for main()'s verdict, _lock_refused)."""
     try:
         with _MEMBERS_LOCK:
             _MEMBERS["groups"].discard(group)
             fd, group.pidfd = group.pidfd, None
     except RegistryLockTimeout as exc:
-        return "group {} not released: {}".format(group.proc.pid, exc)
+        return _lock_refused("group {} not released".format(group.proc.pid), exc)
     if fd is not None:
         os.close(fd)
     return None
@@ -1746,39 +1762,53 @@ def _close_members():
                 if unconfirmed is not None:
                     problems.append(unconfirmed)
     except RegistryLockTimeout as exc:
-        problems.append("close stopped: {}".format(exc))
+        problems.append(_lock_refused("close stopped", exc))
     return problems
 
 
 def _close_on_signal(signum, frame):
-    """main()'s SIGINT and SIGTERM handler: the FIRST one sets closing (no member starts after it)
-    and raises KeyboardInterrupt (SIGINT) or SystemExit(128 + signum) (SIGTERM), so main()'s
-    finally closes every member group; while closing is set (after that first one, or once main()'s
-    finally, the close or the config pool's failed-member branch has set it) every later one is
-    ignored, so it cannot cut the bounded close short; the first one ignored is kept in held for
-    _reopen_members. It never takes the registry lock, and it never raises while the main thread
-    holds it: every main-thread path that takes the lock during a run sets closing first."""
-    if _MEMBERS["closing"]:
+    """main()'s SIGINT and SIGTERM handler, FIRST RAISE THEN DEFER: the first one, while closing is
+    clear and none has raised, sets closing (no member starts after it), records itself in raised
+    and raises (_raise_signal_exception), so main()'s finally closes every member group. Every
+    later one (once one has raised, or once closing is set by main()'s finally, the close or the
+    config pool's failed-member branch) is DEFERRED, never raised: the first deferred is kept in
+    held and main() raises it exactly once after its second close and the restore (_raise_held),
+    so no second or later signal can cut either close short or be lost. It never takes the
+    registry lock, and it never raises while the main thread holds it: every main-thread path that
+    takes the lock during a run sets closing first."""
+    if _MEMBERS["closing"] or _MEMBERS["raised"]:
         _MEMBERS["held"] = _MEMBERS["held"] or signum
         return
     _MEMBERS["closing"] = True
+    _MEMBERS["raised"] = signum
+    _raise_signal_exception(signum)
+
+
+def _raise_signal_exception(signum):
+    """Raise what signum's default disposition means here: KeyboardInterrupt for SIGINT (Python's
+    default handler), SystemExit(128 + signum) for SIGTERM (143, the default action's exit code)."""
     if signum == signal.SIGINT:
         raise KeyboardInterrupt
     raise SystemExit(128 + signum)
 
 
+def _raise_held():
+    """Raise the SIGINT or SIGTERM _close_on_signal deferred (held), once, and clear it; nothing
+    when none was deferred. main() calls it after its second close and the restore."""
+    held, _MEMBERS["held"] = _MEMBERS["held"], None
+    if held:
+        _raise_signal_exception(held)
+
+
 def _reopen_members():
     """Clear closing after a control drove _config_results into its failed-member branch on
     purpose and caught the raise (production never clears it inside a run: that raise ends the
-    suite). A SIGINT or SIGTERM ignored while closing was set is raised now, closing set again,
-    instead of being lost."""
+    suite). A SIGINT or SIGTERM deferred while closing was set is raised now (_raise_held),
+    closing set again, instead of being lost."""
     _MEMBERS["closing"] = False
-    held, _MEMBERS["held"] = _MEMBERS["held"], None
-    if held:
+    if _MEMBERS["held"]:
         _MEMBERS["closing"] = True
-        if held == signal.SIGINT:
-            raise KeyboardInterrupt
-        raise SystemExit(128 + held)
+        _raise_held()
 
 
 def _install_signal_handlers(previous):
@@ -1801,7 +1831,8 @@ def _install_signal_handlers(previous):
 
 def _restore_signal_handlers(previous):
     """Restore the dispositions _install_signal_handlers recorded, ONCE, after main()'s second
-    close, in reverse order so SIGINT (whose restored handler raises) is restored last."""
+    close, in reverse order so SIGINT (whose restored handler raises) is restored last; main()
+    then raises a deferred signal (_raise_held)."""
     for signum in reversed(list(previous)):
         signal.signal(signum, previous[signum])
 
@@ -1815,17 +1846,21 @@ def _finish_members():
     return problems
 
 
-def _final_verdict(code, unresolved):
+def _final_verdict(code, unresolved, refused=()):
     """main()'s exit code after the suite's close. code is _suite_main's (0 when nothing was found);
     unresolved, the problems main()'s second close still met (a group not confirmed empty, a kill
-    refused, a registry lock not granted), makes the run cannot-evaluate: 0 becomes 2, a definite
-    failure's 1 and a harness error's 2 stand, and the problems are listed. The PASS line is
-    printed here, after the close, and only for a run that is still 0."""
-    if unresolved:
-        note = "the suite's close left member process groups unresolved"
+    refused, a registry lock not granted), and refused, every registry lock refusal of the run
+    (_lock_refused: a member start, a release, a kill sweep or a close, even one a later close made
+    good), make the run cannot-evaluate: 0 becomes 2, a definite failure's 1 and a harness error's 2
+    stand, and the problems are listed. The PASS line is printed here, after the close, and only
+    for a run that is still 0."""
+    problems = list(unresolved) + [entry for entry in refused if entry not in unresolved]
+    if problems:
+        note = ("the suite's close left member process groups unresolved" if unresolved else
+                "the member registry lock was refused during the run")
         print(("  also cannot evaluate ({}):" if code == 1 else
                "SELF-TEST CANNOT EVALUATE: {}:").format(note), flush=True)
-        for problem in unresolved:
+        for problem in problems:
             print("  - " + problem, flush=True)
         return code or 2
     if code == 0:
@@ -1922,7 +1957,8 @@ def _run_member(argv, cwd, env, bound, label, banner, cannot_evaluate, report):
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc), "", ""
     except RegistryLockTimeout as exc:
-        message = "TIMEOUT: {} not started: {} (cannot evaluate)".format(label, exc)
+        message = "TIMEOUT: {} (cannot evaluate)".format(_lock_refused(
+            "{} not started".format(label), exc))
         (CANNOT_EVALUATE if cannot_evaluate is None else cannot_evaluate).append(message)
         print(banner + message, file=sink, flush=True)
         return message, "", ""
@@ -2345,7 +2381,8 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # holder (the member thread must stop waiting at once, not at its bound); "sigterm", the same with
 # a process-directed SIGTERM; "install", a real SIGINT delivered inside the installation of the
 # SIGINT handler; "close", a member left running on a non-main thread when the lanes return and a
-# real SIGINT at the ENTRY of each close (both ignored, the handler installed at both entries);
+# real SIGINT at the ENTRY of each close (both deferred, the handler installed at both entries,
+# and raised once after the second close);
 # "lock", the registry lock wrapped so a real SIGINT is raised right after an acquire by the main
 # thread: _close_members called directly with closing clear, a 2 s loop of _close_members under
 # real SIGINTs from another thread (each interrupted close must leave the lock free), a member
@@ -2355,7 +2392,12 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # sweep; "failed-signal", the same with the lock wrapper armed for the failed-member branch;
 # "unresolved", a member exiting 0 whose group's emptiness probes raise PermissionError (main()
 # must exit 2 and never print PASS), then the injection removed and _close_members releasing the
-# group. It prints one PROBE-REPORT line: the outcome, how many groups are still registered after
+# group; "release-timeout", a member exiting 0 whose release is refused (another thread takes the
+# registry lock right after the member's kill and holds it past a 0.2 s lock bound, freeing it once
+# _run_bounded returns, so main()'s closes then release the group cleanly), and "start-timeout",
+# a member start refused the same way (its timeout recorded only in a private list), each of
+# which main() must still end with exit 2, the CANNOT EVALUATE line, no PASS line and one recorded
+# refusal. It prints one PROBE-REPORT line: the outcome, how many groups are still registered after
 # main(), every recorded process's state (_recorded_states), whether main() ended within 30 s of
 # every signal or injected failure, and the extras: the handlers restored after main() and a real
 # SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and each scenario's own
@@ -2434,7 +2476,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "def direct():",
     "    previous = signal.signal(signal.SIGINT, suite._close_on_signal)",
     "    try:",
-    "        suite._MEMBERS['closing'] = False",
+    "        suite._MEMBERS.update(closing=False, raised=None, held=None)",
     "        fire.append(True)",
     "        try:",
     "            problems, raised = suite._close_members(), None",
@@ -2460,7 +2502,7 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "            try:",
     "                if time.monotonic() >= end:",
     "                    break",
-    "                suite._MEMBERS['closing'] = False",
+    "                suite._MEMBERS.update(closing=False, raised=None, held=None)",
     "                problems = suite._close_members()",
     "                if problems:",
     "                    stuck.append(problems)",
@@ -2518,6 +2560,33 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    elif scenario == 'unresolved':",
     "        suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
     "                           dict(os.environ), 90, 'unresolved probe', 'PROBE ')",
+    "        sent.append(time.monotonic())",
+    "    elif scenario.endswith('-timeout'):",
+    "        suite.REGISTRY_LOCK_SECONDS = 0.2",
+    "        taken, done, record, real_stop = (threading.Event(), threading.Event(), [],",
+    "                                          suite._stop_member_group)",
+    "        def holder():",
+    "            got = real_acquire(10)",
+    "            taken.set()",
+    "            done.wait(30)",
+    "            if got:",
+    "                suite._MEMBERS_LOCK.release()",
+    "        def stop(group):",
+    "            problems = real_stop(group)",
+    "            threading.Thread(target=holder, daemon=True).start()",
+    "            taken.wait(30)",
+    "            return problems",
+    "        if scenario == 'start-timeout':",
+    "            threading.Thread(target=holder, daemon=True).start()",
+    "            taken.wait(30)",
+    "        else:",
+    "            suite._stop_member_group = stop",
+    "        try:",
+    "            rc = suite._run_bounded([sys.executable, '-I', '-B', '-c', 'pass'], folder,",
+    "                                    dict(os.environ), 90, 'lock probe', 'PROBE ', record)[0]",
+    "        finally:",
+    "            done.set()",
+    "        extra['run'] = [str(rc)[:9], len(record)]",
     "        sent.append(time.monotonic())",
     "    else:",
     "        threading.Thread(target=monitor, args=(('a',),), daemon=True).start()",
@@ -2584,6 +2653,8 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "if scenario == 'unresolved':",
     "    problems = suite._close_members()",
     "    extra['released'] = [problems, len(suite._MEMBERS['groups'])]",
+    "if scenario.endswith('-timeout'):",
+    "    extra['refused'] = len(suite._MEMBERS['refused'])",
     "restored = [signal.getsignal(signal.SIGINT) is signal.default_int_handler,",
     "            signal.getsignal(signal.SIGTERM) == signal.SIG_DFL]",
     "try:",
@@ -2597,6 +2668,158 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "print(captured.getvalue(), end='', flush=True)",
     "print('PROBE-REPORT ' + json.dumps([outcome, registered, suite._recorded_states(folder),",
     "      bool(sent) and all(ended - when < 30 for when in sent), extra]), flush=True)",
+))
+
+
+# The child config/member-close-signal-sweep runs (python3 -I -B -c, argv: the tools directory):
+# THE SIGNAL-BOUNDARY SWEEP of main(). The suite body is a stub returning 0, the registry holds one
+# group whose own cleanup has run, and the only stubs are the process-touching ones (the group
+# kill is recorded, its emptiness probe finds the group empty) plus a recorder around
+# _close_members; main(), _finish_members, _close_members, the kill sweep, the release, the
+# bounded registry lock (0.01 s here) and the handlers are the production ones. Each run delivers
+# REAL signals (signal.raise_signal, so the production handler runs at that point) at one point of
+# the window from the stub body's first line through the first line of _restore_signal_handlers
+# (the end of the second close): "line", a SIGINT, and separately a SIGTERM, at every line event
+# (sys.settrace); "instruction", the same before every bytecode instruction (sys.monitoring);
+# "pair", a first signal at every line event and a second of the other kind at every later line
+# event of that run (sys.monitoring: CPython drops a trace function that raised, so sys.settrace
+# cannot deliver a second signal after a first that raised). Every run must end with the outcome
+# of a delivered signal (KeyboardInterrupt, or SystemExit 143 for SIGTERM; returned 0 with none),
+# no close cut short, at least one close completed clean, the registry empty, the lock free, the
+# default handlers restored and no signal left deferred. It prints one SWEEP-REPORT line: the
+# baseline run, per mode and first signal the runs made and the first five failing ones (point,
+# offset of the second, signals, outcome, each close's problems, groups left), the functions the
+# window reached and the seconds taken.
+_CLOSE_SWEEP_CHILD = "\n".join((
+    "import contextlib, io, json, signal, sys, time",
+    "sys.path.insert(0, sys.argv[1])",
+    "import selftest_git_fixture_env as suite",
+    "suite.REGISTRY_LOCK_SECONDS = 0.01",
+    "M, TOOL = sys.monitoring, sys.monitoring.DEBUGGER_ID",
+    "SUITE_FILE = suite.main.__code__.co_filename",
+    "RESTORE = suite._restore_signal_handlers.__code__",
+    "OUTCOME = {signal.SIGINT: 'KeyboardInterrupt', signal.SIGTERM: 'SystemExit 143'}",
+    "def body(report_path, lanes):",
+    "    code = 0",
+    "    return code",
+    "BODY = body.__code__",
+    "class Proc:",
+    "    pid, returncode, stdout, stderr = 0, 0, None, None",
+    "def signal_group(group, sig):",
+    "    if sig == 0:",
+    "        raise ProcessLookupError(3, 'the group is empty')",
+    "    st['kills'] += 1",
+    "    return True",
+    "real_close = suite._close_members",
+    "def close():",
+    "    st['closes'].append(None)",
+    "    problems = real_close()",
+    "    st['closes'][-1] = problems",
+    "    return problems",
+    "suite._suite_main, suite._close_members = body, close",
+    "suite._signal_member_group = signal_group",
+    "suite._expected_check_ids = lambda: set(suite.EXECUTED)",
+    "st = {}",
+    "def step(code):",
+    "    if code.co_filename != SUITE_FILE and code is not BODY:",
+    "        return False",
+    "    if not st['open']:",
+    "        if code is not BODY:",
+    "            return True",
+    "        st['open'] = True",
+    "    if st['shut']:",
+    "        return True",
+    "    st['shut'] = code is RESTORE",
+    "    st['n'] += 1",
+    "    st['names'].add(code.co_name)",
+    "    plan = st['plan']",
+    "    if plan[0] == st['n']:",
+    "        st['first'] = st['n']",
+    "        st['sent'].append(plan[1])",
+    "        signal.raise_signal(plan[1])",
+    "    elif st['first'] and plan[2] and st['n'] == st['first'] + plan[2]:",
+    "        st['sent'].append(plan[3])",
+    "        signal.raise_signal(plan[3])",
+    "    return True",
+    "def tracer(frame, event, arg):",
+    "    if event == 'call':",
+    "        code = frame.f_code",
+    "        return tracer if code.co_filename == SUITE_FILE or code is BODY else None",
+    "    if event == 'line':",
+    "        step(frame.f_code)",
+    "    return tracer",
+    "def on_event(code, where):",
+    "    return None if step(code) else M.DISABLE",
+    "def lock_free():",
+    "    free = suite._MEMBERS_LOCK.acquire(0)",
+    "    if free:",
+    "        suite._MEMBERS_LOCK.release()",
+    "    return free",
+    "def run(how, plan):",
+    "    st.clear()",
+    "    st.update(open=False, shut=False, n=0, first=0, plan=plan, sent=[], closes=[], kills=0,",
+    "              names=set())",
+    "    group = suite._MemberGroup(Proc(), None)",
+    "    group.ended = True",
+    "    suite._MEMBERS['groups'].clear()",
+    "    suite._MEMBERS['groups'].add(group)",
+    "    signal.signal(signal.SIGINT, signal.default_int_handler)",
+    "    signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+    "    if how == 'trace':",
+    "        sys.settrace(tracer)",
+    "    else:",
+    "        M.restart_events()",
+    "        M.set_events(TOOL, M.events.LINE if how == 'line' else M.events.INSTRUCTION)",
+    "    try:",
+    "        with contextlib.redirect_stdout(io.StringIO()):",
+    "            outcome = 'returned {}'.format(suite.main(None, None))",
+    "    except KeyboardInterrupt:",
+    "        outcome = 'KeyboardInterrupt'",
+    "    except SystemExit as exc:",
+    "        outcome = 'SystemExit {}'.format(exc.code)",
+    "    except BaseException as exc:",
+    "        outcome = '{}: {}'.format(type(exc).__name__, exc)",
+    "    finally:",
+    "        sys.settrace(None)",
+    "        M.set_events(TOOL, 0)",
+    "    sent, closes = list(st['sent']), st['closes']",
+    "    allowed = [OUTCOME[sig] for sig in sent] or ['returned 0']",
+    "    good = (outcome in allowed and None not in closes and [] in closes",
+    "            and (sent or len(closes) == 2) and not suite._MEMBERS['groups'] and lock_free()",
+    "            and signal.getsignal(signal.SIGINT) is signal.default_int_handler",
+    "            and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL",
+    "            and suite._MEMBERS['held'] is None)",
+    "    return sent, good, [outcome, closes, len(suite._MEMBERS['groups'])]",
+    "M.use_tool_id(TOOL, 'member close sweep')",
+    "M.register_callback(TOOL, M.events.LINE, on_event)",
+    "M.register_callback(TOOL, M.events.INSTRUCTION, on_event)",
+    "started, report, names = time.monotonic(), {}, set()",
+    "baseline = run('trace', (0, 0, 0, 0))",
+    "report['baseline'] = [baseline[1], baseline[2]]",
+    "for how, pairs, label in (('trace', False, 'line'), ('instruction', False, 'instruction'),",
+    "                          ('line', True, 'pair')):",
+    "    for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):",
+    "        points, bad, point = 0, [], 1",
+    "        while len(bad) < 5:",
+    "            offset = 1 if pairs else 0",
+    "            while True:",
+    "                sent, good, seen = run(how, (point, first, offset, second))",
+    "                if not sent:",
+    "                    break",
+    "                names |= st['names']",
+    "                points += 1",
+    "                if not good:",
+    "                    bad.append([point, offset, sent, seen])",
+    "                if not pairs or len(sent) < 2 or len(bad) >= 5:",
+    "                    break",
+    "                offset += 1",
+    "            if not sent:",
+    "                break",
+    "            point += 1",
+    "        report['{} {}'.format(label, signal.Signals(first).name)] = [points, bad]",
+    "report['names'] = sorted(names)",
+    "report['seconds'] = round(time.monotonic() - started, 1)",
+    "print('SWEEP-REPORT ' + json.dumps(report), flush=True)",
 ))
 
 
@@ -2689,19 +2912,29 @@ def _member_close_controls(fixture):
     registry lock free and every recorded process dead unless noted, within 30 s of each signal
     (the members' bound is 90 s): config/member-close-on-interrupt, "pooled", "communicate",
     "leader-first" and "setsid" end in KeyboardInterrupt with no group registered (the setsid
-    holder alive, out of reach of the group kill); config/member-close-handlers, "close" returns 0
-    with the handler installed at the entry of BOTH closes and both SIGINTs ignored, "sigterm"
+    holder alive, out of reach of the group kill); config/member-close-handlers, "close" ends in
+    KeyboardInterrupt raised once after the second close, with the handler installed at the entry
+    of BOTH closes and both SIGINTs deferred until then, "sigterm"
     ends in SystemExit(143), "install" in KeyboardInterrupt with SIGINT restored;
     config/member-close-lock, "lock": no KeyboardInterrupt and the lock free after the direct
     close, no close left blocked in the real-signal loop, with the lock held by another thread a
     member start and the close each give up within the lock bound (the start a recorded timeout,
-    the close a problem), main() returns 0;
-    config/member-failed-no-late-launch, "failed" and "failed-signal": the ValueError propagates
-    and member b's late start is refused; config/member-close-unresolved-verdict, "unresolved":
+    the close a problem), main() ends in KeyboardInterrupt (the SIGINT at the close's acquire is
+    deferred and raised once after the second close);
+    config/member-failed-no-late-launch, "failed" and "failed-signal": member b's late start is
+    refused, and the ValueError propagates ("failed") or the SIGINT deferred at the failed-member
+    branch's acquire is raised once after the second close ("failed-signal");
+    config/member-close-unresolved-verdict, "unresolved":
     main() returns 2 with
     the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
-    injection is removed. Every process recorded here is killed afterwards whatever the code under
-    test did (_kill_recorded)."""
+    injection is removed; "release-timeout" and "start-timeout": a registry lock refused once and
+    then free, so the closes end cleanly, still makes main() return 2 with the CANNOT EVALUATE
+    line, no PASS line, no group registered and the refusal recorded.
+    config/member-close-signal-sweep: the _CLOSE_SWEEP_CHILD sweep reports no failing run in any
+    mode (line, instruction, pair; SIGINT first and SIGTERM first), a clean baseline and every
+    close function reached; the number of runs per mode is printed on a MEMBER CLOSE SWEEP line.
+    Every process recorded here is killed afterwards whatever the code under test did
+    (_kill_recorded)."""
     import contextlib
     import io
     from unittest.mock import patch
@@ -2780,7 +3013,8 @@ def _member_close_controls(fixture):
 
     got = {}
     for scenario in ("pooled", "communicate", "leader-first", "setsid", "close", "sigterm",
-                     "install", "lock", "failed", "failed-signal", "unresolved"):
+                     "install", "lock", "failed", "failed-signal", "unresolved",
+                     "release-timeout", "start-timeout"):
         folder = fixture / "close-{}".format(scenario)
         folder.mkdir()
         try:
@@ -2814,22 +3048,49 @@ def _member_close_controls(fixture):
                 expect("leader-first", "KeyboardInterrupt", 0, ["dead"], 2),
                 expect("setsid", "KeyboardInterrupt", 0, ["alive", "dead"], 2)]),
             ("config/member-close-handlers", [
-                expect("close", "returned 0", 0, ["dead"], 2, (True, False),
-                       protected=[True, True]),
+                expect("close", "KeyboardInterrupt", 0, ["dead"], 2, protected=[True, True]),
                 expect("sigterm", "SystemExit 143", 0, ["dead"], 2),
                 expect("install", "KeyboardInterrupt", 0, [], 0)]),
             ("config/member-close-lock", [
-                expect("lock", "returned 0", 0, ["dead"], 2, (True, False),
+                expect("lock", "KeyboardInterrupt", 0, ["dead"], 2,
                        direct=[None, True, []], loop=[[], True],
                        held=[True, True, [True], True])]),
             ("config/member-failed-no-late-launch", [
-                expect(scenario, "ValueError: injected failed member a", 0, [], 0,
-                       late=[["b", closing]]) for scenario in ("failed", "failed-signal")]),
+                expect("failed", "ValueError: injected failed member a", 0, [], 0,
+                       late=[["b", closing]]),
+                expect("failed-signal", "KeyboardInterrupt", 0, [], 0,
+                       late=[["b", closing]])]),
             ("config/member-close-unresolved-verdict", [
                 expect("unresolved", "returned 2", 1, [], 0, (False, True),
-                       released=[[], 0])])):
+                       released=[[], 0]),
+                expect("release-timeout", "returned 2", 0, [], 0, (False, True),
+                       run=["0", 0], refused=1),
+                expect("start-timeout", "returned 2", 0, [], 0, (False, True),
+                       run=["TIMEOUT: ", 1], refused=1)])):
         observed = [got[want[0]] for want in wants]
         check(check_id, observed, wants, _partial_timeout_cause(observed, wants) or None)
+
+    rc, out, err = _run_bounded([sys.executable, "-I", "-B", "-c", _CLOSE_SWEEP_CHILD,
+                                 str(ROOT / "tools")], str(fixture), dict(os.environ), 300,
+                                "member-close signal sweep child", "CONTROL ")
+    modes = ["{} {}".format(mode, name) for mode in ("line", "instruction", "pair")
+             for name in ("SIGINT", "SIGTERM")]
+    reached = ["__enter__", "__exit__", "_close_members", "_finish_members",
+               "_member_group_empty", "_release_member_group", "_restore_signal_handlers",
+               "_signal_member_groups", "body", "main"]
+    try:
+        sweep = json.loads(out.rpartition("SWEEP-REPORT ")[2].partition("\n")[0])
+        print("MEMBER CLOSE SWEEP: {} ({} s)".format(", ".join(
+            "{} {} runs".format(mode, sweep[mode][0]) for mode in modes), sweep["seconds"]),
+            flush=True)
+        got = (sweep["baseline"], [[mode, sweep[mode][0] > 0, sweep[mode][1]] for mode in modes],
+               sorted(set(reached) - set(sweep["names"])))
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
+        got = rc if _is_timeout(rc) else "no report ({}): rc={} err={!r}".format(
+            exc, rc, err[-400:])
+    check("config/member-close-signal-sweep", got,
+          ([True, ["returned 0", [[], []], 0]], [[mode, True, []] for mode in modes], []),
+          (rc,) if _is_timeout(rc) else None)
 
 
 def _member_timeout_controls(base):
@@ -6190,36 +6451,55 @@ def main(report_path=None, lanes=None):
     """The suite's entry: _suite_main (the lanes and the verdict) inside ONE top-level try whose
     finally ends every member group still registered (_finish_members, _close_members), on every
     exit: a return, a timeout, KeyboardInterrupt, SystemExit or any other exception. While it runs,
-    the first SIGINT or SIGTERM raises once and every later one is ignored (_close_on_signal). The
-    finally's FIRST statement stores closing = True (a plain store: no handler can run before it),
-    so from there on no signal can raise: neither close can be cut short, and the main thread never
-    takes the registry lock while a handler could raise. The close handlers stay installed through
-    BOTH closes and the caller's dispositions are restored ONCE, after the second
-    (_restore_signal_handlers), even when the installation itself was interrupted. Only then is the
-    exit code final (_final_verdict): problems the second close still meets make a clean run
-    cannot-evaluate (exit 2), and the PASS line is printed only after the close.
-    config/member-close-handlers pins a real SIGINT at the entry of each close, a SIGINT during
-    the installation, a SIGTERM and the restored handlers; config/member-close-lock the lock;
-    config/member-close-unresolved-verdict the verdict.
-    DISCLOSED RESIDUALS: SIGKILL, and a SIGINT or SIGTERM whose disposition the caller had already
-    changed (left as it is), are outside this; an exception set into the main thread from outside
-    (PyThreadState_SetAsyncExc) is not a signal and is not limited to one."""
-    _MEMBERS["held"] = None
-    _MEMBERS["closing"] = False
+    the first SIGINT or SIGTERM raises and every later one is deferred, never raised
+    (_close_on_signal, first raise then defer). THE FALLBACK CLOSE PROTECTS THE CLOSING STORE: the
+    store closing = True is the first statement of a finally that is itself inside the try whose
+    finally runs the second close, so a signal raising at that store (closing still clear, none
+    raised yet) skips at most the first close, and the handler has then set closing itself; once
+    closing is set or one signal has raised, no signal raises, so neither close can be cut short
+    and the main thread never takes the registry lock while a handler could raise. (A try statement
+    as the finally's first statement would not do under the sweep's line-event model: CPython 3.14
+    leaves that line's NOP outside every protected range, so a raise delivered there escapes main()
+    with both closes skipped.) The close handlers stay installed through BOTH closes and the
+    caller's dispositions are restored ONCE, after the second (_restore_signal_handlers), even when
+    the installation itself was interrupted; then the first deferred signal is raised, exactly once
+    (_raise_held: KeyboardInterrupt, or SystemExit 143 for SIGTERM). Only then is the exit code final
+    (_final_verdict): problems the second close still meets, and any registry lock refusal of the
+    run, make a clean run cannot-evaluate (exit 2), and the PASS line is printed only after the
+    close. config/member-close-signal-sweep pins this by a sweep: a real SIGINT, and separately a
+    SIGTERM, at every line event from the suite body through the second close (sys.settrace), at
+    every bytecode instruction of that range (sys.monitoring), and a second signal at every line
+    after each first (sys.monitoring, since CPython drops a trace function that raised), each run
+    requiring a completed close, an empty registry, a free lock, the restored handlers and the
+    signal's own outcome. config/member-close-handlers pins a SIGINT during the installation, a
+    SIGTERM, the restored handlers and a real member closed under SIGINTs at the entry of each
+    close; config/member-close-lock the lock; config/member-close-unresolved-verdict the verdict.
+    DISCLOSED RESIDUALS: the guarantee holds at the interpreter's signal-delivery points
+    (eval-breaker granularity) on the main thread, where CPython runs Python signal handlers; a
+    signal delivered to the process before the handlers are installed takes the default
+    disposition, and one delivered after the restore takes the restored disposition. SIGKILL, and
+    a SIGINT or SIGTERM whose disposition the caller had already changed (left as it is), are
+    outside this; an exception set into the main thread from outside (PyThreadState_SetAsyncExc)
+    is not a signal and is not limited to one."""
+    _MEMBERS.update(closing=False, raised=None, held=None)
+    del _MEMBERS["refused"][:]
     previous, code, unresolved = {}, None, []
     try:
         try:
-            _install_signal_handlers(previous)
-            code = _suite_main(report_path, lanes)
-        finally:
-            _MEMBERS["closing"] = True
             try:
-                _finish_members()
+                _install_signal_handlers(previous)
+                code = _suite_main(report_path, lanes)
             finally:
-                unresolved = _finish_members()
+                _MEMBERS["closing"] = True
+                _finish_members()
+        finally:
+            unresolved = _finish_members()
     finally:
-        _restore_signal_handlers(previous)
-    return _final_verdict(code, unresolved)
+        try:
+            _restore_signal_handlers(previous)
+        finally:
+            _raise_held()
+    return _final_verdict(code, unresolved, list(_MEMBERS["refused"]))
 
 
 def _suite_main(report_path, lanes):
