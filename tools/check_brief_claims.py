@@ -22,28 +22,36 @@ block: a marker line anywhere in the brief counts. Cannot-evaluate (exit 2): a s
 block, an END with no BEGIN, a BEGIN inside an open block, an empty block, any other line inside the block
 (a blank line, an extra word, a colon, trailing space, a lookalike or invisible character), a repeated
 name, and a NEAR-MISS MARKER: a line outside the block that is not exactly a marker but, normalized
-(NFKC, invisible characters removed), case-folded and stripped, is at most 80 characters (measured after
-normalization, so invisible padding of any length does not hide a marker) and consists
+(NFKC, invisible characters removed) and case-folded, has at most 80 word characters (letters and digits:
+every non-word character is padding and is not counted, so padding of any kind and length, invisible,
+blank-rendering, spaces or punctuation, does not hide a marker) and consists
 ONLY of BEGIN or END, BRIEF, CLAIMS and an optional version (digits and dots, optionally after v or
 version), separated and surrounded by non-word characters (an indented, BOM-prefixed, lower-case,
 re-spaced, decorated or wrong-version marker). A line with any other word ("Begin brief claims
 investigation tomorrow.") is prose, not a near miss.
 
 THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict TOKEN comes only from its trailer record;
-the body's structure can make the file cannot-evaluate, and nothing else in the body is read. Reading
-upward from the last line, blank lines (empty or spaces and tabs only; a form feed or a no-break space is
-not blank) and trailer lines (a line starting at column 0 with a configured trailer prefix) are skipped;
-the first other line must be exactly `VERDICT: <token>` for one configured token, else the file is
-cannot-evaluate (no trailer, prose or a closing fence after the record, a decorated, indented,
-BOM-prefixed, differently cased or trailing-space record, or a value that is not exactly one token). The
-file is read as CommonMark block structure, and it is also cannot-evaluate when the record lies inside a
-fenced block, an HTML block (a comment, a pre element or another kind), an HTML comment or code span
-still open in its paragraph, or a block quote (its lazy continuation included), whatever the trailer
-prefixes are; and when a fence or an HTML block that ends at a closing marker (a comment, pre, script,
-style, textarea, processing instruction, declaration or CDATA) is never closed, in that reading or in a
-fence-only reading (a record there may be quoted or hidden text). Where the reading is unsure it refuses:
-a list item is read as a paragraph, and fences that pair differently once HTML blocks are ignored are
-cannot-evaluate.
+the body's structure can make the file cannot-evaluate, and nothing else in the body is read. The file
+is split into lines at CRLF, at a bare CR and at LF, as CommonMark reads it. Reading upward from the last
+line, blank lines (empty or spaces and tabs only; a form feed or a no-break space is not blank) and
+trailer lines (a line starting at column 0 with a configured trailer prefix) are skipped; the first other
+line must be exactly `VERDICT: <token>` for one configured token, else the file is cannot-evaluate (no
+trailer, prose or a closing fence after the record, a decorated, indented, BOM-prefixed, differently
+cased or trailing-space record, or a value that is not exactly one token). The record is accepted in ONE
+closed shape, whatever the trailer prefixes are, and every other shape is cannot-evaluate with a reason
+naming it: (1) the record starts at column 0; (2) the line before it is blank, or it is the file's first
+line, so no paragraph, list item or block quote can continue into it (lazily or otherwise), and no
+inline construct (a comment, a code span, a tag, a link title) can carry over into it; (3) no fence and no
+HTML block of a kind that survives a blank line (CommonMark types 1 to 5: a comment, pre, script, style,
+textarea, a processing instruction, a declaration or CDATA) is open at it; and (4) every trailer line
+after it starts at column 0 with no block-quote or list-item marker and starts no fence or HTML block.
+Condition (3) is read with NO container inferred: a line with at most one space of indentation that
+starts a fence or an HTML block starts it at the top level, and the file is cannot-evaluate when a line
+indented two or three spaces starts a fence or an HTML block of types 1 to 5 (it may lie in a list item,
+so a fence inside an indented list item is refused even when it is closed), or when a fence or HTML
+block starts while a lone tag line or an indented HTML line may still hold an HTML block open to the next
+blank line. A fence never closed when HTML blocks are ignored is cannot-evaluate too (a record there may
+be quoted or hidden text).
 
 COMPLETENESS. Every token in the brief's own text (outside fences, `>` lines, declared verbatim sections and
 the block) whose basename full-matches the review-file-pattern needs a block line with that basename, else
@@ -52,12 +60,14 @@ worker will write, a file kept elsewhere) cannot be claimed: a block line for it
 without one it is reported as an ABSENT line that does not change the exit code. Genuinely absent means:
 the name is printable ASCII, no path the brief writes for it under --input-dir exists, and no entry
 anywhere in --input-dir's subtree (a symlinked directory is listed, not entered; at most 20000 entries)
-has the same name after NFKC and case-folding (invisible characters removed) or a lookalike name (a
-non-ASCII character in the entry's name stands for any one character; 0 and o, 1 i | and l, rn and m,
-vv and w, cl and d are one). A present or lookalike name is UNCLAIMED, a name that is not printable ASCII
-is UNCLAIMED, and a subtree that cannot be listed whole or a path that cannot be examined is
-cannot-evaluate, never ABSENT. This scan is a trigger only: a name it does not recognize, or one
-reported ABSENT, loses the completeness check, but it can never make a wrong block line pass.
+has the same name after NFKC and case-folding (invisible characters removed) or a lookalike name. Every
+name is compared in ONE form, the brief's and each entry's alike: 0 and o, 1 i | and l, rn and m, vv and
+w, cl and d are one, and each non-ASCII character in the entry's name stands for any one character (so
+also for rn, vv or cl, the form of m, w or d), the two kinds composing in any combination. A present or
+lookalike name is UNCLAIMED, a name that is not printable ASCII is UNCLAIMED, and a subtree that cannot
+be listed whole or a path that cannot be examined is cannot-evaluate, never ABSENT. This scan is a
+trigger only: a name it does not recognize, or one reported ABSENT, loses the completeness check, but it
+can never make a wrong block line pass.
 
 ADVISORY PROSE (never blocking). The free-prose rules of the third QA round run on the brief's own text
 and report every result as an ADVISORY line: verdict, id, grade and count restatements bound to named
@@ -116,12 +126,14 @@ MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and bl
        recognized named review file present in DIR (or a lookalike of it) has no block line (UNCLAIMED): a
        brief that names a review file present in DIR and has no claims line for it exits 1
     2  cannot evaluate: a block-named review file that is missing, unreadable, not UTF-8, over 4 MiB, a
-       directory or outside DIR; a missing or malformed trailer in that file, a record inside a fence, an
-       HTML block, a comment, a pre element, an open code span or a block quote, or a fence or HTML block
-       never closed; a malformed block or a near-miss marker; an unclaimed name whose absence cannot be
-       established; an unreadable brief; an unclosed fence or verbatim section in the brief; a malformed
-       configuration; a missing DIR; an adopter review-file-pattern over its bound; a usage error; no
-       configuration under --require-config; the run deadline passed before every blocking result
+       directory or outside DIR; a missing or malformed trailer in that file, or a record outside the
+       closed trailer shape (not after a blank line, inside a fence or an HTML block of types 1 to 5, a
+       line the top-level reading cannot place, a trailer line that starts a block quote, a list item, a
+       fence or an HTML block, a fence never closed); a malformed block or a near-miss marker; an
+       unclaimed name whose absence cannot be established; an unreadable brief; an unclosed fence or
+       verbatim section in the brief; a malformed configuration; a missing DIR; an adopter
+       review-file-pattern over its bound; a usage error; no configuration under --require-config; the
+       run deadline passed before every blocking result
 
   OUTPUT, on stdout, one result per line; the FIRST WORD of every line is one of these:
     BRIEF <path> sha256=<hex>                              (first, for each readable brief)
@@ -143,8 +155,12 @@ MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and bl
   hook bound of about 10 seconds sees the tool's own exit, never a kill: an overrun is the tool's own
   CANNOT-EVALUATE run line and exit 2. Two mechanisms enforce it: SIGALRM where the platform has it
   (unblocked for the run when the inherited signal mask blocks it, and the mask restored after), and a
-  deadline polled between steps (before each brief, each block line, each unclaimed name and each
-  directory of the absence listing), which holds where SIGALRM is missing, ignored or cannot be armed.
+  deadline polled between steps (before each brief, each block line, each unclaimed name, each directory
+  of the absence listing and each --emit name, and once more before the blocking exit code is committed
+  and before the --emit block is printed), so where SIGALRM is missing, ignored or cannot be armed a run
+  whose steps each return never commits its blocking exit code, or prints an --emit block, after the
+  deadline has passed (a brief summary printed before that last poll can be followed by the run's
+  CANNOT-EVALUATE line and exit 2).
   Within it the regex child has REGEX_DEADLINE (4 seconds, CPU limit CHILD_CPU 3 seconds) and the advisory
   children share ADVISORY_DEADLINE (2.5 seconds for the whole run, each child's CPU limit its whole
   seconds), each cut to what is left of the run (the advisory children keep a 0.5-second reserve).
@@ -174,8 +190,10 @@ agrees with its trailer, or that a file did not change after the check while kee
 file named in a form the completeness scan does not recognize (a name split across lines, a path whose
 basename does not full-match the pattern, a name inside a fence, a quote or a declared verbatim section)
 needs no block line, and neither does a recognized name that is genuinely absent (ABSENT); a lookalike
-made of several characters for one (beyond the ASCII pairs listed under COMPLETENESS) is not detected,
-so a present file named that way is reported ABSENT. A prose path naming a
+made of several characters for one (beyond the ASCII pairs listed under COMPLETENESS, such as a letter
+with a separate combining mark) is not detected, so a present file named that way is reported ABSENT. A
+review file whose record follows a fence in an indented list item is cannot-evaluate (above), a refusal,
+never a pass. A prose path naming a
 same-named file in another directory is covered by the block line for that basename, which reads the file
 inside DIR.
 
@@ -227,7 +245,8 @@ BLOCK_END = "END BRIEF-CLAIMS"
 # characters. Ordinary prose ("Begin brief claims investigation tomorrow.") has other words and is not one.
 NEAR_MARKER_RE = re.compile(r"[\W_]*(?:begin|end)[\W_]*brief[\W_]*claims"
                             r"(?:[\W_]*(?:(?:v|version)[\W_]*)?\d+(?:\.\d+)*)?[\W_]*")
-NEAR_MARKER_MAX = 80  # a stripped line longer than this is never read as a near-miss marker
+NEAR_MARKER_MAX = 80  # a line with more word characters than this is never a near-miss marker (padding not counted)
+NON_WORD_RE = re.compile(r"[\W_]+")  # the padding NEAR_MARKER_RE ignores, removed before the length is measured
 NAME_RE = re.compile(r"[!-.0-~]+")  # a block name: printable ASCII, no space, no slash
 VERDICT_TOKEN_RE = re.compile(r"[!-~]+(?: [!-~]+)*")
 TRAILER_PREFIX_RE = re.compile(r"[!-~][ -~]*")
@@ -248,8 +267,9 @@ SRC_WORD_RE = re.compile(NUMBER + r"|[A-Za-z][A-Za-z-]*")
 CLAUSE_RE = re.compile(r"[,;:.!?](?=\s|$)|\n")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
-# CommonMark block starts read in a review file (the trailer record must lie outside every such block):
-# HTML block types 1 to 5 with their end conditions, type 6 (ends at a blank line), and type 7.
+# CommonMark block starts read in a review file (the trailer record must follow a blank line at the top level,
+# outside every fence and HTML block that survives a blank line): HTML block types 1 to 5 with their end
+# conditions, type 6 (ends at a blank line), and type 7 (a lone tag line; ends at a blank line).
 BLANK_END = re.compile(r"\A\Z")  # sentinel: an HTML block of type 6 or 7, which ends at a blank line
 HTML_STARTS = (
     (re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.I),
@@ -265,12 +285,8 @@ HTML_STARTS = (
      BLANK_END))
 HTML_7_RE = re.compile(r" {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*"
                        r"(?:[^ \t\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$")
-ATX_RE = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
-BREAK_RE = re.compile(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
-SETEXT_RE = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
-QUOTE_RE = re.compile(r" {0,3}>")
-BACKTICKS_RE = re.compile(r"`+")
-INLINE_OPEN_RE = re.compile(r"\\[!-/:-@\[-`{-~]|`+|<!--")
+LINE_END_RE = re.compile(r"\r\n|\r|\n")  # the CommonMark line endings: a review file's structure is read at these
+CONTAINER_RE = re.compile(r" {0,3}(?:>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$))")  # a quote or list-item marker
 VERDICT_WORD_RE = re.compile(r"(?<![A-Za-z])verdicts?(?![A-Za-z])", re.I)
 OPTION_GAP_RE = re.compile(r"[\s\"'*_:,]*(?:or|/)[\s\"'*_:,]*(?:verdict[\s*_]*:[\s\"'*_]*)?", re.I)
 # Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): removed before any advisory comparison.
@@ -295,7 +311,9 @@ ADVISORY_DEADLINE = 2.5  # wall-clock seconds for the advisory child (its CPU li
 ADVISORY_MAX = 256 << 10  # characters: advisory size budget (the brief's own text, sections, named files, template)
 RESERVE = 0.5  # seconds of the run deadline kept back for printing after the advisory child
 MAX_DIR_ENTRIES = 20000  # --input-dir subtree entries read to establish that a named file is absent
-ASCII_SKELETON = str.maketrans("01i|", "olll")  # ASCII lookalikes folded together in a file-name key
+# The ASCII lookalikes of a file-name key written in one form: 0 as o; 1, i and | as l; m as rn, w as vv and d as cl
+# (a pair and its single character compare equal, in any combination with the others).
+ASCII_SKELETON = str.maketrans(dict(zip("01i|mwd", ("o", "l", "l", "l", "rn", "vv", "cl"))))
 CHILD_MEMORY = 1 << 30  # a child's address-space cap, where the platform allows one
 MATCH, MISMATCH, CANNOT, WARN, EXEMPT, UNCLAIMED, ABSENT = (
     "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT", "UNCLAIMED", "ABSENT")
@@ -1320,176 +1338,161 @@ def check_foreign(own, registry, found):
 
 def raw_lines(text):
     """The lines of a text split at LF only, each with one final CR dropped: no other character ends a
-    line, so a vertical tab or U+2028 stays inside its line (and fails any exact-line grammar)."""
+    line, so a vertical tab or U+2028 stays inside its line (and fails any exact-line grammar). The claims
+    block of a brief is read from these; a review file's structure is read from md_lines."""
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
-def _html_start(line, in_paragraph):
-    """The end condition of the CommonMark HTML block line starts (a regex for types 1 to 5, BLANK_END for
-    types 6 and 7), or None. Type 7 cannot interrupt a paragraph."""
+def md_lines(text):
+    """The lines of a review file as CommonMark reads them: split at CRLF, at a bare CR and at LF, with no
+    final empty line. A vertical tab or U+2028 stays inside its line, as in raw_lines."""
+    lines = LINE_END_RE.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _html_end(line):
+    """The end condition of the CommonMark HTML block of types 1 to 6 that line starts (a regex for types 1
+    to 5, which survive a blank line; BLANK_END for type 6), or None."""
     for start, end in HTML_STARTS:
         if start.match(line):
             return end
-    if not in_paragraph and HTML_7_RE.match(line):
-        return BLANK_END
     return None
 
 
-def _inline(line, state):
-    """The inline state after one paragraph line, given the state before it: None, "comment" (an HTML
-    comment still open) or the length of the backtick run of a code span still open."""
-    i = 0
-    while True:
-        if state == "comment":
-            j = line.find("-->", i)
-            if j < 0:
-                return state
-            state, i = None, j + 3
-        elif state is not None:
-            for m in BACKTICKS_RE.finditer(line, i):
-                if len(m.group(0)) == state:
-                    state, i = None, m.end()
-                    break
-            else:
-                return state
-        else:
-            m = INLINE_OPEN_RE.search(line, i)
-            if m is None:
-                return None
-            i = m.end()
-            if m.group(0) == "<!--":
-                state = "comment"
-            elif m.group(0)[0] == "`":
-                state = len(m.group(0))
+def _starts_block(line):
+    """True for a line that starts a fence or an HTML block of any type (1 to 7)."""
+    return bool(_fence(line)) or _html_end(line) is not None or HTML_7_RE.match(line) is not None
 
 
-def _structure(lines):
-    """A CommonMark reading of a review file's block structure: (inside, unclosed). inside[k] is True when
-    lines[k] lies inside a fenced block, an HTML block (a comment, a pre element and the other HTML block
-    kinds), an HTML comment or code span still open in its paragraph, or a block quote (its own lines and
-    the lazy continuation lines of its paragraph). unclosed is (what, line number) for a fence or an HTML
-    block of types 1 to 5 still open at the end of the file, else None. Where this reading is unsure it
-    marks MORE lines inside, never fewer (a list item is read as a paragraph)."""
-    inside, fence, html, para, inline, opened = [], None, None, None, None, None
-    for n, line in enumerate(lines, 1):
-        if fence is not None:
-            inside.append(True)
-            if _closes(line, fence):
-                fence = None
-            continue
+def _open_block(lines, upto):
+    """The top-level CommonMark block still open at line upto (1-based), read from lines 1 to upto - 1 with
+    NO container inferred: (what, the line that opened it) for a fence or an HTML block of types 1 to 5
+    (the kinds that survive a blank line), else None, or a GateError for a line this reading cannot place.
+    A line with at most one space of indentation that starts a fence or an HTML block of types 1 to 6
+    starts it at the top level (a list item's content is indented at least two spaces, a block quote line
+    starts with >, and none of these continues a paragraph), and the block runs to its own end condition.
+    A lone tag line (type 7) opens a block only where no paragraph continues, which is certain only at the
+    file's first line or after a blank line, with at most one space of indentation; elsewhere, and for a
+    type 6 line indented two or three spaces, a block MAY run to the next blank line, and a line inside
+    that window that starts a fence or an HTML block is refused. A fence or an HTML block of types 1 to 5
+    started by a line indented two or three spaces is refused: it may lie in a list item, whose extent is
+    not inferred."""
+    block, maybe = None, None
+    for n, line in enumerate(lines[:upto - 1], 1):
         blank = not line.strip(" \t")
-        if html is not None:
-            if html is BLANK_END and blank:
-                html = None
-            else:
-                inside.append(True)
-                if html is not BLANK_END and html.search(line):
-                    html = None
-                continue
+        if block is not None:
+            kind, end, _ = block
+            if (end.search(line) if kind == "html" else _closes(line, end) if kind == "fence" else blank):
+                block = None
+            continue
         if blank:
-            inside.append(False)
-            para = inline = None
+            maybe = None
             continue
-        lead = len(line) - len(line.lstrip(" \t"))
-        if para is None and len(line[:lead].expandtabs(4)) >= 4:
-            inside.append(False)  # indented code: a column-0 record never is one
+        if line.lstrip(" ")[:1] not in ("`", "~", "<"):
+            continue  # a fence or an HTML block starts with one of these after at most three spaces
+        fence = _fence(line)
+        end = None if fence else _html_end(line)
+        tag = not fence and end is None and HTML_7_RE.match(line) is not None
+        if not (fence or end is not None or tag):
             continue
-        f = _fence(line)
-        if f:
-            inside.append(True)
-            fence, opened, para, inline = f, n, None, None
-            continue
-        end = _html_start(line, para is not None)
-        if end is not None:
-            inside.append(True)
-            para = inline = None
-            if end is BLANK_END or not end.search(line, lead + 2):
-                html, opened = end, n
-            continue
-        if ATX_RE.match(line) or BREAK_RE.match(line) or (para == "plain" and SETEXT_RE.match(line)):
-            inside.append(False)
-            para = inline = None
-            continue
-        q = QUOTE_RE.match(line)
-        if q:
-            inside.append(True)
-            rest = line[q.end():]
-            rest = rest[1:] if rest[:1] in (" ", "\t") else rest
-            para = "quote" if rest.strip(" \t") and not (_fence(rest) or ATX_RE.match(rest) or BREAK_RE.match(
-                rest) or _html_start(rest, False) is not None) else None
-            inline = None
-            continue
-        inside.append(para == "quote" or (para is not None and inline is not None))
-        before = inline if para is not None else None
-        para = para or "plain"
-        inline = _inline(line, before)
-    if fence is not None:
-        return inside, ("a fence", opened)
-    if html is not None and html is not BLANK_END:
-        return inside, ("an HTML block (a comment, a pre element or another raw HTML block)", opened)
-    return inside, None
+        if maybe is not None:
+            raise GateError("line {} starts a fence or an HTML block while line {} (a lone tag line, or an "
+                            "indented HTML line) may hold an HTML block open to the next blank "
+                            "line".format(n, maybe))
+        lead = len(line) - len(line.lstrip(" "))
+        if lead >= 2 and (fence or (end is not None and end is not BLANK_END)):
+            raise GateError("line {} starts a fence or an HTML block indented {} spaces, so it may lie in a list "
+                            "item, whose extent this reading does not infer".format(n, lead))
+        if fence:
+            block = ("fence", fence, n)
+        elif end is not None and end is not BLANK_END:
+            if not end.search(line, lead + 2):
+                block = ("html", end, n)
+        elif lead < 2 and (end is BLANK_END or n == 1 or not lines[n - 2].strip(" \t")):
+            block = ("blank", None, n)
+        else:
+            maybe = n
+    if block is None or block[0] == "blank":
+        return None
+    return ("a fenced block" if block[0] == "fence" else "an HTML block (a comment, a pre element or another "
+            "kind that survives a blank line)"), block[2]
 
 
 def _open_fence(lines):
     """The fence-only reading (fences paired with no other structure): the line of a fence never closed, or
     None. A record that this reading puts inside a closed fence is followed by that fence's closing line,
-    which is neither blank nor a trailer line (no trailer prefix starts with a backtick or a tilde)."""
+    which is neither blank nor a trailer line (no trailer line may start a fence)."""
     fence, opened = None, None
     for n, line in enumerate(lines, 1):
         if fence is not None:
             if _closes(line, fence):
                 fence = None
             continue
-        f = _fence(line)
+        f = _fence(line) if line.lstrip(" ")[:1] in ("`", "~") else None
         if f:
             fence, opened = f, n
     return opened if fence is not None else None
 
 
 def trailer_verdict(text, cfg):
-    """(token, line number) of a review file's trailer record, or a GateError. Reading upward from the last
-    line, blank lines (empty or spaces and tabs) and lines starting with a configured trailer prefix are
-    skipped; the first other line must be exactly `VERDICT: <token>`, and it must lie outside every fenced
-    block, HTML block, comment, pre element, open code span and block quote in the CommonMark reading
-    (_structure), whatever the trailer prefixes are. A fence, or an HTML block of types 1 to 5, that is
-    never closed in that reading or in the fence-only reading (_open_fence) is a GateError too (the record
-    could be quoted or hidden text). Only the trailer record gives the token; the body's structure can
-    make the file cannot-evaluate, and nothing else in the body is read."""
-    lines = raw_lines(text)
-    inside, unclosed = _structure(lines)
-    open_fence = _open_fence(lines)
-    if unclosed is None and open_fence is not None:
-        unclosed = ("a fence (read with no HTML structure)", open_fence)
-    if unclosed is not None:
-        raise GateError("no trailer record: {} opened at line {} is never closed, so the last VERDICT line may "
-                        "be quoted or hidden text".format(*unclosed))
+    """(token, line number) of a review file's trailer record, or a GateError. The file is split into lines
+    at CRLF, CR and LF (md_lines). Reading upward from the last line, blank lines (empty or spaces and tabs)
+    and lines starting with a configured trailer prefix are skipped; the first other line must be exactly
+    `VERDICT: <token>`. The record is accepted ONLY in one closed shape: (1) it starts at column 0 (the
+    exact match); (2) no fence or HTML block of types 1 to 5 is open at it in the top-level reading of
+    _open_block, and no line before it is one that reading cannot place; (3) the line before it is blank,
+    or it is the first line, so no paragraph, list item or block quote continues into it; and (4) every
+    trailer line after it starts at column 0 with no block-quote or list-item marker and starts no fence
+    or HTML block. A fence never closed in the fence-only reading (_open_fence) is refused too. Anything
+    else is a GateError naming the shape. Only the trailer record gives the token; nothing else in the
+    body is read."""
+    lines = md_lines(text)
     records = dict(("VERDICT: " + t, t) for t in cfg["verdicts"])
-    for n in range(len(lines), 0, -1):
-        line = lines[n - 1]
-        if not line.strip(" \t") or any(line.startswith(p) for p in cfg["trailers"]):
-            continue
-        if line not in records:
-            raise GateError("no trailer record: line {}, the last line before the trailer lines, is not exactly "
-                            "'VERDICT: <token>' for a configured token ({!r})".format(n, line[:120]))
-        if inside[n - 1]:
-            raise GateError("no trailer record: the VERDICT line {} lies inside a fenced block, an HTML block, a "
-                            "comment, a pre element, an open code span or a block quote, so it may be quoted or "
-                            "hidden text".format(n))
-        return records[line], n
-    raise GateError("no trailer record: the file holds no line but blank and trailer lines")
+    n = len(lines)
+    while n and (not lines[n - 1].strip(" \t") or any(lines[n - 1].startswith(p) for p in cfg["trailers"])):
+        n -= 1
+    if n == 0:
+        raise GateError("no trailer record: the file holds no line but blank and trailer lines")
+    line = lines[n - 1]
+    if line not in records:
+        raise GateError("no trailer record: line {}, the last line before the trailer lines, is not exactly "
+                        "'VERDICT: <token>' for a configured token ({!r})".format(n, line[:120]))
+    try:
+        held = _open_block(lines, n)
+    except GateError as exc:
+        raise GateError("no trailer record: {}; the VERDICT line {} may be quoted or hidden text".format(exc, n))
+    if held is not None:
+        raise GateError("no trailer record: the VERDICT line {} lies inside {} opened at line {}, so it may be "
+                        "quoted or hidden text".format(n, *held))
+    if n > 1 and lines[n - 2].strip(" \t"):
+        raise GateError("no trailer record: line {} before the VERDICT line {} is not blank, so the record may "
+                        "continue a paragraph, a list item or a block quote (it must follow a blank "
+                        "line)".format(n - 1, n))
+    for k in range(n + 1, len(lines) + 1):
+        if CONTAINER_RE.match(lines[k - 1]) or _starts_block(lines[k - 1]):
+            raise GateError("no trailer record: trailer line {} starts a block quote, a list item, a fence or an "
+                            "HTML block (a trailer line must be plain text at column 0)".format(k))
+    open_fence = _open_fence(lines)
+    if open_fence is not None:
+        raise GateError("no trailer record: a fence opened at line {} is never closed when HTML blocks are "
+                        "ignored, so the last VERDICT line may be quoted or hidden text".format(open_fence))
+    return records[line], n
 
 
 def _near_marker(line):
     """True for a line that is not exactly a marker but reads as one as a WHOLE line (NEAR_MARKER_RE over
-    the normalized, case-folded, stripped line of at most NEAR_MARKER_MAX characters): an indented,
-    BOM-prefixed, lower-case, re-spaced, decorated, padded or wrong-version marker. The length limit
-    applies to the normalized line only (there is no raw-length shortcut), so invisible padding of any
-    length never hides a marker. A line with any other word is prose."""
-    key = _norm(line).casefold().strip()
-    return len(key) <= NEAR_MARKER_MAX and NEAR_MARKER_RE.fullmatch(key) is not None
+    the normalized, case-folded line): an indented, BOM-prefixed, lower-case, re-spaced, decorated,
+    padded or wrong-version marker. The length limit counts only the word characters left once every
+    non-word character NEAR_MARKER_RE ignores is removed (there is no raw-length shortcut), so padding of
+    any kind (invisible, blank-rendering, spaces or punctuation) and any length never hides a marker. A
+    line with any other word is prose."""
+    key = _norm(line).casefold()
+    return len(NON_WORD_RE.sub("", key)) <= NEAR_MARKER_MAX and NEAR_MARKER_RE.fullmatch(key) is not None
 
 
 def parse_block(lines, cfg):
@@ -1553,19 +1556,39 @@ def _file_entry(name, cfg, opts, groups_of):
 
 
 def _name_key(name):
-    """The comparison form of a file name: invisible characters removed, NFKC, case-folded, stripped, and
-    (when ASCII) the ASCII lookalikes 0 and o, 1 i | and l, rn and m, vv and w, cl and d made one."""
-    key = _norm(name).casefold().strip()
-    if not key.isascii():
-        return key
-    return key.translate(ASCII_SKELETON).replace("rn", "m").replace("vv", "w").replace("cl", "d")
+    """The one comparison form of every file name, the brief's and each directory entry's alike: invisible
+    characters removed, NFKC, case-folded, stripped, and every ASCII lookalike in one form (ASCII_SKELETON:
+    0 as o; 1, i and | as l; m as rn, w as vv, d as cl). A non-ASCII character is kept (see _lookalike)."""
+    return _norm(name).casefold().strip().translate(ASCII_SKELETON)
+
+
+def _lookalike(entry, key):
+    """True when an entry's comparison form matches the ASCII comparison form key, each non-ASCII character
+    of the entry standing for any one character of the name (whose form is one character, or rn, vv or
+    cl) and every ASCII character compared in its form: the two kinds of lookalike compose."""
+    reach = set([0])
+    for c in entry:
+        step = set()
+        for p in reach:
+            if c.isascii():
+                if key.startswith(c, p):
+                    step.add(p + 1)
+                continue
+            if p < len(key):
+                step.add(p + 1)
+            if key[p:p + 2] in ("rn", "vv", "cl"):
+                step.add(p + 2)
+        if not step:
+            return False
+        reach = step
+    return len(key) in reach
 
 
 def _dir_names(input_dir):
-    """The comparison keys of every entry name in --input-dir's subtree (a symlinked directory is listed,
-    not entered): (set of ASCII keys, dict(length -> [non-ASCII keys])), or a GateError when the subtree
-    cannot be listed whole or holds more than MAX_DIR_ENTRIES entries."""
-    exact, other, count, stack = set(), dict(), 0, [input_dir]
+    """The comparison forms of every entry name in --input-dir's subtree (a symlinked directory is listed,
+    not entered): (set of ASCII forms, [(non-ASCII form, shortest, longest name form it can match)]), or a
+    GateError when the subtree cannot be listed whole or holds more than MAX_DIR_ENTRIES entries."""
+    exact, other, count, stack = set(), [], 0, [input_dir]
     while stack:
         _check_deadline()
         top = stack.pop()
@@ -1579,7 +1602,7 @@ def _dir_names(input_dir):
                     if key.isascii():
                         exact.add(key)
                     else:
-                        other.setdefault(len(key), []).append(key)
+                        other.append((key, len(key), len(key) + sum(1 for c in key if not c.isascii())))
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(entry.path)
         except OSError as exc:
@@ -1590,10 +1613,10 @@ def _dir_names(input_dir):
 def _absent(base, paths, opts):
     """True only when a recognized review-file name the block does not claim is genuinely absent: the name
     is printable ASCII (a name that is not may render as a present file's name), no path the brief writes
-    for it under --input-dir exists, and no entry anywhere in --input-dir's subtree has the same name after
-    normalization and case-folding or a lookalike name (a non-ASCII character in the entry's name stands for
-    any one character, and the ASCII lookalikes of _name_key are one). False means present or
-    lookalike (UNCLAIMED); a GateError means absence cannot be established (cannot-evaluate)."""
+    for it under --input-dir exists, and no entry anywhere in --input-dir's subtree has the same comparison
+    form (_name_key) or a lookalike one (_lookalike: a non-ASCII character in the entry's name stands for
+    any one character, composed with the ASCII lookalikes). False means present or lookalike (UNCLAIMED);
+    a GateError means absence cannot be established (cannot-evaluate)."""
     if not NAME_RE.fullmatch(base):
         return False
     roots = tuple(os.path.join(r, "") for r in (os.path.abspath(opts["input_dir"]),
@@ -1618,9 +1641,7 @@ def _absent(base, paths, opts):
         raise listing
     exact, other = listing
     key = _name_key(base)
-    raw = base.casefold()
-    return key not in exact and not any(all(a == b or not b.isascii() for a, b in zip(raw, k))
-                                        for k in other.get(len(raw), ()))
+    return key not in exact and not any(lo <= len(key) <= hi and _lookalike(k, key) for k, lo, hi in other)
 
 
 def check_block(lines, own, cfg, opts, groups_of, entries, problems):
@@ -1846,6 +1867,7 @@ def emit(cfg, opts):
     groups_of = dict((b, _groups(f)) for b, f in zip(sorted(set(names)), found) if f is not None)
     block = [BLOCK_BEGIN]
     for name in names:
+        _check_deadline()
         try:
             block.append("{} VERDICT {}".format(name, _file_entry(name, cfg, opts, groups_of)[2]))
         except GateError as exc:
@@ -1854,6 +1876,7 @@ def emit(cfg, opts):
         for p in problems:
             print("CANNOT-EVALUATE {}; no block emitted".format(p), file=sys.stderr)
         return 2
+    _check_deadline()  # polled once more: a block is never printed after the deadline
     print("\n".join(block + [BLOCK_END]))
     return 0
 
@@ -1933,6 +1956,7 @@ def _run(root, opts, stream):
             code, job = check_brief(brief, cfg, opts)
             rc = max(rc, code)
             jobs.extend([job] if job else [])
+        _check_deadline()  # polled once more: no blocking result is committed after the deadline
         _BLOCKING_RC[0] = rc  # final: the advisory work below never changes it
         for path, own, sections, groups_of in jobs:
             for line in advisory(own, sections, opts, groups_of):
@@ -2025,6 +2049,7 @@ ALPHA5 = """Review of item seven, round five, by the first reviewer family.
 3. **Major** - the cache key ignores the locale and returns stale rows.
 ### MEDIUM 1
 The error message names the wrong flag.
+
 VERDICT: BLOCKERS FOUND
 """
 
@@ -2037,6 +2062,7 @@ A log line repeats the same word.
 Typo.
 ### MINOR n2
 Another typo.
+
 VERDICT: NO BLOCKERS
 """
 
@@ -2241,9 +2267,35 @@ def _cases_trailer(base):
              "BLOCKERS\n", 2),
             ("trailer/fence-unpaired-in-html-block", "Findings.\n<details>\n```\n</details>\n\nVERDICT: NO BLOCKERS\n",
              2),
+            ("trailer/tilde-fence-unpaired-in-html-block", "Findings.\n<details>\n~~~\n</details>\n\nVERDICT: NO "
+             "BLOCKERS\n", 2),
             ("trailer/closed-html-and-comment-before-record", "Findings.\n<details>\nx\n</details>\n\n<!-- note "
              "-->\nText with `code` and <!-- a comment --> closed.\n> quoted\n\nVERDICT: NO BLOCKERS\n"
              "WORKER_STATUS: COMPLETE\n", 0),
+            ("trailer/record-at-first-line", "VERDICT: NO BLOCKERS\nWORKER_STATUS: COMPLETE\n", 0),
+            ("trailer/closed-fence-then-blank-before-record", "Body.\n```\nVERDICT: BLOCKERS FOUND\n```\n\nVERDICT: "
+             "NO BLOCKERS\n", 0),
+            ("trailer/one-line-comment-before-record", "Body.\n\n<!-- note -->\n\nVERDICT: NO BLOCKERS\n", 0),
+            ("trailer/closed-comment-block-before-record", "Body.\n<!--\nnote\n-->\n\nVERDICT: NO BLOCKERS\n", 0),
+            ("trailer/blank-line-ends-lone-tag-window", "Body.\n<span>\nmore\n\n```\ncode\n```\n\nVERDICT: NO "
+             "BLOCKERS\n", 0),
+            ("trailer/bare-cr-line-ending-opens-fence", "Body.\r~~~\n\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/record-continues-list-item-quote", "Review body.\nVERDICT: BLOCKERS FOUND\n- > The prior round "
+             "said\nVERDICT: NO BLOCKERS\nWORKER_STATUS: COMPLETE\n", 2),
+            ("trailer/record-continues-list-item", "- quoted result\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/record-in-link-reference-title", "[prior]: /r \"\nVERDICT: NO BLOCKERS\nWORKER_STATUS: \"\n", 2),
+            ("trailer/record-in-image-alt-text", "![\nVERDICT: NO BLOCKERS\nWORKER_STATUS: COMPLETE](x.png)\n", 2),
+            ("trailer/record-in-inline-html-attribute", "See <span title=\"\nVERDICT: NO BLOCKERS\nWORKER_STATUS: "
+             "\">x</span>\n", 2),
+            ("trailer/record-after-blank-in-open-comment", "Body.\n<!--\n\nVERDICT: NO BLOCKERS\nWORKER_STATUS: -->\n",
+             2),
+            ("trailer/record-after-blank-in-open-pre", "Body.\n<pre>\n\nVERDICT: NO BLOCKERS\nWORKER_STATUS: </pre>\n",
+             2),
+            ("trailer/fence-indented-two-spaces-refused", "- item\n  ```\n  code\n\n```\n\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/html-6-block-hides-fence-opener", "Body.\n<div\n```\n\n```\n\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/html-7-block-hides-fence-opener", "Body.\n\n<span>\n```\n\n```\n\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/lone-tag-line-window-refused", "Body.\n```\nx\n```\n<span>\n```\n\n```\n\nVERDICT: NO "
+             "BLOCKERS\n", 2),
             ("trailer/form-feed-line-not-blank", BETA5 + "\x0c\n", 2),
             ("trailer/no-break-space-line-not-blank", BETA5 + "\N{NO-BREAK SPACE}\n", 2)):
         rc, out = sc(cid.replace("/", "_"), BLOCK_BETA, files=dict([("it7-r5-beta.txt", source)]))
@@ -2257,6 +2309,16 @@ def _cases_trailer(base):
     except GateError as exc:
         got = str(exc)
     check("trailer/record-in-closed-fence-any-prefix", "lies inside a fenced block" in str(got), got)
+    # Every trailer line is plain text at column 0: one that starts a block quote, a list item or an HTML
+    # block is refused (a configuration that admits such a prefix is given to the reading directly).
+    cfg = dict(verdicts=["NO BLOCKERS"], trailers=["> done", "- status", "<div"])
+    got = []
+    for last in ("> done", "- status", "<div>"):
+        try:
+            got.append(trailer_verdict("Body.\n\nVERDICT: NO BLOCKERS\n" + last + "\n", cfg))
+        except GateError as exc:
+            got.append(str(exc))
+    check("trailer/trailer-line-container-or-block-refused", all("trailer line 4 starts" in str(g) for g in got), got)
 
 
 def _cases_block(base):
@@ -2285,8 +2347,11 @@ def _cases_block(base):
             ("block/padded-near-miss-in-fence", "```\n" + PAD + "begin brief-claims 1\nit7-r5-alpha.txt VERDICT NO "
              "BLOCKERS\n" + PAD + "end brief-claims\n```\n", 2, near),
             ("block/padded-near-miss-alone", BLOCK_OK + PAD + "begin brief-claims 1\n", 2, near),
-            ("block/long-decorated-line-not-a-near-miss", "=" * 40 + " BEGIN BRIEF-CLAIMS " + "=" * 40 + "\n" + BLOCK_OK,
-             0, "(2 MATCH)"),
+            ("block/long-decorated-line-is-a-near-miss", "=" * 400 + " BEGIN BRIEF-CLAIMS " + "=" * 400 + "\n"
+             + BLOCK_OK, 2, near),
+            ("block/blank-run-padded-near-miss", "```\nBEGIN" + chr(0x2800) * 100 + "BRIEF-CLAIMS 1\nit7-r5-alpha.txt "
+             "VERDICT NO BLOCKERS\nEND" + chr(0x2800) * 100 + "BRIEF-CLAIMS\n```\n", 2, near),
+            ("block/space-padded-near-miss", BLOCK_OK + "END" + " " * 100 + "BRIEF-CLAIMS\n", 2, near),
             ("block/prose-is-not-a-near-miss", "Begin brief claims investigation tomorrow.\n", 0, "exit 0"),
             ("block/prose-with-block-not-a-near-miss", "Begin brief-claims section below; it is generated by "
              "--emit.\n" + BLOCK_OK, 0, "(2 MATCH)")):
@@ -2385,6 +2450,26 @@ def _cases_completeness(base):
             ("complete/non-ascii-file-lookalike-not-absent", "Read it7-r5-alpha.txt.\n",
              dict([(cyr_i + "t7-r5-alpha.txt", ALPHA5)]), GOOD_CFG, 1),
             ("complete/ascii-lookalike-not-absent", "Read lt7-r5-alpha.txt.\n", alpha, GOOD_CFG, 1),
+            ("complete/rn-for-m-not-absent", "Read it7-r5-mike.txt.\n", dict([("it7-r5-rnike.txt", ALPHA5)]),
+             GOOD_CFG, 1),
+            ("complete/vv-for-w-not-absent", "Read it7-r5-wave.txt.\n", dict([("it7-r5-vvave.txt", ALPHA5)]),
+             GOOD_CFG, 1),
+            ("complete/cl-for-d-not-absent", "Read it7-r5-dove.txt.\n", dict([("it7-r5-clove.txt", ALPHA5)]),
+             GOOD_CFG, 1),
+            ("complete/non-ascii-and-digit-lookalike-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([("it7-r5-" + chr(0x430) + "1pha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-first-and-digit-lookalike-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([(cyr_i + "t7-r5-a1pha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/digit-and-non-ascii-extension-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([("1t7-r5-alpha.t" + chr(0x445) + "t", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-half-of-rn-not-absent", "Read it7-r5-mike.txt.\n",
+             dict([("it7-r5-r" + chr(0x578) + "ike.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-r-of-rn-not-absent", "Read it7-r5-mike.txt.\n",
+             dict([("it7-r5-" + chr(0x433) + "nike.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-half-of-vv-not-absent", "Read it7-r5-wave.txt.\n",
+             dict([("it7-r5-v" + chr(0x3bd) + "ave.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-for-a-pair-not-absent", "Read it7-r5-rnike.txt.\n",
+             dict([("it7-r5-" + chr(0x43c) + "ike.txt", ALPHA5)]), GOOD_CFG, 1),
             ("complete/path-too-long-cannot", "Read @IN@/" + "d" * 300 + "/it7-r9-alpha.txt.\n", alpha, GOOD_CFG, 2),
             ("complete/future-path-under-dir-absent", "Write @IN@/it7-r6-alpha.txt.\n", alpha, GOOD_CFG, 0)):
         rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief, files=files, cfg=cfg)
@@ -2463,7 +2548,7 @@ def _cases_advisory(base):
     sc = functools.partial(_scenario, base)
     named = "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n"
     sweep = dict([("it7-r5-alpha.txt", "20 seeded, 10 accepted. Sweep: 41 of 42 mutants killed; 2 of 3 MAJORs "
-                   "fixed; latency 2 seconds.\nVERDICT: BLOCKERS FOUND\n"), ("it7-r5-beta.txt", BETA5)])
+                   "fixed; latency 2 seconds.\n\nVERDICT: BLOCKERS FOUND\n"), ("it7-r5-beta.txt", BETA5)])
     reg = dict([("reg.toml", 'format-version = 1\ntarget = "ITEM-7"\naliases = []\ndependencies = []\n'
                  "id-pattern = 'ITEM-[0-9]+'\n"), ("tmpl.md", "# Fix item seven round 4\n"
                  "Inputs: it7-r4-alpha.txt (alpha MEDIUM-1 and MAJOR-2 remain open)\n")])
@@ -2676,8 +2761,9 @@ def _cases_contract(base):
 
 def _cases_runtime(base):
     """The run's bounds, each pinned on its own: one advisory budget per run spent only after every brief's
-    blocking result, an overrun during advisory work that keeps the exit code, the reserve and the minimum
-    advisory budget, the regex deadline cut to the run, the polled deadline where no alarm can be armed,
+    blocking result (and started only then), an overrun during advisory work that keeps the exit code, the
+    reserve and the minimum advisory budget, the regex deadline cut to the run, each poll of the deadline
+    where no alarm can be armed (including the polls before the blocking exit code and the --emit block),
     SIGALRM unblocked for the run, an alarm after the run, and an overrun that escapes run()."""
     me = sys.modules[__name__]
     root, indir = _tree(base, "runtime")
@@ -2743,6 +2829,21 @@ def _cases_runtime(base):
         except GateError as exc:
             got = str(exc)
         check("runtime/regex-refused-after-deadline", "deadline passed" in str(got), got)
+        # The advisory budget starts only after every blocking result: 1.2 seconds of slowed block lines
+        # leave the first advisory child the whole budget.
+        answered[:] = []
+        me._remaining, real_entry = saved[1], me._file_entry
+
+        def slow_entry(*args):
+            time.sleep(0.6)
+            return real_entry(*args)
+        me._file_entry = slow_entry
+        try:
+            rc, out, _ = _quiet(root, ["--input-dir", indir, ok])
+        finally:
+            me._file_entry = real_entry
+        check("runtime/advisory-budget-starts-after-blocking-work", rc == 0 and [
+            t for a, t in answered if a == "--advisory-worker"] == [ADVISORY_DEADLINE], (answered, out))
     finally:
         me.subprocess.run, me._remaining, me._ADVISORY_LEFT[0] = real_run, saved[1], ADVISORY_DEADLINE
     real_signal = me.signal.signal
@@ -2755,17 +2856,25 @@ def _cases_runtime(base):
     _write(absent, "Write it7-r8-alpha.txt and it7-r9-alpha.txt.\n")
     _write(absent1, "Write it7-r9-alpha.txt.\n")
     _write(os.path.join(indir, "sub", "x.txt"), "x\n")
-    # Each polled check is the only one that can stop its vector: a slowed step (0.6 seconds, or 0.3 per
-    # directory entry) runs past a 0.5-second deadline where no alarm can be armed.
-    for cid, name, delay, briefs in (("runtime/deadline-polled-per-block-line", "_file_entry", 0.6, [ok]),
-                                     ("runtime/deadline-polled-per-brief", "raw_lines", 0.6, [plain] * 3),
-                                     ("runtime/deadline-polled-per-unclaimed-name", "_absent", 0.6, [absent]),
-                                     ("runtime/deadline-polled-per-directory", "_name_key", 0.3, [absent1])):
+    # Each polled check is the only one that can stop its vector WHERE it stops: a slowed step (0.6 seconds,
+    # or 0.3 per directory entry; slowed before it runs, or after it for an unclaimed name, so the directory
+    # listing is done first) runs past a 0.5-second deadline where no alarm can be armed, and the run must
+    # end with the number of brief summaries given (a later poll would let more be printed).
+    for cid, name, delay, after, briefs, summaries in (
+            ("runtime/deadline-polled-per-block-line", "_file_entry", 0.6, False, [ok], 0),
+            ("runtime/deadline-polled-per-brief", "raw_lines", 0.6, False, [plain] * 3, 1),
+            ("runtime/deadline-polled-per-unclaimed-name", "_absent", 0.6, True, [absent], 0),
+            ("runtime/deadline-polled-per-directory", "_name_key", 0.3, False, [absent1], 0),
+            ("runtime/deadline-polled-before-blocking-exit", "raw_lines", 0.6, False, [plain], 1)):
         real = getattr(me, name)
 
-        def slow(*args, real=real, delay=delay):
-            time.sleep(delay)
-            return real(*args)
+        def slow(*args, real=real, delay=delay, after=after):
+            if not after:
+                time.sleep(delay)
+            got = real(*args)
+            if after:
+                time.sleep(delay)
+            return got
         me.RUN_DEADLINE, me.signal.signal = 0.5, no_alarm
         setattr(me, name, slow)
         try:
@@ -2773,8 +2882,27 @@ def _cases_runtime(base):
         finally:
             me.RUN_DEADLINE, me.signal.signal = saved[0], real_signal
             setattr(me, name, real)
-        check(cid, rc == 2 and out.splitlines()[-1].startswith(
-            "CANNOT-EVALUATE run: the check did not finish within its 0.5-second deadline"), out)
+        check(cid, rc == 2 and out.splitlines()[-1].startswith("CANNOT-EVALUATE run: the check did not finish "
+              "within its 0.5-second deadline") and sum(line.startswith("brief-claims: ")
+                                                         for line in out.splitlines()) == summaries, out)
+    # --emit polls before each name and once more before it prints the block.
+    real, calls = me._file_entry, []
+
+    def slow_emit(*args):
+        calls.append(args[0])
+        time.sleep(0.6)
+        return real(*args)
+    for cid, names in (("runtime/deadline-polled-per-emit-name", ["it7-r5-alpha.txt", "it7-r5-beta.txt"]),
+                       ("runtime/deadline-polled-before-emit-block", ["it7-r5-alpha.txt"])):
+        calls[:] = []
+        me.RUN_DEADLINE, me.signal.signal, me._file_entry = 0.5, no_alarm, slow_emit
+        try:
+            rc, out, err = _quiet(root, ["--emit", "--input-dir", indir] + names)
+        finally:
+            me.RUN_DEADLINE, me.signal.signal, me._file_entry = saved[0], real_signal, real
+        check(cid, rc == 2 and out == "" and len(calls) == 1 and err.splitlines()[-1:] == [
+            "CANNOT-EVALUATE run: the check did not finish within its 0.5-second deadline; fail-closed"],
+              (calls, out, err))
     real_check, seen = me.check_brief, []
 
     def probe(*args):
@@ -2832,7 +2960,7 @@ def _blocked_alarm_probe(base):
     inherits, on 1000 block lines that each read a 1 MiB review file (symlinks to one file): it must end
     with its own CANNOT-EVALUATE run line and exit 2 inside 10 seconds. Returns (ok, detail)."""
     root, indir, gate = _gate_copy(base, "blocked_alarm", dict([("it0-r5-beta.txt", "x" * (1 << 20)
-                                                                + "\nVERDICT: NO BLOCKERS\n")]),
+                                                                + "\n\nVERDICT: NO BLOCKERS\n")]),
                                    ("RUN_DEADLINE = 7" + ".0  #", "RUN_DEADLINE = 1.0  #"))
     lines = [BLOCK_BETA.splitlines()[0]]
     for k in range(1000):
@@ -2936,7 +3064,7 @@ def _cases_size(base):
     advisory_lines = [line for line in out if line.startswith("ADVISORY ")]
     check("size/one-mib-brief-verdict-first", rc == 0 and took < 10 and _verdict_first(out, 0)
           and len(advisory_lines) == 1 and "over the advisory size budget" in advisory_lines[0], detail)
-    review = "verdict " + "NO BLOCKERS " * 16000 + "\nVERDICT: BLOCKERS FOUND\n"
+    review = "verdict " + "NO BLOCKERS " * 16000 + "\n\nVERDICT: BLOCKERS FOUND\n"
     rc, out, took, detail = _capped(base, "size_review_line", "Review it7-r5-beta.txt.\n" + BLOCK_BETA.replace(
         "NO BLOCKERS", "BLOCKERS FOUND"), dict([("it7-r5-beta.txt", review)]))
     check("size/long-verdict-line-in-review-file", rc == 0 and took < 10 and _verdict_first(out, 0)
