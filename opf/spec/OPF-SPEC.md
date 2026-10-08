@@ -2125,13 +2125,17 @@ cannot-evaluate, and otherwise `pass` where it authorized store operations and `
 not. A restatement differs from that file's declaration where it gives a different value for any
 field the file carries, omits such a field, or states a field the file does not carry. The
 documentation of each release MUST restate that file's declaration without differing from it. The
-expected report of a release is fixed by the bytes the release ships alone: its restatement is the
+expected report of a release is fixed by the bytes the release ships alone, apart from the one
+behaviour-coupled comparison below: its restatement is the
 declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of
 that file's bytes as the release ships them, and its runtime result is `cannot_evaluate` exactly
 where a rule of this section makes those bytes yield cannot-evaluate, and otherwise `pass` or
 `fail`, between which this section, as it now stands, sets no rule. A report deviates from the
 expected report where any of the four compared parts is omitted, written in another form, or holds
-another value; no other content of a report is compared.
+another value; no other content of a report is compared. The runtime-result part also deviates
+where its token disagrees with whether that run authorized store operations; this comparison is
+against the run's own behaviour, the only part of the expected report not fixed by the shipped
+bytes alone.
 
 An execution environment is unaltered where it is a stock install of a platform and version within
 what the documentation of the release names or, where that documentation names none, of the platform
@@ -2146,7 +2150,9 @@ unaltered execution environment, from the bytes the release ships and, for each 
 release does not ship, from the source its documentation directs, followed by two successive
 documented runs of the runtime check and the emitter over that installation. A reference run of a
 release is a run of an attempt whose installed copy holds that file's bytes as the release ships
-them and is readable when the run starts.
+them and is readable when the run starts. An attempt in which anything other than the documented
+steps and the release's own code altered the installation or the execution environment is not an
+attempt and establishes nothing.
 
 A release MUST be available: every attempt MUST complete the documented installation and yield two
 reference runs, so an installer that rewrites that file's bytes, by converting its line endings or
@@ -2165,7 +2171,11 @@ either rule is shown for a checker where one of its own attempts or reference ru
 established for that checker where a second of its own attempts or reference runs, made on the same
 platform and version, shows a failure of the same rule and, under the reference-run rule, in the
 same part of the report or in the runtime result; attempts and reference runs that show no failure,
-however many there are, never counter a shown or established failure. A checker that reports on a
+however many there are, never counter a shown or established failure. An availability failure is
+shown by a failed attempt and established by a second failed attempt of the same checker on the
+same platform and version; the same-part condition applies only to deviating reports. The showing
+and the reproducing evidence MAY be any two of the checker's own reference runs on the same
+platform and version, the two runs of one attempt included. A checker that reports on a
 shown failure MUST report it as established or, where its own evidence has shown it and not
 reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and
 reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
@@ -2603,7 +2613,10 @@ The gates in this standard are strong where they are strong and say so where the
   organization-wide package-manager configuration file taken for part of the stock install, can
   mislead that checker, another checker contests a claim only with its own attempts and reference
   runs, and honest checkers on stock installs of different platforms or versions within a documented
-  family can reach different verdicts, each of which the release must meet. A failure that a checker
+  family can reach different verdicts, each of which the release must meet. The same residual
+  covers the section 16.1 rule that an attempt altered by anything other than the documented steps
+  and the release's own code is not an attempt and establishes nothing: only a checker that detects
+  the alteration can know to set that attempt aside. A failure that a checker
   cannot show twice in its own attempts and reference runs stays unresolved, however many other
   checkers each show it once, and an unresolved failure neither establishes nor counters any
   conformance or nonconformance of the release. Where the documentation of a release directs that a

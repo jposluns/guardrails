@@ -766,16 +766,20 @@ _CONTRACT = {
         "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate, and otherwise pass where it authorized store operations and fail where it did not.",
         _D("A restatement differs from that file's declaration where it gives a different value for any field the file carries, omits such a field, or states a field the file does not carry."),
         "The documentation of each release MUST restate that file's declaration without differing from it.",
-        _D("The expected report of a release is fixed by the bytes the release ships alone: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
+        _D("The expected report of a release is fixed by the bytes the release ships alone, apart from the one behaviour-coupled comparison below: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
         _D('A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared.'),
+        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations; this comparison is against the run's own behaviour, the only part of the expected report not fixed by the shipped bytes alone."),
         _D("An execution environment is unaltered where it is a stock install of a platform and version within what the documentation of the release names or, where that documentation names none, of the platform the checker uses, as that platform's own installer leaves it, changed only as that documentation directs and in this closed operational list, and in nothing else: the account name, administrative privilege only where that documentation directs it, the working and temporary locations, and the clock."),
         _D("Every default of that stock install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the release's, whichever platform and version within that naming a checker uses."),
         _D('An attempt is the documented installation of a release, made by one checker in an unaltered execution environment, from the bytes the release ships and, for each installed file the release does not ship, from the source its documentation directs, followed by two successive documented runs of the runtime check and the emitter over that installation.'),
         _D("A reference run of a release is a run of an attempt whose installed copy holds that file's bytes as the release ships them and is readable when the run starts."),
+        _D("An attempt in which anything other than the documented steps and the release's own code altered the installation or the execution environment is not an attempt and establishes nothing."),
         "A release MUST be available: every attempt MUST complete the documented installation and yield two reference runs, so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot complete, and a first run whose writes leave the second run with an installed copy that no longer holds the shipped bytes are each a failure of this rule.",
         'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate.',
         "Only a checker's own attempts and reference runs are evidence under the two rules above: a report of any other run or installation, altered or not, MUST NOT be presented as establishing or countering conformance of any release, and whether a release conforms to this section is judged only from the bytes the release ships, the implementation and the installer included, inspected, from the documentation of the release, and from the checker's own attempts and reference runs.",
         _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part of the report or in the runtime result; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
+        _D('An availability failure is shown by a failed attempt and established by a second failed attempt of the same checker on the same platform and version; the same-part condition applies only to deviating reports.'),
+        "The showing and the reproducing evidence MAY be any two of the checker's own reference runs on the same platform and version, the two runs of one attempt included.",
         'A checker that reports on a shown failure MUST report it as established or, where its own evidence has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
         "A release for which a checker's own evidence establishes a failure of either rule does not conform to this section, and that checker MUST NOT make a conformance claim for it; a conformance claim under this section MUST name the attempts and reference runs it rests on.",
         'Each such failure is a release nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it does not change what a runtime check of an installed copy yields.',
@@ -894,6 +898,7 @@ _CONTRACT = {
         _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
         _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
         _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker, another checker contests a claim only with its own attempts and reference runs, and honest checkers on stock installs of different platforms or versions within a documented family can reach different verdicts, each of which the release must meet."),
+        _D("The same residual covers the section 16.1 rule that an attempt altered by anything other than the documented steps and the release's own code is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside."),
         _D('A failure that a checker cannot show twice in its own attempts and reference runs stays unresolved, however many other checkers each show it once, and an unresolved failure neither establishes nor counters any conformance or nonconformance of the release.'),
         _D("Where the documentation of a release directs that a file the release does not ship be installed and does not pin its bytes, attempts made at different times can differ as the bytes the directed source serves differ, a residual of the release's own documentation."),
         _D('Appendix E gives informative guidance for checking release conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference environment.'),
@@ -2914,7 +2919,7 @@ def _self_test_vectors():
               "SHOULD restate that file's declaration."),
             )),
             ('The expected report of a release', (
-             ('is fixed by the bytes the release ships alone:',
+             ('is fixed by the bytes the release ships alone, apart from the one behaviour-coupled comparison below:',
               'is the report a reference run emits:'),
              ('and otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule.',
               'and otherwise `pass`.'),
@@ -2924,6 +2929,12 @@ def _self_test_vectors():
               'holds another value;'),
              ('no other content of a report is compared.',
               'every other content of a report is compared.'),
+            )),
+            ('The runtime-result part also deviates', (
+             ('also deviates where its token disagrees with whether that run authorized store operations;',
+              'does not deviate on what that run authorized;'),
+             ('the only part of the expected report not fixed by the shipped bytes alone.',
+              'a part of the expected report the shipped bytes fix.'),
             )),
             ('An execution environment is unaltered', (
              ('changed only as that documentation directs and in this closed operational list, and in nothing else:',
@@ -2944,6 +2955,12 @@ def _self_test_vectors():
             ('A reference run of a release is a run', (
              ("holds that file's bytes as the release ships them and is readable when the run starts.",
               "holds that file's bytes as the release ships them."),
+            )),
+            ('An attempt in which anything other than', (
+             ('is not an attempt and establishes nothing.',
+              'is an attempt like any other.'),
+             ("anything other than the documented steps and the release's own code",
+              'anything'),
             )),
             ('A release MUST be available:', (
              ('every attempt MUST complete',
@@ -2968,6 +2985,16 @@ def _self_test_vectors():
               'counter a shown or established failure.'),
              ('established for that checker where a second of its own attempts or reference runs,',
               'established where a second attempt or reference run of any checker,'),
+            )),
+            ('An availability failure is shown by a failed attempt', (
+             ('the same-part condition applies only to deviating reports.',
+              'the same-part condition applies to every failure.'),
+             ('established by a second failed attempt of the same checker on the same platform and version;',
+              'established by a second failed attempt of any checker;'),
+            )),
+            ('The showing and the reproducing evidence MAY be', (
+             ('the two runs of one attempt included.',
+              'never the two runs of one attempt.'),
             )),
             ('A checker that reports on a shown failure', (
              ('and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
@@ -3034,6 +3061,10 @@ def _self_test_vectors():
               'cannot mislead any checker,'),
              ('honest checkers on stock installs of different platforms or versions within a documented family can reach different verdicts,',
               'honest checkers always reach one verdict,'),
+            )),
+            ('The same residual covers the section 16.1 rule', (
+             ('only a checker that detects the alteration can know to set that attempt aside.',
+              'every checker can set that attempt aside.'),
             )),
             ('A failure that a checker cannot show twice', (
              ('stays unresolved, however many other checkers each show it once,',
