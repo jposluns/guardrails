@@ -79,12 +79,14 @@ the authority, and the summary further down this page only points to it.
   reason names each character by its code point (`U+` and four hex digits) and quotes the policy's advice.
   A policy file that cannot be used, or an existing file it cannot read, gets a note and the write goes
   ahead; the CI gate still checks the file. Once its root is set, every other call it cannot evaluate (a
-  payload it cannot read, a path it cannot resolve, a root that is not an absolute path, does not exist or
-  is not a directory, a launch with an unknown command-line argument, or an internal error) also goes ahead
-  with a note naming the reason. Once its root is set, it stays silent only for a call it checked and found
-  clean, a file outside the root or outside the policy's scope, a tool other than the three it checks, and
-  a well-formed call while the root holds no policy file; while its root is unset or empty, it is silent
-  for every call. It does not skip worker processes.
+  payload it cannot read, a field of the wrong type, a path it cannot resolve, a root that is not an
+  absolute path, does not exist or is not a directory, a launch with an unknown command-line argument, or
+  an internal error) also goes ahead with a note naming the reason; it checks a call's fields before its
+  path and the policy file, so a malformed call gets that note wherever it points and whether or not the
+  root holds a policy file. Once its root is set, it stays silent only for a tool other than the three it
+  checks, and for a well-formed call that it checked and found clean, that targets a file outside the root
+  or outside the policy's scope, or whose root holds no policy file; while its root is unset or empty, it
+  is silent for every call. It does not skip worker processes.
   Event: `PreToolUse`, matcher `Write|Edit|MultiEdit`.
 - **`constraint-reread.py`** reminds the assistant of standing constraints after a context compaction and
   refuses the turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed
@@ -161,7 +163,7 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `95195173497f8f4aeb8487bee353031a40e6c99c4711264b7899cabe681c1a92` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `56a7981f1e6c13e4d60fd6dc36dcdc9b38ee6818ccf221b911fb3fe0f4dc4705` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
@@ -325,8 +327,13 @@ fails and report it; do not work around a failed check.
    `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
-   for byte with the gate's, checks in both files that nothing outside the region rebinds a name the region
-   binds or reads, and compares a sample of policies and its scope test with the gate. It finds the gate at
+   for byte with the gate's; checks, by a static walk of both files' module-level statements, that none
+   outside the region rebinds a name the region binds or reads (or `__builtins__`), or stores to an
+   attribute or item of such a name, `json`, `builtins` or `sys.modules`; and compares a sample of policies
+   and its scope test with the gate. That walk catches accidental drift between the two copies. It does not
+   catch a deliberate edit that replaces behaviour through a path it does not model (a function body run
+   later, an alias made by assignment, `setattr`, `globals()`, `exec`); the hashes recorded in `SHA256SUMS`
+   and the release manifest `.aiqt/manifest.toml` are the control for that. It finds the gate at
    `../tools/` from the hook's folder, as in a checkout of this repository; installed on its own, that
    comparison reports skipped.
 
@@ -375,7 +382,8 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
 - **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
-  unset or empty, the hook does nothing, and with no policy file under that root it does nothing either.
+  unset or empty, the hook does nothing, and with no policy file under that root it allows every
+  well-formed file write silently (a malformed call still gets a note).
   Set to a relative path, or to a path that does not exist or is not a directory, it checks nothing and
   says so in a note on every file write; so does a hook launched with any argument other than
   `--self-test` alone. It has no opt-out comment: to allow a character, write it in words, or narrow the

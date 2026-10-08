@@ -66,8 +66,13 @@ DEFAULT_POLICY = {
     ],
 }
 # --- BEGIN COPY SOURCE: tools/gen_char_policy.py writes this region into .preview/char-policy-write.py ---
-# The policy validator. Every module-level name it reads is bound in this region or is a builtin, and neither
-# file binds one of them outside it (the hook's H12 walks both files' module scope to check that).
+# The policy validator. Every module-level name it reads is bound in this region or is a builtin. The hook's H12
+# walks both files' module-level statements and fails when one outside this region binds a name the region
+# binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
+# sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
+# through a path the static walk does not model (a function body run later, an alias made by assignment,
+# setattr, globals(), exec) is not caught there; the recorded hashes (.preview/SHA256SUMS for the hook,
+# .aiqt/manifest.toml for both files) are the control for a deliberate edit.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -465,8 +470,9 @@ def _self_test():
                     failures.append(f"G7 {label}: want PolicyError with {needle!r}, got {exc}")
             expect(f"G7 {label}", tree({"d/a.md": quote}, data), 2, needle)
         expect("G7 duplicate key", tree({"d/a.md": quote}, raw_policy=(
-            b'{"version": 1, "version": 1, "id": "x", "chars": {"a": "a"}, "scope": [{"file": "N"}]}')), 2)
-        expect("G7 not JSON", tree({"d/a.md": quote}, raw_policy=b"{"), 2)
+            b'{"version": 1, "version": 1, "id": "x", "chars": {"a": "a"}, "scope": [{"file": "N"}]}')), 2,
+            "duplicate key 'version'")
+        expect("G7 not JSON", tree({"d/a.md": quote}, raw_policy=b"{"), 2, "is not valid UTF-8 JSON")
         # A non-standard constant in an otherwise-valid policy: the needle tells the constant check from the
         # version check that would also reject the parsed float.
         for constant in ("NaN", "Infinity", "-Infinity"):
@@ -478,11 +484,11 @@ def _self_test():
             expect(f"G7 line boundary U+{ord(boundary):04X}", tree({"d/a.md": f"x{boundary}y\n"}, policy(
                 chars={boundary: "separator"})), 2, f"U+{ord(boundary):04X} is a line boundary")
         expect("G7 over the cap", tree({"d/a.md": quote}, raw_policy=json.dumps(policy()).encode("ascii")
-                                         + b" " * POLICY_CAP), 2)
+                                         + b" " * POLICY_CAP), 2, f"is over {POLICY_CAP} bytes")
         linked = tree({"d/a.md": quote, "elsewhere.json": json.dumps(policy())})
         os.makedirs(os.path.join(linked, ".aiqt"))
         os.symlink(os.path.join(linked, "elsewhere.json"), os.path.join(linked, ".aiqt", "char-policy.json"))
-        expect("G7 symbolic link", linked, 2)
+        expect("G7 symbolic link", linked, 2, "a symbolic link or another kind")
         expect("G7 valid file is used", tree({"d/a.md": quote}, policy()), 1)
         expect("G7 valid file with advice and skip", tree({"d/a.md": quote}, policy(
             advice="spell it out", scope=[{"tree": ".", "suffixes": [".md"], "skip": ["x"]}])), 1)

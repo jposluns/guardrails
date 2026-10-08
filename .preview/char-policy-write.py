@@ -11,9 +11,10 @@ WHAT IT DOES
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
     PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: always
     0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks. Once
-    armed (its root set), it allows every call it cannot evaluate with a note naming why, and it allows
-    silently a call it evaluates and finds clean, a call outside the root or the policy's scope, a tool other
-    than Write, Edit or MultiEdit, and a well-formed call while the root holds no policy file.
+    armed (its root set), it allows every call it cannot evaluate with a note naming why, a malformed call
+    among them, and it allows silently only a tool other than Write, Edit or MultiEdit and a well-formed call
+    (see DECISION) that it evaluates and finds clean, whose target is outside the root or the policy's scope,
+    or whose root holds no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
@@ -21,7 +22,8 @@ CONFIGURATION
     relative, holding a control character, or naming a path that does not exist or is not a directory, it
     checks nothing and says so in a note on every call; so does an armed hook launched with any command-line
     argument other than --self-test alone. The policy file is <root>/.aiqt/char-policy.json; absent, the hook
-    does nothing (the gate then applies its built-in default policy, which this hook does not copy).
+    allows a well-formed call silently and notes a malformed one (the gate then applies its built-in default
+    policy, which this hook does not copy).
 
 POLICY FILE
     {"version": 1, "id": <name>, "chars": {<one code point>: <name>, ...}, "advice": <optional text>,
@@ -38,8 +40,16 @@ POLICY FILE
     bytes; walks both files' module scope (conditional and compound statements included, function and class
     bodies not) to check that no name the region binds or reads is bound outside it, and that no function
     declares one of them global; and compares the policy path, a sample of policies through both
-    validators, and this hook's scope test with the gate's walk. Rebinding at run time (through globals(),
-    setattr on the module, or builtins) is beyond that static walk.
+    validators, and this hook's scope test with the gate's walk. The walk treats __builtins__ as a region
+    name, and also fails on a module-level statement outside the region that stores to an attribute or item of
+    a region name, json, builtins or sys.modules (an alias made by importing one of those modules counts). H12
+    exists to catch accidental drift between the two copies. It is not a defence against a deliberate edit
+    that replaces behaviour through a path the static walk does not model: a function body run later, an
+    alias made by assignment, setattr, globals(), vars(), exec, or another module patching this one. The
+    behaviour sample runs both validators in one process, so it shares one json module and cannot see a
+    change made to json. The control for a deliberate edit is the hash check: .preview/SHA256SUMS records
+    this hook's SHA-256 and the release manifest .aiqt/manifest.toml records both files', so any such edit
+    changes a recorded hash.
 
 DECISION
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
@@ -54,13 +64,16 @@ DECISION
       missing tool_name, a tool_input that is not an object, a file_path that is not a non-empty string
       without control characters, a relative file_path with no absolute cwd, a path that cannot be resolved
       or encoded as a file name (a lone surrogate, say), a field the tool needs (old_string, new_string,
-      edits, content) of the wrong type, and an internal error.
+      edits, content) of the wrong type, and an internal error. A call is well-formed when none of these
+      faults applies to it; its fields are checked before its path is compared with the root and before the
+      policy file is read, so a malformed call gets a note wherever it points and whether or not the root
+      holds a policy file.
     - A relative file_path is joined onto the payload's cwd. The target's and the root's real paths are
-      compared whole component by component; a target outside the root, or not in the policy's scope, is
-      allowed silently.
+      compared whole component by component; a well-formed call whose target is outside the root, or not in
+      the policy's scope, is allowed silently.
     - A policy file that is malformed, unreadable, a symbolic link, not a regular file, or over 65536 bytes:
       allow with a note naming the gate, which exits 2 on the same file, so CI still fails closed. No policy
-      file: allow, silently.
+      file: allow a well-formed call, silently.
     - For each policy character c, a write ADDS c when:
         Edit       new_string holds more c than old_string (with replace_all both counts scale alike);
         MultiEdit  any one edit's new_string holds more c than its old_string;
@@ -103,11 +116,11 @@ RESIDUAL COVERAGE
     - The file can change between this hook's decision and the write (a race).
     - A payload over 64 MiB, or one that is not a JSON object, is allowed with a note.
     - It does not read AIQT_HOOKS_WORKER: worker processes are checked like any other session.
-    - An armed hook whose root holds no policy file allows every well-formed call silently; the gate then
-      applies its built-in default, which this hook does not copy.
+    - An armed hook whose root holds no policy file allows every well-formed call silently (a malformed one
+      gets a note); the gate then applies its built-in default, which this hook does not copy.
 
 SELF-TEST
-    --self-test runs the vectors H1 to H20 below. The parity test H12 imports the sibling gate
+    --self-test runs the vectors H1 to H21 below. The parity test H12 imports the sibling gate
     ../tools/check_no_dashes.py; when it is absent the test reports skipped, unless the environment sets
     AIQT_HOOKS_REQUIRE_SIBLINGS=1, when its absence fails the test.
 """
@@ -134,8 +147,13 @@ TOOLS = ("Write", "Edit", "MultiEdit")
 
 
 # --- BEGIN COPY: generated from tools/check_no_dashes.py by tools/gen_char_policy.py; do not edit ---
-# The policy validator. Every module-level name it reads is bound in this region or is a builtin, and neither
-# file binds one of them outside it (the hook's H12 walks both files' module scope to check that).
+# The policy validator. Every module-level name it reads is bound in this region or is a builtin. The hook's H12
+# walks both files' module-level statements and fails when one outside this region binds a name the region
+# binds or reads (or __builtins__), or stores to an attribute or item of such a name, json, builtins or
+# sys.modules. That catches accidental drift between the two copies. A deliberate edit that replaces behaviour
+# through a path the static walk does not model (a function body run later, an alias made by assignment,
+# setattr, globals(), exec) is not caught there; the recorded hashes (.preview/SHA256SUMS for the hook,
+# .aiqt/manifest.toml for both files) are the control for a deliberate edit.
 import json  # noqa: E402
 
 POLICY_CAP = 65536  # bytes; a larger policy file is malformed
@@ -371,6 +389,31 @@ def _deny(policy, tool, rel, added, where):
                                    "permissionDecisionReason": _escape(reason, chars)}}
 
 
+def _fields(tool, tool_input):
+    """(fields, None) when the fields the tool needs have the right type, else (None, why). For Write the fields
+    are its content; for Edit and MultiEdit, a list of (old_string, new_string) pairs, one per edit."""
+    if tool == "Write":
+        content = tool_input.get("content")
+        return (content, None) if isinstance(content, str) else (None, "its content is not a string")
+    if tool == "Edit":
+        old, new = tool_input.get("old_string"), tool_input.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None, "its old_string or new_string is not a string"
+        return [(old, new)], None
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return None, "its edits value is not a non-empty list"
+    pairs = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return None, "one of its edits is not an object"
+        old, new = edit.get("old_string"), edit.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None, "one of its edits has an old_string or new_string that is not a string"
+        pairs.append((old, new))
+    return pairs, None
+
+
 def _decide(payload, env):
     """The verdict for one payload: None (allow silently), a note object, or a deny object."""
     root = env.get(ROOT_VAR)
@@ -403,6 +446,11 @@ def _decide(payload, env):
         if not _clean(cwd) or not os.path.isabs(cwd):
             return _unchecked("its file_path is relative and the payload has no absolute cwd", tool)
         file_path = os.path.join(cwd, file_path)
+    # The fields are checked before the path and the policy, so a malformed call gets a note wherever it points
+    # and whether or not the root holds a policy file.
+    fields, why = _fields(tool, tool_input)
+    if why is not None:
+        return _unchecked(why, tool)
     try:
         root_real = os.path.realpath(root)
         target = os.path.realpath(file_path)
@@ -423,37 +471,15 @@ def _decide(payload, env):
         return None
     chars = list(policy["chars"])
     rel = "/".join(parts)
-    if tool == "Edit":
-        old, new = tool_input.get("old_string"), tool_input.get("new_string")
-        if not isinstance(old, str) or not isinstance(new, str):
-            return _unchecked("its old_string or new_string is not a string", tool)
-        added = _added(chars, old, new)
-        if added:
-            line, column = _position(new, added)
-            return _deny(policy, tool, rel, added, f"line {line}, column {column} of the new text")
-        return None
-    if tool == "MultiEdit":
-        edits = tool_input.get("edits")
-        if not isinstance(edits, list) or not edits:
-            return _unchecked("its edits value is not a non-empty list", tool)
-        pairs = []
-        for edit in edits:
-            if not isinstance(edit, dict):
-                return _unchecked("one of its edits is not an object", tool)
-            old, new = edit.get("old_string"), edit.get("new_string")
-            if not isinstance(old, str) or not isinstance(new, str):
-                return _unchecked("one of its edits has an old_string or new_string that is not a string", tool)
-            pairs.append((old, new))
-        for number, (old, new) in enumerate(pairs, 1):
+    if tool != "Write":
+        for number, (old, new) in enumerate(fields, 1):
             added = _added(chars, old, new)
             if added:
                 line, column = _position(new, added)
-                return _deny(policy, tool, rel, added,
-                             f"line {line}, column {column} of edit {number}'s new text")
+                text = "the new text" if tool == "Edit" else f"edit {number}'s new text"
+                return _deny(policy, tool, rel, added, f"line {line}, column {column} of {text}")
         return None
-    content = tool_input.get("content")
-    if not isinstance(content, str):
-        return _unchecked("its content is not a string", tool)
+    content = fields
     if not any(c in content for c in chars):
         return None
     try:
@@ -609,13 +635,46 @@ def _self_test():
         for child in ast.iter_child_nodes(node):
             bindings(child, out)
 
+    def stores(node, out, aliases):
+        """Add to out the base of each attribute or item store or deletion node makes at module scope: the name
+        its target chain starts from (an alias bound by importing json, builtins or sys counts as that module),
+        or "sys.modules" for a chain that starts there. A def or lambda body, which runs only when called, is
+        not walked, though its decorators and defaults are; a class body, which runs at once, is."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            inner = list(getattr(node, "decorator_list", [])) + node.args.defaults
+            for child in inner + [d for d in node.args.kw_defaults if d is not None]:
+                stores(child, out, aliases)
+            return
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            first = node
+            while isinstance(first.value, (ast.Attribute, ast.Subscript)):
+                first = first.value
+            if isinstance(first.value, ast.Name):
+                base = aliases.get(first.value.id, first.value.id)
+                if base == "sys" and isinstance(first, ast.Attribute) and first.attr == "modules":
+                    base = "sys.modules"
+                out.add(base)
+        for child in ast.iter_child_nodes(node):
+            stores(child, out, aliases)
+
     def rebound(text):
-        """The names the marked region binds or reads (every name in it, function bodies included) that the rest
-        of the module binds at module scope or that a function outside the region declares global, plus "*"
-        for a wildcard import outside it. Each module-level statement must lie wholly on one side."""
+        """The names the marked region binds or reads (every name in it, function bodies included), with
+        __builtins__, that the rest of the module binds at module scope or that a function outside the region
+        declares global, plus "*" for a wildcard import outside it, plus the base of each attribute or item
+        store outside the region, at module scope, whose base is one of those names, builtins or sys.modules.
+        Each module-level statement must lie wholly on one side."""
         first, last, _ = marked(text)
-        inside, outside = {"*"}, set()
-        for stmt in ast.parse(text).body:
+        inside, outside, stored, aliases = {"*", "__builtins__"}, set(), set(), {}
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                module = (node.module or "") if isinstance(node, ast.ImportFrom) else None
+                for alias in node.names:
+                    whole = alias.name if module is None else f"{module}.{alias.name}"
+                    if whole.partition(".")[0] in ("json", "builtins", "sys"):
+                        bound = alias.asname or (alias.name if module is not None else whole.partition(".")[0])
+                        aliases[bound] = "sys.modules" if whole == "sys.modules" else whole.partition(".")[0]
+        for stmt in tree.body:
             start = min([stmt.lineno] + [d.lineno for d in getattr(stmt, "decorator_list", [])])
             if first <= start and stmt.end_lineno <= last:
                 bindings(stmt, inside)
@@ -624,19 +683,23 @@ def _self_test():
                 bindings(stmt, outside)
                 outside.update(name for n in ast.walk(stmt) if isinstance(n, (ast.Global, ast.Nonlocal))
                                for name in n.names)
+                stores(stmt, stored, aliases)
             else:
                 raise AssertionError(f"the statement at line {start} straddles a copy marker")
-        return inside & outside
+        return (inside & outside) | (stored & (inside | {"builtins", "sys.modules"}))
 
-    def after_end(text, code):
-        """text with code inserted on the line after its END COPY marker."""
+    def beside(text, code, marker):
+        """text with code inserted on the line after its END COPY marker, or before its BEGIN COPY marker."""
         lines = text.split("\n")
-        end = next(i for i, line in enumerate(lines) if line.startswith("# --- END COPY"))
-        return "\n".join(lines[:end + 1] + [code] + lines[end + 1:])
+        at = next(i for i, line in enumerate(lines) if line.startswith(f"# --- {marker} COPY"))
+        at += marker == "END"
+        return "\n".join(lines[:at] + [code] + lines[at:])
 
-    # Rebindings outside the region that H12 must find, in either file. The first four are the mutants that
-    # survived QA round 2 (a plain and a conditional rebinding of _TOP_KEYS, a plain and a conditional
-    # redefinition of _rel_ok); the rest are the other ways a statement can bind a name.
+    # Rebindings outside the region that H12 must find, in either file, before the region and after it. The
+    # first four are the mutants that survived QA round 2 (a plain and a conditional rebinding of _TOP_KEYS, a
+    # plain and a conditional redefinition of _rel_ok); the next ones are the other ways a statement can bind
+    # a name, one vector or more for each branch of bindings(); the last ones are the stores of QA round 3's
+    # mutants (A, B and C) and their variants, one vector or more for each branch of stores().
     rebindings = (
         ("_TOP_KEYS", '_TOP_KEYS = _TOP_KEYS | {"metadata"}'),
         ("_TOP_KEYS", 'if True:\n    _TOP_KEYS = _TOP_KEYS | {"metadata"}'),
@@ -656,6 +719,39 @@ def _self_test():
         ("validate_policy", "while False:\n    validate_policy = None"),
         ("parse_policy", "type parse_policy = int"),
         ("*", "from os.path import *"),
+        ("_plain", "match []:\n    case [*_plain]:\n        pass"),
+        ("_REQUIRED_KEYS", "match 0:\n    case {**_REQUIRED_KEYS}:\n        pass"),
+        ("json", "import json.decoder"),
+        ("_suffix_ok", "@(_suffix_ok := staticmethod)\ndef _unrelated():\n    pass"),
+        ("_skip_ok", "def _unrelated(value=(_skip_ok := None)):\n    pass"),
+        ("_no_duplicates", "def _unrelated(*, value=(_no_duplicates := None)):\n    pass"),
+        ("_TREE_KEYS", "_unrelated = lambda value=(_TREE_KEYS := None): value"),
+        ("_no_constant", "class _Unrelated((_no_constant := object)):\n    pass"),
+        ("POLICY_CAP", "class _Unrelated(metaclass=(POLICY_CAP := type)):\n    pass"),
+        ("__builtins__", "import builtins as _bi\n__builtins__ = dict(vars(_bi), sorted=lambda it: "
+                         '[k for k in _bi.sorted(it) if k != "metadata"])'),
+        ("__builtins__", '__builtins__["sorted"] = sorted'),
+        ("builtins", "import builtins\nbuiltins.sorted = sorted"),
+        ("builtins", "import builtins as _bi\n_bi.sorted = sorted"),
+        ("validate_policy", "import types as _ty\n"
+                            "_vp_copy = _ty.FunctionType(validate_policy.__code__, globals())\n"
+                            "def _shim(data):\n"
+                            "    return _vp_copy(dict((k, v) for k, v in data.items() if k != 'metadata'))\n"
+                            "validate_policy.__code__ = _shim.__code__"),
+        ("sys.modules", "import json as _real_json\nclass _J:\n    def loads(self, *args, **kwargs):\n"
+                        "        data = _real_json.loads(*args, **kwargs)\n"
+                        '        data.pop("metadata", None)\n        return data\n'
+                        'sys.modules["json"] = _J()'),
+        ("sys.modules", 'import sys as _s\n_s.modules["json"] = None'),
+        ("sys.modules", 'from sys import modules as _mods\n_mods["json"] = None'),
+        ("json", "import json as _j\n_j.loads = None"),
+        ("json", "from json import decoder as _d\n_d.scanstring = None"),
+        ("json", "class _Patch:\n    json.loads = None"),
+        ("_TOP_KEYS", "if True:\n    _TOP_KEYS.__doc__ = None"),
+        ("json", "del json.loads"),
+        ("json", "def _unrelated(value=[0 for json.loads in [None]]):\n    pass"),
+        ("builtins", "import builtins\n@[staticmethod for builtins.sorted in [None]][0]\n"
+                     "def _unrelated():\n    pass"),
     )
 
     class T(unittest.TestCase):
@@ -885,14 +981,18 @@ def _self_test():
                     texts[path] = handle.read().decode("utf-8")
             self.assertEqual(marked(texts[here])[2], marked(texts[gate.__file__])[2],
                              "the validator region drifted; run tools/gen_char_policy.py")
-            # Both files alike: no name the region binds or reads is bound outside it at module scope, and each
-            # surviving mutant of QA round 2, with the other binding forms, is found after either END marker.
-            # A rebinding at run time (through globals(), setattr on the module, or builtins) is beyond this
-            # static walk.
+            # Both files alike: no name the region binds or reads (or __builtins__) is bound outside it at module
+            # scope, no module-level statement outside it stores to an attribute or item of one of those names,
+            # of builtins or of sys.modules, and each vector is found before either BEGIN marker and after either
+            # END marker. This catches accidental drift. It is not a defence against a deliberate edit that
+            # replaces behaviour through a path this static walk does not model (a function body run later, an
+            # alias made by assignment, setattr, globals(), exec); the hashes of the shipped files
+            # (.preview/SHA256SUMS and .aiqt/manifest.toml) are the control for a deliberate edit.
             for path, text in texts.items():
                 self.assertEqual(rebound(text), set(), (path, "a name of the copied region is bound outside it"))
                 for name, code in rebindings:
-                    self.assertEqual(rebound(after_end(text, code)), {name}, (path, code))
+                    for marker in ("BEGIN", "END"):
+                        self.assertEqual(rebound(beside(text, code, marker)), {name}, (path, marker, code))
             self.assertEqual(POLICY_PATH, gate.POLICY_PATH)
             # The behaviour, on a sample: each rejected fixture is otherwise valid, so its rejection is the named
             # fault's, and both validators must give the stated verdict, not merely the same one.
@@ -976,9 +1076,37 @@ def _self_test():
             self.is_unchecked(_decide([], self.env), "not a JSON object")
             self.is_unchecked(_decide({"tool_input": {"file_path": self.at("docs/a.md")}}, self.env), "tool_name")
             self.assertIsNone(_decide({"tool_name": "Read", "tool_input": None}, self.env))
-            # out of scope, a field the tool needs is never examined: silent
-            self.assertIsNone(_decide({"tool_name": "Write", "tool_input": {"file_path": self.at("a.txt")}},
-                                      self.env))
+            # the fields a tool needs are checked before the path and the policy: a malformed call gets a note
+            # out of scope and outside the root too, and a well-formed one there is silent
+            for path in (self.at("a.txt"), os.path.join(self.tmp, "elsewhere", "a.md")):
+                self.is_unchecked(_decide({"tool_name": "Write", "tool_input": {"file_path": path}}, self.env),
+                                  "its content is not a string")
+                self.assertIsNone(_decide({"tool_name": "Write", "tool_input": {"file_path": path, "content": em}},
+                                          self.env))
+
+        def test_h21_no_policy_file(self):
+            # QA round 3: under a root without a policy file, these three malformed calls were allowed silently;
+            # each gets a note, in process and through the hook as launched, while the well-formed call is silent
+            empty = os.path.join(self.tmp, "empty")
+            os.makedirs(empty)
+            self.set_policy(None)
+            for tool, bad, good, needle in (
+                    ("Write", {"content": 7}, {"content": em}, "its content is not a string"),
+                    ("Edit", {"old_string": None, "new_string": "x"}, {"old_string": "x", "new_string": em},
+                     "its old_string or new_string is not a string"),
+                    ("MultiEdit", {"edits": []}, {"edits": [{"old_string": "x", "new_string": em}]},
+                     "its edits value is not a non-empty list")):
+                for root, target in ((empty, os.path.join(empty, "x.md")), (self.root, self.at("docs/a.md"))):
+                    env = {ROOT_VAR: root}
+                    payload = {"tool_name": tool, "tool_input": {"file_path": target} | bad}
+                    self.is_unchecked(_decide(payload, env), needle)
+                    self.assertIsNone(_decide({"tool_name": tool, "tool_input": {"file_path": target} | good}, env))
+                p = subprocess.run([sys.executable, "-I", "-S", "-B", here], capture_output=True, timeout=60,
+                                   input=json.dumps({"tool_name": tool, "tool_input": {
+                                       "file_path": os.path.join(empty, "x.md")} | bad}).encode("ascii"),
+                                   env={"LC_ALL": "C", ROOT_VAR: empty})
+                self.assertEqual((p.returncode, p.stderr), (0, b""), tool)
+                self.is_unchecked(json.loads(p.stdout), needle)
 
         def test_h15_existing_unreadable(self):
             os.makedirs(self.at("docs/dir.md"))

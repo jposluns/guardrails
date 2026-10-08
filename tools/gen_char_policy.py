@@ -12,12 +12,17 @@ byte for byte, keeping both marker lines and everything outside them, so the two
   gen_char_policy.py --check      exit 1 on any byte difference (run gen_char_policy.py to regenerate)
   gen_char_policy.py --self-test  synthetic sources and targets for the splice and its fail-closed cases
 
-Exit: 0 clean (or written); 1 drift in --check; 2 cannot evaluate: an unreadable or unwritable file, or a file
-without exactly one BEGIN and exactly one END marker line, in that order (a line starting "# --- BEGIN COPY"
-or "# --- END COPY" counts as a marker, so a stray or nested one fails closed rather than being copied).
+Exit: 0 clean (or written); 1 drift in --check; 2 cannot evaluate: an unknown argument (a usage line on
+stderr), an unreadable or unwritable file, a file without exactly one BEGIN and exactly one END marker line,
+in that order (a line starting "# --- BEGIN COPY" or "# --- END COPY" counts as a marker, so a stray or
+nested one fails closed rather than being copied), or a marker line whose text is not the exact expected
+marker ("a marker line is not the expected text").
 
-Byte equality covers the region only. Whether a name the region reads is rebound outside it, in either file,
-is checked by the hook's own self-test (H12), which walks both files' module scope. After regenerating, the
+Byte equality covers the region only. Whether a statement outside the region, in either file, rebinds a name
+the region binds or reads, or stores to an attribute or item of one, is checked by the hook's own self-test
+(H12), a static walk of both files' module-level statements. That walk catches accidental drift; a deliberate
+edit through a path it does not model (a function body, setattr, globals(), exec) is left to the recorded
+hashes in .preview/SHA256SUMS and .aiqt/manifest.toml, which any edit changes. After regenerating, the
 hook's SHA-256 in .preview/SHA256SUMS and the .preview/README.md table changes too; tools/check_hooks_preview.py
 fails until both are updated.
 """
