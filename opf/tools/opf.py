@@ -3840,15 +3840,9 @@ def _watchdog_completion_case(mode):
         # cancelled construction aborts the launch and re-raises the cancellation.
         real_start = threading.Thread.start
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
-            return live
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
 
         def no_children():
             try:
@@ -3884,6 +3878,45 @@ def _watchdog_completion_case(mode):
         # keeps a libffi mapping descriptor open for the process's life) so the
         # descriptor parity below measures ONLY what a cancelled launch leaks.
         emit._fixture_preload()
+        import errno
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
+        finally:
+            os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
         with patch.object(threading.Thread, "start", interrupted_start):
             held = cancelled_run()
@@ -4021,11 +4054,11 @@ def _watchdog_completion_case(mode):
             identity = (os.fstat(spare).st_dev, os.fstat(spare).st_ino)
 
             def probe():
-                try:
-                    stat = os.fstat(spare)
-                except OSError:
+                if not _st_census_open(spare):   # EBADF only reads as swept; any other read error raises
                     return "SWEPT"
+                stat = os.fstat(spare)
                 return "LEAKED" if (stat.st_dev, stat.st_ino) == identity else "SWEPT"
+            assert _st_census_eio_raises(probe, spare), "the probe read an EIO descriptor as swept"
 
             real_listdir = os.listdir
 
@@ -4873,15 +4906,9 @@ def _watchdog_completion_case(mode):
         real_abandon = emit._FixtureProcess._abandon_unfinished_launch
         real_finish = emit._FixtureProcess._finish_close
 
-        def open_fds():
-            live = set()
-            for name in os.listdir("/proc/self/fd"):
-                try:
-                    os.fstat(int(name))
-                except OSError:
-                    continue
-                live.add(int(name))
-            return live
+        # Identities, not bare numbers: a same-number replacement reads as a
+        # change; EBADF only reads as closed, any other read error raises.
+        open_fds = _st_census_fds
 
         def no_children():
             try:
@@ -4974,6 +5001,45 @@ def _watchdog_completion_case(mode):
 
         emit._fixture_preload()
         assert no_children(), "children live before the close-cancel probe"
+        import errno
+        held_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            assert _st_census_eio_raises(open_fds, held_fd), \
+                "the descriptor census read an EIO descriptor as closed"
+            assert _st_census_eio_raises(open_fds, held_fd, "readlink"), \
+                "the descriptor census read a descriptor whose link fails EIO as closed"
+            # Every other read error fails closed too (each seam's one tolerated
+            # errno included for the other seam); ENOENT on the link read alone
+            # (the number has no entry) reads as no kind.
+            for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                                ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF))):
+                for code in codes:
+                    assert _st_census_eio_raises(open_fds, held_fd, seam, code), \
+                        "the descriptor census read a {} {} failure as closed".format(
+                            seam, errno.errorcode[code])
+
+            def link_enoent(path):
+                raise OSError(errno.ENOENT, "injected census read failure")
+            assert _st_census_anon_kind(held_fd, link_enoent) is None, \
+                "the descriptor census did not read an ENOENT link as no kind"
+        finally:
+            os.close(held_fd)
+        # A descriptor reopened at the same number to another file reads as
+        # a leak; the flip, a number-only census, reads it as unchanged.
+        assert _st_census_reuse_detected(open_fds), \
+            "the descriptor census read a same-number replacement as unchanged"
+        assert not _st_census_reuse_detected(lambda: set(entry[0] for entry in open_fds())), \
+            "flip: a number-only census caught the same-number replacement"
+        # An eventfd put at an epoll descriptor's number reads as a change by
+        # its anonymous-inode kind; the flip, a census of the stat fields
+        # alone, reads it as unchanged wherever the two share an inode.
+        detected, shared = _st_census_anon_reuse_detected(open_fds)
+        assert detected, "the descriptor census read an epoll-to-eventfd replacement as unchanged"
+        assert not shared or not _st_census_anon_reuse_detected(
+            lambda: set(entry[:4] for entry in open_fds()))[0], \
+            "flip: a stat-only census caught the epoll-to-eventfd replacement"
+        assert _st_census_anon_close_leak_free(open_fds), \
+            "the epoll-to-eventfd probe leaked a descriptor when its epoll close raised"
         before = open_fds()
 
         # Leg 1: fork unrecorded (wedged), SIGINT pending from inside the
@@ -17114,6 +17180,11 @@ def _cli_self_test():
                         _wl_seen["wfd"] = fd
                     return fd
 
+                def _wl_leaked(fd):
+                    """The worksheet leak verdict: whether fd is still open. Only EBADF reads as closed; any
+                    other read error raises naming fd, never read as closed."""
+                    return _st_census_open(fd)
+
                 def _wl_close(fd):
                     _wl_real_close(fd)
                     if fd == _wl_seen.get("pfd") and "fired" not in _wl_seen:
@@ -17142,12 +17213,18 @@ def _cli_self_test():
                     if _wl_out != "valueerror":
                         failures.append("adopt --inputs with a failing parent close: expected the "
                                         "fail-closed ValueError, got {}".format(_wl_out))
-                    try:
-                        os.fstat(_wl_seen["wfd"])
+                    if _wl_leaked(_wl_seen["wfd"]):
                         failures.append("adopt --inputs leaked the worksheet fd (fd {} still open "
                                         "after the parent close failed)".format(_wl_seen["wfd"]))
-                    except OSError:
-                        pass
+                # The worksheet leak verdict fails closed: an EIO census read of a held descriptor raises
+                # naming it, never reads as closed.
+                _wl_held = _wl_real_open(os.devnull, os.O_RDONLY)
+                try:
+                    if not _st_census_eio_raises(lambda: _wl_leaked(_wl_held), _wl_held):
+                        failures.append("adopt --inputs worksheet leak check: an EIO census read of a held "
+                                        "descriptor read as closed")
+                finally:
+                    _wl_real_close(_wl_held)
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner
@@ -17260,6 +17337,169 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
+def _st_census_stat(fd, fstat=None):
+    """The stat result of descriptor `fd`, or None once it is closed, for a self-test descriptor census or
+    survivor scan. Only EBADF reads as closed; any other read error (EIO, EACCES, ENOMEM) is cannot-evaluate,
+    raised naming `fd`, never read as a closed descriptor: a leak check fails closed on input it cannot read.
+    `fstat` defaults to os.fstat as bound when called, so a case can inject the census read failure."""
+    import errno
+    try:
+        return (os.fstat if fstat is None else fstat)(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            return None
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+
+
+def _st_census_open(fd, fstat=None):
+    """Whether descriptor `fd` is open (see _st_census_stat: only EBADF reads as closed)."""
+    return _st_census_stat(fd, fstat) is not None
+
+
+def _st_census_anon_kind(fd, readlink=None):
+    """The anonymous-inode kind of descriptor `fd` ("anon_inode:[eventpoll]", "anon_inode:[eventfd]"), None
+    for any other file, from its /proc/self/fd link. Anonymous-inode descriptors of many kinds share one
+    (st_dev, st_ino), so the kind is what tells an epoll descriptor from an eventfd put at its number. ENOENT
+    (the number has no entry: closed since its stat read) returns None; any other read error raises naming
+    `fd`, never read as closed. `readlink` defaults to os.readlink as bound when called."""
+    import errno
+    try:
+        target = (os.readlink if readlink is None else readlink)("/proc/self/fd/{}".format(fd))
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return None
+        raise RuntimeError("descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
+    return target if target.startswith("anon_inode:") else None
+
+
+def _st_census_fds():
+    """This process's open descriptors as identities (number, st_dev, st_ino, file type, anonymous-inode
+    kind), so a descriptor closed and reopened at the same number to a different file reads as a change,
+    never as unchanged, an anonymous-inode descriptor replaced by one of another kind (an epoll descriptor by
+    an eventfd, which share one st_dev and st_ino) included. Residual: two anonymous-inode descriptors of the
+    same kind share every field, so one replaced at its number by another of its own kind still reads as
+    unchanged. Only EBADF reads as closed (the listing's own descriptor); any other read error raises naming
+    the descriptor."""
+    live = set()
+    for name in os.listdir("/proc/self/fd"):
+        info = _st_census_stat(int(name))
+        if info is not None:
+            live.add((int(name), info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                      _st_census_anon_kind(int(name))))
+    return live
+
+
+def _st_census_reuse_detected(scan):
+    """Whether `scan()` reports a same-number replacement as a change: a held /dev/null descriptor is in the
+    baseline, then its number is reopened to /dev/zero (dup2), so the set of open numbers is unchanged but
+    the file behind one is not. A number-only census reads that as unchanged and would pass a leak."""
+    held = os.open(os.devnull, os.O_RDONLY)
+    try:
+        baseline = scan()
+        other = os.open("/dev/zero", os.O_RDONLY)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        return scan() != baseline
+    finally:
+        os.close(held)
+
+
+def _st_census_anon_reuse_detected(scan):
+    """(detected, shared) for an anonymous-inode replacement: a held epoll descriptor is in the baseline, then
+    an eventfd is put at its number (dup2). `detected` is whether `scan()` reads that as a change; `shared` is
+    whether the two have one (st_dev, st_ino, file type), where a census of those stat fields alone reads the
+    replacement as unchanged and only the anonymous-inode kind tells them apart. Every descriptor it opens is
+    closed once on every path: `held` is owned from the dup on, under the finally that also covers the epoll's
+    own close, so a raising close leaves nothing open."""
+    import select
+    poll = select.epoll()
+    held = None
+    try:
+        try:
+            held = os.dup(poll.fileno())
+        finally:
+            poll.close()
+        before = os.fstat(held)
+        baseline = scan()
+        other = os.eventfd(0)
+        try:
+            os.dup2(other, held)
+        finally:
+            os.close(other)
+        after = os.fstat(held)
+        shared = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)) == \
+            (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+        return scan() != baseline, shared
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+def _st_census_anon_close_leak_free(scan):
+    """Whether _st_census_anon_reuse_detected leaves no descriptor open when its epoll's close raises:
+    select.epoll is wrapped so close() closes the real epoll and then raises OSError(EIO); the call must raise
+    that error, and `scan()` must read as it did before the call."""
+    import errno
+    import select
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = scan()
+    select.epoll = RaisingEpoll
+    try:
+        _st_census_anon_reuse_detected(scan)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and scan() == before
+
+
+def _st_census_eio_raises(scan, fd, seam="fstat", code=None):
+    """Whether `scan()` fails closed when the census read of the held descriptor `fd` fails errno `code` (EIO
+    by default): it must raise RuntimeError naming fd (read as closed, a leak would pass). os.<seam> (fstat,
+    or readlink of fd's /proc/self/fd link) fails for fd only during the call. An independent fstat must
+    still see fd open afterwards, else the check proves nothing. The caller owns fd."""
+    import errno
+    code = errno.EIO if code is None else code
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
+
+    def failing(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
+            raise OSError(code, "injected census read failure")
+        return real_seam(number, *args, **kwargs)
+    if seam == "readlink":
+        os.readlink = failing
+    else:
+        os.fstat = failing
+    try:
+        scan()
+        named = False
+    except RuntimeError as exc:
+        named = "descriptor {}:".format(fd) in str(exc)
+    finally:
+        os.fstat, os.readlink = real_fstat, real_readlink
+    try:
+        real_fstat(fd)
+    except OSError:
+        return False
+    return named
+
+
 def _retained_close_offpath_self_test():
     """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
     the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
@@ -17285,7 +17525,7 @@ def _retained_close_offpath_self_test():
     import _opf_adopt_observe
     this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
-    real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
+    real_open, real_dup, real_pipe, real_close, real_fstat = os.open, os.dup, os.pipe, os.close, os.fstat
     failures = []
     ran = []
 
@@ -17342,13 +17582,8 @@ def _retained_close_offpath_self_test():
             finally:
                 os.supports_dir_fd.discard(_open)
                 os.open, os.dup, os.pipe, os.close = real_open, real_dup, real_pipe, real_close
-            left = []
-            for fd in sorted(set(state.opened)):
-                try:
-                    os.fstat(fd)
-                except OSError:
-                    continue
-                left.append(fd)
+            # Only EBADF reads as closed; any other census read error raises naming the descriptor.
+            left = [fd for fd in sorted(set(state.opened)) if _st_census_open(fd)]
             for fd in left:                   # a pre-fix run leaks; release so the suite itself stays clean
                 try:
                     real_close(fd)
@@ -17376,9 +17611,44 @@ def _retained_close_offpath_self_test():
         if not ok:
             failures.append(name)
 
+    def census_read_failure():
+        """The survivor census fails closed: a call leaves a recorded descriptor open and its census read
+        fails EIO; the sweep must raise naming it (read as closed, the leak would pass). An independent fstat
+        must still see the descriptor open, else the row proves nothing."""
+        kept, fails = [], []
+
+        def leave_open():
+            kept.append(os.open(os.devnull, os.O_RDONLY))
+
+        def fstat(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        try:
+            with mock.patch.object(os, "fstat", fstat):
+                sweep(leave_open)
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("the sweep raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("the sweep returned: the unreadable descriptor read as closed")
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        ran.append("offpath-census-read-failure")
+        print("  {} offpath-census-read-failure: EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "the sweep raised naming it"))
+        if fails:
+            failures.append("offpath-census-read-failure")
+
     base = Path(tempfile.mkdtemp(prefix="opf-retained-close-offpath-")).resolve()
     held = []
     try:
+        census_read_failure()
         # A render-clean empty-state store (the check_opf_drift fixture idiom), its views populated through
         # the engine's own planner, plus a store-control .gitignore for the write-guard reader.
         root = base / "store"
@@ -17686,7 +17956,7 @@ def _close_exc_safe_vectors_self_test():
     ANY = object()
     state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
                                   number=None, closes=0, probes=0, unrelated=None, want=None,
-                                  break_reuse=False)
+                                  break_reuse=False, census=real_fstat)
 
     def propagating(fd):
         """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
@@ -17831,11 +18101,8 @@ def _close_exc_safe_vectors_self_test():
         for fd in sorted(set(state.opened)):
             if fd == state.number and holds_unrelated(fd):
                 continue                      # the unrelated file: graded by REUSE, never as a survivor
-            try:
-                real_fstat(fd)
-            except OSError:
-                continue
-            left.append(fd)
+            if _st_census_open(fd, state.census):   # only EBADF reads as closed; any other read error raises
+                left.append(fd)
         for fd in left:                       # a failing vector leaks; release so the suite stays clean
             with contextlib.suppress(OSError):
                 real_close(fd)
@@ -18420,6 +18687,37 @@ def _close_exc_safe_vectors_self_test():
                                  "_opf_store._immediate_subdirs finally", fails))
             print("  {} forced-reuse-setup-failure body {} [_opf_store._immediate_subdirs finally]: {}".format(
                 "PASS" if ok else "FAIL", errno.errorcode[err], "; ".join(fails) if fails else "green"))
+        # The survivor census fails closed: a call leaves a recorded descriptor open and its census read fails
+        # EIO; run() must raise naming it (read as closed, the leak would pass). An independent fstat must
+        # still see the descriptor open, else the row proves nothing.
+        kept, fails = [], []
+
+        def census(fd, *args, **kwargs):
+            if fd in kept:
+                raise OSError(errno.EIO, "injected census read failure")
+            return real_fstat(fd, *args, **kwargs)
+        state.census = census
+        try:
+            run(lambda: kept.append(os.open(os.devnull, os.O_RDONLY)))
+        except RuntimeError as exc:
+            if not kept or "descriptor {}:".format(kept[0]) not in str(exc):
+                fails.append("census: run() raised without naming descriptor {} ({!r})".format(kept, exc))
+        else:
+            fails.append("census: run() returned; the unreadable descriptor read as closed")
+        finally:
+            state.census = real_fstat
+        for fd in kept:
+            try:
+                real_fstat(fd)
+            except OSError:
+                fails.append("census: the injected descriptor {} was not open".format(fd))
+            else:
+                real_close(fd)
+        checks += 1
+        if fails:
+            failures.append(("census-read-failure", "EIO", fails))
+        print("  {} census-read-failure EIO on a recorded descriptor left open: {}".format(
+            "PASS" if not fails else "FAIL", "; ".join(fails) if fails else "run() raised naming it"))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
