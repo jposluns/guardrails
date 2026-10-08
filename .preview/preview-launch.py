@@ -67,8 +67,12 @@ ORDINARY faults its own code can raise: each operation that can fail on what it 
 checking, reading and compiling the hook file, formatting an acquisition error whose __str__ raises,
 writing to a closed or broken descriptor) runs inside a protected block, and the statements between
 those blocks (the imports, the literal assignments, the version and mode tests, the def statements
-and the path computations) read nothing but the argv, the interpreter's version and the launcher's
-own path. An INJECTED fault is outside that rule: a line-trace exception or an asynchronous
+and the path computations) read nothing but the argv, the interpreter's version, the launcher's own
+path and, for the imports, the interpreter installation's own standard library. That rule assumes a
+working interpreter installation: an import of a standard library module the installation cannot
+supply (a damaged or partial installation, for example) raises ImportError outside the protected
+blocks and exits 1, which does not deny a PreToolUse call. An INJECTED fault is outside that rule:
+a line-trace exception or an asynchronous
 exception (the KeyboardInterrupt a delivered SIGINT raises; the launcher does not ignore SIGINT) can
 arrive at ANY line, the clause lines (`try:`, `except BaseException:`), the floor guard, the module
 docstring and the `pass` of each diagnostic handler included, and where no protected block catches
@@ -76,17 +80,30 @@ it the process ends with that fault's own outcome: an uncaught exception prints 
 exits 1, SystemExit(n) exits n, and KeyboardInterrupt ends the process by SIGINT. That outcome may
 not block: exit 1, exit 0 and a SIGINT death do not deny a PreToolUse call (SystemExit(2) does). A
 MemoryError from real memory exhaustion can likewise arise at any allocating line outside the
-protected blocks, and then exits 1. That channel is not reachable from adopter input (the repository
-content and the tool-call payload a hook judges): a line trace needs code already running in this
-interpreter, and the launcher is started with -I -S, so no PYTHON* environment variable
-(PYTHONSTARTUP and PYTHONPATH included), no site module or .pth file, no user site directory and no
-module from the script's or the current directory runs before its first line (the only earlier code
-is the interpreter installation's own standard library); an asynchronous exception needs a sender
-with the right to signal the hook process (its own user, a privileged user, or the terminal of its
-process group); and the launcher reads no adopter input before the hook runs, so none can drive its
-memory use. tools/check_python_floor.py faults every line a blocking-mode run of the launcher
-executes (launcher/line-fault-sweep) and accepts only the mode rule or the injected fault's own
-outcome, so an ordinary fault that escapes the mode rule there fails it. The hook's own
+protected blocks, and then exits 1. Reaching that channel needs code already running in this
+process, or a sender of signals to it. The launcher is registered with -I -S -B (USAGE above; the
+README registrations; tools/check_python_floor.py refuses a README registration without -S). -I
+excludes the environment (every PYTHON* variable, PYTHONSTARTUP and PYTHONPATH included), the user
+site directory and the script's and the current directory on sys.path; -S excludes the site module,
+so no .pth file and no sitecustomize or usercustomize runs before the launcher's first line,
+whichever interpreter PATH selects (a project virtual environment's site-packages included;
+launcher/registered-options-skip-site-pth pins this). What remains before that line is the
+interpreter binary PATH selects, with the loader environment it starts under, and its standard
+library: whoever can write those (a user with the hook user's own rights included) can run code
+first, the same tier as whoever can write the hook files. An asynchronous exception needs a sender
+with the right to signal the hook process: code running with the hook user's own rights (repository
+code that an earlier allowed tool call ran included), a privileged user, or the terminal of its
+process group. The launcher reads no adopter input before the hook runs, so none can drive its
+memory use. tools/check_python_floor.py injects a fault at every line a blocking-mode run of the
+launcher executes, in each scenario it runs (below the floor, the hook missing, present or
+uncompilable, and an unknown mode; launcher/line-fault-sweep), and accepts only the mode rule or the
+injected fault's own outcome: that row shows what an injected fault does at those lines, and an
+ordinary fault reaches it only where a scenario or an injection triggers one. The ordinary faults of
+the protected operations are held by the rows that trigger them without an injection:
+launcher/ordinary-fault-scenarios (a syntax error, an unreadable hook and a broken stderr, refusing
+too a launcher with compile() or the refusal's delivery moved out of its protected block), the
+launcher/acquire-*-mode-rule rows, and the refusals' fd-state, stdout-buffer and fault-injection
+rows. The hook's own
 execution, the exec statement (its evaluation of exec, _got and _module.__dict__ included) and the
 hook's code, keeps the platform's exit semantics as any hook does: an exception it does not catch
 exits 1, as when the hook file is launched directly. Each fail-open refusal (the floor guard's and

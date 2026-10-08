@@ -108,7 +108,9 @@ Legs, in order:
   launcher       over exactly the launchers the tree declares: a LAUNCHERS entry is declared when
                  guarded-surfaces lists it, when it is present, or when its registration file
                  (REGISTRATIONS: the plugin hooks.json, and the `exec python3` lines of the preview
-                 README) is present and names a registration; an undeclared entry adds nothing. A
+                 README) is present and names a registration; an undeclared entry adds nothing; each
+                 registration must run the launcher with exactly the options REGISTRATION_FLAGS
+                 (-I -S -B) before it, so no .pth file or sitecustomize runs first. A
                  declared launcher must be present and listed, stay inside the LAUNCHER-SUBSET
                  ALLOWLIST (launcher_subset_findings: a CLOSED, MINIMAL list of the node types and
                  forms the launchers need, each compiled identically by Python 3.4, the first to
@@ -449,6 +451,11 @@ OLD_GRAMMAR = (3, 4)
 # (launcher_subset_findings, below), never by ast.parse(feature_version=...) alone, which is
 # only best-effort.
 README_LAUNCH_RE = re.compile(r"exec python3\b[^\n]*")
+# The interpreter options every registration passes before a launcher: -I (no PYTHON* variable, no user
+# site directory, neither the script's nor the working directory on sys.path), -S (no site module, so no
+# .pth file and no sitecustomize of the interpreter PATH selects runs before the launcher's first line)
+# and -B (no bytecode written), the form tools/gen_hooks.py renders and the preview README registers.
+REGISTRATION_FLAGS = ("-I", "-S", "-B")
 SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+\.py\b")
 MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
 DISPATCH_NAME = "PREVIEW_HOOKS"
@@ -1588,17 +1595,36 @@ def dispatch_probe_findings(root, launcher, pinned, floor):
     return findings
 
 
+def _leading_options(tokens):
+    """The tokens before the first one that does not start with a dash (the interpreter options)."""
+    options = []
+    for token in tokens:
+        if not token.startswith("-"):
+            break
+        options.append(token)
+    return options
+
+
 def registered_scripts(registry, text):
-    """(where, script file name) for each hook registration in a registration file."""
+    """(where, script file name, interpreter options) for each hook registration in a registration
+    file: in a hooks.json the script is the first args entry that does not start with a dash and the
+    options are the entries before it; in the README the options are the dash tokens that follow
+    `exec python3`."""
     if registry.endswith(".json"):
         try:
             data = json.loads(text)
-            return [("{} {}".format(registry, event), Path(hook["args"][1]).name)
-                    for event, groups in data["hooks"].items() for group in groups
-                    for hook in group["hooks"]]
+            found = []
+            for event, groups in data["hooks"].items():
+                for group in groups:
+                    for hook in group["hooks"]:
+                        options = _leading_options(hook["args"])
+                        found.append(("{} {}".format(registry, event),
+                                      Path(hook["args"][len(options)]).name, options))
+            return found
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             raise CannotEvaluate("{}: not a readable hooks file: {}".format(registry, exc))
-    return [("{}:{}".format(registry, text.count("\n", 0, match.start()) + 1), name)
+    return [("{}:{}".format(registry, text.count("\n", 0, match.start()) + 1), name,
+             _leading_options(match.group(0).split()[2:]))
             for match in README_LAUNCH_RE.finditer(text) for name in SCRIPT_NAME_RE.findall(match.group(0))]
 
 
@@ -1613,7 +1639,8 @@ def launcher_findings(root, surfaces, floor):
     which must be present, or the pinned literal when LAUNCHERS maps it to a modes tuple, with every
     other mode of its DISPATCH_NAME literal probed below the floor (dispatch_probe_findings); its
     registration file, where REGISTRATIONS names one, must be present and name at least one
-    registration, and every registration in it must name the launcher."""
+    registration, and every registration in it must name the launcher with exactly the interpreter
+    options REGISTRATION_FLAGS (-I -S -B) before it."""
     findings = []
     for launcher, target in sorted(LAUNCHERS.items()):
         named, registries = [], [registry for registry, name in REGISTRATIONS if name == launcher]
@@ -1631,7 +1658,13 @@ def launcher_findings(root, surfaces, floor):
                 findings.append("{}: names no hook registration to check".format(registry))
             findings.extend("{}: registers {}, not the launcher {} (a hook compiled whole on an old "
                             "interpreter fails open)".format(where, name, Path(launcher).name)
-                            for where, name in scripts if name != Path(launcher).name)
+                            for where, name, _ in scripts if name != Path(launcher).name)
+            findings.extend("{}: runs the launcher {} with the interpreter options {!r}, not {!r} "
+                            "(without -S the site module, and with it each .pth file and sitecustomize "
+                            "of the interpreter PATH selects, runs before the launcher's first line)".format(
+                                where, name, options, list(REGISTRATION_FLAGS))
+                            for where, name, options in scripts
+                            if name == Path(launcher).name and options != list(REGISTRATION_FLAGS))
         if not os.path.lexists(root / launcher):
             findings.append("{}: a registered launcher is missing".format(launcher))
             continue
@@ -2436,8 +2469,11 @@ def _self_test_cases(base):
     # when they read the exit status only, and so did the below-floor dispatch probe
     # (dispatch_probe_findings). Each of the two rows reads the real launchers AND these mutants
     # through the same function against the same wanted list, and requires every mutant entry to
-    # differ from it: a revert of either row to an exit-only reading turns that row itself red, since
-    # the mutants then match the wanted list.
+    # differ from it: a revert of the shared function (_below_floor_seen, _missing_sibling_seen) to an
+    # exit-only reading turns that row itself red, since the mutants then match the wanted list. A
+    # revert that reads only the exit status of the REAL side, outside the shared function, leaves the
+    # mutant comparison untouched and is not caught by these rows; the line-fault sweep's below-floor
+    # and hook-missing baselines still require exit 2 with EMPTY stdout of the real launchers.
     junk_line = "os.write(1, %r)" % (json.dumps(dict(decision="approve")) + "\n").encode()
     floor_tail = "    except BaseException:\n        pass\n    os._exit(_floor_status)\n"
     acquire_tail = "        pass\n    try:\n        os._exit(_refusal_status)\n"
@@ -3161,8 +3197,9 @@ def _self_test_cases(base):
     # it keeps the mode rule against the ordinary faults its own code raises, and an INJECTED fault (a
     # line-trace or asynchronous exception) can arrive at any line and then ends the process with that
     # fault's own outcome. This row faults EVERY line a blocking-mode run executes, in each scenario a
-    # blocking event reaches (below the floor, the hook missing, the hook present, and for the preview
-    # launcher an unknown mode): a line trace raises MemoryError, then SystemExit(0), at that line's
+    # blocking event reaches (below the floor, the hook missing, the hook present, the hook present
+    # but uncompilable, and for the preview launcher an unknown mode): a line trace raises
+    # MemoryError, then SystemExit(0), at that line's
     # first line event in the module or in any launcher function. Each outcome must be the mode rule
     # (exit 2, empty stdout, no traceback, nothing escaped) or EXACTLY the injected fault's own outcome
     # (the injected object itself escapes the launcher, exit 1 for MemoryError, exit 0 for
@@ -3172,7 +3209,15 @@ def _self_test_cases(base):
     # take that scenario's own outcome, and both accepted outcomes must occur, so the sweep cannot
     # pass vacuously. Byte-identical launchers share one sweep. Lines a blocking run never executes
     # (the fail-open branches and the --self-test branch) are outside it, and only the first line
-    # event of each line is faulted.
+    # event of each line is faulted. SCOPE: the row proves what an INJECTED fault does at each of those
+    # lines. An ordinary fault reaches it only where one of its scenarios, or an injection, triggers
+    # one, so a protected operation moved out of its block, whose fault no scenario here triggers, is
+    # classed "injected" and accepted. The ordinary faults of the protected operations are held by the
+    # rows that trigger them without an injection: launcher/ordinary-fault-scenarios (below, with two
+    # mutants it must refuse), the launcher/acquire-*-mode-rule rows, the floor, acquire, unknown-mode
+    # and dispatcher fd-state rows, launcher/refusal-stdout-buffer-fd-closed and the
+    # launcher/acquire-refusal-fault-injection, acquire-error-text-fault-injection and
+    # acquire-unmapped-exception-mode-rule rows.
     sweep_runner = (
         "import os, runpy, sys\n"
         "fault, path, target, version = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]\n"
@@ -3223,7 +3268,8 @@ def _self_test_cases(base):
             sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
             scenarios = [("below-floor", "%d.%d.%d" % old, mode, False, (REFUSAL_EXIT, "")),
                          ("hook-missing", "real", mode, False, (REFUSAL_EXIT, "")),
-                         ("hook-present", "real", mode, True, (0, "HOOK_RAN\n"))]
+                         ("hook-present", "real", mode, True, (0, "HOOK_RAN\n")),
+                         ("hook-uncompilable", "real", mode, "def broken(:\n", (REFUSAL_EXIT, ""))]
             if multi:
                 scenarios.append(("unknown-mode", "real", "no_such_mode", False, (REFUSAL_EXIT, "")))
             for scenario, version, argv_mode, present, baseline_want in scenarios:
@@ -3231,7 +3277,7 @@ def _self_test_cases(base):
                 launcher = spot / Path(rels[0]).name
                 launcher.write_text(text, encoding="utf-8")
                 if present:
-                    (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                    (spot / sibling).write_text(hook_ran if present is True else present, encoding="utf-8")
                 rc, out, err = _child(sweep_runner, ["none", str(launcher), "0", version, argv_mode], (), spot)
                 swept = sorted(set(int(line.split("=", 1)[1]) for line in err.splitlines()
                                    if line.startswith("SWEEP_LINE=")))
@@ -3248,6 +3294,140 @@ def _self_test_cases(base):
         sweep_got.append(("both outcomes occur", "mode rule" in sweep_seen, "injected" in sweep_seen))
         sweep_want.append(("both outcomes occur", True, True))
     check("launcher/line-fault-sweep", sweep_got, sweep_want)
+    # (ordinary faults, the sweep's companion) Each real launcher, with NO injection, in a blocking
+    # mode, meets each ordinary failure a protected operation exists for: the hook file holds a syntax
+    # error (compile), the hook file is unreadable (open; skipped as root, where the open succeeds),
+    # and the hook is missing while stderr is a broken pipe (the refusal's diagnostic delivery). Each
+    # must refuse by the mode rule: exit 2, empty stdout. The same judgement is applied to two mutants
+    # of each launcher, and each mutant must fail it: compile() moved out of the acquisition's
+    # protected block to the exec statement (the hook's bytes returned uncompiled), and _deliver's
+    # try/except removed together with the acquisition refusal's diagnostic try (narrowed to an
+    # exception the delivery never raises). Each mutation must apply exactly once per launcher, so a
+    # renamed statement fails this row instead of leaving a mutant equal to the real launcher.
+    ordinary_mutations = (
+        ("compile-unprotected", (('        return compile(data, path, "exec")\n', "        return data\n"),
+                                 ("exec(_got, _module.__dict__)\n",
+                                  'exec(compile(_got, _hook, "exec"), _module.__dict__)\n'))),
+        ("deliver-unprotected", (('    try:\n        _deliver_tail(number, text.encode("utf-8", '
+                                  '"backslashreplace"), 1)\n    except BaseException:\n        pass\n',
+                                  '    _deliver_tail(number, text.encode("utf-8", "backslashreplace"), 1)\n'),
+                                 ("    except BaseException:\n        pass\n    try:\n"
+                                  "        os._exit(_refusal_status)\n",
+                                  "    except ArithmeticError:\n        pass\n    try:\n"
+                                  "        os._exit(_refusal_status)\n"))))
+    unreadable_runs = getattr(os, "geteuid", None) is not None and os.geteuid() != 0
+
+    def _ordinary_seen(texts):
+        seen = []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            mode = _hook_kind_mode(rel, "blocking")
+            sibling = mode.replace("_", "-") + ".py" if multi else "aiqt_hooks.py"
+            for scenario in ("syntax-error", "unreadable", "stderr-broken"):
+                if scenario == "unreadable" and not unreadable_runs:
+                    continue
+                spot = Path(tempfile.mkdtemp(prefix="ordinary-", dir=base))
+                launcher = spot / Path(rel).name
+                launcher.write_text(texts[rel], encoding="utf-8")
+                if scenario == "syntax-error":
+                    (spot / sibling).write_text("def broken(:\n", encoding="utf-8")
+                elif scenario == "unreadable":
+                    (spot / sibling).write_text(hook_ran, encoding="utf-8")
+                    os.chmod(spot / sibling, 0)
+                if scenario == "stderr-broken":
+                    rc, out = _fd_run([str(launcher), mode], "stderr-broken")
+                else:
+                    rc, out = _child(sibling_runner, [str(launcher), mode], (), spot)[:2]
+                seen.append((rel, scenario, rc, out))
+        return seen
+
+    if os.name != "posix":
+        ordinary_got = ordinary_want = "skipped (the broken-pipe child needs posix)"
+    else:
+        real_texts = dict((rel, _read_text(ROOT / rel)) for rel in sorted(LAUNCHERS))
+        ordinary_real = _ordinary_seen(real_texts)
+        ordinary_ok = [(rel, scenario, REFUSAL_EXIT, "") for rel, scenario, _, _ in ordinary_real]
+        mutation_counts, mutant_fails = [], []
+        for label, pairs in ordinary_mutations:
+            mutant_texts = dict()
+            for rel, text in real_texts.items():
+                mutation_counts.append((label, rel, [text.count(before) for before, _ in pairs]))
+                for before, after in pairs:
+                    text = text.replace(before, after, 1)
+                mutant_texts[rel] = text
+            seen = _ordinary_seen(mutant_texts)
+            mutant_fails.extend((label, rel, any(entry != want for entry, want in zip(seen, ordinary_ok)
+                                                 if entry[0] == rel)) for rel in sorted(LAUNCHERS))
+        ordinary_got = (ordinary_real, len(ordinary_real) >= 2 * len(LAUNCHERS), mutation_counts,
+                        mutant_fails)
+        ordinary_want = (ordinary_ok, True,
+                         [(label, rel, [1] * len(pairs)) for label, pairs in ordinary_mutations
+                          for rel in sorted(LAUNCHERS)],
+                         [(label, rel, True) for label, _ in ordinary_mutations for rel in sorted(LAUNCHERS)])
+    check("launcher/ordinary-fault-scenarios", ordinary_got, ordinary_want)
+    # (site-packages .pth, the round-15 silent pass) The registered options keep every .pth file of
+    # the interpreter PATH selects from running before a launcher's first line. A virtual environment
+    # (python -m venv --without-pip: once activated, its python3 is the one a PATH lookup finds) gets
+    # a .pth file in its site-packages that imports a module setting a trace which raises
+    # SystemExit(0) at the first event of any launcher frame. Each real launcher then runs from that
+    # venv in a blocking mode with its hook missing: under its registration's own options (read by
+    # registered_scripts from the real registration files; the core source launcher has none of its
+    # own and takes the plugin copy's) the mode rule must hold (exit 2, empty stdout, the .pth never
+    # ran), and under those options without -S (the control) the .pth runs and the launcher exits 0
+    # with empty stdout, a silent pass, so the row shows that the options are what hold it.
+    pth_module = (
+        "import os, sys\n"
+        "os.write(2, b'PTH_RAN\\n')\n"
+        "def _trace(frame, event, arg):\n"
+        "    if os.path.basename(frame.f_code.co_filename) in %r:\n"
+        "        raise SystemExit(0)\n"
+        "    return None\n"
+        "sys.settrace(_trace)\n" % (sorted(set(Path(rel).name for rel in LAUNCHERS)),))
+    if os.name != "posix":
+        pth_got = pth_want = "skipped (the virtual environment's bin/python3 layout needs posix)"
+    else:
+        venv_dir = base / "pth-venv"
+        try:
+            made = subprocess.run([sys.executable, "-I", "-m", "venv", "--without-pip", str(venv_dir)],
+                                  stdin=subprocess.DEVNULL, capture_output=True, env=CHILD_ENV,
+                                  timeout=CHILD_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CannotEvaluate("the .pth row's virtual environment was not created: {}".format(exc))
+        site_dirs = sorted(venv_dir.glob("lib/python*/site-packages"))
+        venv_python = venv_dir / "bin" / "python3"
+        if made.returncode != 0 or len(site_dirs) != 1 or not venv_python.exists():
+            raise CannotEvaluate("the .pth row's virtual environment was not created: exit {}, {!r}".format(
+                made.returncode, made.stderr.decode("utf-8", "backslashreplace")[-300:]))
+        (site_dirs[0] / "zz_launch_trace.py").write_text(pth_module, encoding="utf-8")
+        (site_dirs[0] / "zz_launch_trace.pth").write_text("import zz_launch_trace\n", encoding="utf-8")
+        registered_options = dict()
+        for registry, registered_launcher in REGISTRATIONS:
+            registered_options[registered_launcher] = sorted(set(
+                tuple(options) for _, name, options in registered_scripts(registry, _read_text(ROOT / registry))
+                if name == Path(registered_launcher).name))
+        pth_got, pth_want = [], []
+        for rel in sorted(LAUNCHERS):
+            multi = isinstance(LAUNCHERS[rel], tuple)
+            options_seen = registered_options[REGISTRATIONS[1][1] if multi else REGISTRATIONS[0][1]]
+            pth_got.append((rel, options_seen))
+            pth_want.append((rel, [REGISTRATION_FLAGS]))
+            for options in options_seen:
+                for label, used in (("registered", list(options)),
+                                    ("without -S", [option for option in options if option != "-S"])):
+                    spot = Path(tempfile.mkdtemp(prefix="pth-", dir=base))
+                    (spot / Path(rel).name).write_text(_read_text(ROOT / rel), encoding="utf-8")
+                    try:
+                        proc = subprocess.run([str(venv_python), *used, str(spot / Path(rel).name),
+                                               _hook_kind_mode(rel, "blocking")], cwd=spot,
+                                              stdin=subprocess.DEVNULL, capture_output=True, env=CHILD_ENV,
+                                              timeout=CHILD_TIMEOUT)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        raise CannotEvaluate("the .pth row's child launch failed: {}".format(exc))
+                    pth_got.append((rel, label, proc.returncode,
+                                    proc.stdout.decode("utf-8", "backslashreplace"), b"PTH_RAN" in proc.stderr))
+                    pth_want.append((rel, label) + ((REFUSAL_EXIT, "", False) if label == "registered"
+                                                    else (0, "", True)))
+    check("launcher/registered-options-skip-site-pth", pth_got, pth_want)
     # Each construct outside the subset is a finding, whether newer than Python 3.4 (most pass
     # ast.parse(feature_version=OLD_GRAMMAR) itself and are caught only by the allowlist walk and
     # token scan) or 3.4-legal but unlisted (loops, with, finally, decorators, lambdas,
@@ -3325,7 +3505,7 @@ def _self_test_cases(base):
     plugin_hook = LAUNCHERS[plugin_launcher]
     modes = ("orch_stop_guard",)
     launched = json.dumps(dict(hooks=dict(PreToolUse=[dict(hooks=[dict(
-        args=["-I", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"])])])))
+        args=["-I", "-S", "-B", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"])])])))
     conformant = {plugin_json: launched,
                   plugin_launcher: _entry(guard_text(Path(plugin_launcher).name, floor, modes), after=""),
                   plugin_hook: _entry(guard_text(Path(plugin_hook).name, floor, modes), after="")}
@@ -3358,6 +3538,26 @@ def _self_test_cases(base):
                                                     ("diff_wall_stop",), plugin_hook)])
     check("launcher/empty-registration-finding", leg(dict(conformant, **{plugin_json: json.dumps(
         dict(hooks={}))})), ["{}: names no hook registration to check".format(plugin_json)])
+    # A registration that runs the launcher without -S (the site module, and with it each .pth file of
+    # the interpreter PATH selects, would run first), or with -S after the launcher path, is a
+    # finding, in the plugin hooks.json and in the preview README alike.
+    site_note = ("(without -S the site module, and with it each .pth file and sitecustomize of the "
+                 "interpreter PATH selects, runs before the launcher's first line)")
+    check("launcher/registration-site-module-finding", [leg(dict(conformant, **{plugin_json: json.dumps(
+        dict(hooks=dict(PreToolUse=[dict(hooks=[dict(args=args)])])))})) for args in (
+            ["-I", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"],
+            ["-I", "-B", "/p/hooks/scripts/" + Path(plugin_launcher).name, "-S", "absolute_paths"])] + [
+        leg({readme: "Requires Python 3.14 or newer.\n" * 2
+            + "exec python3 -I -B \"/p/preview-launch.py\" clock_inject\n", preview: (
+                guard_text(Path(preview).name, floor, LAUNCHERS[preview]) + "\n" + "{} = {!r}\n".format(
+                    DISPATCH_NAME, ("clock_inject", "future_stamp_write", "record_remove_check",
+                                    "stamp_truth_stop", "unbounded_wait", "ungated_record"))
+                + "\nif __name__ == \"__main__\":\n    pass\n")}, source=_source_text(surfaces=[preview]))], [
+        ["{} PreToolUse: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
+            plugin_json, Path(plugin_launcher).name, options, list(REGISTRATION_FLAGS), site_note)]
+        for options in (["-I"], ["-I", "-B"])] + [
+        ["{}:3: runs the launcher {} with the interpreter options {!r}, not {!r} {}".format(
+            readme, Path(preview).name, ["-I", "-B"], list(REGISTRATION_FLAGS), site_note)]])
     check("launcher/readme-declared-by-launcher", [line.split(": ", 1)[1] for line in leg(
         {preview: _entry(guard_text(Path(preview).name, floor, modes), after="")},
         source=_source_text(surfaces=[preview]))],
@@ -3372,7 +3572,7 @@ def _self_test_cases(base):
         "clock_inject", "future_stamp_write", "record_remove_check", "stamp_truth_stop",
         "unbounded_wait", "ungated_record"))
     preview_registered = ("Requires Python 3.14 or newer.\n" * 2
-                          + "exec python3 -I \"/p/preview-launch.py\" clock_inject\n")
+                          + "exec python3 -I -S -B \"/p/preview-launch.py\" clock_inject\n")
     preview_good = (guard_text(Path(preview).name, floor, LAUNCHERS[preview]) + "\n"
                     + dispatch_literal + "\nif __name__ == \"__main__\":\n    pass\n")
     check("launcher/preview-conformant-passes", leg(

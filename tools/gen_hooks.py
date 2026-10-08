@@ -64,6 +64,12 @@ LAUNCHER_REL = PLUGIN_ROOT_REL + "/hooks/scripts/" + LAUNCHER_NAME
 # regardless of where the plugin is nested in this authoring repo.
 SCRIPT_PLUGIN_PATH = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + SCRIPT_NAME
 LAUNCHER_PLUGIN_PATH = SCRIPT_PLUGIN_PATH.rsplit("/", 1)[0] + "/" + LAUNCHER_NAME
+# The interpreter options every rendered entry passes before the launcher path, the preview launcher's
+# registered form: -I (isolated: no PYTHON* variable, no user site directory, neither the script's nor
+# the working directory on sys.path), -S (no site module, so no .pth file and no sitecustomize of the
+# interpreter that PATH selects, a project virtual environment for example, runs before the launcher's
+# first line) and -B (no bytecode written).
+LAUNCHER_FLAGS = ("-I", "-S", "-B")
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
 # and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
@@ -234,9 +240,11 @@ def render_hooks_json(hooks):
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
     is python3 with the launcher path and handler as args (no shell string, so nothing is shell-quoted);
-    matcher is omitted for non-tool events. Every launcher runs isolated: args[0] is "-I" (Python's
-    isolated mode), placed before the script path, so a file written beside the dispatcher cannot
-    shadow a standard-library import and silently neuter the hook. The path is the launcher
+    matcher is omitted for non-tool events. Every launcher runs isolated and without the site module:
+    args begins with LAUNCHER_FLAGS ("-I", "-S", "-B"), placed before the script path, so a file
+    written beside the dispatcher cannot shadow a standard-library import and silently neuter the hook,
+    and no .pth file or sitecustomize of the interpreter PATH selects runs before the launcher's first
+    line. The path is the launcher
     (LAUNCHER_NAME), never the dispatcher itself, so an interpreter below the floor refuses with the
     event's exit instead of failing to compile the dispatcher. The generator asserts this invariant
     in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
@@ -247,7 +255,7 @@ def render_hooks_json(hooks):
             entry["matcher"] = hook["matcher"]
         entry["hooks"] = [{"type": "command",
                            "command": "python3",
-                           "args": ["-I", LAUNCHER_PLUGIN_PATH, hook["handler"]],
+                           "args": list(LAUNCHER_FLAGS) + [LAUNCHER_PLUGIN_PATH, hook["handler"]],
                            "timeout": TIMEOUT}]
         events.setdefault(hook["event"], []).append(entry)
     obj = {"description": "AIQT Guardrails mechanical-enforcement hooks, generated from "
@@ -363,7 +371,8 @@ def main():
 # Proves the generator's own fail-closed invariants against synthetic trees (the conformance.py
 # pattern), so gen_hooks never becomes an ungated generator:
 #   1. a conformant manifest generates, and regeneration is drift-clean,
-#  1b. every rendered launcher runs isolated: args[0] == "-I", before the script path,
+#  1b. every rendered launcher runs isolated and without the site module: args begins with
+#      LAUNCHER_FLAGS ("-I", "-S", "-B"), before the script path,
 #   2. drift in hooks.json (and an orphan under the plugin hooks/) is caught (exit 1),
 #   3. an unknown corpus-id in the manifest fails closed (exit 2),
 #   4. an empty residue fails closed (exit 2),
@@ -487,9 +496,14 @@ def self_test_main():
             if not (good / rel).is_file():
                 failures.append("conformant tree: expected generated file {}".format(rel))
 
-        # 1b. Every rendered launcher runs isolated: args[0] is "-I", before the script path, so a
-        #     sibling file cannot shadow a stdlib import and neuter the hook. A regression in the
-        #     generator (dropping the flag or misplacing it) fails the generator's own self-test.
+        # 1b. Every rendered launcher runs isolated and without the site module: args begins with
+        #     exactly LAUNCHER_FLAGS ("-I", "-S", "-B"), before the script path, so a sibling file
+        #     cannot shadow a stdlib import and neuter the hook, and no .pth file of the interpreter
+        #     PATH selects runs code before the launcher's first line. A regression in the generator
+        #     (dropping a flag or misplacing it) fails the generator's own self-test.
+        if LAUNCHER_FLAGS != ("-I", "-S", "-B"):
+            failures.append("isolation invariant: LAUNCHER_FLAGS must be ('-I', '-S', '-B'), got {!r}"
+                            .format(LAUNCHER_FLAGS))
         try:
             rendered = json.loads((good / HOOKS_JSON_REL).read_text(encoding="utf-8"))
             entries = [h for event in rendered["hooks"].values() for e in event for h in e["hooks"]]
@@ -498,12 +512,12 @@ def self_test_main():
             for h in entries:
                 # 1c. Every entry runs the launcher, never the dispatcher directly: the dispatcher's
                 #     newer syntax would fail to compile on an old interpreter (exit 1, fail open).
-                if h.get("args", [None, None])[1:2] != [LAUNCHER_PLUGIN_PATH]:
-                    failures.append("launcher invariant: args[1] must be the launcher {!r}, got {!r}"
+                if h.get("args", [])[3:4] != [LAUNCHER_PLUGIN_PATH]:
+                    failures.append("launcher invariant: args[3] must be the launcher {!r}, got {!r}"
                                     .format(LAUNCHER_PLUGIN_PATH, h.get("args")))
-                if h.get("args", [None])[0] != "-I":
-                    failures.append("isolation invariant: launcher args[0] must be '-I', got {!r}"
-                                    .format(h.get("args")))
+                if h.get("args", [])[:3] != ["-I", "-S", "-B"]:
+                    failures.append("isolation invariant: launcher args[:3] must be ['-I', '-S', '-B'], "
+                                    "got {!r}".format(h.get("args")))
         except (OSError, ValueError, KeyError, IndexError) as exc:
             failures.append("isolation invariant: could not read rendered hooks.json: {}".format(exc))
 
@@ -696,7 +710,7 @@ def self_test_main():
             " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
-          "launcher runs isolated (args[0] == '-I'); hooks.json "
+          "launcher runs isolated and without the site module (args[:3] == ['-I', '-S', '-B']); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
           "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "

@@ -6131,7 +6131,9 @@ def _commit_line(text):
 
 
 # No filesystem access that supplies proof runs in the hook process itself.
-# This helper is isolated Python, takes literal argv, and prints one JSON payload.
+# This helper is isolated Python without the site module (-I -S -B, the hook's own registered form,
+# so no .pth file of the interpreter's site-packages runs in it), takes literal argv, and prints one
+# JSON payload.
 _COMMIT_FS_PROBE = r"""
 import json, os, pathlib, stat, sys
 def directory(value):
@@ -6171,7 +6173,7 @@ except Exception:
 
 
 def _commit_fs(deadline, operation, *paths):
-    result = _commit_run([sys.executable, "-I", "-B", "-c", _COMMIT_FS_PROBE,
+    result = _commit_run([sys.executable, "-I", "-S", "-B", "-c", _COMMIT_FS_PROBE,
                           operation, *paths], deadline)
     try:
         return json.loads(_commit_checked(result))

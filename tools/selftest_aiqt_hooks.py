@@ -4820,8 +4820,9 @@ def _main_isolated(monitor):
             _pl239_reads = []
 
             def _pl239_bad_fs_run(argv, deadline):
-                if len(argv) >= 6 and argv[4:6] == [aiqt_hooks._COMMIT_FS_PROBE, "identity"]:
-                    _pl239_reads.append(tuple(argv[6:]))
+                if len(argv) >= 7 and argv[1:7] == ["-I", "-S", "-B", "-c", aiqt_hooks._COMMIT_FS_PROBE,
+                                                    "identity"]:
+                    _pl239_reads.append(tuple(argv[7:]))
                     return subprocess.CompletedProcess(argv, _rc, _stdout, "")
                 return _pl239_original_run(argv, deadline)
 
@@ -4878,7 +4879,8 @@ def _main_isolated(monitor):
         ]
         _pl239_expected_entry = {
             "type": "command", "command": "python3",
-            "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py", "protected_line"],
+            "args": ["-I", "-S", "-B", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks_launch.py",
+                     "protected_line"],
             "timeout": 10,
         }
         if _pl239_entries != [_pl239_expected_entry]:

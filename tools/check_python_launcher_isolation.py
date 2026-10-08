@@ -41,8 +41,17 @@ launcher is isolated iff ``I`` is among those option letters, or all of ``P``, `
 Options after the script are never credited, and environment variables (PYTHONSAFEPATH and the like) are
 never credited.
 
-EXIT CONVENTION: 0 every recognized launcher is isolated; 1 at least one recognized launcher is not
-isolated; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
+NO-SITE RULE. A launcher whose script operand (the first token after the interpreter options) has the
+core hook launcher's basename (gen_hooks.LAUNCHER_NAME, aiqt_hooks_launch.py), in the plugin hooks.json
+args form or in a settings.json shell-string, must also carry ``S`` among those option letters (``-S``,
+alone or in a cluster): without it the site module runs before the launcher's first line, and with it
+every .pth file and sitecustomize of the interpreter's site-packages (a PATH-selected project virtual
+environment's included), which can install a line trace that ends a blocking hook with exit 0. ``-I``
+does not exclude them. A launcher of any other script is not held to this rule.
+
+EXIT CONVENTION: 0 every recognized launcher is isolated (and each core hook launcher also runs without
+the site module); 1 at least one recognized launcher is not isolated, or a core hook launcher runs with
+the site module; 2 cannot-evaluate (a required input missing, unreadable, non-regular, or malformed; a JSON
 parse error; a shell line carrying a python token whose command-word position cannot be established; a
 hook entry with a missing type/command or a non-list args; or the gate's own interpreter not isolated).
 Diagnostics are deterministic, sorted by relative path then line then location.
@@ -107,6 +116,10 @@ RUN_ALL_REL = "tools/run_all_checks.sh"
 WORKFLOWS_REL = ".github/workflows"
 OPTIONAL_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 REQUIRED_FORM = "-I (or the full -P -E -s) before the script"
+# The NO-SITE RULE's scope and required form: a launcher of the core hook launcher must also run without
+# the site module.
+NO_SITE_SCRIPTS = frozenset((gen_hooks.LAUNCHER_NAME,))
+NO_SITE_FORM = "-S (no site module, so no .pth file or sitecustomize runs first) before the launcher"
 
 # The QA-suite Python sources whose sibling-import posture this gate keeps isolated. Each imports a sibling
 # module (the QA adapter, the shared tree walk, the leak gate) and MUST do so with sys.path.append, never a
@@ -191,25 +204,26 @@ VALUE_SHORT_OPTS = frozenset("WX")               # short options that take a val
 VALUE_LONG_OPTS = frozenset({"--check-hash-based-pycs"})  # long options that take a separate value
 
 
-def _flags_isolated(after_interpreter):
+def _option_letters(after_interpreter):
     """Collect the interpreter option letters from the tokens after the command word, stopping at the
     first non-option, `-m`, `-c`, `--`, or an unrecognized long `--option`, and expanding a single-dash
     cluster letter by letter. A value-taking option (`-W`/`-X`, attached or separate, and the long
     `--check-hash-based-pycs`) has its value skipped rather than letter-scanned, so an isolation letter is
-    never forged from a value and a real flag after a separate value is never missed. Isolated iff `I`, or
-    all of `P`, `E`, `s`."""
+    never forged from a value and a real flag after a separate value is never missed. Returns (the set
+    of option letters, the index of the script token in after_interpreter, or None when the scan stops
+    at `-m`, `-c`, `--`, an unrecognized long option or the end of the tokens)."""
     flags = set()
     tokens = list(after_interpreter)
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok in ("--", "-m", "-c"):
-            break
+            return flags, None
         if tok in VALUE_LONG_OPTS:
             i += 2                       # skip the long option and its separate value token
             continue
         if tok.startswith("--"):
-            break                        # an unrecognized long interpreter option: not a flag we credit
+            return flags, None           # an unrecognized long interpreter option: not a flag we credit
         if tok.startswith("-") and len(tok) > 1:
             j = 1
             skip_next = False
@@ -231,11 +245,27 @@ def _flags_isolated(after_interpreter):
                 flags.add(letter)        # a valueless flag: credit it (e.g. -PEs -> P, E, s)
                 j += 1
             if terminate:
-                break
+                return flags, None
             i += 2 if skip_next else 1
             continue
-        break                            # the script/program token: options end here
+        return flags, i                  # the script/program token: options end here
+    return flags, None
+
+
+def _flags_isolated(after_interpreter):
+    """Isolated iff the option letters (_option_letters) hold `I`, or all of `P`, `E`, `s`."""
+    flags = _option_letters(after_interpreter)[0]
     return ("I" in flags) or {"P", "E", "s"}.issubset(flags)
+
+
+def _no_site_verdict(rest):
+    """The NO-SITE RULE for one launcher (rest: the command word onward). None when the script
+    operand is not a NO_SITE_SCRIPTS launcher (out of scope), else True iff `S` is among the option
+    letters before it."""
+    flags, at = _option_letters(rest[1:])
+    if at is None or _basename(rest[1:][at]) not in NO_SITE_SCRIPTS:
+        return None
+    return "S" in flags
 
 
 def check_argv(argv):
@@ -376,6 +406,9 @@ def _scan_command_tokens(rel, lineno, loc, tokens, source_repr, errors, failures
         if not _flags_isolated(rest[1:]):
             failures.append((rel, lineno, loc, "non-isolated launcher {!r}; requires {}"
                              .format(" ".join(rest), REQUIRED_FORM)))
+        if _no_site_verdict(rest) is False:
+            failures.append((rel, lineno, loc, "core hook launcher run with the site module {!r}; "
+                             "requires {}".format(" ".join(rest), NO_SITE_FORM)))
 
 
 def _check_shell_line(rel, lineno, line, errors, failures):
@@ -494,6 +527,9 @@ def _check_hooks_json(rel, text, errors, failures):
                     if verdict is False:
                         failures.append((rel, 0, hloc, "non-isolated launcher {!r}; requires {}"
                                          .format(" ".join(argv), REQUIRED_FORM)))
+                    if verdict is not None and _no_site_verdict(_strip_launcher_prefix(argv)) is False:
+                        failures.append((rel, 0, hloc, "core hook launcher run with the site module "
+                                         "{!r}; requires {}".format(" ".join(argv), NO_SITE_FORM)))
                 else:
                     # The settings form: a shell string that may chain commands (e.g. `prep && python3
                     # x.py`), so segment-split and check every launcher segment, not just the first.
@@ -631,7 +667,8 @@ def run(root):
         print("RESULT: cannot-evaluate ({} issue(s)); fail-closed".format(len(errors)))
         return 2
     if failures:
-        print("RESULT: {} non-isolated launcher(s)".format(len(failures)))
+        print("RESULT: {} launcher finding(s): non-isolated, or a core hook launcher run with the site "
+              "module".format(len(failures)))
         return 1
     print("PASS: every recognized python launcher in the scanned surfaces runs isolated")
     return 0
@@ -692,6 +729,10 @@ def main():
 #      guard proving the settings path (which already decoded first) still agrees with the shell path.
 #  32. real bash confirms the obfuscated names `pyt\hon3`, `pyt"hon"3`, `py'thon'3` all resolve to the
 #      token `python3` (the fail-to-pass witness for the decode-then-decide shell-line fix).
+#  34. the NO-SITE RULE: the core hook launcher registered with -I alone, or with -S after the script,
+#      fails (exit 1) in the plugin hooks.json and in a settings.json shell-string; -I -S -B, the -IS
+#      cluster and the shell-string -I -S -B form pass (exit 0); another script with -I alone passes;
+#      and a real interpreter confirms -S is what keeps the site module (so every .pth file) from running.
 
 SCRIPT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 
@@ -1134,6 +1175,34 @@ def self_test_main():
             failures.append("a missing required QA-suite Python source expected exit 2 (fail-closed, "
                             "finding-6)")
 
+        # 34. The NO-SITE RULE (the core hook launcher only). Each case: label, hooks.json args (or a
+        #     settings.json shell-string), expected exit.
+        launcher = SCRIPT.rsplit("/", 1)[0] + "/" + gen_hooks.LAUNCHER_NAME
+        for label, args, want in (("dash-I-only", ("-I", launcher, "h_one"), 1),
+                                  ("S-after-script", ("-I", launcher, "-S", "h_one"), 1),
+                                  ("registered", ("-I", "-S", "-B", launcher, "h_one"), 0),
+                                  ("cluster-IS", ("-IS", launcher, "h_one"), 0),
+                                  ("other-script", ("-I", SCRIPT, "h_one"), 0)):
+            if run_quiet(_build(tmp / ("nosite-" + label), hooks_args=args)) != want:
+                failures.append("no-site rule: the {} hooks.json form expected exit {}".format(label, want))
+        for label, cmd, want in (("settings-dash-I-only", "python3 -I /p/" + gen_hooks.LAUNCHER_NAME + " x", 1),
+                                 ("settings-registered",
+                                  "python3 -I -S -B /p/" + gen_hooks.LAUNCHER_NAME + " x", 0)):
+            tree = _build(tmp / ("nosite-" + label))
+            sp = tree / ".claude" / "settings.json"
+            sp.parent.mkdir(parents=True)
+            sp.write_text(json.dumps(dict(hooks=dict(PreToolUse=[dict(hooks=[
+                dict(type="command", command=cmd)])]))) + "\n", encoding="utf-8")
+            if run_quiet(tree) != want:
+                failures.append("no-site rule: the {} form expected exit {}".format(label, want))
+        site_probe = "import sys; sys.stdout.write(str(int('site' in sys.modules)))"
+        site_seen = [subprocess.run([sys.executable] + flags + ["-c", site_probe], capture_output=True,
+                                    text=True, env=env, cwd=str(tmp), timeout=30).stdout
+                     for flags in (["-I"], ["-I", "-S", "-B"])]
+        if site_seen != ["1", "0"]:
+            failures.append("no-site rule: a real interpreter should import site under -I and not under "
+                            "-I -S -B (got {!r})".format(site_seen))
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -1172,7 +1241,9 @@ def self_test_main():
           "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; a "
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
-          "fails closed (exit 2); and "
+          "fails closed (exit 2); the core hook launcher registered without -S before it fails (exit 1) "
+          "while -I -S -B and -IS pass, and a real interpreter imports site under -I alone but not under "
+          "-I -S -B; and "
           "the gate refuses to run non-isolated (exit 2)" + note)
     return 0
 
