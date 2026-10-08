@@ -5122,6 +5122,26 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
 
+        # THE DOCUMENTED STOP FIELD: the hooks reference (Stop input) sends stop_hook_active, true when Claude
+        # Code is already continuing as a result of a stop hook, and advises a blocking Stop hook to check it.
+        # The stop guard honours it as a loop signal below its own counter: an actionable backlog that denies
+        # with no prior denial yields with findings (the recorded forced exit) once the payload says the stop
+        # continues a stop-hook block. Only the JSON true is that signal; a string "true" and an explicit
+        # false still deny.
+        _sha = Fixture(tmp, "stop-hook-active")
+        _sha_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_sha.root)))
+        _sha.set_items([item("SHA-1")])
+        for _sha_value, _sha_id in ((False, "stop-hook-active/false-denies"),
+                                    ("true", "stop-hook-active/string-denies")):
+            _sha.set_turn_state({})
+            check(_sha_id, _verdict(aiqt_hooks.orch_stop_guard(
+                _sha.payload("Stop", extra={"stop_hook_active": _sha_value}))), "block2")
+        _sha.set_turn_state({})
+        check("stop-hook-active/true-yields-with-findings", _verdict(aiqt_hooks.orch_stop_guard(
+            _sha.payload("Stop", extra={"stop_hook_active": True}))), "warn")
+        _sha_rows, _sha_bad = aiqt_hooks._orch_read_jsonl(str(_sha_sd / "forced-exit.jsonl"))
+        check("stop-hook-active/forced-exit-recorded", [r.get("open_ids") for r in _sha_rows], [["SHA-1"]])
+
         # ROUND 21, A FAILED GUARD-EVENTS APPEND ON A DENY IS WARNED ABOUT AND THE DENY HOLDS: with
         # guard-events.jsonl a directory (a real failed append, no patched seam), the shared Stop and
         # TeammateIdle path still blocks (exit 2) with the recording-failure warning on its block reason (it

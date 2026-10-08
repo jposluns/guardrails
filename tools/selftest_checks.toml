@@ -489,6 +489,11 @@ expected-check-ids = [
   "forced/surfaced-set-written",
   "forced/clean-after-triage",
   "forced/failed-record-in-banner",
+  # ---------- the documented Stop field stop_hook_active is a loop signal ----------
+  "stop-hook-active/false-denies",
+  "stop-hook-active/string-denies",
+  "stop-hook-active/true-yields-with-findings",
+  "stop-hook-active/forced-exit-recorded",
   # ---------- round 21: a failed guard-events append on a deny is warned about ----------
   "r21/stop-deny-holds-and-warns",
   "r21/stop-deny-counted",

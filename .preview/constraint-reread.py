@@ -741,8 +741,8 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.call("Stop", 30, stop_hook_active=False)["reason"])  # a new turn
 
         def test_23_the_cap_holds_without_stop_hook_active(self):
-            # Round 20: with no stop_hook_active field in the payload the count was reset at every Stop, so the
-            # cap was never reached. Each Stop below carries no such field.
+            # Round 20: with the stop_hook_active field absent from the payload the count was reset at every
+            # Stop, so the cap was never reached. Each Stop below omits that field.
             self.compact()
             outs = [self.call("Stop", s) for s in range(5, 5 + BLOCK_CAP + 3)]
             refusals = [o for o in outs if o.get("decision") == "block"]

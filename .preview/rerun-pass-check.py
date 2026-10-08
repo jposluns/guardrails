@@ -1198,7 +1198,7 @@ def _self_test():
         def prompt(self):
             return decide(dict(hook_event_name="UserPromptSubmit", session_id="s", prompt="go on"), self.env)
 
-        def stop(self, msg, active=False):  # active None: the payload carries no stop_hook_active field
+        def stop(self, msg, active=False):  # active None: the payload omits the stop_hook_active field
             payload = dict(hook_event_name="Stop", session_id="s", last_assistant_message=msg)
             if active is not None:
                 payload["stop_hook_active"] = active
@@ -2122,8 +2122,8 @@ def _self_test():
             self.assertNotIn("(each says only", desc[0])
 
         def test_49_the_cap_holds_without_stop_hook_active(self):
-            # Round 20: with no stop_hook_active field in the payload the count was reset at every Stop, so the
-            # cap was never reached. Each Stop below carries no such field.
+            # Round 20: with the stop_hook_active field absent from the payload the count was reset at every
+            # Stop, so the cap was never reached. Each Stop below omits that field.
             path = state_path(dict(session_id="s"), self.env)
             allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
                        "session ran a command that names a CI rerun and was not reported as failed, or saw a check "

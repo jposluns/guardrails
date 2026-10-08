@@ -761,6 +761,118 @@ def _ask_label_failures(source_path=None):
     return out
 
 
+# (stop-field-claim) The hooks reference (Stop input) documents stop_hook_active on the Stop and SubagentStop
+# payloads: true when Claude Code is already continuing as a result of a stop hook. These patterns match the
+# CLAIM that the field is absent or undocumented, not the word: "absent from the payload" or "omits the field"
+# describes a test scenario and passes; "no stop_hook_active" and "none is documented on Stop" are refused.
+_STOP_FIELD_CLAIM_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\bno\s+[`'\"]?stop_hook_active\b",
+    r"\bnone\s+is\s+documented\s+on\s+(?:subagent)?stop\b",
+    r"\bstop\s+payloads?\s+(?:has|have|carries|carry|holds?|contains?)\s+no\s+(?:loop|stop_hook_active)\b",
+    r"\bstop_hook_active\b[^.;]{0,40}?\b(?:is|are)\s+(?:not|never)\s+(?:documented|sent|provided|present)\b",
+    r"\bstop_hook_active\b[^.;]{0,30}?\bundocumented\b",
+    r"\bundocumented\b[^.;]{0,30}?\bstop_hook_active\b",
+))
+# The files that carry hook prose about the Stop payload: the hook sources, their manifests and docs, the
+# preview hooks, and the residue renderings generated from the manifest.
+_STOP_FIELD_CLAIM_FILES = (
+    ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    ".aiqt/core/hooks/manifest.toml",
+    ".aiqt/core/hooks/preview.toml",
+    ".aiqt/core/hooks/ORCHESTRATION.md",
+    ".aiqt/enforceability.json",
+    "ENFORCEMENT.md",
+    "site/enforcement.html",
+)
+_STOP_FIELD_CLAIM_GLOBS = (".preview/*.py", ".preview/*.md")
+# A sentence another change is rewriting, tolerated verbatim until it lands. Each entry must still occur in its
+# source file (the first path): once the rewrite lands the entry goes stale and this check fails until it is
+# removed, so the allowance cannot outlive the sentence.
+_STOP_FIELD_CLAIM_PENDING = (
+    (".aiqt/core/hooks/manifest.toml",
+     "independent of any platform loop field (none is documented on Stop; a loop-ish payload field is honoured "
+     "opportunistically if one ever appears)"),
+)
+
+
+def _stop_field_claim_failures(root=None, pending=_STOP_FIELD_CLAIM_PENDING):
+    """(stop-field-claim) No hook source comment, docstring or residue claims that the Stop payload has no
+    stop_hook_active field (or that none is documented on Stop). Comment markers and line breaks are folded
+    to single spaces first, so a claim wrapped across comment lines is still seen. A missing file in the
+    fixed list is a failure (a renamed file must be renamed here too), and so is a pending allowance whose
+    sentence no longer occurs in its source file."""
+    base = Path(root) if root is not None else repo_root()
+    paths = [base / rel for rel in _STOP_FIELD_CLAIM_FILES]
+    for pattern in _STOP_FIELD_CLAIM_GLOBS:
+        paths.extend(sorted(base.glob(pattern)))
+    out = []
+    folded = {}
+    for path in paths:
+        rel = path.relative_to(base).as_posix()
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            out.append("(stop-field-claim-read) cannot read {}: {}".format(rel, exc))
+            continue
+        folded[rel] = " ".join(re.sub(r"\n[ \t]*#+", " ", raw).split())
+    for rel, sentence in pending:
+        if rel in folded and sentence not in folded[rel]:
+            out.append("(stop-field-claim-pending) the pending allowance for {} no longer matches that file; the rewrite "
+                       "it waited for has landed, so remove the entry from _STOP_FIELD_CLAIM_PENDING".format(rel))
+    for rel, text in folded.items():
+        for _rel, sentence in pending:
+            text = text.replace(sentence, " ")
+        for regex in _STOP_FIELD_CLAIM_RES:
+            for match in regex.finditer(text):
+                out.append("(stop-field-claim) {} claims the Stop payload lacks stop_hook_active ({!r}); the hooks "
+                           "reference documents the field on Stop and SubagentStop (true when Claude Code is "
+                           "already continuing as a result of a stop hook)".format(rel, match.group(0)))
+    return out
+
+
+def _test_stop_field_claim_check(failures, tmp):
+    """(stop-field-claim-pin) The claim check itself: each phrasing the repository carried before the correction
+    is caught, also wrapped across comment lines; a scenario phrasing and the documented fact pass; a stale
+    pending allowance is reported."""
+    base = tmp / "stop-field-claim"
+    claims = (
+        "as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).",
+        "because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop",
+        "# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop\n"
+        "# bound), so on ANY error",
+        "and with no\n    # stop_hook_active field and no documented loop bound a hard block could wedge the session",
+        "independent of any platform loop field (none is documented on Stop; a loop-ish field is honoured)",
+        "the Stop payload carries no loop field",
+        "stop_hook_active is not documented on the Stop event",
+    )
+    clean = (
+        "Stop hooks receive stop_hook_active, true when Claude Code is already continuing as a result of a stop "
+        "hook. With the stop_hook_active field absent from the payload the count was reset; the payload omits "
+        "the stop_hook_active field; without a `stop_hook_active` field in the input the count stays at the cap.")
+    for index, claim in enumerate(claims):
+        root = base / "claim-{}".format(index)
+        (root / ".preview").mkdir(parents=True)
+        (root / ".preview" / "hook.py").write_text(claim + "\n", encoding="utf-8")
+        got = [f for f in _stop_field_claim_failures(root, pending=()) if ".preview/hook.py claims" in f]
+        if len(got) != 1:
+            failures.append("(stop-field-claim-pin) the claim check found {} claim(s) in {!r}; want exactly 1"
+                            .format(len(got), claim))
+    root = base / "clean"
+    (root / ".preview").mkdir(parents=True)
+    (root / ".preview" / "hook.py").write_text(clean + "\n", encoding="utf-8")
+    got = [f for f in _stop_field_claim_failures(root, pending=()) if ".preview/hook.py" in f]
+    if got:
+        failures.append("(stop-field-claim-clean) the claim check refused a scenario or the documented fact: {}"
+                        .format(got))
+    stale = [f for f in _stop_field_claim_failures(root, pending=((".preview/hook.py", "no such sentence"),))
+             if "pending allowance" in f]
+    if len(stale) != 1:
+        failures.append("(stop-field-claim-stale) a pending allowance that no longer matches was not reported: {}"
+                        .format(stale))
+    shutil.rmtree(str(base), ignore_errors=True)
+
+
 def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
@@ -9260,6 +9372,7 @@ def _main_isolated(monitor):
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
+        _test_stop_field_claim_check(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -10140,11 +10253,13 @@ def _main_isolated(monitor):
 
     # (note-shape) every note is built inside the declared constructor set, (an-coverage) every
     # `return <constructor>(...)` site in the hook source ran at least once above, and
-    # (label-unique) no case label names two cases.
+    # (label-unique) no case label names two cases, and (stop-field-claim) no hook prose claims the Stop
+    # payload lacks stop_hook_active.
     failures.extend(_note_constructor_shape_failures())
     failures.extend(_note_site_coverage_failures(monitor))
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())
+    failures.extend(_stop_field_claim_failures())
 
     if failures:
         print("SELF-TEST FAIL:")

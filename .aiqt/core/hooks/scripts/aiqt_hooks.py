@@ -25,7 +25,9 @@ as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
 "permissionDecisionReason": "..."}}; an allow decision is expressed as NO output (exit 0 silent), so
 the user's own permission flow is never bypassed, and a deny decision blocks the tool. exit 2 is a
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
-as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
+as last_assistant_message and the boolean stop_hook_active (SubagentStop carries it too), which the
+hooks reference (Stop input) documents as true when Claude Code is already continuing as a result of a
+stop hook, advising a hook to check it so it does not block on a condition that will never resolve.
 
 NO-ASK POSTURE (maintainer directive): these hooks NEVER return permissionDecision "ask". An unattended
 orchestrator must never stall waiting on a human, so there is no ask constructor at all and every decision
@@ -149,10 +151,12 @@ read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
-it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
-because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
-block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
-diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
+it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; a hard
+exit-2 Stop block would only force a continuation, and the platform documents no built-in loop bound for
+one (it sends stop_hook_active, true on a continuation a stop hook forced, and leaves the check to the
+hook), so a block that skipped that check could re-fire on the forced continuation and wedge the
+session. The hard PREVENTION for console diffs lives in the PreToolUse diff_source layer at the command
+source; the Stop layer only surfaces.
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
 class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
@@ -15634,11 +15638,11 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
-# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
-# emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
-# exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
-# fails closed via exit 2 on error.
+# re-fire on the forced continuation and wedge the session (an error path never consults the payload's
+# stop_hook_active field, and the platform documents no built-in loop bound), so on ANY error (unreadable
+# stdin, JSON parse failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage
+# warning and exits 0. A DELIBERATE backlog-deny is the intended exception (the documented Stop block
+# mechanism, bounded by the loop cap); only a PreToolUse handler fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -15686,9 +15690,9 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
-    # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
-    # still fails closed (exit 2).
+    # wedge the session (an error path never consults stop_hook_active, and the platform documents no
+    # built-in loop bound), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
+    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
