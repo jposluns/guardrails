@@ -2101,17 +2101,22 @@ stores directly at them, and implements no section 9.2 upgrade and no legacy-sta
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity, its class, and its supported `spec_version`, homes generation, and
 worklog storage generation. Each release MUST ship that declaration as one file, the declaration
-file. A runtime check MUST read the declaration from the copy of that file installed with the
-implementation (the installed copy) alone, never from the documentation of the release or from any
-report. Each release MUST also carry, in the implementation and apart from that file, the SHA-256
-digest of that file's bytes as the release ships them (the shipped-file digest), and the
-documentation of each release MUST state where the implementation carries it. A release that carries
-no such digest, or whose documentation states no such place, does not conform to this section, and a
-conformance claim MUST NOT be made for it. A runtime check MUST compare the installed copy's bytes
-with the shipped-file digest before it reads any field, and an installed copy that is absent or
-unreadable, or whose bytes differ from that digest, MUST yield cannot-evaluate and MUST NOT
-authorize any store operation. That comparison detects an edit of the installed copy alone; section
-17 discloses that residual and the others these rules leave.
+file. A runtime check is the step of the implementation that, in a run, reads the declaration and
+gates that run's store operations, and a documented run of the runtime check and the emitter need
+not resolve a store. Whether a run authorized store operations is an observable of that run: it
+authorized them exactly where it performed one, a write within a store that run resolved or to that
+store's lease, as the checker observes the run's writes, and an authorization no performed operation
+shows is not compared. A runtime check MUST read the declaration from the copy of that file
+installed with the implementation (the installed copy) alone, never from the documentation of the
+release or from any report. Each release MUST also carry, in the implementation and apart from that
+file, the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest),
+and the documentation of each release MUST state where the implementation carries it. A release that
+carries no such digest, or whose documentation states no such place, does not conform to this
+section, and a conformance claim MUST NOT be made for it. A runtime check MUST compare the installed
+copy's bytes with the shipped-file digest before it reads any field, and an installed copy that is
+absent or unreadable, or whose bytes differ from that digest, MUST yield cannot-evaluate and MUST
+NOT authorize any store operation. That comparison detects an edit of the installed copy alone;
+section 17 discloses that residual and the others these rules leave.
 
 Every report the emitter of a release writes MUST carry exactly four compared parts: the restatement
 of the declaration, the shipped-file digest the implementation carries, the installed-copy digest,
@@ -2121,21 +2126,23 @@ installed copy is absent or unreadable, and a report MUST NOT carry `not-read` w
 result other than `cannot_evaluate`. Each digest in a report MUST be written as 64 lowercase
 hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued
 gate_run verdict field (section 8.5): `cannot_evaluate` where that run's runtime check yielded
-cannot-evaluate, and otherwise `pass` where it authorized store operations and `fail` where it did
-not. A restatement differs from that file's declaration where it gives a different value for any
-field the file carries, omits such a field, or states a field the file does not carry. The
-documentation of each release MUST restate that file's declaration without differing from it. The
-expected report of a release is fixed by the bytes the release ships alone, apart from the one
-behaviour-coupled comparison below: its restatement is the
-declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of
-that file's bytes as the release ships them, and its runtime result is `cannot_evaluate` exactly
-where a rule of this section makes those bytes yield cannot-evaluate, and otherwise `pass` or
-`fail`, between which this section, as it now stands, sets no rule. A report deviates from the
-expected report where any of the four compared parts is omitted, written in another form, or holds
-another value; no other content of a report is compared. The runtime-result part also deviates
-where its token disagrees with whether that run authorized store operations; this comparison is
-against the run's own behaviour, the only part of the expected report not fixed by the shipped
-bytes alone.
+cannot-evaluate or another rule of this section made that run yield cannot-evaluate, the admission
+check over the store that run resolved included, and otherwise `pass` where it authorized store
+operations and `fail` where it did not. A restatement differs from that file's declaration where it
+gives a different value for any field the file carries, omits such a field, or states a field the
+file does not carry. The documentation of each release MUST restate that file's declaration without
+differing from it. The expected report of a release is fixed by the bytes the release ships alone,
+apart from the runtime result, the one part also coupled to the run it concerns: its restatement is
+the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest
+of that file's bytes as the release ships them, and its runtime result is `cannot_evaluate` exactly
+where a rule of this section makes those bytes, or the store that run resolved as the checker
+observes it, yield cannot-evaluate, and otherwise `pass` or `fail`, between which this section, as
+it now stands, sets no rule. A report deviates from the expected report where any of the four
+compared parts is omitted, written in another form, or holds another value; no other content of a
+report is compared. The runtime-result part also deviates where its token disagrees with whether
+that run authorized store operations, the performed operations the checker observes; this comparison
+and the store-coupled cannot-evaluate rule above read the run's own observed behaviour, which makes
+the runtime result the only part of the expected report not fixed by the shipped bytes alone.
 
 An execution environment is unaltered where it is a stock install of a platform and version within
 what the documentation of the release names or, where that documentation names none, of the platform
@@ -2150,9 +2157,16 @@ unaltered execution environment, from the bytes the release ships and, for each 
 release does not ship, from the source its documentation directs, followed by two successive
 documented runs of the runtime check and the emitter over that installation. A reference run of a
 release is a run of an attempt whose installed copy holds that file's bytes as the release ships
-them and is readable when the run starts. An attempt in which anything other than the documented
-steps and the release's own code altered the installation or the execution environment is not an
-attempt and establishes nothing.
+them and is readable when the run starts. The installation or the execution environment is altered
+where any byte, file, or setting of either differs from what the stock install's defaults, the
+documented steps, the release's own code, and code those steps install from a source the
+documentation of the release directs left it; the working and temporary locations the checker chose
+are the checker's own, and what sits there alters neither. An attempt whose installation or
+execution environment anything else altered is not an attempt and establishes nothing. A verdict
+under this section is decided from the checker's own observations, given its detection of
+alterations (section 17), and an attempt whose eligibility under this rule the checker cannot
+determine establishes nothing for that checker: a failure that only such attempts show MUST be
+reported as unresolved, never as established.
 
 A release MUST be available: every attempt MUST complete the documented installation and yield two
 reference runs, so an installer that rewrites that file's bytes, by converting its line endings or
@@ -2170,15 +2184,26 @@ documentation of the release, and from the checker's own attempts and reference 
 either rule is shown for a checker where one of its own attempts or reference runs shows it, and
 established for that checker where a second of its own attempts or reference runs, made on the same
 platform and version, shows a failure of the same rule and, under the reference-run rule, in the
-same part of the report or in the runtime result; attempts and reference runs that show no failure,
-however many there are, never counter a shown or established failure. An availability failure is
-shown by a failed attempt and established by a second failed attempt of the same checker on the
-same platform and version; the same-part condition applies only to deviating reports. The showing
-and the reproducing evidence MAY be any two of the checker's own reference runs on the same
-platform and version, the two runs of one attempt included. A checker that reports on a
-shown failure MUST report it as established or, where its own evidence has shown it and not
-reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and
-reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
+same part, the four compared parts of the report and the store part below each one part; attempts
+and reference runs that show no failure, however many there are, never counter a shown or
+established failure. The two rules above are the one path from attempts and reference runs to a
+verdict: a breach of any requirement of this section that only an attempt or a run of the release
+can show, the four compared parts of a report, `not-read` beside another runtime result, a run's
+cannot-evaluate and the store operations it performs, and a restatement a report states included,
+MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and
+established only as those rules provide, never as nonconformance on one showing; only what a checker
+inspects in the bytes the release ships or reads in the documentation of the release decides a
+verdict under this section without that procedure. An availability failure is shown by a failed
+attempt and established by a second failed attempt of the same checker on the same platform and
+version; it has no part, so the same-part condition does not apply to it. Under the reference-run
+rule the same-part condition applies to every failure, a store operation performed where the
+expected runtime result is `cannot_evaluate` included: that operation is a failure in a part of its
+own, the store part, shown and reproduced only by a run that performs such an operation, never by a
+deviating report. The showing and the reproducing evidence MAY be any two of the checker's own
+reference runs on the same platform and version, the two runs of one attempt included. A checker
+that reports on a shown failure MUST report it as established or, where its own evidence has shown
+it and not reproduced it, as unresolved, MUST name the platform, the version, and its own attempts
+and reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
 shown one, as conformance of the release. A release for which a checker's own evidence establishes a
 failure of either rule does not conform to this section, and that checker MUST NOT make a
 conformance claim for it; a conformance claim under this section MUST name the attempts and
@@ -2199,12 +2224,15 @@ contradictory on other grounds. The rules on an absent, unreadable, malformed, c
 classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
 as it stands, a check of the documentation or of the reports MUST apply them to that file as the
 release ships it, and each check MUST NOT take a class or any other field from the documentation of
-the release or from any report. Where that documentation or a report a reference run of that release
-emits states a class that the file omits, the release does not conform to this section because that
-restatement states a field the file does not carry, and the file declares no class only where it
-omits its class and no other field: a file that is absent, or that also omits its release identity,
-its `spec_version`, its homes generation, or its worklog storage generation, is malformed and MUST
-yield cannot-evaluate.
+the release or from any report. Where that documentation states a class that the file omits, the
+release does not conform to this section and a conformance claim MUST NOT be made for it, because
+the documentation's restatement states a field the file does not carry; where a report a reference
+run of that release emits states such a class, that report's restatement differs from the file's
+declaration the same way, a deviation of the restatement part judged under the reference-run rule
+like any other, never a direct verdict. The file declares no class only where it omits its class and
+no other field: a file that is absent, or that also omits its release identity, its `spec_version`,
+its homes generation, or its worklog storage generation, is malformed and MUST yield
+cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2613,12 +2641,14 @@ The gates in this standard are strong where they are strong and say so where the
   organization-wide package-manager configuration file taken for part of the stock install, can
   mislead that checker, another checker contests a claim only with its own attempts and reference
   runs, and honest checkers on stock installs of different platforms or versions within a documented
-  family can reach different verdicts, each of which the release must meet. The same residual
-  covers the section 16.1 rule that an attempt altered by anything other than the documented steps
-  and the release's own code is not an attempt and establishes nothing: only a checker that detects
-  the alteration can know to set that attempt aside. A failure that a checker
-  cannot show twice in its own attempts and reference runs stays unresolved, however many other
-  checkers each show it once, and an unresolved failure neither establishes nor counters any
+  family can reach different verdicts, each of which the release must meet. The same residual covers
+  the section 16.1 rule that an attempt altered by anything other than the documented steps, the
+  release's own code, code those steps install from a directed source, and the stock platform's
+  defaults is not an attempt and establishes nothing: only a checker that detects the alteration can
+  know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's
+  eligibility report what only such attempts show as unresolved, never established. A failure that a
+  checker cannot show twice in its own attempts and reference runs stays unresolved, however many
+  other checkers each show it once, and an unresolved failure neither establishes nor counters any
   conformance or nonconformance of the release. Where the documentation of a release directs that a
   file the release does not ship be installed and does not pin its bytes, attempts made at different
   times can differ as the bytes the directed source serves differ, a residual of the release's own

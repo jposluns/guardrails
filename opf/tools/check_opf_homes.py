@@ -22,6 +22,10 @@ The default entry also runs a section 2 keyword lint over every registered pin: 
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D). Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
+
+The default entry also guards the informative sections: a section whose heading says
+"(informative)" or whose body declares itself informative (Appendix E) is red where it carries a
+requirement keyword (MUST, SHALL, REQUIRED, SHOULD), and red where Appendix E loses that marking.
 """
 import sys
 
@@ -756,6 +760,8 @@ _CONTRACT = {
         _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
         'An implementation MUST declare, in the documentation of each release and in every report its emitter writes, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
         'Each release MUST ship that declaration as one file, the declaration file.',
+        _D("A runtime check is the step of the implementation that, in a run, reads the declaration and gates that run's store operations, and a documented run of the runtime check and the emitter need not resolve a store."),
+        _D("Whether a run authorized store operations is an observable of that run: it authorized them exactly where it performed one, a write within a store that run resolved or to that store's lease, as the checker observes the run's writes, and an authorization no performed operation shows is not compared."),
         'A runtime check MUST read the declaration from the copy of that file installed with the implementation (the installed copy) alone, never from the documentation of the release or from any report.',
         "Each release MUST also carry, in the implementation and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the shipped-file digest), and the documentation of each release MUST state where the implementation carries it.",
         'A release that carries no such digest, or whose documentation states no such place, does not conform to this section, and a conformance claim MUST NOT be made for it.',
@@ -763,22 +769,26 @@ _CONTRACT = {
         _D('That comparison detects an edit of the installed copy alone; section 17 discloses that residual and the others these rules leave.'),
         'Every report the emitter of a release writes MUST carry exactly four compared parts: the restatement of the declaration, the shipped-file digest the implementation carries, the installed-copy digest, and the runtime result.',
         "The installed-copy digest is the SHA-256 digest of the installed copy's bytes that the runtime check read, or the token not-read where that check read none because the installed copy is absent or unreadable, and a report MUST NOT carry not-read with any runtime result other than cannot_evaluate.",
-        "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate, and otherwise pass where it authorized store operations and fail where it did not.",
+        "Each digest in a report MUST be written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the tokens of the three-valued gate_run verdict field (section 8.5): cannot_evaluate where that run's runtime check yielded cannot-evaluate or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included, and otherwise pass where it authorized store operations and fail where it did not.",
         _D("A restatement differs from that file's declaration where it gives a different value for any field the file carries, omits such a field, or states a field the file does not carry."),
         "The documentation of each release MUST restate that file's declaration without differing from it.",
-        _D("The expected report of a release is fixed by the bytes the release ships alone, apart from the one behaviour-coupled comparison below: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
+        _D("The expected report of a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns: its restatement is the declaration of that file as the release ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships them, and its runtime result is cannot_evaluate exactly where a rule of this section makes those bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and otherwise pass or fail, between which this section, as it now stands, sets no rule."),
         _D('A report deviates from the expected report where any of the four compared parts is omitted, written in another form, or holds another value; no other content of a report is compared.'),
-        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations; this comparison is against the run's own behaviour, the only part of the expected report not fixed by the shipped bytes alone."),
+        _D("The runtime-result part also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes; this comparison and the store-coupled cannot-evaluate rule above read the run's own observed behaviour, which makes the runtime result the only part of the expected report not fixed by the shipped bytes alone."),
         _D("An execution environment is unaltered where it is a stock install of a platform and version within what the documentation of the release names or, where that documentation names none, of the platform the checker uses, as that platform's own installer leaves it, changed only as that documentation directs and in this closed operational list, and in nothing else: the account name, administrative privilege only where that documentation directs it, the working and temporary locations, and the clock."),
         _D("Every default of that stock install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, is part of an unaltered execution environment, so meeting it is the release's, whichever platform and version within that naming a checker uses."),
         _D('An attempt is the documented installation of a release, made by one checker in an unaltered execution environment, from the bytes the release ships and, for each installed file the release does not ship, from the source its documentation directs, followed by two successive documented runs of the runtime check and the emitter over that installation.'),
         _D("A reference run of a release is a run of an attempt whose installed copy holds that file's bytes as the release ships them and is readable when the run starts."),
-        _D("An attempt in which anything other than the documented steps and the release's own code altered the installation or the execution environment is not an attempt and establishes nothing."),
+        _D("The installation or the execution environment is altered where any byte, file, or setting of either differs from what the stock install's defaults, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it; the working and temporary locations the checker chose are the checker's own, and what sits there alters neither."),
+        _D('An attempt whose installation or execution environment anything else altered is not an attempt and establishes nothing.'),
+        "A verdict under this section is decided from the checker's own observations, given its detection of alterations (section 17), and an attempt whose eligibility under this rule the checker cannot determine establishes nothing for that checker: a failure that only such attempts show MUST be reported as unresolved, never as established.",
         "A release MUST be available: every attempt MUST complete the documented installation and yield two reference runs, so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot complete, and a first run whose writes leave the second run with an installed copy that no longer holds the shipped bytes are each a failure of this rule.",
         'A reference run of a release MUST NOT emit a report that deviates from the expected report, and its runtime check MUST NOT authorize any store operation where the expected runtime result is cannot_evaluate.',
         "Only a checker's own attempts and reference runs are evidence under the two rules above: a report of any other run or installation, altered or not, MUST NOT be presented as establishing or countering conformance of any release, and whether a release conforms to this section is judged only from the bytes the release ships, the implementation and the installer included, inspected, from the documentation of the release, and from the checker's own attempts and reference runs.",
-        _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part of the report or in the runtime result; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
-        _D('An availability failure is shown by a failed attempt and established by a second failed attempt of the same checker on the same platform and version; the same-part condition applies only to deviating reports.'),
+        _D('A failure of either rule is shown for a checker where one of its own attempts or reference runs shows it, and established for that checker where a second of its own attempts or reference runs, made on the same platform and version, shows a failure of the same rule and, under the reference-run rule, in the same part, the four compared parts of the report and the store part below each one part; attempts and reference runs that show no failure, however many there are, never counter a shown or established failure.'),
+        "The two rules above are the one path from attempts and reference runs to a verdict: a breach of any requirement of this section that only an attempt or a run of the release can show, the four compared parts of a report, not-read beside another runtime result, a run's cannot-evaluate and the store operations it performs, and a restatement a report states included, MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing; only what a checker inspects in the bytes the release ships or reads in the documentation of the release decides a verdict under this section without that procedure.",
+        _D('An availability failure is shown by a failed attempt and established by a second failed attempt of the same checker on the same platform and version; it has no part, so the same-part condition does not apply to it.'),
+        _D('Under the reference-run rule the same-part condition applies to every failure, a store operation performed where the expected runtime result is cannot_evaluate included: that operation is a failure in a part of its own, the store part, shown and reproduced only by a run that performs such an operation, never by a deviating report.'),
         "The showing and the reproducing evidence MAY be any two of the checker's own reference runs on the same platform and version, the two runs of one attempt included.",
         'A checker that reports on a shown failure MUST report it as established or, where its own evidence has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a shown one, as conformance of the release.',
         "A release for which a checker's own evidence establishes a failure of either rule does not conform to this section, and that checker MUST NOT make a conformance claim for it; a conformance claim under this section MUST name the attempts and reference runs it rests on.",
@@ -788,7 +798,8 @@ _CONTRACT = {
         'A declaration that is absent, or that omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
         'A declaration that carries its release identity, its spec_version, its homes generation, and its worklog storage generation, and omits only its class, declares no class: it MUST NOT be treated as malformed for that omission, and the implementation that ships it MUST be treated as upgrade-capable unless the declaration is malformed or contradictory on other grounds.',
         'The rules on an absent, unreadable, malformed, contradictory, or classless declaration govern the file alone: a runtime check MUST apply them to the installed copy as it stands, a check of the documentation or of the reports MUST apply them to that file as the release ships it, and each check MUST NOT take a class or any other field from the documentation of the release or from any report.',
-        'Where that documentation or a report a reference run of that release emits states a class that the file omits, the release does not conform to this section because that restatement states a field the file does not carry, and the file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
+        "Where that documentation states a class that the file omits, the release does not conform to this section and a conformance claim MUST NOT be made for it, because the documentation's restatement states a field the file does not carry; where a report a reference run of that release emits states such a class, that report's restatement differs from the file's declaration the same way, a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.",
+        'The file declares no class only where it omits its class and no other field: a file that is absent, or that also omits its release identity, its spec_version, its homes generation, or its worklog storage generation, is malformed and MUST yield cannot-evaluate.',
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
         "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
         'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
@@ -898,7 +909,7 @@ _CONTRACT = {
         _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
         _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
         _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker, another checker contests a claim only with its own attempts and reference runs, and honest checkers on stock installs of different platforms or versions within a documented family can reach different verdicts, each of which the release must meet."),
-        _D("The same residual covers the section 16.1 rule that an attempt altered by anything other than the documented steps and the release's own code is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside."),
+        _D("The same residual covers the section 16.1 rule that an attempt altered by anything other than the documented steps, the release's own code, code those steps install from a directed source, and the stock platform's defaults is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established."),
         _D('A failure that a checker cannot show twice in its own attempts and reference runs stays unresolved, however many other checkers each show it once, and an unresolved failure neither establishes nor counters any conformance or nonconformance of the release.'),
         _D("Where the documentation of a release directs that a file the release does not ship be installed and does not pin its bytes, attempts made at different times can differ as the bytes the directed source serves differ, a residual of the release's own documentation."),
         _D('Appendix E gives informative guidance for checking release conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference environment.'),
@@ -1010,6 +1021,39 @@ def keyword_findings(contract=None):
             elif not keyword:
                 findings.append("spec {} requirement without a section 2 keyword: {}".format(
                     section, fragment))
+    return findings
+
+
+_INFORMATIVE_KEYWORD = re.compile(r"\b(?:MUST|SHALL|REQUIRED|SHOULD)\b")
+_INFORMATIVE_MARK = re.compile(r"\bThis (?:appendix|section) is informative\b")
+
+
+def _informative_sections(text):
+    # Every heading bounds a section; a section is informative where its heading says
+    # "(informative)" or its body declares itself informative.
+    bounds = list(re.finditer(r"^#{2,3} .*$", text, re.MULTILINE))
+    out = dict()
+    for i, m in enumerate(bounds):
+        end = bounds[i + 1].start() if i + 1 < len(bounds) else len(text)
+        body = text[m.end():end]
+        if "(informative)" in m.group(0).lower() or _INFORMATIVE_MARK.search(body):
+            out[m.group(0).lstrip("#").strip()] = body
+    return out
+
+
+def informative_findings(text):
+    # An informative section adds no requirement (Appendix E says so itself), so a section 2
+    # requirement keyword there, or SHALL or REQUIRED read as one, is drift: a removed MUST
+    # could regain force there unnoticed. Residual: the guard reads uppercase keywords, so a
+    # lowercase restatement that a reader takes as binding stays green; review catches that.
+    findings = []
+    sections = _informative_sections(text)
+    if not any(title.startswith("Appendix E") for title in sections):
+        findings.append("spec informative guard: Appendix E not marked informative")
+    for title, body in sections.items():
+        for word in sorted(set(_INFORMATIVE_KEYWORD.findall(body))):
+            findings.append("spec informative section {} carries requirement keyword {}".format(
+                title, word))
     return findings
 
 
@@ -2845,7 +2889,8 @@ def _self_test_vectors():
           contract_findings(text.replace(body, mutated, 1)))
     # Section 16.1 declaration rules and their section 17 residuals: deleting the wrapped
     # sentence in place, or rewording its operative clause, turns the gate red with that pin's
-    # own finding.
+    # own finding. Each reword vector also asserts its target finding is absent before the
+    # mutation, so a vector cannot pass against a text that already lacks its whole pin.
     def spec_vectors(section, cases):
         body = _sections(text)[section]
         for start, rewordings in cases:
@@ -2862,7 +2907,8 @@ def _self_test_vectors():
                 reworded, changed = re.subn(r"\s+".join(map(re.escape, old.split())), new, body)
                 check("spec-reword-" + section + "-" + old,
                       lambda w=reworded, c=changed, f=finding, b=body:
-                      c == 1 and f in contract_findings(text.replace(b, w, 1)))
+                      c == 1 and f not in contract_findings(text)
+                      and f in contract_findings(text.replace(b, w, 1)))
     spec_vectors("16.1", (
             ('An implementation MUST declare,', (
              ('in the documentation of each release and in every report its emitter writes,',
@@ -2909,6 +2955,8 @@ def _self_test_vectors():
               'in hexadecimal,'),
              ('`pass` where it authorized store operations and `fail` where it did not.',
               '`pass` or `fail`.'),
+             ('or another rule of this section made that run yield cannot-evaluate, the admission check over the store that run resolved included,',
+              ''),
             )),
             ('A restatement differs from', (
              ('omits such a field, or states a field the file does not carry.',
@@ -2919,7 +2967,7 @@ def _self_test_vectors():
               "SHOULD restate that file's declaration."),
             )),
             ('The expected report of a release', (
-             ('is fixed by the bytes the release ships alone, apart from the one behaviour-coupled comparison below:',
+             ('is fixed by the bytes the release ships alone, apart from the runtime result, the one part also coupled to the run it concerns:',
               'is the report a reference run emits:'),
              ('and otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule.',
               'and otherwise `pass`.'),
@@ -2931,7 +2979,7 @@ def _self_test_vectors():
               'every other content of a report is compared.'),
             )),
             ('The runtime-result part also deviates', (
-             ('also deviates where its token disagrees with whether that run authorized store operations;',
+             ('also deviates where its token disagrees with whether that run authorized store operations, the performed operations the checker observes;',
               'does not deviate on what that run authorized;'),
              ('the only part of the expected report not fixed by the shipped bytes alone.',
               'a part of the expected report the shipped bytes fix.'),
@@ -2946,6 +2994,14 @@ def _self_test_vectors():
              ("is part of an unaltered execution environment, so meeting it is the release's,",
               "alters the execution environment, so undoing it is the checker's,"),
             )),
+            ('A runtime check is the step of the implementation', (
+             ('and a documented run of the runtime check and the emitter need not resolve a store.',
+              'and a documented run of the runtime check and the emitter always resolves a store.'),
+            )),
+            ('Whether a run authorized store operations is an observable', (
+             ("it authorized them exactly where it performed one, a write within a store that run resolved or to that store's lease, as the checker observes the run's writes,",
+              'it authorized them where its own decision said so, observed or not,'),
+            )),
             ('An attempt is the documented installation', (
              ('followed by two successive documented runs',
               'followed by one documented run'),
@@ -2956,11 +3012,19 @@ def _self_test_vectors():
              ("holds that file's bytes as the release ships them and is readable when the run starts.",
               "holds that file's bytes as the release ships them."),
             )),
-            ('An attempt in which anything other than', (
+            ('The installation or the execution environment is altered', (
+             ("what the stock install's defaults, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it;",
+              "what the documented steps and the release's own code left it;"),
+             ("the working and temporary locations the checker chose are the checker's own, and what sits there alters neither.",
+              'the working and temporary locations the checker chose alter both.'),
+            )),
+            ('An attempt whose installation or execution environment anything else altered', (
              ('is not an attempt and establishes nothing.',
               'is an attempt like any other.'),
-             ("anything other than the documented steps and the release's own code",
-              'anything'),
+            )),
+            ('A verdict under this section is decided', (
+             ('MUST be reported as unresolved, never as established.',
+              'MAY be reported as established.'),
             )),
             ('A release MUST be available:', (
              ('every attempt MUST complete',
@@ -2986,11 +3050,19 @@ def _self_test_vectors():
              ('established for that checker where a second of its own attempts or reference runs,',
               'established where a second attempt or reference run of any checker,'),
             )),
+            ('The two rules above are the one path', (
+             ('MUST be judged solely as a failure of the availability rule or of the reference-run rule, shown and established only as those rules provide, never as nonconformance on one showing;',
+              'MAY be judged as nonconformance on one showing;'),
+            )),
             ('An availability failure is shown by a failed attempt', (
-             ('the same-part condition applies only to deviating reports.',
-              'the same-part condition applies to every failure.'),
+             ('it has no part, so the same-part condition does not apply to it.',
+              'the same-part condition applies to it.'),
              ('established by a second failed attempt of the same checker on the same platform and version;',
               'established by a second failed attempt of any checker;'),
+            )),
+            ('Under the reference-run rule the same-part condition applies to every failure,', (
+             ('shown and reproduced only by a run that performs such an operation, never by a deviating report.',
+              'shown by such an operation and reproduced by any deviating report.'),
             )),
             ('The showing and the reproducing evidence MAY be', (
              ('the two runs of one attempt included.',
@@ -3008,9 +3080,13 @@ def _self_test_vectors():
              ('it MUST NOT be treated as making the declaration malformed or contradictory,',
               'it makes the declaration contradictory,'),
             )),
-            ('Where that documentation or a report a reference run', (
-             ('Where that documentation or a report a reference run of that release emits states a class that the file omits,',
-              'Where a report states a class that the file omits,'),
+            ('Where that documentation states a class that the file omits,', (
+             ('a deviation of the restatement part judged under the reference-run rule like any other, never a direct verdict.',
+              'and the release does not conform to this section.'),
+            )),
+            ('The file declares no class only where it omits its class and no other field:', (
+             ('is malformed and MUST yield cannot-evaluate.',
+              'declares no class.'),
             )),
     ))
     spec_vectors("17", (
@@ -3063,8 +3139,10 @@ def _self_test_vectors():
               'honest checkers always reach one verdict,'),
             )),
             ('The same residual covers the section 16.1 rule', (
-             ('only a checker that detects the alteration can know to set that attempt aside.',
-              'every checker can set that attempt aside.'),
+             ("anything other than the documented steps, the release's own code, code those steps install from a directed source, and the stock platform's defaults",
+              "anything other than the documented steps and the release's own code"),
+             ("and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established.",
+              'and such an attempt counts until the alteration is proven.'),
             )),
             ('A failure that a checker cannot show twice', (
              ('stays unresolved, however many other checkers each show it once,',
@@ -3079,6 +3157,25 @@ def _self_test_vectors():
               'Appendix E gives normative rules'),
             )),
     ))
+    # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
+    # and planting a requirement keyword there turns the gate red with that keyword's finding;
+    # unmarking Appendix E turns it red too, so the guard cannot be sidestepped by unmarking.
+    informative_anchor = "This appendix is informative:"
+    check("spec-informative-clean", lambda: not informative_findings(text))
+    check("spec-informative-appendix-e", lambda: any(
+        t.startswith("Appendix E") for t in _informative_sections(text)))
+    for word in ("MUST", "MUST NOT", "SHALL", "REQUIRED", "SHOULD"):
+        planted = text.replace(informative_anchor,
+                               informative_anchor + " A checker " + word + " share each record.", 1)
+        check("spec-informative-flip-" + word, lambda m=planted, w=word.split()[0]:
+              text.count(informative_anchor) == 1 and any(
+                  f.endswith("carries requirement keyword " + w) and "Appendix E" in f
+                  for f in informative_findings(m)))
+    check("spec-informative-lowercase-green", lambda: not informative_findings(text.replace(
+        informative_anchor, informative_anchor + " A checker must share records.", 1)))
+    check("spec-informative-unmarked-red", lambda: "spec informative guard: Appendix E not marked"
+          " informative" in informative_findings(text.replace("(informative)", "", 1).replace(
+              informative_anchor, "This appendix recommends practice:", 1)))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -3139,8 +3236,9 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
-                    + surface_findings())
+        spec_text = SPEC.read_text(encoding="utf-8")
+        findings = (contract_findings(spec_text) + keyword_findings()
+                    + surface_findings() + informative_findings(spec_text))
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
