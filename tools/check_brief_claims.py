@@ -22,41 +22,55 @@ block: a marker line anywhere in the brief counts. Cannot-evaluate (exit 2): a s
 block, an END with no BEGIN, a BEGIN inside an open block, an empty block, any other line inside the block
 (a blank line, an extra word, a colon, trailing space, a lookalike or invisible character), a repeated
 name, and a NEAR-MISS MARKER: a line outside the block that is not exactly a marker but, normalized
-(NFKC, invisible characters removed), case-folded and stripped, is at most 80 characters and consists
+(NFKC, invisible characters removed), case-folded and stripped, is at most 80 characters (measured after
+normalization, so invisible padding of any length does not hide a marker) and consists
 ONLY of BEGIN or END, BRIEF, CLAIMS and an optional version (digits and dots, optionally after v or
 version), separated and surrounded by non-word characters (an indented, BOM-prefixed, lower-case,
 re-spaced, decorated or wrong-version marker). A line with any other word ("Begin brief claims
 investigation tomorrow.") is prose, not a near miss.
 
-THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict token is read from its trailer only; body
-contents never determine the blocking verdict. The body is scanned for fence delimiters only: a fence
-that is never closed makes the file cannot-evaluate (a record at the end of an unclosed fence may be
-quoted text). Reading upward from the last line, blank lines (empty or spaces and tabs only; a form feed
-or a no-break space is not blank) and trailer lines (a line starting at column 0 with a configured trailer
-prefix) are skipped; the first other line must be exactly `VERDICT: <token>` for one configured token,
-else the file is cannot-evaluate (no trailer, prose or a closing fence after the record, a decorated,
-indented, BOM-prefixed, differently cased or trailing-space record, or a value that is not exactly one
-token).
+THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict TOKEN comes only from its trailer record;
+the body's structure can make the file cannot-evaluate, and nothing else in the body is read. Reading
+upward from the last line, blank lines (empty or spaces and tabs only; a form feed or a no-break space is
+not blank) and trailer lines (a line starting at column 0 with a configured trailer prefix) are skipped;
+the first other line must be exactly `VERDICT: <token>` for one configured token, else the file is
+cannot-evaluate (no trailer, prose or a closing fence after the record, a decorated, indented,
+BOM-prefixed, differently cased or trailing-space record, or a value that is not exactly one token). The
+file is read as CommonMark block structure, and it is also cannot-evaluate when the record lies inside a
+fenced block, an HTML block (a comment, a pre element or another kind), an HTML comment or code span
+still open in its paragraph, or a block quote (its lazy continuation included), whatever the trailer
+prefixes are; and when a fence or an HTML block that ends at a closing marker (a comment, pre, script,
+style, textarea, processing instruction, declaration or CDATA) is never closed, in that reading or in a
+fence-only reading (a record there may be quoted or hidden text). Where the reading is unsure it refuses:
+a list item is read as a paragraph, and fences that pair differently once HTML blocks are ignored are
+cannot-evaluate.
 
 COMPLETENESS. Every token in the brief's own text (outside fences, `>` lines, declared verbatim sections and
 the block) whose basename full-matches the review-file-pattern needs a block line with that basename, else
-the brief is a MISMATCH (exit 1, UNCLAIMED). A recognized name with NO entry of that basename in --input-dir
-(a report a worker will write, a file kept elsewhere) cannot be claimed: a block line for it is
-cannot-evaluate, and without one it is reported as an ABSENT line that does not change the exit code. This
-scan is a trigger only: a name it does not recognize, or one reported ABSENT, loses the completeness
-check, but it can never make a wrong block line pass.
+the brief is a MISMATCH (exit 1, UNCLAIMED). A recognized name that is GENUINELY absent (a report a
+worker will write, a file kept elsewhere) cannot be claimed: a block line for it is cannot-evaluate, and
+without one it is reported as an ABSENT line that does not change the exit code. Genuinely absent means:
+the name is printable ASCII, no path the brief writes for it under --input-dir exists, and no entry
+anywhere in --input-dir's subtree (a symlinked directory is listed, not entered; at most 20000 entries)
+has the same name after NFKC and case-folding (invisible characters removed) or a lookalike name (a
+non-ASCII character in the entry's name stands for any one character; 0 and o, 1 i | and l, rn and m,
+vv and w, cl and d are one). A present or lookalike name is UNCLAIMED, a name that is not printable ASCII
+is UNCLAIMED, and a subtree that cannot be listed whole or a path that cannot be examined is
+cannot-evaluate, never ABSENT. This scan is a trigger only: a name it does not recognize, or one
+reported ABSENT, loses the completeness check, but it can never make a wrong block line pass.
 
 ADVISORY PROSE (never blocking). The free-prose rules of the third QA round run on the brief's own text
 and report every result as an ADVISORY line: verdict, id, grade and count restatements bound to named
 files, verbatim excerpts, embedded verbatim sections, template carry-over (--template), and foreign item
-ids (--registry). They run AFTER the blocking result is printed, in a child interpreter with their own
-budgets: ADVISORY_MAX (256 KiB) characters of input (the brief's own text and sections, the template and
-the files named in prose) and ADVISORY_DEADLINE (2.5 seconds) of wall clock, under a CPU-time limit. An
+ids (--registry). They run AFTER every brief's blocking result is printed, one child interpreter per
+brief, with their own budgets: ADVISORY_MAX (256 KiB) characters of input per brief (the brief's own text
+and sections, the template and the files named in prose) and ONE ADVISORY_DEADLINE (2.5 seconds) of
+wall clock for the whole run, shared by every brief, each child under a CPU-time limit. An
 advisory MISMATCH or CANNOT-EVALUATE, an unreadable file named only in prose, an unreadable template or
-registry, an adopter id-pattern over its bound, an exhausted budget and a failed advisory child are
-ADVISORY lines (an exhausted budget or a failed child is ONE line) and never change the exit code or
-delay the blocking result. Their recall and true-negative rate are not measured, and the rules miss
-shapes: slash-joined tokens ("NO BLOCKERS/BLOCKERS FOUND respectively", read as an option list) and a
+registry, an adopter id-pattern over its bound, an exhausted budget, a failed advisory child and the run
+deadline passing during the advisory work are ADVISORY lines (an exhausted budget or a failed child is
+ONE line) and never change the exit code or delay any brief's blocking result. Their recall and
+true-negative rate are not measured, and the rules miss shapes: slash-joined tokens ("NO BLOCKERS/BLOCKERS FOUND respectively", read as an option list) and a
 parenthetical in fullwidth parentheses are not read as claims.
 
 CONFIGURATION (`.aiqt/brief-claims.toml` at this file's repository root, the parent of the directory that
@@ -68,8 +82,9 @@ holds this file), every key REQUIRED:
                                       the named groups item, round (digits) and family
   verdicts = ["NO BLOCKERS", ...]     the exact verdict tokens: printable ASCII words joined by single spaces
   trailer-prefixes = ["WORKER_STATUS:"]  column-0 prefixes of the lines allowed after the VERDICT record (may
-                                      be empty; printable ASCII; none may start with VERDICT or be a prefix
-                                      of "VERDICT:")
+                                      be empty; printable ASCII; none may start with VERDICT, be a prefix
+                                      of "VERDICT:", or start with a backtick or a tilde, which could
+                                      hide a fence line)
   grades = ["BLOCKER", "MAJOR", ...]  finding grade words (advisory)
   grade-labels = ["Grade"]            label words of the "Label: GRADE" finding form (advisory)
   verbatim-begin = "BEGIN VERBATIM"   opens an embedded verbatim review; the first family word after it is
@@ -98,34 +113,46 @@ MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and bl
        in DIR has a block line; in particular a brief with no claims block that names no review file;
        NOT APPLICABLE with no configuration and no --require-config
     1  nothing is cannot-evaluate, and a block line's token differs from its file's trailer verdict, or a
-       recognized named review file present in DIR has no block line (UNCLAIMED): a brief that names a
-       review file and has no claims line for it exits 1
+       recognized named review file present in DIR (or a lookalike of it) has no block line (UNCLAIMED): a
+       brief that names a review file present in DIR and has no claims line for it exits 1
     2  cannot evaluate: a block-named review file that is missing, unreadable, not UTF-8, over 4 MiB, a
-       directory or outside DIR; a missing or malformed trailer or an unclosed fence in that file; a
-       malformed block or a near-miss marker; an unreadable brief; an unclosed fence or verbatim section in
-       the brief; a malformed configuration; a missing DIR; an adopter review-file-pattern over its bound;
-       a usage error; no configuration under --require-config; the run deadline passed
+       directory or outside DIR; a missing or malformed trailer in that file, a record inside a fence, an
+       HTML block, a comment, a pre element, an open code span or a block quote, or a fence or HTML block
+       never closed; a malformed block or a near-miss marker; an unclaimed name whose absence cannot be
+       established; an unreadable brief; an unclosed fence or verbatim section in the brief; a malformed
+       configuration; a missing DIR; an adopter review-file-pattern over its bound; a usage error; no
+       configuration under --require-config; the run deadline passed before every blocking result
 
   OUTPUT, on stdout, one result per line; the FIRST WORD of every line is one of these:
     BRIEF <path> sha256=<hex>                              (first, for each readable brief)
     MATCH <name> VERDICT <token>: <path> sha256=<hex>
     MISMATCH <name> VERDICT <token>: <path> sha256=<hex>: the trailer VERDICT (line <n>) is <token>
     UNCLAIMED <name>: brief line <n> names it and the claims block has no line for it
-    ABSENT <name>: brief line <n> names it and --input-dir holds no such file, ...  (exit unchanged)
+    ABSENT <name>: brief line <n> names it and no entry in --input-dir's subtree has ...  (exit unchanged)
     CANNOT-EVALUATE <subject>: <reason>
     brief-claims: <path>: <n> blocking result(s) (<tally>); exit <0|1|2>
-    ADVISORY <MATCH|WARN|CANNOT-EVALUATE|EXEMPT> <detail>  (never affects the exit code)
-  For each brief: BRIEF, its blocking lines, then its brief-claims: summary line (the verdict, flushed
-  before any advisory work starts), then its ADVISORY lines. A run-level failure (configuration, usage,
-  DIR, the run deadline) prints one CANNOT-EVALUATE line; for --emit it goes to stderr.
+    ADVISORY <MATCH|WARN|CANNOT-EVALUATE|EXEMPT> <brief path>: <detail>  (never affects the exit code)
+  For each brief in order: BRIEF, its blocking lines, then its brief-claims: summary line (its verdict,
+  flushed); only after the LAST brief's summary, each brief's ADVISORY lines in the same order. A
+  run-level failure (configuration, usage, DIR, the run deadline before every blocking result) prints one
+  CANNOT-EVALUATE line; for --emit it goes to stderr. The run deadline passing during the advisory work
+  prints one ADVISORY CANNOT-EVALUATE run line and keeps the blocking exit code.
 
   RUNTIME BOUND. The check and --emit forms end within RUN_DEADLINE (7 seconds) of wall clock after the
   interpreter has started (start-up is not counted; it is well under a second on a working host), so a
   hook bound of about 10 seconds sees the tool's own exit, never a kill: an overrun is the tool's own
-  CANNOT-EVALUATE run line and exit 2. SIGALRM enforces it where the platform has it; within it the regex
-  child has REGEX_DEADLINE (4 seconds, CPU limit CHILD_CPU 3 seconds) and the advisory child
-  ADVISORY_DEADLINE (2.5 seconds, CPU limit 2 seconds), each cut to what is left of the run. Several
-  briefs in one run share the one deadline.
+  CANNOT-EVALUATE run line and exit 2. Two mechanisms enforce it: SIGALRM where the platform has it
+  (unblocked for the run when the inherited signal mask blocks it, and the mask restored after), and a
+  deadline polled between steps (before each brief, each block line, each unclaimed name and each
+  directory of the absence listing), which holds where SIGALRM is missing, ignored or cannot be armed.
+  Within it the regex child has REGEX_DEADLINE (4 seconds, CPU limit CHILD_CPU 3 seconds) and the advisory
+  children share ADVISORY_DEADLINE (2.5 seconds for the whole run, each child's CPU limit its whole
+  seconds), each cut to what is left of the run (the advisory children keep a 0.5-second reserve).
+  Several briefs in one run share the one deadline. What remains: Python runs a signal handler only
+  between bytecodes and the polled deadline is checked only between steps, so one step that blocks in the
+  kernel or in one long C call (reading a review file on a stalled filesystem, normalizing a 4 MiB line)
+  can run past the deadline until it returns; on a platform without SIGALRM only the polled deadline and
+  each child's own deadline hold.
 
   check_brief_claims.py --emit --input-dir DIR NAME...
       Print the claims block for the review files NAME... (basenames inside DIR, in the order given) on
@@ -146,7 +173,9 @@ verdict tokens only: it does not prove that the brief's prose agrees with the bl
 agrees with its trailer, or that a file did not change after the check while keeping its verdict. A review
 file named in a form the completeness scan does not recognize (a name split across lines, a path whose
 basename does not full-match the pattern, a name inside a fence, a quote or a declared verbatim section)
-needs no block line, and neither does a recognized name DIR does not hold (ABSENT). A prose path naming a
+needs no block line, and neither does a recognized name that is genuinely absent (ABSENT); a lookalike
+made of several characters for one (beyond the ASCII pairs listed under COMPLETENESS) is not detected,
+so a present file named that way is reported ABSENT. A prose path naming a
 same-named file in another directory is covered by the block line for that basename, which reads the file
 inside DIR.
 
@@ -219,6 +248,29 @@ SRC_WORD_RE = re.compile(NUMBER + r"|[A-Za-z][A-Za-z-]*")
 CLAUSE_RE = re.compile(r"[,;:.!?](?=\s|$)|\n")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+# CommonMark block starts read in a review file (the trailer record must lie outside every such block):
+# HTML block types 1 to 5 with their end conditions, type 6 (ends at a blank line), and type 7.
+BLANK_END = re.compile(r"\A\Z")  # sentinel: an HTML block of type 6 or 7, which ends at a blank line
+HTML_STARTS = (
+    (re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.I),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
+    (re.compile(r" {0,3}<!--"), re.compile(r"-->")),
+    (re.compile(r" {0,3}<\?"), re.compile(r"\?>")),
+    (re.compile(r" {0,3}<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r" {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(r" {0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|"
+                r"details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|"
+                r"header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
+                r"search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|/>|$)", re.I),
+     BLANK_END))
+HTML_7_RE = re.compile(r" {0,3}(?:<[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*"
+                       r"(?:[^ \t\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$")
+ATX_RE = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
+BREAK_RE = re.compile(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+SETEXT_RE = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
+QUOTE_RE = re.compile(r" {0,3}>")
+BACKTICKS_RE = re.compile(r"`+")
+INLINE_OPEN_RE = re.compile(r"\\[!-/:-@\[-`{-~]|`+|<!--")
 VERDICT_WORD_RE = re.compile(r"(?<![A-Za-z])verdicts?(?![A-Za-z])", re.I)
 OPTION_GAP_RE = re.compile(r"[\s\"'*_:,]*(?:or|/)[\s\"'*_:,]*(?:verdict[\s*_]*:[\s\"'*_]*)?", re.I)
 # Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): removed before any advisory comparison.
@@ -242,10 +294,14 @@ CHILD_CPU = 3  # the child's CPU-time limit in seconds (RLIMIT_CPU): below the d
 ADVISORY_DEADLINE = 2.5  # wall-clock seconds for the advisory child (its CPU limit is the whole seconds below)
 ADVISORY_MAX = 256 << 10  # characters: advisory size budget (the brief's own text, sections, named files, template)
 RESERVE = 0.5  # seconds of the run deadline kept back for printing after the advisory child
+MAX_DIR_ENTRIES = 20000  # --input-dir subtree entries read to establish that a named file is absent
+ASCII_SKELETON = str.maketrans("01i|", "olll")  # ASCII lookalikes folded together in a file-name key
 CHILD_MEMORY = 1 << 30  # a child's address-space cap, where the platform allows one
 MATCH, MISMATCH, CANNOT, WARN, EXEMPT, UNCLAIMED, ABSENT = (
     "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT", "UNCLAIMED", "ABSENT")
 _RUN_END = [None]  # the monotonic time the current run must end by (None outside a bounded run)
+_BLOCKING_RC = [None]  # the run's exit code once every brief's blocking result is printed (None before)
+_ADVISORY_LEFT = [ADVISORY_DEADLINE]  # wall-clock seconds of advisory work left in the current run
 
 
 class GateError(Exception):
@@ -257,12 +313,20 @@ class Overrun(BaseException):
 
 
 def _overrun(signum, frame):
-    raise Overrun()
+    if _RUN_END[0] is not None:  # an alarm landing after the run has ended is ignored
+        raise Overrun()
 
 
 def _remaining():
     """Seconds left in the current run's deadline (infinite outside a bounded run)."""
     return float("inf") if _RUN_END[0] is None else _RUN_END[0] - time.monotonic()
+
+
+def _check_deadline():
+    """Raise Overrun once the run's deadline has passed: the polled bound, which holds where SIGALRM is
+    blocked, ignored or missing (it is checked between steps, so one step can still run past it)."""
+    if _remaining() <= 0:
+        raise Overrun()
 
 
 def _read_bytes(path):
@@ -363,6 +427,9 @@ def load_config(path):
         if not TRAILER_PREFIX_RE.fullmatch(prefix) or prefix.startswith("VERDICT") or "VERDICT:".startswith(prefix):
             raise GateError("{}: trailer prefix {!r} is not printable ASCII or would admit a VERDICT line as a "
                             "trailer line".format(what, prefix))
+        if prefix[0] in "`~":
+            raise GateError("{}: trailer prefix {!r} is fence-like: a line it admits could be a fence line, so it "
+                            "could hide a fence".format(what, prefix))
     grades = [g.upper() for g in _str_list(data, "grades", what, shape=re.compile(r"^[A-Za-z]+$"))]
     labels = _str_list(data, "grade-labels", what, shape=re.compile(r"^[A-Za-z][A-Za-z ]*$"))
     aliases = data["aliases"]
@@ -1260,13 +1327,116 @@ def raw_lines(text):
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
-def trailer_verdict(text, cfg):
-    """(token, line number) of a review file's trailer record, or a GateError. A fence that is never closed
-    is a GateError (the record could be quoted text). Reading upward from the last line, blank lines (empty
-    or spaces and tabs) and lines starting with a configured trailer prefix are skipped; the first other
-    line must be exactly `VERDICT: <token>`. The body is scanned for fence delimiters only: its contents
-    never determine the token."""
-    lines = raw_lines(text)
+def _html_start(line, in_paragraph):
+    """The end condition of the CommonMark HTML block line starts (a regex for types 1 to 5, BLANK_END for
+    types 6 and 7), or None. Type 7 cannot interrupt a paragraph."""
+    for start, end in HTML_STARTS:
+        if start.match(line):
+            return end
+    if not in_paragraph and HTML_7_RE.match(line):
+        return BLANK_END
+    return None
+
+
+def _inline(line, state):
+    """The inline state after one paragraph line, given the state before it: None, "comment" (an HTML
+    comment still open) or the length of the backtick run of a code span still open."""
+    i = 0
+    while True:
+        if state == "comment":
+            j = line.find("-->", i)
+            if j < 0:
+                return state
+            state, i = None, j + 3
+        elif state is not None:
+            for m in BACKTICKS_RE.finditer(line, i):
+                if len(m.group(0)) == state:
+                    state, i = None, m.end()
+                    break
+            else:
+                return state
+        else:
+            m = INLINE_OPEN_RE.search(line, i)
+            if m is None:
+                return None
+            i = m.end()
+            if m.group(0) == "<!--":
+                state = "comment"
+            elif m.group(0)[0] == "`":
+                state = len(m.group(0))
+
+
+def _structure(lines):
+    """A CommonMark reading of a review file's block structure: (inside, unclosed). inside[k] is True when
+    lines[k] lies inside a fenced block, an HTML block (a comment, a pre element and the other HTML block
+    kinds), an HTML comment or code span still open in its paragraph, or a block quote (its own lines and
+    the lazy continuation lines of its paragraph). unclosed is (what, line number) for a fence or an HTML
+    block of types 1 to 5 still open at the end of the file, else None. Where this reading is unsure it
+    marks MORE lines inside, never fewer (a list item is read as a paragraph)."""
+    inside, fence, html, para, inline, opened = [], None, None, None, None, None
+    for n, line in enumerate(lines, 1):
+        if fence is not None:
+            inside.append(True)
+            if _closes(line, fence):
+                fence = None
+            continue
+        blank = not line.strip(" \t")
+        if html is not None:
+            if html is BLANK_END and blank:
+                html = None
+            else:
+                inside.append(True)
+                if html is not BLANK_END and html.search(line):
+                    html = None
+                continue
+        if blank:
+            inside.append(False)
+            para = inline = None
+            continue
+        lead = len(line) - len(line.lstrip(" \t"))
+        if para is None and len(line[:lead].expandtabs(4)) >= 4:
+            inside.append(False)  # indented code: a column-0 record never is one
+            continue
+        f = _fence(line)
+        if f:
+            inside.append(True)
+            fence, opened, para, inline = f, n, None, None
+            continue
+        end = _html_start(line, para is not None)
+        if end is not None:
+            inside.append(True)
+            para = inline = None
+            if end is BLANK_END or not end.search(line, lead + 2):
+                html, opened = end, n
+            continue
+        if ATX_RE.match(line) or BREAK_RE.match(line) or (para == "plain" and SETEXT_RE.match(line)):
+            inside.append(False)
+            para = inline = None
+            continue
+        q = QUOTE_RE.match(line)
+        if q:
+            inside.append(True)
+            rest = line[q.end():]
+            rest = rest[1:] if rest[:1] in (" ", "\t") else rest
+            para = "quote" if rest.strip(" \t") and not (_fence(rest) or ATX_RE.match(rest) or BREAK_RE.match(
+                rest) or _html_start(rest, False) is not None) else None
+            inline = None
+            continue
+        inside.append(para == "quote" or (para is not None and inline is not None))
+        before = inline if para is not None else None
+        para = para or "plain"
+        inline = _inline(line, before)
+    if fence is not None:
+        return inside, ("a fence", opened)
+    if html is not None and html is not BLANK_END:
+        return inside, ("an HTML block (a comment, a pre element or another raw HTML block)", opened)
+    return inside, None
+
+
+def _open_fence(lines):
+    """The fence-only reading (fences paired with no other structure): the line of a fence never closed, or
+    None. A record that this reading puts inside a closed fence is followed by that fence's closing line,
+    which is neither blank nor a trailer line (no trailer prefix starts with a backtick or a tilde)."""
     fence, opened = None, None
     for n, line in enumerate(lines, 1):
         if fence is not None:
@@ -1276,28 +1446,48 @@ def trailer_verdict(text, cfg):
         f = _fence(line)
         if f:
             fence, opened = f, n
-    if fence is not None:
-        raise GateError("no trailer record: a fence opened at line {} is never closed, so the last VERDICT "
-                        "line may be quoted text".format(opened))
+    return opened if fence is not None else None
+
+
+def trailer_verdict(text, cfg):
+    """(token, line number) of a review file's trailer record, or a GateError. Reading upward from the last
+    line, blank lines (empty or spaces and tabs) and lines starting with a configured trailer prefix are
+    skipped; the first other line must be exactly `VERDICT: <token>`, and it must lie outside every fenced
+    block, HTML block, comment, pre element, open code span and block quote in the CommonMark reading
+    (_structure), whatever the trailer prefixes are. A fence, or an HTML block of types 1 to 5, that is
+    never closed in that reading or in the fence-only reading (_open_fence) is a GateError too (the record
+    could be quoted or hidden text). Only the trailer record gives the token; the body's structure can
+    make the file cannot-evaluate, and nothing else in the body is read."""
+    lines = raw_lines(text)
+    inside, unclosed = _structure(lines)
+    open_fence = _open_fence(lines)
+    if unclosed is None and open_fence is not None:
+        unclosed = ("a fence (read with no HTML structure)", open_fence)
+    if unclosed is not None:
+        raise GateError("no trailer record: {} opened at line {} is never closed, so the last VERDICT line may "
+                        "be quoted or hidden text".format(*unclosed))
     records = dict(("VERDICT: " + t, t) for t in cfg["verdicts"])
     for n in range(len(lines), 0, -1):
         line = lines[n - 1]
         if not line.strip(" \t") or any(line.startswith(p) for p in cfg["trailers"]):
             continue
-        if line in records:
-            return records[line], n
-        raise GateError("no trailer record: line {}, the last line before the trailer lines, is not exactly "
-                        "'VERDICT: <token>' for a configured token ({!r})".format(n, line[:120]))
+        if line not in records:
+            raise GateError("no trailer record: line {}, the last line before the trailer lines, is not exactly "
+                            "'VERDICT: <token>' for a configured token ({!r})".format(n, line[:120]))
+        if inside[n - 1]:
+            raise GateError("no trailer record: the VERDICT line {} lies inside a fenced block, an HTML block, a "
+                            "comment, a pre element, an open code span or a block quote, so it may be quoted or "
+                            "hidden text".format(n))
+        return records[line], n
     raise GateError("no trailer record: the file holds no line but blank and trailer lines")
 
 
 def _near_marker(line):
     """True for a line that is not exactly a marker but reads as one as a WHOLE line (NEAR_MARKER_RE over
     the normalized, case-folded, stripped line of at most NEAR_MARKER_MAX characters): an indented,
-    BOM-prefixed, lower-case, re-spaced, decorated or wrong-version marker. A line with any other word
-    is prose."""
-    if len(line) > 4 * NEAR_MARKER_MAX:
-        return False
+    BOM-prefixed, lower-case, re-spaced, decorated, padded or wrong-version marker. The length limit
+    applies to the normalized line only (there is no raw-length shortcut), so invisible padding of any
+    length never hides a marker. A line with any other word is prose."""
     key = _norm(line).casefold().strip()
     return len(key) <= NEAR_MARKER_MAX and NEAR_MARKER_RE.fullmatch(key) is not None
 
@@ -1362,13 +1552,86 @@ def _file_entry(name, cfg, opts, groups_of):
     return path, digest, token, line
 
 
+def _name_key(name):
+    """The comparison form of a file name: invisible characters removed, NFKC, case-folded, stripped, and
+    (when ASCII) the ASCII lookalikes 0 and o, 1 i | and l, rn and m, vv and w, cl and d made one."""
+    key = _norm(name).casefold().strip()
+    if not key.isascii():
+        return key
+    return key.translate(ASCII_SKELETON).replace("rn", "m").replace("vv", "w").replace("cl", "d")
+
+
+def _dir_names(input_dir):
+    """The comparison keys of every entry name in --input-dir's subtree (a symlinked directory is listed,
+    not entered): (set of ASCII keys, dict(length -> [non-ASCII keys])), or a GateError when the subtree
+    cannot be listed whole or holds more than MAX_DIR_ENTRIES entries."""
+    exact, other, count, stack = set(), dict(), 0, [input_dir]
+    while stack:
+        _check_deadline()
+        top = stack.pop()
+        try:
+            with os.scandir(top) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > MAX_DIR_ENTRIES:
+                        raise GateError("--input-dir's subtree holds more than {} entries".format(MAX_DIR_ENTRIES))
+                    key = _name_key(entry.name)
+                    if key.isascii():
+                        exact.add(key)
+                    else:
+                        other.setdefault(len(key), []).append(key)
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+        except OSError as exc:
+            raise GateError("{} in --input-dir's subtree cannot be listed ({})".format(top, exc.strerror or exc))
+    return exact, other
+
+
+def _absent(base, paths, opts):
+    """True only when a recognized review-file name the block does not claim is genuinely absent: the name
+    is printable ASCII (a name that is not may render as a present file's name), no path the brief writes
+    for it under --input-dir exists, and no entry anywhere in --input-dir's subtree has the same name after
+    normalization and case-folding or a lookalike name (a non-ASCII character in the entry's name stands for
+    any one character, and the ASCII lookalikes of _name_key are one). False means present or
+    lookalike (UNCLAIMED); a GateError means absence cannot be established (cannot-evaluate)."""
+    if not NAME_RE.fullmatch(base):
+        return False
+    roots = tuple(os.path.join(r, "") for r in (os.path.abspath(opts["input_dir"]),
+                                                os.path.realpath(opts["input_dir"])))
+    for tok in paths:
+        if tok.startswith(roots):
+            try:
+                os.lstat(tok)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise GateError("{} cannot be examined ({})".format(tok, exc.strerror or exc))
+            return False
+    listing = opts.get("_listing")
+    if listing is None:
+        try:
+            listing = _dir_names(opts["input_dir"])
+        except GateError as exc:
+            listing = exc
+        opts["_listing"] = listing
+    if isinstance(listing, GateError):
+        raise listing
+    exact, other = listing
+    key = _name_key(base)
+    raw = base.casefold()
+    return key not in exact and not any(all(a == b or not b.isascii() for a, b in zip(raw, k))
+                                        for k in other.get(len(raw), ()))
+
+
 def check_block(lines, own, cfg, opts, groups_of, entries, problems):
     """The blocking results: [(status, line)]. Block problems and unreadable files are cannot-evaluate,
     a token differing from the trailer is a MISMATCH, and a recognized named file with no block line is
-    UNCLAIMED (a mismatch), unless DIR holds no entry of that basename: such a file cannot be claimed
-    (a block line for it is cannot-evaluate), so it is reported ABSENT and does not change the exit code."""
+    UNCLAIMED (a mismatch), unless _absent finds it genuinely absent: such a file cannot be claimed (a
+    block line for it is cannot-evaluate), so it is reported ABSENT and does not change the exit code. A
+    name whose absence cannot be established is cannot-evaluate, never ABSENT."""
     out = [(CANNOT, "CANNOT-EVALUATE block: " + p) for p in problems]
     for n, name, token in entries:
+        _check_deadline()
         try:
             path, digest, have, line = _file_entry(name, cfg, opts, groups_of)
         except GateError as exc:
@@ -1381,20 +1644,26 @@ def check_block(lines, own, cfg, opts, groups_of, entries, problems):
             out.append((MISMATCH, "MISMATCH {} VERDICT {}: {}: the trailer VERDICT (line {}) is {}".format(
                 name, token, where, line, have)))
     claimed = set(name for _, name, _ in entries)
-    first = dict()
+    first, paths = dict(), dict()
     for n, _, tok in _tokens(own):
         base = tok.rsplit("/", 1)[-1]
         if groups_of.get(base) is not None and base not in claimed:
             first.setdefault(base, n)
+            if "/" in tok:
+                paths.setdefault(base, []).append(tok)
     for base in sorted(first, key=lambda b: (first[b], b)):
+        _check_deadline()
         try:
-            os.lstat(os.path.join(opts["input_dir"], base))
-        except FileNotFoundError:
-            out.append((ABSENT, "ABSENT {}: brief line {} names it and --input-dir holds no such file, so it "
-                                "cannot be claimed (reported, not checked)".format(base, first[base])))
+            absent = _absent(base, paths.get(base, ()), opts)
+        except GateError as exc:
+            out.append((CANNOT, "CANNOT-EVALUATE {} (brief line {}): the claims block has no line for it and "
+                                "its absence cannot be established: {}".format(base, first[base], exc)))
             continue
-        except OSError:
-            pass
+        if absent:
+            out.append((ABSENT, "ABSENT {}: brief line {} names it and no entry in --input-dir's subtree has this "
+                                "name or a lookalike of it, so it cannot be claimed (reported, not "
+                                "checked)".format(base, first[base])))
+            continue
         out.append((UNCLAIMED, "UNCLAIMED {}: brief line {} names it and the claims block has no line for "
                                "it".format(base, first[base])))
     return out
@@ -1470,28 +1739,35 @@ def _own_size(own, sections):
 
 def advisory(own, sections, opts, groups_of):
     """The advisory lines of one brief, computed in a child interpreter under its own budgets: at most
-    ADVISORY_MAX characters of input and ADVISORY_DEADLINE seconds of wall clock (less when less of the
-    run deadline is left), a CPU-time limit, and on Linux death with its parent. Past a budget, or on any
-    failure of the child, the answer is ONE ADVISORY CANNOT-EVALUATE line: the advisory layer never
-    delays or changes the blocking result, which is printed before this runs."""
+    ADVISORY_MAX characters of input, and wall clock from ONE budget of ADVISORY_DEADLINE seconds shared
+    by every brief of the run (_ADVISORY_LEFT; less when less of the run deadline is left, keeping
+    RESERVE), a CPU-time limit, and on Linux death with its parent. Past a budget, or on any failure of
+    the child, the answer is ONE ADVISORY CANNOT-EVALUATE line: the advisory layer never delays or
+    changes a blocking result, every one of which is printed before any advisory work starts."""
     def one(why):
         return ["ADVISORY CANNOT-EVALUATE prose: {}; the prose was not analyzed".format(why)]
     size = _own_size(own, sections)
     if size > ADVISORY_MAX:
         return one("the brief's own text and sections hold {} characters, over the advisory size budget of "
                    "{}".format(size, ADVISORY_MAX))
-    budget = min(ADVISORY_DEADLINE, _remaining() - RESERVE)
+    budget = min(_ADVISORY_LEFT[0], _remaining() - RESERVE)
     if budget < 0.5:
-        return one("less than half a second of the run's {:g}-second deadline is left".format(RUN_DEADLINE))
+        return one("less than half a second is left of the run's advisory budget ({:g} seconds for all briefs) "
+                   "or of its {:g}-second deadline".format(ADVISORY_DEADLINE, RUN_DEADLINE))
     if not sys.executable or os.name != "posix":
         return one("the advisory child needs an interpreter path and a POSIX CPU-time limit")
     job = dict(root=str(opts["root"]), own=own, sections=sections, groups_of=groups_of,
                opts=dict((k, opts[k]) for k in ("input_dir", "template", "registry")),
                regex_deadline=round(budget * 0.6, 3), child_cpu=max(1, int(budget * 0.6) - 1))
     argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--advisory-worker"]
+    began = time.monotonic()
     try:
-        done = subprocess.run(argv, input=json.dumps(job).encode("ascii"), capture_output=True, timeout=budget,
-                              preexec_fn=functools.partial(_child_limits, os.getpid(), max(1, int(budget))))
+        try:
+            done = subprocess.run(argv, input=json.dumps(job).encode("ascii"), capture_output=True,
+                                  timeout=budget, preexec_fn=functools.partial(_child_limits, os.getpid(),
+                                                                               max(1, int(budget))))
+        finally:
+            _ADVISORY_LEFT[0] -= time.monotonic() - began  # one budget for every brief of the run
     except subprocess.TimeoutExpired:
         return one("the advisory analysis did not finish within its {:.3g}-second budget".format(budget))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -1529,8 +1805,9 @@ def advisory_worker():
 # --- driver -----------------------------------------------------------------------------------------
 
 def check_brief(path, cfg, opts):
-    """Check one brief; print its blocking results and its summary line (flushed), THEN compute and print
-    its advisory lines. Returns the brief's exit code 0/1/2 (the advisory lines never change it)."""
+    """Check one brief's blocking path; print its blocking results and its summary line (flushed). Returns
+    (the brief's exit code 0/1/2, its advisory job or None); the advisory work runs later, after every
+    brief's blocking result (_run)."""
     results, own = [], None
     try:
         text, digest = read_text(path, "brief")
@@ -1553,10 +1830,7 @@ def check_brief(path, cfg, opts):
                       if s in statuses) or "none"
     print("brief-claims: {}: {} blocking result(s) ({}); exit {}".format(path, len(results), tally, rc))
     sys.stdout.flush()
-    if own is not None:
-        for line in advisory(own, sections, opts, groups_of):
-            print(line)
-    return rc
+    return rc, (None if own is None else (path, own, sections, groups_of))
 
 
 def emit(cfg, opts):
@@ -1590,16 +1864,31 @@ def run(root, opts):
     deadline). Returns 0/1/2."""
     stream = sys.stderr if opts["emit"] else sys.stdout
     _RUN_END[0] = time.monotonic() + RUN_DEADLINE
-    armed, previous = False, None
+    _BLOCKING_RC[0], _ADVISORY_LEFT[0] = None, ADVISORY_DEADLINE
+    armed, previous, mask = False, None, None
     try:
         previous = signal.signal(signal.SIGALRM, _overrun)
         armed = True
-        signal.setitimer(signal.ITIMER_REAL, RUN_DEADLINE)
     except (AttributeError, ValueError, OSError):
-        pass  # no alarm here (not POSIX, or not the main thread): each child's deadline still holds
+        pass  # no alarm here (not POSIX, or not the main thread): the polled deadline and each child's hold
+    if armed:
+        try:  # an inherited signal mask that blocks SIGALRM would silence the alarm: unblock it for the run
+            mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+        except (AttributeError, ValueError, OSError):
+            pass
+        try:
+            signal.setitimer(signal.ITIMER_REAL, RUN_DEADLINE)
+        except (AttributeError, ValueError, OSError):
+            pass
     try:
         return _run(root, opts, stream)
     except Overrun:
+        _RUN_END[0] = None
+        if _BLOCKING_RC[0] is not None:
+            print("ADVISORY CANNOT-EVALUATE run: the run's {:g}-second deadline passed during the advisory work; "
+                  "the rest of the prose was not analyzed (the exit code is the blocking result)".format(
+                      RUN_DEADLINE), file=stream)
+            return _BLOCKING_RC[0]
         print("CANNOT-EVALUATE run: the check did not finish within its {:g}-second deadline; "
               "fail-closed".format(RUN_DEADLINE), file=stream)
         return 2
@@ -1608,6 +1897,8 @@ def run(root, opts):
         if armed:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
+        if mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def _run(root, opts, stream):
@@ -1636,9 +1927,17 @@ def _run(root, opts, stream):
             raise GateError("--input-dir must name an existing directory when a brief or review file is named")
         if opts["emit"]:
             return emit(cfg, opts)
-        rc = 0
+        rc, jobs = 0, []
         for brief in opts["briefs"]:
-            rc = max(rc, check_brief(brief, cfg, opts))
+            _check_deadline()
+            code, job = check_brief(brief, cfg, opts)
+            rc = max(rc, code)
+            jobs.extend([job] if job else [])
+        _BLOCKING_RC[0] = rc  # final: the advisory work below never changes it
+        for path, own, sections, groups_of in jobs:
+            for line in advisory(own, sections, opts, groups_of):
+                status, rest = line[len("ADVISORY "):].split(" ", 1)
+                print("ADVISORY {} {}: {}".format(status, path, rest))
         return rc
     except GateError as exc:
         print("CANNOT-EVALUATE: {}; fail-closed".format(exc), file=stream)
@@ -1824,6 +2123,8 @@ def _cases_config(base):
             ("cfg/trailer-prefix-starts-verdict", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"VERDICT", "WORKER')),
             ("cfg/trailer-prefix-of-verdict-colon", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"VER", "WORKER')),
             ("cfg/trailer-prefix-not-ascii", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"QA\\u2014DONE", "WORKER')),
+            ("cfg/trailer-prefix-backtick-fence-like", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"```", "WORKER')),
+            ("cfg/trailer-prefix-tilde-fence-like", GOOD_CFG.replace('"QA-COMPLETE", "WORKER', '"~ done", "WORKER')),
             ("cfg/pattern-groups", GOOD_CFG.replace("(?P<family>[a-z]+)", "([a-z]+)")),
             ("cfg/malformed-toml", GOOD_CFG + "[[[\n"),
             ("cfg/alias-undeclared-grade", GOOD_CFG.replace('M = "MAJOR"', 'M = "SEVERE"')),
@@ -1924,10 +2225,38 @@ def _cases_trailer(base):
             ("trailer/only-trailer-lines", "WORKER_STATUS: COMPLETE\n", 2),
             ("trailer/record-ending-unclosed-fence", "Review body: BLOCKERS FOUND, one MAJOR.\nVERDICT: BLOCKERS "
              "FOUND\nQuoting the prior round:\n```text\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/html-block-hides-fence", "Findings.\n<details>\n```\n</details>\n\nVERDICT: BLOCKERS FOUND\n"
+             "```\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/record-after-unclosed-comment", "VERDICT: BLOCKERS FOUND\n<!--\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/record-after-unclosed-pre", "VERDICT: BLOCKERS FOUND\n<pre>\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/record-in-comment-closed-by-trailer-line", "VERDICT: BLOCKERS FOUND\n<!--\nVERDICT: NO "
+             "BLOCKERS\nWORKER_STATUS: -->\n", 2),
+            ("trailer/record-in-html-block-no-blank-line", "VERDICT: BLOCKERS FOUND\n<details>\nVERDICT: NO "
+             "BLOCKERS\n", 2),
+            ("trailer/record-in-open-inline-comment", "VERDICT: BLOCKERS FOUND\nSee <!--\nVERDICT: NO BLOCKERS\n"
+             "WORKER_STATUS: -->\n", 2),
+            ("trailer/record-in-open-code-span", "VERDICT: BLOCKERS FOUND\nSee `\nVERDICT: NO BLOCKERS\n"
+             "WORKER_STATUS: `\n", 2),
+            ("trailer/record-continues-block-quote", "VERDICT: BLOCKERS FOUND\n> The prior round said\nVERDICT: NO "
+             "BLOCKERS\n", 2),
+            ("trailer/fence-unpaired-in-html-block", "Findings.\n<details>\n```\n</details>\n\nVERDICT: NO BLOCKERS\n",
+             2),
+            ("trailer/closed-html-and-comment-before-record", "Findings.\n<details>\nx\n</details>\n\n<!-- note "
+             "-->\nText with `code` and <!-- a comment --> closed.\n> quoted\n\nVERDICT: NO BLOCKERS\n"
+             "WORKER_STATUS: COMPLETE\n", 0),
             ("trailer/form-feed-line-not-blank", BETA5 + "\x0c\n", 2),
             ("trailer/no-break-space-line-not-blank", BETA5 + "\N{NO-BREAK SPACE}\n", 2)):
         rc, out = sc(cid.replace("/", "_"), BLOCK_BETA, files=dict([("it7-r5-beta.txt", source)]))
         check(cid, rc == want and ("no trailer record" in out if want == 2 else True), out)
+    # The record must lie outside every fence whatever the trailer prefixes are: a configuration that admits a
+    # fence-like prefix is refused (cfg/trailer-prefix-backtick-fence-like), and here the reading itself is
+    # given one directly.
+    cfg = dict(verdicts=["NO BLOCKERS", "BLOCKERS FOUND"], trailers=["```"])
+    try:
+        got = trailer_verdict("VERDICT: BLOCKERS FOUND\n```text\nVERDICT: NO BLOCKERS\n```\n", cfg)
+    except GateError as exc:
+        got = str(exc)
+    check("trailer/record-in-closed-fence-any-prefix", "lies inside a fenced block" in str(got), got)
 
 
 def _cases_block(base):
@@ -1939,6 +2268,7 @@ def _cases_block(base):
     a_line = "it7-r5-alpha.txt VERDICT BLOCKERS FOUND\n"
     named = "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n"
     near = "reads as a claims-block marker"
+    PAD = chr(0x200B) * 321  # invisible padding: 321 zero-width spaces before a marker
     for cid, brief, want, needle in (
             ("block/two-different-blocks", BLOCK_ALPHA + BLOCK_BETA, 2, "a second claims block"),
             ("block/nested-begin-message", head + head + a_line + tail, 2, "BEGIN inside the block"),
@@ -1952,6 +2282,11 @@ def _cases_block(base):
             ("block/near-miss-alone-version", BLOCK_OK + "**BEGIN BRIEF-CLAIMS v2**\n", 2, near),
             ("block/near-miss-alone-fullwidth", BLOCK_OK + "\N{FULLWIDTH LATIN CAPITAL LETTER E}ND BRIEF-CLAIMS\n", 2,
              near),
+            ("block/padded-near-miss-in-fence", "```\n" + PAD + "begin brief-claims 1\nit7-r5-alpha.txt VERDICT NO "
+             "BLOCKERS\n" + PAD + "end brief-claims\n```\n", 2, near),
+            ("block/padded-near-miss-alone", BLOCK_OK + PAD + "begin brief-claims 1\n", 2, near),
+            ("block/long-decorated-line-not-a-near-miss", "=" * 40 + " BEGIN BRIEF-CLAIMS " + "=" * 40 + "\n" + BLOCK_OK,
+             0, "(2 MATCH)"),
             ("block/prose-is-not-a-near-miss", "Begin brief claims investigation tomorrow.\n", 0, "exit 0"),
             ("block/prose-with-block-not-a-near-miss", "Begin brief-claims section below; it is generated by "
              "--emit.\n" + BLOCK_OK, 0, "(2 MATCH)")):
@@ -2027,6 +2362,61 @@ def _cases_completeness(base):
         rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief)
         check(cid, rc == want and ("UNCLAIMED" in out) == (want == 1)
               and ("ABSENT it7-r" in out) == ("absent" in cid and want == 0), out)
+    # A present review file never looks ABSENT: a lookalike name, a name found deeper in DIR's subtree, or a
+    # path under DIR is UNCLAIMED, and a name whose absence cannot be established is cannot-evaluate.
+    digits = GOOD_CFG.replace("(?P<round>[0-9]+)", "(?P<round>\\d+)")
+    words = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>\\w+)")
+    cyr_i, fw_5, zw = chr(0x456), chr(0xFF15), chr(0x200B)
+    alpha = dict([("it7-r5-alpha.txt", ALPHA5)])
+    for cid, brief, files, cfg, want in (
+            ("complete/fullwidth-digit-name-not-absent", "it7-r" + fw_5 + "-alpha.txt found NO BLOCKERS.\n", None,
+             digits, 1),
+            ("complete/cyrillic-lookalike-name-not-absent", cyr_i + "t7-r5-alpha.txt found NO BLOCKERS.\n", None,
+             words, 1),
+            ("complete/non-ascii-name-never-absent", cyr_i + "t7-r9-alpha.txt found NO BLOCKERS.\n", None, words, 1),
+            ("complete/name-deeper-in-dir-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([("sub/it7-r5-alpha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/case-variant-file-not-absent", "Read it7-r5-alpha.txt.\n", dict([("IT7-R5-ALPHA.TXT", ALPHA5)]),
+             GOOD_CFG, 1),
+            ("complete/zero-width-file-name-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([("it7-r5-" + zw + "alpha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/fullwidth-file-name-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([("it7-r" + fw_5 + "-alpha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/non-ascii-file-lookalike-not-absent", "Read it7-r5-alpha.txt.\n",
+             dict([(cyr_i + "t7-r5-alpha.txt", ALPHA5)]), GOOD_CFG, 1),
+            ("complete/ascii-lookalike-not-absent", "Read lt7-r5-alpha.txt.\n", alpha, GOOD_CFG, 1),
+            ("complete/path-too-long-cannot", "Read @IN@/" + "d" * 300 + "/it7-r9-alpha.txt.\n", alpha, GOOD_CFG, 2),
+            ("complete/future-path-under-dir-absent", "Write @IN@/it7-r6-alpha.txt.\n", alpha, GOOD_CFG, 0)):
+        rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief, files=files, cfg=cfg)
+        check(cid, rc == want and ("UNCLAIMED" in out) == (want == 1) and ("ABSENT " in out) == (want == 0)
+              and ("its absence cannot be established" in out) == (want == 2), out)
+    root, indir = _tree(base, "complete_symlinked_dir", files=dict())
+    _write(os.path.join(root, "elsewhere", "it7-r5-alpha.txt"), ALPHA5)
+    os.symlink(os.path.join(root, "elsewhere"), os.path.join(indir, "link"))
+    os.symlink(os.path.join(root, "none.txt"), os.path.join(indir, "it7-r4-alpha.txt"))
+    _write(os.path.join(root, "b.md"), "Read {}/link/it7-r5-alpha.txt and it7-r4-alpha.txt.\n".format(indir))
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "b.md")])
+    check("complete/path-through-symlinked-dir-not-absent", rc == 1 and "UNCLAIMED it7-r5-alpha.txt" in out, out)
+    check("complete/dangling-symlink-not-absent", rc == 1 and "UNCLAIMED it7-r4-alpha.txt" in out, out)
+    me = sys.modules[__name__]
+    real_scandir, saved = me.os.scandir, me.MAX_DIR_ENTRIES
+
+    def unlistable(path):
+        if os.path.basename(path) == "sub":
+            raise PermissionError(13, "Permission denied")
+        return real_scandir(path)
+    me.os.scandir = unlistable
+    try:
+        rc, out = sc("complete_unlistable", "Read it7-r9-alpha.txt.\n", files=dict([("sub/x.txt", "x\n")]))
+    finally:
+        me.os.scandir = real_scandir
+    check("complete/unlistable-subtree-cannot", rc == 2 and "cannot be listed" in out and "ABSENT" not in out, out)
+    me.MAX_DIR_ENTRIES = 1
+    try:
+        rc, out = sc("complete_too_many", "Read it7-r9-alpha.txt.\n")
+    finally:
+        me.MAX_DIR_ENTRIES = saved
+    check("complete/subtree-over-bound-cannot", rc == 2 and "more than 1 entries" in out and "ABSENT" not in out, out)
 
 
 def _cases_emit(base):
@@ -2284,6 +2674,220 @@ def _cases_contract(base):
           == "CANNOT-EVALUATE run: the check did not finish within its 1-second deadline; fail-closed", out)
 
 
+def _cases_runtime(base):
+    """The run's bounds, each pinned on its own: one advisory budget per run spent only after every brief's
+    blocking result, an overrun during advisory work that keeps the exit code, the reserve and the minimum
+    advisory budget, the regex deadline cut to the run, the polled deadline where no alarm can be armed,
+    SIGALRM unblocked for the run, an alarm after the run, and an overrun that escapes run()."""
+    me = sys.modules[__name__]
+    root, indir = _tree(base, "runtime")
+    for rel, text in (("ok.md", BLOCK_OK), ("bad.md", BLOCK_SWAPPED)):
+        _write(os.path.join(root, rel), "Inputs: it7-r5-alpha.txt (NO BLOCKERS).\n" + text)
+    ok, bad = os.path.join(root, "ok.md"), os.path.join(root, "bad.md")
+    real_run, saved = me.subprocess.run, (me.RUN_DEADLINE, me._remaining)
+    calls = []
+
+    def stalled(seconds):
+        def fake(argv, *args, **kwargs):
+            if argv[-1] != "--advisory-worker":
+                return real_run(argv, *args, **kwargs)
+            calls.append(kwargs.get("timeout"))
+            time.sleep(min(seconds, kwargs.get("timeout")) if seconds < 30 else seconds)
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        return fake
+    me.subprocess.run = stalled(1.0)
+    try:
+        rc, out, _ = _quiet(root, ["--input-dir", indir, ok, ok, ok, ok])
+    finally:
+        me.subprocess.run = real_run
+    lines = out.splitlines()
+    summaries = [k for k, line in enumerate(lines) if line.startswith("brief-claims: ")]
+    advisories = [k for k, line in enumerate(lines) if line.startswith("ADVISORY ")]
+    check("runtime/advisory-budget-per-run-after-every-verdict", rc == 0 and len(summaries) == 4 and advisories
+          and max(summaries) < min(advisories) and 2 <= len(calls) <= 3 and "advisory budget" in out, (calls, out))
+    calls[:] = []
+    me.RUN_DEADLINE, me.subprocess.run = 2.5, stalled(30)
+    try:
+        rc, out, _ = _quiet(root, ["--input-dir", indir, bad])
+    finally:
+        me.RUN_DEADLINE, me.subprocess.run = saved[0], real_run
+    check("runtime/advisory-overrun-keeps-blocking-exit", rc == 1 and len(calls) == 1 and out.splitlines()[-1]
+          .startswith("ADVISORY CANNOT-EVALUATE run: the run's 2.5-second deadline passed during the advisory")
+          and "\nCANNOT-EVALUATE run" not in out, out)
+    opts = dict(root=root, input_dir=indir, template=None, registry=None)
+    answered = []
+
+    def answer(argv, *args, **kwargs):
+        answered.append((argv[-1], kwargs.get("timeout")))
+        if argv[-1] == "--advisory-worker":
+            return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+        return real_run(argv, *args, **kwargs)
+    me.subprocess.run = answer
+    try:
+        for cid, left, own, want in (
+                ("runtime/advisory-budget-keeps-reserve", 2.0, [[1, "x"]], [("--advisory-worker", 2.0 - RESERVE)]),
+                ("runtime/advisory-refused-under-half-second", 0.9, [[1, "x"]], []),
+                ("runtime/advisory-size-checked-before-child", 60.0, [[1, "x" * (ADVISORY_MAX + 1)]], [])):
+            answered[:] = []
+            me._remaining, me._ADVISORY_LEFT[0] = (lambda left=left: left), ADVISORY_DEADLINE
+            got = advisory(own, [], opts, dict())
+            check(cid, answered == want and (got == [] if want else len(got) == 1), (answered, got))
+        answered[:] = []
+        me._remaining = lambda: 1.25
+        got = bounded_regex([("a", "fullmatch", ["a"])])
+        check("runtime/regex-deadline-cut-to-run", answered == [("--regex-worker", 1.25)] and got == [[dict()]],
+              (answered, got))
+        me._remaining = lambda: 0.0
+        try:
+            got = bounded_regex([("a", "fullmatch", ["a"])])
+        except GateError as exc:
+            got = str(exc)
+        check("runtime/regex-refused-after-deadline", "deadline passed" in str(got), got)
+    finally:
+        me.subprocess.run, me._remaining, me._ADVISORY_LEFT[0] = real_run, saved[1], ADVISORY_DEADLINE
+    real_signal = me.signal.signal
+
+    def no_alarm(*args):
+        raise ValueError("signal only works in main thread")
+    plain = os.path.join(root, "plain.md")
+    _write(plain, "Nothing named here.\n")
+    absent, absent1 = os.path.join(root, "absent.md"), os.path.join(root, "absent1.md")
+    _write(absent, "Write it7-r8-alpha.txt and it7-r9-alpha.txt.\n")
+    _write(absent1, "Write it7-r9-alpha.txt.\n")
+    _write(os.path.join(indir, "sub", "x.txt"), "x\n")
+    # Each polled check is the only one that can stop its vector: a slowed step (0.6 seconds, or 0.3 per
+    # directory entry) runs past a 0.5-second deadline where no alarm can be armed.
+    for cid, name, delay, briefs in (("runtime/deadline-polled-per-block-line", "_file_entry", 0.6, [ok]),
+                                     ("runtime/deadline-polled-per-brief", "raw_lines", 0.6, [plain] * 3),
+                                     ("runtime/deadline-polled-per-unclaimed-name", "_absent", 0.6, [absent]),
+                                     ("runtime/deadline-polled-per-directory", "_name_key", 0.3, [absent1])):
+        real = getattr(me, name)
+
+        def slow(*args, real=real, delay=delay):
+            time.sleep(delay)
+            return real(*args)
+        me.RUN_DEADLINE, me.signal.signal = 0.5, no_alarm
+        setattr(me, name, slow)
+        try:
+            rc, out, _ = _quiet(root, ["--input-dir", indir] + briefs)
+        finally:
+            me.RUN_DEADLINE, me.signal.signal = saved[0], real_signal
+            setattr(me, name, real)
+        check(cid, rc == 2 and out.splitlines()[-1].startswith(
+            "CANNOT-EVALUATE run: the check did not finish within its 0.5-second deadline"), out)
+    real_check, seen = me.check_brief, []
+
+    def probe(*args):
+        seen.append(signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, []))
+        return real_check(*args)
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGALRM])
+    me.check_brief = probe
+    try:
+        rc, out, _ = _quiet(root, ["--input-dir", indir, ok])
+        after = signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    finally:
+        me.check_brief = real_check
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
+    check("runtime/sigalrm-unblocked-for-the-run", rc == 0 and seen == [False] and after, (seen, after, out))
+    _RUN_END[0] = None
+    check("runtime/alarm-after-run-ignored", _overrun(signal.SIGALRM, None) is None)
+    real_go = me.run
+
+    def overrun(*args):
+        raise Overrun()
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    me.run = overrun
+    try:
+        with redirect_stdout(buf):
+            rc = main(["--input-dir", indir, ok])
+    finally:
+        me.run = real_go
+    check("runtime/overrun-after-run-exits-2", rc == 2 and buf.getvalue().startswith("CANNOT-EVALUATE run: "),
+          buf.getvalue())
+    ok_rc, detail = _blocked_alarm_probe(base)
+    check("runtime/blocked-sigalrm-own-exit-2", ok_rc, detail)
+    ok_rc, detail = _flush_probe(base)
+    check("contract/verdict-flushed-to-pipe-before-advisory", ok_rc, detail)
+
+
+def _gate_copy(base, name, files=None, edit=None):
+    """A copy of this gate (with at most one textual edit of its source) in a fresh GOOD_CFG tree holding
+    files: (root, input dir, gate path)."""
+    root, indir = _tree(base, name, files)
+    with open(os.path.abspath(__file__), encoding="utf-8") as handle:
+        source = handle.read()
+    if edit is not None:
+        if source.count(edit[0]) != 1:
+            raise GateError("self-test harness: the edit {!r} does not match exactly once".format(edit[0]))
+        source = source.replace(*edit)
+    gate = os.path.join(root, "tools", os.path.basename(__file__))
+    _write(gate, source)
+    return root, indir, gate
+
+
+def _blocked_alarm_probe(base):
+    """A copy of this gate with a 1-second run deadline, started with SIGALRM blocked in the signal mask it
+    inherits, on 1000 block lines that each read a 1 MiB review file (symlinks to one file): it must end
+    with its own CANNOT-EVALUATE run line and exit 2 inside 10 seconds. Returns (ok, detail)."""
+    root, indir, gate = _gate_copy(base, "blocked_alarm", dict([("it0-r5-beta.txt", "x" * (1 << 20)
+                                                                + "\nVERDICT: NO BLOCKERS\n")]),
+                                   ("RUN_DEADLINE = 7" + ".0  #", "RUN_DEADLINE = 1.0  #"))
+    lines = [BLOCK_BETA.splitlines()[0]]
+    for k in range(1000):
+        if k:
+            os.symlink(os.path.join(indir, "it0-r5-beta.txt"), os.path.join(indir, "it{}-r5-beta.txt".format(k)))
+        lines.append("it{}-r5-beta.txt VERDICT NO BLOCKERS".format(k))
+    _write(os.path.join(root, "brief.md"), "\n".join(lines + [BLOCK_END, ""]))
+    began = time.monotonic()
+    try:
+        done = subprocess.run([sys.executable, "-I", "-B", gate, "--input-dir", indir, os.path.join(root, "brief.md")],
+                              capture_output=True, timeout=30, preexec_fn=functools.partial(
+                                  signal.pthread_sigmask, signal.SIG_BLOCK, [signal.SIGALRM]))
+    except subprocess.TimeoutExpired:
+        return False, "killed after 30 seconds"
+    took = time.monotonic() - began
+    out = done.stdout.decode("utf-8", "replace")
+    return (done.returncode == 2 and took < 10 and out.splitlines()[-1:] == [
+        "CANNOT-EVALUATE run: the check did not finish within its 1-second deadline; fail-closed"],
+        "rc {} after {:.1f}s: {}".format(done.returncode, took, out[-300:]))
+
+
+def _flush_probe(base):
+    """A copy of this gate writing to a pipe, its advisory child stalled by a catastrophic registry
+    id-pattern (at least a second of CPU time): the summary line must reach the pipe at least half a second
+    before the output ends, so it was flushed before the advisory work began. Returns (ok, detail)."""
+    import select
+    root, indir, gate = _gate_copy(base, "flush_probe")
+    _write(os.path.join(root, "reg.toml"), 'format-version = 1\ntarget = "ITEM-7"\naliases = []\ndependencies = []\n'
+           "id-pattern = '(a+)+b'\n")
+    _write(os.path.join(root, "brief.md"), "TASK: " + "a" * 40 + "c\n" + BLOCK_OK)
+    data, summary_at, ended = b"", None, None
+    with subprocess.Popen([sys.executable, "-I", "-B", gate, "--input-dir", indir, "--registry",
+                           os.path.join(root, "reg.toml"), os.path.join(root, "brief.md")],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+        until = time.monotonic() + 30
+        while time.monotonic() < until:
+            if not select.select([proc.stdout], [], [], 0.5)[0]:
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                ended = time.monotonic()
+                break
+            data += chunk
+            if summary_at is None and b"brief-claims: " in data:
+                summary_at = time.monotonic()
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    text = data.decode("utf-8", "replace")
+    ok = (proc.returncode == 0 and summary_at is not None and ended is not None and ended - summary_at >= 0.5
+          and "ADVISORY CANNOT-EVALUATE" in text)
+    return ok, "rc {}, summary {} s before the end: {}".format(
+        proc.returncode, None if summary_at is None or ended is None else round(ended - summary_at, 2), text[-300:])
+
+
 def _test_caps():
     """In a size-regression child only: a 60-second CPU-time limit and a 2 GiB address-space cap."""
     import resource
@@ -2427,6 +3031,7 @@ def self_test(report_path=None):
         _cases_advisory(base)
         _cases_regex(base)
         _cases_contract(base)
+        _cases_runtime(base)
         _cases_size(base)
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -2467,7 +3072,12 @@ def main(argv):
         return usage_error(argv, why)
     if opts["self_test"]:
         return self_test()
-    return run(Path(__file__).resolve().parents[1], opts)
+    try:
+        return run(Path(__file__).resolve().parents[1], opts)
+    except Overrun:  # an alarm that lands in run's own cleanup, after its handler
+        print("CANNOT-EVALUATE run: the check did not finish within its {:g}-second deadline; "
+              "fail-closed".format(RUN_DEADLINE), file=sys.stderr if opts["emit"] else sys.stdout)
+        return 2
 
 
 if __name__ == "__main__":
