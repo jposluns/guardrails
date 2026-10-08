@@ -35,8 +35,13 @@ case's refutation. Attribution (see _preflight_exit): no opf/ subtree, a host pr
 (a scratch directory, copy, fixture write, store read, flip write or child launch that raised an
 OSError, or a child that did not finish within its bound; _harness_watch lists what is not watched),
 malformed input, or any other ordinary exception raised by a case's own code outside its attributed
-calls is cannot-evaluate; a crash or a wrong result of the code under test is a refutation, and
-_check_attribution_inventory pins every call a case makes to it. When any preflight case was refuted
+calls is cannot-evaluate; a crash or a wrong result of the code under test is a refutation.
+_check_attribution_inventory derives, by an AST walk of this file, every site at which a function a
+case reaches calls (or passes on to be called) the code under test, and requires each site to carry
+a pin that fires there (see _pin) or a recorded exclusion with its reason. The cases also observe
+what run() executes: the full member roster, under its bounds, over the isolated copy (never the
+repository's opf/), from a scratch directory outside the repository, with the isolated environment;
+and the negative leg's stream separation. When any preflight case was refuted
 the self-test exits 1; when none was refuted but one could not be evaluated, it exits 2. In both of
 those outcomes the closure legs never run.
 Then the two closure legs:
@@ -55,6 +60,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import ast
 import contextlib
 import io
 import os
@@ -504,14 +510,68 @@ def _captured(fn, *args):
 
 
 def _stub_member_runner(calls, outcomes):
-    """A stand-in for _run_one: records (member name, timeout_s) and returns outcomes.get(name) or a pass."""
+    """A stand-in for _run_one: records every call it receives as a dict (name: the _SUBSET member
+    with that script and args, or None for a row not in _SUBSET; script, args, timeout, opf_root,
+    run_dir, env and separate_streams: what the call passed) and returns outcomes.get(name) or a pass."""
     by_row = {(script, tuple(args)): name for name, script, args in _SUBSET}
 
     def stub(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, separate_streams=False):
-        name = by_row[(script, tuple(args))]
-        calls.append((name, timeout_s))
+        name = by_row.get((script, tuple(args)))
+        calls.append(dict(name=name, script=script, args=tuple(args), timeout=timeout_s, opf_root=opf_root,
+                          run_dir=run_dir, env=dict(env), separate_streams=separate_streams))
         return outcomes.get(name, (0, "ok", None))
     return stub
+
+
+def _copy_recorder(made):
+    """A stand-in for _materialize that delegates to the one bound now and records each copy it returns."""
+    inner = _materialize
+
+    def materialize(opf_src, dest):
+        made.append(inner(opf_src, dest))
+        return made[-1]
+    return materialize
+
+
+def _roster(subset, table):
+    """The member calls `subset` must give under the bound table `table`, as (name, script, args, bound)."""
+    return [(name, script, tuple(args), table.get(name, _SUBSET_TIMEOUT_S)) for name, script, args in subset]
+
+
+def _check_member_calls(label, calls, made, root, separate_streams, roster):
+    """Reconcile what a run executed, as _stub_member_runner recorded it, with what it must execute:
+    exactly `roster` (no omission, no extra, no repeat; script, args and bound equal; in any order),
+    every call over the opf/ copy the run made (the last path _materialize returned in `made`, never
+    the repository's opf/), with run_dir the scratch directory holding that copy and outside the
+    repository at `root`, the isolated environment (no PYTHONPATH, PYTHONHOME or GIT_ variable, and
+    PYTHONDONTWRITEBYTECODE=1) and the stream mode `separate_streams`. Raises AssertionError naming
+    `label` and what differs."""
+    got = [(call["name"], call["script"], call["args"], call["timeout"]) for call in calls]
+    extra, missing = list(got), []
+    for row in roster:
+        if row in extra:
+            extra.remove(row)
+        else:
+            missing.append(row)
+    if missing or extra:
+        raise AssertionError("{}-roster: missing {!r}, extra {!r}".format(label, missing, extra))
+    if not made:
+        raise AssertionError("{}-root: the members ran but no opf/ copy was made".format(label))
+    repo, copy = Path(root).resolve(), Path(made[-1]).resolve()
+    for call in calls:
+        where, run_dir, env = Path(call["opf_root"]).resolve(), Path(call["run_dir"]).resolve(), call["env"]
+        if where != copy or where.is_relative_to(repo):
+            raise AssertionError("{}-root: {} ran over {}, not the copy {}".format(label, call["name"], where, copy))
+        if run_dir != copy.parent or run_dir.is_relative_to(repo):
+            raise AssertionError("{}-run-dir: {} ran in {}, not {} outside {}".format(
+                label, call["name"], run_dir, copy.parent, repo))
+        leaked = sorted(key for key in env if key.startswith("GIT_") or key in ("PYTHONPATH", "PYTHONHOME"))
+        if leaked or env.get("PYTHONDONTWRITEBYTECODE") != "1":
+            raise AssertionError("{}-env: {} ran with {!r}, PYTHONDONTWRITEBYTECODE={!r}".format(
+                label, call["name"], leaked, env.get("PYTHONDONTWRITEBYTECODE")))
+        if call["separate_streams"] is not separate_streams:
+            raise AssertionError("{}-streams: {} ran with separate_streams={!r}".format(
+                label, call["name"], call["separate_streams"]))
 
 
 class _CannotEvaluate(Exception):
@@ -545,19 +605,24 @@ def _harness_watch(broke):
     bound now and appends to `broke` when it raised an OSError (the host refused the allocation, copy,
     write, read or launch) or, for subprocess.run only, TimeoutExpired (a child did not finish within its
     bound). Such a failure is the host's: the fixture or the child's result was not made. Any other
-    exception raised inside a watched call (a TypeError from an invalid call, a crash inside
-    _materialize) is not recorded: it is a defect of the caller, so where the caller is the code
-    under test it is a refutation. The watch observes the primitive itself, never a message the code
-    under test produced. Residuals: an OSError or a timeout that the caller's own wrong argument
-    caused (a nonexistent dir= for mkdtemp, a too-short timeout for a child) still reads as the
-    host's, so the outcome is cannot-evaluate (exit 2), fail-closed, never a pass. Host I/O outside
-    these primitives is not watched: the removal of scratch directories (errors ignored), and the
-    is_dir and is_file probes in run(), _run_one and _require_subtree, where an unreadable path reads
-    as absent. _require_subtree then makes the case cannot-evaluate, but a probe in run() or _run_one
-    that reads a path as absent after the case found or wrote it (a path that became unreadable in
-    between) is a refutation, and so is the UTF-8 sub-check of _check_undecodable_attribution reading
-    the fixture it has just written as absent. A child the host kills or starves after it launched
-    (for example out of memory) still completes with an exit code, which is judged."""
+    exception raised inside a watched call is not recorded: it is a defect of the code that raised
+    it (the caller, for a TypeError from an invalid call; _materialize itself, for a crash inside
+    it), so where that code is the code under test it is a refutation. The watch observes the
+    primitive itself, never a message the code under test produced. Residuals: an OSError or a
+    timeout that the caller's own wrong argument caused (a nonexistent dir= for mkdtemp, a too-short
+    timeout for a child) still reads as the host's, so the outcome is cannot-evaluate (exit 2),
+    fail-closed, never a pass. Host I/O outside these primitives is not watched: the removal of
+    scratch directories (errors ignored), the path
+    resolution in _check_member_calls, and the is_dir and is_file probes in run(), _run_one and
+    _require_subtree, where an unreadable path reads as absent. _require_subtree then makes the case
+    cannot-evaluate, but a probe that reads a path as absent after the case found or wrote it (a path
+    that became unreadable in between) is a refutation where the case judges that probe's outcome:
+    a probe in run() or _run_one; closure/undecodable-wiring of _check_undecodable_fixture (also
+    reached through _check_undecodable_attribution), whose _check_leg_wiring then names no-subtree
+    instead of the decode cause; and the UTF-8 sub-check of _check_undecodable_attribution. These
+    read a host fault as exit 1: misattribution, never a pass. A child the host kills or starves
+    after it launched (for example out of memory) still completes with an exit code, which is
+    judged."""
     def watched(what, inner, refused=(OSError,)):
         def call(*args, **kwargs):
             try:
@@ -621,17 +686,15 @@ def _stubbed_run(root, outcomes):
     calls). Cannot-evaluate when root has no opf/ subtree, or when the watch saw the scratch
     directory or the copy fail (the message then names run()'s exit code and its own error).
     Otherwise a run() that crashed, or exited before any subset member ran, is refuted; the
-    refutation says whether its copy was built, as observed at _materialize."""
+    refutation says whether its copy was built, as observed at _materialize. So is a run() whose
+    member calls do not reconcile with the full _SUBSET roster under its bounds, over the copy it
+    made, in a run_dir outside the repository, with the isolated environment and merged streams
+    (_check_member_calls, its labels starting closure/member-)."""
     _require_subtree(root)
     calls, seen, made = [], [], []
 
     def stubs():
-        inner = _materialize
-
-        def materialize(opf_src, dest):
-            made.append(inner(opf_src, dest))
-            return made[-1]
-        return dict(_run_one=_stub_member_runner(calls, outcomes), _materialize=materialize)
+        return dict(_run_one=_stub_member_runner(calls, outcomes), _materialize=_copy_recorder(made))
     try:
         _attributed("closure/stubbed-run", lambda: seen.append(_captured(run, root)), injected=stubs)
     except _HarnessFailure as exc:
@@ -644,6 +707,8 @@ def _stubbed_run(root, outcomes):
         raise AssertionError("closure/stubbed-run: run() exited {} before any subset member ran, {}: {}".format(
             rc, "with its copy built" if made else "without building its copy",
             err.strip().replace("\n", " | ")))
+    _attributed("closure/member-calls", lambda: _check_member_calls(
+        "closure/member", calls, made, root, False, _roster(_SUBSET, _MEMBER_TIMEOUT_S)))
     return rc, out, err, calls
 
 
@@ -653,7 +718,7 @@ def _check_timeout_mapping(root):
     pass 1800 s to opf-tooling-selftest and 600 s to another member."""
     outcomes = {"opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
     rc, out, err, calls = _stubbed_run(root, outcomes)
-    bounds = dict(calls)
+    bounds = {call["name"]: call["timeout"] for call in calls}
     if bounds.get("opf-tooling-selftest") != 1800 or bounds.get("opf-homes-selftest") != 600:
         raise AssertionError("closure/member-bound-lookup: {!r}".format(bounds))
     if rc != 2:
@@ -821,8 +886,11 @@ def _check_verdict_tables():
 
 def _check_leg_wiring(root):
     """Both legs stubbed (run() and the flipped copy's runner) through the real _closure_legs: the
-    flipped opf.py --self-test runs under its bound row, and the self-test exits 2 (not 0, not 1) when
-    only cannot-evaluate remains, 1 when a leg was refuted whatever else could not be evaluated."""
+    flipped opf.py --self-test runs under its bound row, over the negative leg's own copy, in the
+    scratch directory holding it (outside the repository), with the isolated environment and its
+    stdout and stderr captured apart (_check_member_calls, labelled closure/negative-run-...); and
+    the self-test exits 2 (not 0, not 1) when only cannot-evaluate remains, 1 when a leg was refuted
+    whatever else could not be evaluated."""
     wiring = [
         (2, (2, "timed out after 1800s", _TIMEOUT), 2),
         (0, (2, "timed out after 1800s", _TIMEOUT), 2),
@@ -841,9 +909,9 @@ def _check_leg_wiring(root):
     ]
     _require_subtree(root)
     for run_rc, neg, want in wiring:
-        calls = []
+        calls, made = [], []
 
-        def wired(run_rc=run_rc, neg=neg, want=want, calls=calls):
+        def wired(run_rc=run_rc, neg=neg, want=want, calls=calls, made=made):
             failures, cannot = _closure_legs(root)
             # A store that is not UTF-8 text (judged here through the watched _not_utf8, not from the
             # leg's message) is malformed input: the flip cannot be made, so the case is
@@ -852,15 +920,22 @@ def _check_leg_wiring(root):
                 raise _CannotEvaluate("closure/self-test-exit: the flipped copy could not be built: {}".format(
                     " | ".join(cannot)))
             # The negative leg's own bound lookup: the flipped opf.py --self-test runs under its row.
-            if calls != [("opf-tooling-selftest", 1800)]:
-                raise AssertionError("closure/negative-bound-lookup: {!r}".format(calls))
+            bounds = [(call["name"], call["timeout"]) for call in calls]
+            if bounds != [("opf-tooling-selftest", 1800)]:
+                raise AssertionError("closure/negative-bound-lookup: {!r}".format(bounds))
+            # What the flipped copy's run executes: opf.py --self-test over the negative leg's own
+            # copy, in its scratch directory, isolated, with the two streams captured apart.
+            _check_member_calls("closure/negative-run", calls, made, root, True,
+                                [("opf-tooling-selftest", "opf.py", ("--self-test",), 1800)])
             got = _captured(_self_test_exit, failures, cannot)[0]
             if got != want:
                 raise AssertionError("closure/self-test-exit: run()={} flipped={!r} gave {}, expected {}".format(
                     run_rc, neg, got, want))
         stub_run = (lambda rc: (lambda _root: rc))(run_rc)
-        _attributed("closure/self-test-exit", wired, injected=dict(
-            run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg})))
+        _attributed("closure/self-test-exit", wired, injected=(
+            lambda stub_run=stub_run, neg=neg, calls=calls, made=made: dict(
+                run=stub_run, _run_one=_stub_member_runner(calls, {"opf-tooling-selftest": neg}),
+                _materialize=_copy_recorder(made))))
 
 
 def _not_utf8(path):
@@ -999,6 +1074,78 @@ def _check_absent_subtree(root):
         if type(got) is not AssertionError or not str(got).startswith(want):
             raise AssertionError("{}: a run() that ran no member gave {!r}, expected a refutation "
                                  "starting {!r}".format(label, got, want))
+
+
+def _check_missing_input(_root):
+    """run() over a root it cannot evaluate returns 2 with no subset member run: a root that does not
+    exist, an empty root, and a root whose opf/tools/ has no opf.py. Each run() call goes through
+    _attributed with _run_one stubbed to record its calls, so a run() that returns anything but 2, or
+    runs a member, is refuted. Builds its own roots in one scratch directory (the empty root is that
+    directory before anything is written to it), so it needs no opf/ subtree under the root; a host
+    failure building them is cannot-evaluate."""
+    tmp = None
+    try:
+        try:
+            tmp = Path(tempfile.mkdtemp(prefix="opf-closure-missing-"))
+        except OSError as exc:
+            raise _CannotEvaluate("closure/missing-input-scratch: {}".format(exc))
+        for label, where, files in (
+                ("closure/missing-input-nonexistent", tmp / "no-such-root", None),
+                ("closure/missing-input-empty", tmp, None),
+                ("closure/missing-input-no-opf-py", tmp / "tools-only",
+                 (("opf/tools/_opf_store.py", b"from _semver import _parse\n"),))):
+            if files is not None:
+                try:
+                    _write_fixture(where, files)
+                except OSError as exc:
+                    raise _CannotEvaluate("{}: could not build the root: {}".format(label, exc))
+            calls = []
+
+            def refused(label=label, where=where, calls=calls):
+                rc, _out, _err = _captured(run, where)
+                if rc != 2 or calls:
+                    raise AssertionError("{}: run() gave {} with {} member call(s)".format(label, rc, len(calls)))
+            _attributed(label, refused, injected=dict(_run_one=_stub_member_runner(calls, {})))
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _check_entry_points():
+    """How the entry points combine the preflight, the legs and run(), with _preflight_exit,
+    _closure_legs, run, self_test_main and repo_root stubbed to record their calls (the real
+    _self_test_exit judges the legs). self_test_main returns the preflight's 1 or 2 as is and never
+    runs the legs; when the preflight returns None it runs the legs over the same root and exits by
+    them, failure-first (0 when both held, 1 on a refutation whatever else could not be evaluated, 2
+    on cannot-evaluate alone). main runs self_test_main under --self-test, and otherwise run() over
+    the repository root, returning its exit. Pure: no scratch directory and no opf/ subtree."""
+    root = Path("entry-point-root (stubbed)")
+    for pre, legs, want in ((1, None, 1), (2, None, 2), (None, ([], []), 0), (None, (["refuted"], []), 1),
+                            (None, ([], ["cannot"]), 2), (None, (["refuted"], ["cannot"]), 1)):
+        seen = []
+
+        def entry(pre=pre, legs=legs, want=want, seen=seen):
+            rc = _captured(self_test_main)[0]
+            expected = [("preflight", root)] + ([("legs", root)] if pre is None else [])
+            if rc != want or seen != expected:
+                raise AssertionError("closure/entry-self-test: preflight {!r}, legs {!r} gave {!r} after {!r}".format(
+                    pre, legs, rc, seen))
+        _attributed("closure/entry-self-test", entry, injected=dict(
+            repo_root=lambda: root,
+            _preflight_exit=lambda where, pre=pre, seen=seen: seen.append(("preflight", where)) or pre,
+            _closure_legs=lambda where, legs=legs, seen=seen: seen.append(("legs", where)) or legs))
+    for argv, want, expected in ((["check_opf_standalone_closure.py", "--self-test"], 7, [("self-test",)]),
+                                 (["check_opf_standalone_closure.py"], 5, [("run", root)])):
+        seen = []
+
+        def entry(argv=argv, want=want, expected=expected, seen=seen):
+            rc = _captured(main)[0]
+            if rc != want or seen != expected:
+                raise AssertionError("closure/entry-main: argv {!r} gave {!r} after {!r}".format(argv, rc, seen))
+        _attributed("closure/entry-main", entry, injected=dict(
+            sys=_Overlay(sys, argv=argv), repo_root=lambda: root,
+            self_test_main=lambda seen=seen: seen.append(("self-test",)) or 7,
+            run=lambda where, seen=seen: seen.append(("run", where)) or 5))
 
 
 def _check_undecodable_fixture(_root):
@@ -1249,6 +1396,7 @@ def _rootless(fn):
     def check(_root):
         return fn()
     check.__name__ = fn.__name__
+    check.__wrapped__ = fn
     return check
 
 
@@ -1267,10 +1415,12 @@ class _Overlay:
         return getattr(self._target, key)
 
 
-def _nth_call(name, attr, n, mode, fired):
+def _nth_call(name, attr, n, mode, fired, frames=None):
     """A patch for the global `name` (or its attribute `attr`) that delegates to the one bound now,
     except that its n-th outermost call (1-based, counted from now; a call made while an earlier one
-    is still running is delegated and not counted) appends n to `fired` and then, by mode:
+    is still running is delegated and not counted) appends n to `fired`, appends to `frames` (when
+    given) the (co_qualname, current line) of every frame of this file then on the stack, and then,
+    by mode:
     "crash" raises RuntimeError, "none" returns None (a malformed result), "oserror" raises OSError
     and "timeout" raises subprocess.TimeoutExpired (the last two stand for a host failure)."""
     target = globals()[name]
@@ -1288,6 +1438,13 @@ def _nth_call(name, attr, n, mode, fired):
             finally:
                 depth[0] -= 1
         fired.append(n)
+        if frames is not None:
+            here = sys._getframe()
+            frame = here.f_back
+            while frame is not None:
+                if frame.f_code.co_filename == here.f_code.co_filename:
+                    frames.append((frame.f_code.co_qualname, frame.f_lineno))
+                frame = frame.f_back
         if mode == "crash":
             raise RuntimeError(_PIN_MARKER)
         if mode == "oserror":
@@ -1299,24 +1456,28 @@ def _nth_call(name, attr, n, mode, fired):
     return {name: _Overlay(target, **{attr: call}) if attr else call}
 
 
-def _pin(entry, root, absent_root):
+def _pin(entry, root, absent_root, span=None):
     """Run one _ATTRIBUTION_PINS entry: the case's check, over root (or over absent_root, a path with
     no opf/ subtree, when the entry says so), with its target's n-th call patched by mode, under this
     pin's own watch (a host failure there is _HarnessFailure). Nothing is attributed for the check:
     its own raw outcome is judged. When the patched call fired, a "crash" or "none" entry must give
     an AssertionError naming the entry's expected label (its last field) and "the code under test
-    raised" (and, for a crash, the marker), and an "oserror" or "timeout" entry a _CannotEvaluate naming "harness failure" and
-    the marker; anything else is a refutation. When it did not fire: the case's own AssertionError is
-    raised as is (a refutation); a _CannotEvaluate is cannot-evaluate (its setup was missing), except
-    for an absent-root entry, where reaching the call without the subtree is the point, so it is a
-    refutation; a pass is a refutation (the call was skipped); any other exception is raised as is."""
+    raised" (and, for a crash, the marker), and an "oserror" or "timeout" entry a _CannotEvaluate
+    naming "harness failure" and the marker; anything else is a refutation. When it did not fire:
+    the case's own AssertionError is raised as is (a refutation); a _CannotEvaluate is
+    cannot-evaluate (its setup was missing), except for an absent-root entry, where reaching the
+    call without the subtree is the point, so it is a refutation; a pass is a refutation (the call
+    was skipped); any other exception is raised as is.
+    With `span` (the entry's derived site, as (qualname, first line, last line)), a patched call that
+    fired held only when a frame of the site's function was then executing a line of the site's
+    statement (or lambda): the entry exercised the site it names."""
     label, check, absent, name, attr, n, mode, want = entry
     site = "{} {}{}#{} {}".format(label, name, "." + attr if attr else "", n, mode)
     if absent and absent_root is None:
         raise _CannotEvaluate("closure/attribution-pin: {}: no scratch directory for a root with no opf/".format(site))
-    fired, host = [], []
+    fired, host, frames = [], [], []
     with _patched(**_harness_watch(host)):
-        with _patched(**_nth_call(name, attr, n, mode, fired)):
+        with _patched(**_nth_call(name, attr, n, mode, fired, frames)):
             try:
                 _captured(check, absent_root if absent else root)
             except Exception as exc:
@@ -1336,6 +1497,10 @@ def _pin(entry, root, absent_root):
             expected = "a refutation naming {!r}".format(want)
         if not held:
             raise AssertionError("closure/attribution-pin: {} gave {!r}, expected {}".format(site, got, expected))
+        if span is not None and not any(qualname == span[0] and span[1] <= line <= span[2]
+                                        for qualname, line in frames):
+            raise AssertionError("closure/attribution-pin: {} fired outside its site ({}, lines {} to {}): "
+                                 "{!r}".format(site, span[0], span[1], span[2], frames))
         return
     if isinstance(got, AssertionError):
         raise got
@@ -1398,16 +1563,149 @@ def _check_pin_rules():
                 check.__name__, name, mode, got, want.__name__ if want else "a pass"))
 
 
+def _site_walk(node, scope, span, targets, raw, names):
+    """Collect under `node` every module-level name it loads (into `names`) and every load of a name
+    in `targets` as a raw site (qualname, name, line, column, span) into `raw`. `scope` is (the
+    co_qualname of the code that evaluates `node`, the qualname prefix of a function or class
+    defined there); `span` is the (first, last) line of the innermost statement, lambda or generator
+    expression around `node`. A def, lambda or class has its defaults, decorators and bases walked
+    where it stands and its body under its own qualname (annotations are not walked); a generator
+    expression, which runs in a frame of its own, likewise (its first iterable where it stands)."""
+    qualname, prefix = scope
+    if isinstance(node, ast.stmt):
+        span = (node.lineno, node.end_lineno)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        outer = list(getattr(node, "decorator_list", ()))
+        if isinstance(node, ast.ClassDef):
+            outer += node.bases + [keyword.value for keyword in node.keywords]
+        else:
+            outer += node.args.defaults + [value for value in node.args.kw_defaults if value is not None]
+        for sub in outer:
+            _site_walk(sub, scope, span, targets, raw, names)
+        own = prefix + ("<lambda>" if isinstance(node, ast.Lambda) else node.name)
+        inner = (own, own + ("." if isinstance(node, ast.ClassDef) else ".<locals>."))
+        if isinstance(node, ast.Lambda):
+            _site_walk(node.body, inner, (node.lineno, node.end_lineno), targets, raw, names)
+        else:
+            for sub in node.body:
+                _site_walk(sub, inner, span, targets, raw, names)
+        return
+    if isinstance(node, ast.GeneratorExp):
+        _site_walk(node.generators[0].iter, scope, span, targets, raw, names)
+        own = prefix + "<genexpr>"
+        inner, span = (own, own + ".<locals>."), (node.lineno, node.end_lineno)
+        for index, generator in enumerate(node.generators):
+            for sub in [generator.target] + ([generator.iter] if index else []) + generator.ifs:
+                _site_walk(sub, inner, span, targets, raw, names)
+        _site_walk(node.elt, inner, span, targets, raw, names)
+        return
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        names.add(node.id)
+        if node.id in targets:
+            raw.append((qualname, node.id, node.lineno, node.col_offset, span))
+    for child in ast.iter_child_nodes(node):
+        _site_walk(child, scope, span, targets, raw, names)
+
+
+def _derived_sites():
+    """The attribution inventory's authoritative set, derived from this file's own source by an AST
+    walk. The code under test is every module-level function that main reaches by name (the gate,
+    the closure legs, the preflight runner and the entry points) plus every _PREFLIGHT_CASES case's
+    function (a case that calls another case's check tests it). A site is a load of one of those
+    names (called there, or passed to be called) inside a function a case reaches: the case's own
+    function and, transitively, every module-level function or class it names that is not code
+    under test, with their nested defs, lambdas and generator expressions. Its key is "<co_qualname
+    of the code holding it> <name>#<k>", k counting that name's loads in that code in source order.
+    Returns (spans, reach): spans maps every key in any module-level definition to (qualname, first
+    line, last line of its statement, lambda or generator expression); reach maps each case's
+    function name to the set of keys it reaches. Not followed: a function reached only through a
+    value (a module-level assignment, a table such as _PREFLIGHT_CASES, an argument or a patched
+    global), whose calls are therefore not sites. A source that cannot be read is cannot-evaluate;
+    a case with no module-level definition is a refutation."""
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise _CannotEvaluate("closure/attribution-walk: could not read this file's source: {}".format(exc))
+    defs = {node.name: node for node in ast.parse(source).body
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    functions = {name for name, node in defs.items() if isinstance(node, ast.FunctionDef)}
+
+    def walk(name, targets):
+        raw, names = [], set()
+        _site_walk(defs[name], ("", ""), (defs[name].lineno, defs[name].end_lineno), targets, raw, names)
+        return raw, names
+    production, queue = set(), ["main"]
+    while queue:
+        name = queue.pop()
+        if name not in production:
+            production.add(name)
+            queue.extend(sorted(walk(name, frozenset())[1] & functions))
+    cases = []
+    for label, check in _PREFLIGHT_CASES:
+        function = getattr(check, "__wrapped__", check)
+        if function.__name__ not in functions or function.__code__.co_qualname != function.__name__:
+            raise AssertionError("closure/attribution-walk: case {} has no module-level definition: {}".format(
+                label, function.__name__))
+        cases.append(function.__name__)
+    targets = frozenset(production | set(cases))
+    spans, keys, follows = {}, {}, {}
+    for name in defs:
+        raw, names = walk(name, targets)
+        count, keys[name] = {}, []
+        follows[name] = sorted(names & set(defs) - targets)
+        for qualname, target, line, column, span in sorted(raw, key=lambda site: (site[2], site[3])):
+            count[qualname, target] = count.get((qualname, target), 0) + 1
+            key = "{} {}#{}".format(qualname, target, count[qualname, target])
+            spans[key] = (qualname,) + tuple(span)
+            keys[name].append(key)
+    reach = {}
+    for case in cases:
+        seen, queue = set(), [case]
+        while queue:
+            name = queue.pop()
+            if name not in seen:
+                seen.add(name)
+                queue.extend(follows[name])
+        reach[case] = set(key for name in seen for key in keys[name])
+    return spans, reach
+
+
 def _check_attribution_inventory(root):
-    """The attribution inventory: every site at which a _PREFLIGHT_CASES case calls the code under test
-    (for a site in a loop, its first iteration) is pinned by an _ATTRIBUTION_PINS entry (see _pin), so
-    reverting that site's attribution (calling it bare, or interpreting its result outside
-    _attributed) fails here, and so do widening the watch past OSError and TimeoutExpired and
-    requiring the opf/ subtree before the sub-checks of _check_scratch_and_copy_errors and
-    _check_negative_copy_error that do not need it. _check_pin_rules runs first. Unlike the other cases, this one does not stop at its
-    first cannot-evaluate entry: it runs every entry and is failure-first over them, raising the
-    first refutation at once and the cannot-evaluate entries together at the end."""
+    """The attribution inventory, against a DERIVED set. _derived_sites walks this file's AST and
+    enumerates every site, in the functions a _PREFLIGHT_CASES case reaches, that calls or passes on
+    the code under test. Refuted: a derived site with neither an _ATTRIBUTION_PINS entry nor an
+    _ATTRIBUTION_EXCLUSIONS entry (so a new call site added to a case fails until it is pinned or
+    excluded with a reason); a pin naming a site the walk does not find in what its case reaches;
+    an exclusion naming a site the walk does not find, one also pinned or excluded twice, or one
+    with no reason. Then every entry is fired (see _pin): its patched call must fire while a frame
+    of its site's code is executing that site's statement, and give the attribution its mode
+    requires. So reverting a pinned site's attribution (calling it bare, or interpreting its result
+    outside _attributed) fails here, and so do widening the watch past OSError and TimeoutExpired
+    and requiring the opf/ subtree before the sub-checks of _check_scratch_and_copy_errors,
+    _check_negative_copy_error and _check_absent_subtree that do not need it (the entries over a
+    root with no opf/). A site is pinned at one call at least (in a loop, its first iteration);
+    the pins do not prove every iteration. _check_pin_rules runs first, then the walk (an unreadable
+    source is cannot-evaluate). Unlike the other cases, this one does not stop at its first
+    cannot-evaluate entry: it runs every entry and is failure-first over them, raising the first
+    refutation at once and the cannot-evaluate entries together at the end."""
     _check_pin_rules()
+    spans, reach = _derived_sites()
+    derived = set().union(*reach.values())
+    pinned, excluded = set(), set()
+    for site, label, check, *_entry in _ATTRIBUTION_PINS:
+        case = getattr(check, "__wrapped__", check).__name__
+        if site not in reach.get(case, ()):
+            raise AssertionError("closure/attribution-stale-pin: {} pins {!r}, which the walk does not find in "
+                                 "what {} reaches".format(label, site, case))
+        pinned.add(site)
+    for site, reason in _ATTRIBUTION_EXCLUSIONS:
+        if site not in derived or site in pinned or site in excluded or not reason.strip():
+            raise AssertionError("closure/attribution-stale-exclusion: {!r} (a site the walk does not find, "
+                                 "one also pinned or excluded, or no reason)".format(site))
+        excluded.add(site)
+    unpinned = sorted(derived - pinned - excluded)
+    if unpinned:
+        raise AssertionError("closure/attribution-unpinned: {}".format("; ".join(unpinned)))
     unevaluated = []
     tmp = None
     try:
@@ -1415,9 +1713,9 @@ def _check_attribution_inventory(root):
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-pins-"))
         except OSError as exc:
             unevaluated.append("closure/attribution-pin: no scratch directory for a root with no opf/: {}".format(exc))
-        for entry in _ATTRIBUTION_PINS:
+        for site, *entry in _ATTRIBUTION_PINS:
             try:
-                _pin(entry, root, None if tmp is None else tmp / "no-opf-root")
+                _pin(tuple(entry), root, None if tmp is None else tmp / "no-opf-root", spans[site])
             except _CannotEvaluate as exc:
                 unevaluated.append(str(exc))
     finally:
@@ -1427,120 +1725,230 @@ def _check_attribution_inventory(root):
         raise _CannotEvaluate(" | ".join(unevaluated))
 
 
-# The attribution inventory (see _check_attribution_inventory and _pin): one entry per call that a
-# _PREFLIGHT_CASES case makes to the code under test, as (the case's label, its check, True when the
-# entry runs over a root with no opf/ subtree, the patched global, its patched attribute or None,
-# which call to patch, mode, the label the refutation must name or None for a host failure).
+# The attribution inventory (see _check_attribution_inventory and _pin): entries pinning the sites
+# _derived_sites finds, as (the site's key, the case's label, its check, True when the entry runs
+# over a root with no opf/ subtree, the patched global, its patched attribute or None, which call to
+# patch, mode, the label the refutation must name or None for a host failure). Every derived site
+# has at least one entry here or one in _ATTRIBUTION_EXCLUSIONS. A site in a loop is pinned at its
+# first iteration at least; some sites carry several entries (one per mode, or per iteration); and
+# an entry may patch, instead of the site's own callee, a host primitive or a function that callee
+# calls, provided the patched call fires while the site is executing (which _pin checks).
 _PACK_REG, _ADOPT_REG, _ROWS = (_rootless(_pack_manifest_registration_self_test),
                                 _rootless(_adopt_observe_registration_self_test),
                                 _rootless(_member_timeout_rows_self_test))
 _VERDICTS, _COLLECTION = _rootless(_check_verdict_tables), _rootless(_check_preflight_collection)
+_ENTRY = _rootless(_check_entry_points)
 _ATTRIBUTION_PINS = (
-    ("pack-manifest-registration", _PACK_REG, False, "_check_pack_manifest_registration", None, 1, "crash",
+    ("_pack_manifest_registration_self_test.<locals>.<lambda> _check_pack_manifest_registration#1",
+     "pack-manifest-registration", _PACK_REG, False, "_check_pack_manifest_registration", None, 1, "crash",
      "closure/pack-manifest-registration"),
-    ("pack-manifest-registration", _PACK_REG, False, "_check_pack_manifest_registration", None, 2, "crash",
+    ("_pack_manifest_registration_self_test.<locals>.<lambda> _check_pack_manifest_registration#2",
+     "pack-manifest-registration", _PACK_REG, False, "_check_pack_manifest_registration", None, 2, "crash",
      "closure/pack-manifest-registration"),
-    ("adopt-observe-registration", _ADOPT_REG, False, "_check_adopt_observe_registration", None, 1, "crash",
+    ("_adopt_observe_registration_self_test.<locals>.<lambda> _check_adopt_observe_registration#1",
+     "adopt-observe-registration", _ADOPT_REG, False, "_check_adopt_observe_registration", None, 1, "crash",
      "closure/adopt-observe-registration"),
-    ("adopt-observe-registration", _ADOPT_REG, False, "_check_adopt_observe_registration", None, 2, "crash",
+    ("_adopt_observe_registration_self_test.<locals>.<lambda> _check_adopt_observe_registration#2",
+     "adopt-observe-registration", _ADOPT_REG, False, "_check_adopt_observe_registration", None, 2, "crash",
      "closure/adopt-observe-registration"),
-    ("member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 1, "crash", "closure/member-timeout-rows"),
-    ("member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 2, "crash", "closure/member-timeout-rows"),
-    ("member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 3, "crash", "closure/member-timeout-rows"),
-    ("self-test-leg-verdicts", _VERDICTS, False, "_negative_leg_verdict", None, 1, "none", "closure/negative-verdict"),
-    ("self-test-leg-verdicts", _VERDICTS, False, "_positive_leg_verdict", None, 1, "none", "closure/positive-verdict"),
-    ("preflight-collection", _COLLECTION, False, "_preflight_exit", None, 1, "crash", "closure/preflight-collection"),
-    ("preflight-collection", _COLLECTION, False, "_preflight_exit", None, 5, "crash", "closure/preflight-stop"),
-    ("timeout-cannot-evaluate", _check_timeout_mapping, False, "run", None, 1, "crash", "closure/stubbed-run"),
-    ("timeout-cannot-evaluate", _check_timeout_mapping, False, "tempfile", "mkdtemp", 1, "crash", "closure/stubbed-run"),
-    ("timeout-cannot-evaluate", _check_timeout_mapping, False, "_materialize", None, 1, "crash", "closure/stubbed-run"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 1, "none",
+    ("_member_timeout_rows_self_test.<locals>.<lambda> _check_member_timeout_rows#1",
+     "member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 1, "crash",
+     "closure/member-timeout-rows"),
+    ("_member_timeout_rows_self_test.<locals>.<lambda> _check_member_timeout_rows#2",
+     "member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 2, "crash",
+     "closure/member-timeout-rows"),
+    ("_member_timeout_rows_self_test.<locals>.<lambda> _check_member_timeout_rows#3",
+     "member-timeout-rows", _ROWS, False, "_check_member_timeout_rows", None, 3, "crash",
+     "closure/member-timeout-rows"),
+    ("_check_verdict_tables.<locals>.judge _negative_leg_verdict#1",
+     "self-test-leg-verdicts", _VERDICTS, False, "_negative_leg_verdict", None, 1, "none", "closure/negative-verdict"),
+    ("_check_verdict_tables.<locals>.judge _positive_leg_verdict#1",
+     "self-test-leg-verdicts", _VERDICTS, False, "_positive_leg_verdict", None, 1, "none", "closure/positive-verdict"),
+    ("_check_preflight_collection.<locals>.<lambda> _preflight_exit#1",
+     "preflight-collection", _COLLECTION, False, "_preflight_exit", None, 1, "crash", "closure/preflight-collection"),
+    ("_check_preflight_collection.<locals>.<lambda> _preflight_exit#2",
+     "preflight-collection", _COLLECTION, False, "_preflight_exit", None, 5, "crash", "closure/preflight-stop"),
+    ("_stubbed_run.<locals>.<lambda> run#1",
+     "timeout-cannot-evaluate", _check_timeout_mapping, False, "run", None, 1, "crash", "closure/stubbed-run"),
+    ("_stubbed_run.<locals>.<lambda> run#1",
+     "timeout-cannot-evaluate", _check_timeout_mapping, False, "tempfile", "mkdtemp", 1, "crash",
+     "closure/stubbed-run"),
+    ("_stubbed_run.<locals>.<lambda> run#1",
+     "timeout-cannot-evaluate", _check_timeout_mapping, False, "_materialize", None, 1, "crash", "closure/stubbed-run"),
+    ("_check_harness_mapping.<locals>.missing_script _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 1, "none",
      "closure/harness-missing-script"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 2, "none", "closure/run-one-timeout"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 3, "none", "closure/harness-launch"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 4, "none", "closure/evidence-streams"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_negative_leg_verdict", None, 1, "none",
+    ("_check_harness_mapping.<locals>.killed _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 2, "none", "closure/run-one-timeout"),
+    ("_check_harness_mapping.<locals>.no_launch _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 3, "none", "closure/harness-launch"),
+    ("_check_harness_mapping.<locals>.judge _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_run_one", None, 4, "none", "closure/evidence-streams"),
+    ("_check_harness_mapping.<locals>.judge _negative_leg_verdict#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_negative_leg_verdict", None, 1, "none",
      "closure/evidence-streams"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 1, "crash",
+    ("_check_harness_mapping.<locals>.missing_script _isolated_env#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 1, "crash",
      "closure/harness-missing-script"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 2, "crash",
+    ("_check_harness_mapping.<locals>.killed _isolated_env#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 2, "crash",
      "closure/run-one-timeout"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 3, "crash",
+    ("_check_harness_mapping.<locals>.no_launch _isolated_env#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 3, "crash",
      "closure/harness-launch"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 4, "crash",
+    ("_check_harness_mapping.<locals>.judge _isolated_env#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "_isolated_env", None, 4, "crash",
      "closure/evidence-streams"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 1, "crash",
+    ("_check_harness_mapping.<locals>.judge _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 1, "crash",
      "closure/evidence-streams"),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 1, "oserror", None),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 2, "timeout", None),
-    ("harness-cannot-evaluate", _check_harness_mapping, False, "run", None, 1, "crash", "closure/stubbed-run"),
-    ("failure-first", _check_failure_first, False, "run", None, 1, "crash", "closure/stubbed-run"),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_closure_legs", None, 1, "none", "closure/self-test-exit"),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_self_test_exit", None, 1, "crash", "closure/self-test-exit"),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_materialize", None, 1, "crash", "closure/self-test-exit"),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_read_copied_store", None, 1, "crash",
+    ("_check_harness_mapping.<locals>.judge _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 1, "oserror", None),
+    ("_check_harness_mapping.<locals>.judge _run_one#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "subprocess", "run", 2, "timeout", None),
+    ("_stubbed_run.<locals>.<lambda> run#1",
+     "harness-cannot-evaluate", _check_harness_mapping, False, "run", None, 1, "crash", "closure/stubbed-run"),
+    ("_stubbed_run.<locals>.<lambda> run#1",
+     "failure-first", _check_failure_first, False, "run", None, 1, "crash", "closure/stubbed-run"),
+    ("_check_leg_wiring.<locals>.wired _closure_legs#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_closure_legs", None, 1, "none", "closure/self-test-exit"),
+    ("_check_leg_wiring.<locals>.wired _self_test_exit#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_self_test_exit", None, 1, "crash", "closure/self-test-exit"),
+    ("_check_leg_wiring.<locals>.wired _closure_legs#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_materialize", None, 1, "crash", "closure/self-test-exit"),
+    ("_check_leg_wiring.<locals>.wired _closure_legs#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_read_copied_store", None, 1, "crash",
      "closure/self-test-exit"),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_read_copied_store", None, 1, "oserror", None),
-    ("self-test-leg-wiring", _check_leg_wiring, False, "_write_copied_store", None, 1, "oserror", None),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_check_harness_mapping", None, 1,
-     "crash", "closure/scratch-harness"),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_closure_legs", None, 1, "none",
+    ("_check_leg_wiring.<locals>.wired _closure_legs#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_read_copied_store", None, 1, "oserror", None),
+    ("_check_leg_wiring.<locals>.wired _closure_legs#1",
+     "self-test-leg-wiring", _check_leg_wiring, False, "_write_copied_store", None, 1, "oserror", None),
+    ("_check_scratch_and_copy_errors _check_harness_mapping#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_check_harness_mapping", None, 1,
+     "crash",
+     "closure/scratch-harness"),
+    ("_check_scratch_and_copy_errors.<locals>.<lambda> _closure_legs#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_closure_legs", None, 1, "none",
      "closure/negative-harness"),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_self_test_exit", None, 1, "crash",
+    ("_expect_negative_cannot _self_test_exit#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "_self_test_exit", None, 1, "crash",
      "closure/negative-harness"),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "run", None, 1, "crash",
+    ("_check_scratch_and_copy_errors.<locals>.refused run#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "run", None, 1, "crash",
      "closure/scratch-run"),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "run", None, 2, "crash",
+    ("_check_scratch_and_copy_errors.<locals>.refused run#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, False, "run", None, 2, "crash",
      "closure/copy-run"),
-    ("scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, True, "_closure_legs", None, 1, "none",
+    ("_check_scratch_and_copy_errors.<locals>.<lambda> _closure_legs#1",
+     "scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors, True, "_closure_legs", None, 1, "none",
      "closure/negative-harness"),
-    ("negative-copy-cannot-evaluate", _check_negative_copy_error, False, "_closure_legs", None, 1, "none",
+    ("_check_negative_copy_error.<locals>.<lambda> _closure_legs#1",
+     "negative-copy-cannot-evaluate", _check_negative_copy_error, False, "_closure_legs", None, 1, "none",
      "closure/negative-copy"),
-    ("negative-copy-cannot-evaluate", _check_negative_copy_error, False, "_self_test_exit", None, 1, "crash",
+    ("_expect_negative_cannot _self_test_exit#1",
+     "negative-copy-cannot-evaluate", _check_negative_copy_error, False, "_self_test_exit", None, 1, "crash",
      "closure/negative-copy"),
-    ("negative-copy-cannot-evaluate", _check_negative_copy_error, True, "_closure_legs", None, 1, "none",
+    ("_check_negative_copy_error.<locals>.<lambda> _closure_legs#1",
+     "negative-copy-cannot-evaluate", _check_negative_copy_error, True, "_closure_legs", None, 1, "none",
      "closure/negative-copy"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 1, "crash",
+    ("_check_absent_subtree _check_timeout_mapping#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 1, "crash",
      "closure/absent-subtree"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_harness_mapping", None, 1, "crash",
+    ("_check_absent_subtree _check_timeout_mapping#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, True, "_check_timeout_mapping", None, 1, "crash",
      "closure/absent-subtree"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_failure_first", None, 1, "crash",
+    ("_check_absent_subtree _check_harness_mapping#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_harness_mapping", None, 1, "crash",
      "closure/absent-subtree"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_leg_wiring", None, 1, "crash",
+    ("_check_absent_subtree _check_failure_first#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_failure_first", None, 1, "crash",
      "closure/absent-subtree"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_scratch_and_copy_errors", None, 1,
-     "crash", "closure/absent-subtree"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 2, "crash",
+    ("_check_absent_subtree _check_leg_wiring#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_leg_wiring", None, 1, "crash",
+     "closure/absent-subtree"),
+    ("_check_absent_subtree _check_scratch_and_copy_errors#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_scratch_and_copy_errors", None, 1, "crash",
+     "closure/absent-subtree"),
+    ("_check_absent_subtree _check_timeout_mapping#2",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 2, "crash",
      "closure/copy-before-members"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 3, "crash",
+    ("_check_absent_subtree.<locals>.<lambda> _check_timeout_mapping#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 3, "crash",
      "closure/members-never-ran"),
-    ("absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 4, "crash",
+    ("_check_absent_subtree.<locals>.<lambda> _check_timeout_mapping#1",
+     "absent-subtree-cannot-evaluate", _check_absent_subtree, False, "_check_timeout_mapping", None, 4, "crash",
      "closure/members-never-copied"),
-    ("undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_closure_legs", None, 1, "none",
+    ("_check_undecodable_fixture.<locals>.<lambda> _closure_legs#1",
+     "undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_closure_legs", None, 1, "none",
      "closure/undecodable-fixture"),
-    ("undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_self_test_exit", None, 1, "crash",
+    ("_expect_negative_cannot _self_test_exit#1",
+     "undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_self_test_exit", None, 1, "crash",
      "closure/undecodable-fixture"),
-    ("undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_check_leg_wiring", None, 1, "crash",
+    ("_check_undecodable_fixture _check_leg_wiring#1",
+     "undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_check_leg_wiring", None, 1, "crash",
      "closure/undecodable-wiring"),
-    ("undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_not_utf8", None, 1, "oserror", None),
-    ("undecodable-attribution", _check_undecodable_attribution, False, "_check_undecodable_fixture", None, 1,
-     "crash", "closure/undecodable-attribution"),
-    ("undecodable-attribution", _check_undecodable_attribution, False, "_check_leg_wiring", None, 3, "crash",
+    ("_check_undecodable_fixture _check_leg_wiring#1",
+     "undecodable-fixture-cannot-evaluate", _check_undecodable_fixture, False, "_not_utf8", None, 1, "oserror", None),
+    ("_check_undecodable_attribution.<locals>.<lambda> _check_undecodable_fixture#1",
+     "undecodable-attribution", _check_undecodable_attribution, False, "_check_undecodable_fixture", None, 1, "crash",
      "closure/undecodable-attribution"),
-    ("undecodable-attribution", _check_undecodable_attribution, False, "_write_fixture", None, 1, "oserror", None),
-    ("undecodable-attribution", _check_undecodable_attribution, False, "_not_utf8", None, 3, "oserror", None),
-    ("preflight-failure-first", _check_preflight_failure_first, False, "_preflight_exit", None, 1, "crash",
+    ("_check_undecodable_attribution.<locals>.<lambda> _check_leg_wiring#1",
+     "undecodable-attribution", _check_undecodable_attribution, False, "_check_leg_wiring", None, 3, "crash",
+     "closure/undecodable-attribution"),
+    ("_check_undecodable_attribution.<locals>.<lambda> _check_undecodable_fixture#1",
+     "undecodable-attribution", _check_undecodable_attribution, False, "_write_fixture", None, 1, "oserror", None),
+    ("_check_undecodable_attribution.<locals>.<lambda> _check_leg_wiring#1",
+     "undecodable-attribution", _check_undecodable_attribution, False, "_not_utf8", None, 3, "oserror", None),
+    ("_check_preflight_failure_first.<locals>.<lambda> _preflight_exit#1",
+     "preflight-failure-first", _check_preflight_failure_first, False, "_preflight_exit", None, 1, "crash",
      "closure/preflight-failure-first"),
-    ("preflight-failure-first", _check_preflight_failure_first, False, "_preflight_exit", None, 3, "crash",
+    ("_check_preflight_failure_first.<locals>.<lambda> _preflight_exit#2",
+     "preflight-failure-first", _check_preflight_failure_first, False, "_preflight_exit", None, 3, "crash",
      "closure/preflight-absent-subtree"),
-    ("red-bound-lookup", _red_bound_lookup, False, "_check_timeout_mapping", None, 1, "crash",
+    ("_red_bound_lookup _check_timeout_mapping#1",
+     "red-bound-lookup", _red_bound_lookup, False, "_check_timeout_mapping", None, 1, "crash",
      "closure/red-bound-lookup"),
-    ("red-bound-lookup", _red_bound_lookup, False, "_check_leg_wiring", None, 1, "crash", "closure/red-bound-lookup"),
+    ("_red_bound_lookup _check_leg_wiring#1",
+     "red-bound-lookup", _red_bound_lookup, False, "_check_leg_wiring", None, 1, "crash", "closure/red-bound-lookup"),
+    ("_check_entry_points.<locals>.entry self_test_main#1",
+     "entry-points", _ENTRY, False, "self_test_main", None, 1, "crash", "closure/entry-self-test"),
+    ("_check_entry_points.<locals>.entry main#1",
+     "entry-points", _ENTRY, False, "main", None, 1, "crash", "closure/entry-main"),
+    ("_check_missing_input.<locals>.refused run#1",
+     "missing-input", _check_missing_input, False, "run", None, 1, "crash", "closure/missing-input-nonexistent"),
+    ("_check_missing_input.<locals>.refused run#1",
+     "missing-input", _check_missing_input, False, "run", None, 2, "crash", "closure/missing-input-empty"),
+    ("_check_missing_input.<locals>.refused run#1",
+     "missing-input", _check_missing_input, False, "run", None, 3, "crash", "closure/missing-input-no-opf-py"),
+)
+
+# The derived sites that carry no pin, each with the recorded reason (see _check_attribution_inventory).
+_ATTRIBUTION_EXCLUSIONS = (
+    ("_harness_watch _materialize#1",
+     "wrapped for the watch, which delegates every call to it: the call is made at a case's site, pinned there"),
+    ("_harness_watch _read_copied_store#1",
+     "wrapped for the watch, which delegates every call to it: the call is made at a case's site, pinned there"),
+    ("_harness_watch _write_copied_store#1",
+     "wrapped for the watch, which delegates every call to it: the call is made at a case's site, pinned there"),
+    ("_failing_harness _materialize#1",
+     "wrapped to inject one selective failure, delegating every other call: made at a case's site, pinned there"),
+    ("_copy_recorder _materialize#1",
+     "wrapped to record the copy, delegating every call: the call is made at a case's site, pinned there"),
+    ("_check_pin_rules.<locals>.attributed.<locals>.<lambda> _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules, which judges _pin's own rules, not the attribution of the code"),
+    ("_check_pin_rules.<locals>.bare _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules, called bare on purpose to judge _pin's own rules"),
+    ("_check_pin_rules.<locals>.masked _positive_leg_verdict#1",
+     "a probe target of _check_pin_rules, masked on purpose to judge _pin's own rules"),
+    ("_check_preflight_failure_first _check_preflight_failure_first#1",
+     "an identity test that leaves this case out of the cases it runs (running it would recurse); never called"),
+    ("_check_preflight_failure_first _check_attribution_inventory#1",
+     "an identity test that leaves the inventory out of the cases it runs (it runs this case); never called"),
 )
 
 
 # The self-test's preflight: the registration cases and the in-process stubbed cases (no subset member
-# runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first five need
+# runs), as (PASS label, or None for a case that prints its own lines, check(root)). The first six need
 # no scratch directory and no opf/ subtree; the rest build fixtures or stub run() over the real subtree,
 # each ordered by the setup its sub-checks need (see _preflight_exit). The attribution inventory runs
 # last, once every case it pins has run on its own.
@@ -1550,12 +1958,14 @@ _PREFLIGHT_CASES = (
     (None, _ROWS),
     ("closure/self-test-leg-verdicts", _VERDICTS),
     ("closure/preflight-collection", _COLLECTION),
+    ("closure/entry-points", _ENTRY),
     ("closure/timeout-cannot-evaluate", _check_timeout_mapping),
     ("closure/harness-cannot-evaluate", _check_harness_mapping),
     ("closure/failure-first", _check_failure_first),
     ("closure/self-test-leg-wiring", _check_leg_wiring),
     ("closure/scratch-and-copy-cannot-evaluate", _check_scratch_and_copy_errors),
     ("closure/negative-copy-cannot-evaluate", _check_negative_copy_error),
+    ("closure/missing-input", _check_missing_input),
     ("closure/absent-subtree-cannot-evaluate", _check_absent_subtree),
     ("closure/undecodable-fixture-cannot-evaluate", _check_undecodable_fixture),
     ("closure/undecodable-attribution", _check_undecodable_attribution),
@@ -1578,8 +1988,9 @@ def _preflight_exit(root):
     always gives a (rc, stdout, stderr) triple whose rc alone comes from the code under test, and rc
     is only compared and printed.) _attributed tells a host failure apart by watching the host
     primitives themselves (_harness_watch, which documents what it does not watch), never the code's
-    messages. _check_attribution_inventory pins every such call; it and _check_pin_rules call cases
-    and a probe target without _attributed on purpose, to judge their raw outcome (see _pin).
+    messages. _check_attribution_inventory derives every such call site and requires a pin that
+    fires there or a recorded exclusion; it and _check_pin_rules call cases and a probe target
+    without _attributed on purpose, to judge their raw outcome (see _pin).
 
     So an AssertionError is that case's refutation (SELF-TEST FAIL). A _CannotEvaluate, or any other
     Exception (one raised by the case's own code outside every attributed call: a fixture it could not
@@ -1591,10 +2002,11 @@ def _preflight_exit(root):
     (every case held). Within ONE case (except _check_attribution_inventory, which runs all its
     entries) the first sub-check that cannot be evaluated ends that case: its later sub-checks do not
     run, so a refutation they would give stays unobserved until that case can be set up. Hence the
-    cases are split and ordered by setup: the pure cases need none; _check_negative_copy_error needs a
-    scratch directory but no opf/ subtree, so it is its own case; in _check_scratch_and_copy_errors
-    and _check_absent_subtree the sub-checks that need no opf/ subtree run before it is required
-    (the inventory's entries over a root with no opf/ pin that order). Within a case whose fixture
+    cases are split and ordered by setup: the pure cases need none; _check_negative_copy_error and
+    _check_missing_input need a scratch directory but no opf/ subtree, so each is its own case; in
+    _check_scratch_and_copy_errors and _check_absent_subtree the sub-checks that need no opf/
+    subtree run before it is required (the inventory's entries over a root with no opf/ pin that
+    order). Within a case whose fixture
     is built first, every sub-check waits for that fixture even when it would need less (in
     _check_harness_mapping, closure/harness-missing-script needs no scratch directory)."""
     failures, cannot = [], []
