@@ -546,6 +546,8 @@ expected-check-ids = [
   "recwrite5/search-only-state-dir-saves-and-stop-deny-stands",
   "recwrite5/parent-swapped-at-the-stat-stat-and-create-stay-on-the-descriptor",
   "recwrite5/each-save-descriptor-closed-exactly-once-on-success-and-failure",
+  "recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
+  "recwrite6/earned-cap-relief-survives-a-failed-save",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",

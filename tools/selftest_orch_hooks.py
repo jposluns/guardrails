@@ -6086,6 +6086,64 @@ def _main_isolated(report_path=None):
               (_r5_closes(_r5_real_fsync), _r5_closes(_r4_fail)),
               ((None, 2, [1, 1], 2, 0, []), ("OSError", 2, [1, 1], 2, 0, [])))
 
+        # QA round 6 of the silent-write fixes: the yield residue counter claims. (1) A write-and-search-only
+        # (0300) state directory: the schedule denials accumulate there and the fourth call on an unchanged
+        # basis is cap-relieved (three denies, then a warn, the counter at 3). The real chmod binds a non-root
+        # run; the os.open seam refuses any open of the state directory itself that lacks O_PATH, so the row
+        # also discriminates on a root run and a writer reverted to an O_RDONLY directory open fails it (its
+        # saves fail, the count stays unset and the fourth call denies). Where O_PATH is absent the seam is
+        # inert and the row expects the disclosed fallback for a non-root run (no count, four denies). (2)
+        # Relief already earned survives a later save failure: decide_yield reads the counter before any
+        # save, so three denials in a 0700 directory, then the directory set to search only (0100), still
+        # relieve, and so does a counter at the cap in a 0300 directory under the O_RDONLY fallback writer;
+        # each failed wake-digest save is named in the relief note and leaves the counter at 3. A seam
+        # refusing every create in the state directory makes the 0100 save fail on a root run too.
+        _r6_opath = getattr(os, "O_PATH", 0)
+        _r6_real_open = aiqt_hooks.os.open
+
+        def _r6_run(name, setup_mode, mode, walk=None):
+            fx = Fixture(tmp, name)
+            sd = Path(aiqt_hooks._orch_state_dir_for_root(str(fx.root)))
+            sd.mkdir(parents=True, exist_ok=True)
+            ino = os.stat(str(sd)).st_ino
+            fx.set_items([item("QA-R6", blocker=dict(kind="not-before", ref=now_iso(-48)))])
+            fx.set_turn_state(dict())
+            run = lambda: _r2_out(aiqt_hooks.orch_yield_tool(
+                fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting"))))
+
+            def _open(path, flags, *a, **k):
+                if (_r6_opath and not flags & _r6_opath and isinstance(path, (str, bytes, os.PathLike))
+                        and k.get("dir_fd") is None and os.path.abspath(os.fsdecode(path)) == str(sd)):
+                    raise PermissionError(13, "Permission denied", os.fsdecode(path))
+                if (switched and mode == 0o100 and flags & os.O_CREAT and k.get("dir_fd") is not None
+                        and os.fstat(k["dir_fd"]).st_ino == ino):
+                    raise PermissionError(13, "Permission denied", os.fsdecode(path))
+                return _r6_real_open(path, flags, *a, **k)
+            saved_walk = aiqt_hooks._ORCH_O_WALK
+            out, switched = [], []
+            try:
+                aiqt_hooks.os.open = _open
+                os.chmod(str(sd), setup_mode)
+                out += [run() for _ in range(3)]
+                os.chmod(str(sd), mode)
+                switched.append(mode)
+                if walk is not None:
+                    aiqt_hooks._ORCH_O_WALK = walk
+                out.append(run())
+            finally:
+                aiqt_hooks._ORCH_O_WALK = saved_walk
+                aiqt_hooks.os.open = _r6_real_open
+                os.chmod(str(sd), 0o755)
+            return ([o[0] for o in out], "prompt digest could not be written" in out[-1][2],
+                    fx.turn_state().get("schedule_denials"))
+        _r6_ok = bool(_r6_opath) or os.geteuid() == 0
+        check("recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
+              _r6_run("recwrite6a", 0o300, 0o300),
+              (["deny", "deny", "deny", "warn"], False, 3) if _r6_ok else (["deny"] * 4, False, None))
+        check("recwrite6/earned-cap-relief-survives-a-failed-save",
+              (_r6_run("recwrite6b", 0o700, 0o100), _r6_run("recwrite6c", 0o700, 0o300, walk=os.O_RDONLY)),
+              ((["deny", "deny", "deny", "warn"], True, 3), (["deny", "deny", "deny", "warn"], True, 3)))
+
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")
         esched = lambda ti: aiqt_hooks.orch_yield_tool(
