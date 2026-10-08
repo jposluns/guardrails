@@ -204,7 +204,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "grdinp"
 status = "enforced"
-mechanisms = ["gate:aei-enumerator-selftest", "gate:brief-claims", "gate:derived-command-parameters"]
+mechanisms = ["gate:aei-enumerator-selftest", "gate:derived-command-parameters"]
 
 [[rule]]
 corpus-id = "hiasrv"
@@ -283,8 +283,9 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rdbchr"
-status = "enforced"
-mechanisms = ["gate:brief-claims"]
+status = "pending"
+mechanisms = []
+description = "Enforced at dispatch once the external dispatch hook ships: that hook runs the check form of tools/check_brief_claims.py (gate:brief-claims) on every brief and refuses one whose generated claims block disagrees with a named review file's trailer verdict. Until then nothing blocks: the shipped CI step validates the configuration and examines no brief."
 
 [[rule]]
 corpus-id = "recfst"

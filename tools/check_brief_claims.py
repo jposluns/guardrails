@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Brief-claims lint: a dispatch brief's generated claims block must match each named review file's trailer.
-Offline, stdlib only, fail-closed.
+Offline, stdlib only, read-only, fail-closed.
 
 A dispatch brief often restates a named review file's verdict. When that restatement is carried over from
 text about ANOTHER file (the template, the previous round, the other reviewer), the brief asserts what a
@@ -19,31 +19,48 @@ column 0, printable ASCII, matched as the WHOLE line (a final carriage return is
 resolves to a readable UTF-8 regular file inside --input-dir (a similarly named sibling is never
 substituted); <token> is one configured verdict token. Fences, quotes and markdown are NOT parsed for the
 block: a marker line anywhere in the brief counts. Cannot-evaluate (exit 2): a second block, an unclosed
-block, an END with no BEGIN, an empty block, any other line inside the block (a blank line, an extra word,
-a colon, trailing space, a lookalike or invisible character), a repeated name, and a line outside a block
-that reads as a marker after normalization and punctuation removal but is not one (an indented, BOM-
-prefixed, lower-case or wrong-version marker).
+block, an END with no BEGIN, a BEGIN inside an open block, an empty block, any other line inside the block
+(a blank line, an extra word, a colon, trailing space, a lookalike or invisible character), a repeated
+name, and a NEAR-MISS MARKER: a line outside the block that is not exactly a marker but, normalized
+(NFKC, invisible characters removed), case-folded and stripped, is at most 80 characters and consists
+ONLY of BEGIN or END, BRIEF, CLAIMS and an optional version (digits and dots, optionally after v or
+version), separated and surrounded by non-word characters (an indented, BOM-prefixed, lower-case,
+re-spaced, decorated or wrong-version marker). A line with any other word ("Begin brief claims
+investigation tomorrow.") is prose, not a near miss.
 
-THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict is read from its trailer only, and its body
-is never read. Reading upward from the last line, blank lines (empty or spaces and tabs only) and trailer
-lines (a line starting at column 0 with a configured trailer prefix) are skipped; the first other line
-must be exactly `VERDICT: <token>` for one configured token, else the file is cannot-evaluate (no trailer,
-prose or a closing fence after the record, a decorated, indented, BOM-prefixed, differently cased or
-trailing-space record, or a value that is not exactly one token). Fences are not parsed here either.
+THE SOURCE VERDICT: THE TRAILER RECORD. A review file's verdict token is read from its trailer only; body
+contents never determine the blocking verdict. The body is scanned for fence delimiters only: a fence
+that is never closed makes the file cannot-evaluate (a record at the end of an unclosed fence may be
+quoted text). Reading upward from the last line, blank lines (empty or spaces and tabs only; a form feed
+or a no-break space is not blank) and trailer lines (a line starting at column 0 with a configured trailer
+prefix) are skipped; the first other line must be exactly `VERDICT: <token>` for one configured token,
+else the file is cannot-evaluate (no trailer, prose or a closing fence after the record, a decorated,
+indented, BOM-prefixed, differently cased or trailing-space record, or a value that is not exactly one
+token).
 
 COMPLETENESS. Every token in the brief's own text (outside fences, `>` lines, declared verbatim sections and
 the block) whose basename full-matches the review-file-pattern needs a block line with that basename, else
-the brief is a MISMATCH (exit 1, UNCLAIMED). This scan is a trigger only: a name it does not recognize
-loses the completeness check, but it can never make a wrong block line pass.
+the brief is a MISMATCH (exit 1, UNCLAIMED). A recognized name with NO entry of that basename in --input-dir
+(a report a worker will write, a file kept elsewhere) cannot be claimed: a block line for it is
+cannot-evaluate, and without one it is reported as an ABSENT line that does not change the exit code. This
+scan is a trigger only: a name it does not recognize, or one reported ABSENT, loses the completeness
+check, but it can never make a wrong block line pass.
 
 ADVISORY PROSE (never blocking). The free-prose rules of the third QA round run on the brief's own text
 and report every result as an ADVISORY line: verdict, id, grade and count restatements bound to named
 files, verbatim excerpts, embedded verbatim sections, template carry-over (--template), and foreign item
-ids (--registry). An advisory MISMATCH or CANNOT-EVALUATE, an unreadable file named only in prose, an
-unreadable template or registry, and an adopter id-pattern over its bound never change the exit code.
-Their recall and true-negative rate are not measured.
+ids (--registry). They run AFTER the blocking result is printed, in a child interpreter with their own
+budgets: ADVISORY_MAX (256 KiB) characters of input (the brief's own text and sections, the template and
+the files named in prose) and ADVISORY_DEADLINE (2.5 seconds) of wall clock, under a CPU-time limit. An
+advisory MISMATCH or CANNOT-EVALUATE, an unreadable file named only in prose, an unreadable template or
+registry, an adopter id-pattern over its bound, an exhausted budget and a failed advisory child are
+ADVISORY lines (an exhausted budget or a failed child is ONE line) and never change the exit code or
+delay the blocking result. Their recall and true-negative rate are not measured, and the rules miss
+shapes: slash-joined tokens ("NO BLOCKERS/BLOCKERS FOUND respectively", read as an option list) and a
+parenthetical in fullwidth parentheses are not read as claims.
 
-CONFIGURATION (`.aiqt/brief-claims.toml` at this file's repository root), every key REQUIRED:
+CONFIGURATION (`.aiqt/brief-claims.toml` at this file's repository root, the parent of the directory that
+holds this file), every key REQUIRED:
 
   format-version = 1                  the exact integer 1 (true and 1.0 do not pass)
   families = ["alpha", "beta"]        reviewer family words (unique, case-insensitive; advisory binding)
@@ -66,28 +83,49 @@ present but unreadable, symlinked or malformed configuration is cannot-evaluate 
 
 MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and block version 1).
 
-  check_brief_claims.py [--require-config] --input-dir DIR [--template PATH] [--registry PATH] BRIEF...
-      Check each BRIEF. DIR holds the review files the block names. Exit codes:
-        0  every block line equals its file's trailer verdict and every recognized named review file has a
-           block line (or no review file is named and no block is present); NOT APPLICABLE with no
-           configuration and no --require-config
-        1  a block line's token differs from its file's trailer verdict, or a recognized named review file
-           has no block line, and nothing is cannot-evaluate
-        2  cannot evaluate: a block-named review file that is missing, unreadable, not UTF-8, a directory or
-           outside DIR; a missing or malformed trailer; a malformed block; an unreadable brief; an unclosed
-           fence or verbatim section in the brief; a malformed configuration; a missing DIR; an adopter
-           review-file-pattern over its bound; a usage error; no configuration under --require-config
-      With several briefs the exit code is the highest. A hook dispatches ONLY on exit 0 and refuses on every
-      other status, including one this list does not name (an uncaught interpreter error exits 1; a signal
-      death is negative). Output on stdout, one result per line, each starting with a fixed word:
-        BRIEF <path> sha256=<hex>
-        MATCH <name> VERDICT <token>: <path> sha256=<hex>
-        MISMATCH <name> VERDICT <token>: <path> sha256=<hex>: the trailer VERDICT is <token>
-        CANNOT-EVALUATE <subject>: <reason>
-        UNCLAIMED <name>: brief line <n> names it and the claims block has no line for it
-        ADVISORY <MATCH|WARN|CANNOT-EVALUATE|EXEMPT> <detail>   (never affects the exit code)
-        brief-claims: <path>: <counts>; exit <0|1|2>             (the last line for each brief)
-      A run-level failure (configuration, usage, DIR) prints one CANNOT-EVALUATE line instead.
+  INVOCATION. python3 -I -B <installed path>/tools/check_brief_claims.py [--require-config]
+      --input-dir DIR [--template PATH] [--registry PATH] BRIEF...
+  The hook runs it from an installed path; the configuration is read from that installation's root (see
+  CONFIGURATION). Inputs are read only: the configuration, each BRIEF, the review files in DIR that the
+  brief names (each at most MAX_INPUT, 4 MiB; a larger one is cannot-evaluate) and, for advisory lines only,
+  --template and --registry. Nothing is written (-B keeps the interpreter from writing bytecode) and
+  nothing touches the network; the only other processes are this file's own regex and advisory children.
+
+  EXIT CODES (several briefs: the highest). A hook dispatches ONLY on exit 0 and refuses on every other
+  status, including one this list does not name (an uncaught interpreter error exits 1; a signal death is
+  negative):
+    0  every block line equals its file's trailer verdict and every recognized named review file present
+       in DIR has a block line; in particular a brief with no claims block that names no review file;
+       NOT APPLICABLE with no configuration and no --require-config
+    1  nothing is cannot-evaluate, and a block line's token differs from its file's trailer verdict, or a
+       recognized named review file present in DIR has no block line (UNCLAIMED): a brief that names a
+       review file and has no claims line for it exits 1
+    2  cannot evaluate: a block-named review file that is missing, unreadable, not UTF-8, over 4 MiB, a
+       directory or outside DIR; a missing or malformed trailer or an unclosed fence in that file; a
+       malformed block or a near-miss marker; an unreadable brief; an unclosed fence or verbatim section in
+       the brief; a malformed configuration; a missing DIR; an adopter review-file-pattern over its bound;
+       a usage error; no configuration under --require-config; the run deadline passed
+
+  OUTPUT, on stdout, one result per line; the FIRST WORD of every line is one of these:
+    BRIEF <path> sha256=<hex>                              (first, for each readable brief)
+    MATCH <name> VERDICT <token>: <path> sha256=<hex>
+    MISMATCH <name> VERDICT <token>: <path> sha256=<hex>: the trailer VERDICT (line <n>) is <token>
+    UNCLAIMED <name>: brief line <n> names it and the claims block has no line for it
+    ABSENT <name>: brief line <n> names it and --input-dir holds no such file, ...  (exit unchanged)
+    CANNOT-EVALUATE <subject>: <reason>
+    brief-claims: <path>: <n> blocking result(s) (<tally>); exit <0|1|2>
+    ADVISORY <MATCH|WARN|CANNOT-EVALUATE|EXEMPT> <detail>  (never affects the exit code)
+  For each brief: BRIEF, its blocking lines, then its brief-claims: summary line (the verdict, flushed
+  before any advisory work starts), then its ADVISORY lines. A run-level failure (configuration, usage,
+  DIR, the run deadline) prints one CANNOT-EVALUATE line; for --emit it goes to stderr.
+
+  RUNTIME BOUND. The check and --emit forms end within RUN_DEADLINE (7 seconds) of wall clock after the
+  interpreter has started (start-up is not counted; it is well under a second on a working host), so a
+  hook bound of about 10 seconds sees the tool's own exit, never a kill: an overrun is the tool's own
+  CANNOT-EVALUATE run line and exit 2. SIGALRM enforces it where the platform has it; within it the regex
+  child has REGEX_DEADLINE (4 seconds, CPU limit CHILD_CPU 3 seconds) and the advisory child
+  ADVISORY_DEADLINE (2.5 seconds, CPU limit 2 seconds), each cut to what is left of the run. Several
+  briefs in one run share the one deadline.
 
   check_brief_claims.py --emit --input-dir DIR NAME...
       Print the claims block for the review files NAME... (basenames inside DIR, in the order given) on
@@ -103,21 +141,22 @@ MACHINE CONTRACT (for the dispatch-time hook; stable for format-version 1 and bl
 WHAT IT DOES NOT PROVE (class c, partial). NOTHING BLOCKS UNLESS THIS RUNS AT DISPATCH: the shipped CI step
 examines no brief, and the dispatch-time hook that runs the check form on every brief is built and shipped
 outside this repository. Prose restatements, finding ids, grades, counts, template carry-over, embedded
-sections and foreign ids are advisory only, and the advisory rules miss shapes (slash-joined tokens such
-as "NO BLOCKERS/BLOCKERS FOUND respectively" read as an option list). The block compares verdict tokens only: it does not prove that
-the brief's prose agrees with the block, that a file's body agrees with its trailer, or that a file did not
-change after the check while keeping its verdict. A review file named in a form the completeness scan does
-not recognize (a name split across lines, a path whose basename does not full-match the pattern, a name
-inside a fence or quote) needs no block line. A prose path naming a same-named file in another directory
-is covered by the block line for that basename, which reads the file inside DIR.
+sections and foreign ids are advisory only, and the advisory rules miss shapes (above). The block compares
+verdict tokens only: it does not prove that the brief's prose agrees with the block, that a file's body
+agrees with its trailer, or that a file did not change after the check while keeping its verdict. A review
+file named in a form the completeness scan does not recognize (a name split across lines, a path whose
+basename does not full-match the pattern, a name inside a fence, a quote or a declared verbatim section)
+needs no block line, and neither does a recognized name DIR does not hold (ABSENT). A prose path naming a
+same-named file in another directory is covered by the block line for that basename, which reads the file
+inside DIR.
 
 BOUNDS. The two adopter regexes (review-file-pattern, id-pattern) are capped at 512 characters and are
-matched only in a child interpreter (python -I -B) under a CPU-time limit (RLIMIT_CPU, 10 seconds, the
-first bound a CPU-bound regex reaches) and a 20-second wall-clock deadline (which bounds a child that is
-not using CPU); on Linux the child dies with its parent (PR_SET_PDEATHSIG), and its address space is capped
-at 1 GiB where the platform allows. An overrun, a failed child, a child that writes anything to stderr, and
-a platform with no RLIMIT_CPU are cannot-evaluate: exit 2 for the review-file-pattern, an advisory line for
-the id-pattern.
+matched only in a child interpreter (python -I -B) under a CPU-time limit (RLIMIT_CPU, the first bound a
+CPU-bound regex reaches) and a wall-clock deadline (which bounds a child that is not using CPU); on Linux
+every child dies with its parent (PR_SET_PDEATHSIG), and its address space is capped at 1 GiB where the
+platform allows. An overrun, a failed child, a child that writes anything to stderr, and a platform with
+no RLIMIT_CPU are cannot-evaluate: exit 2 for the review-file-pattern, an advisory line for the
+id-pattern.
 """
 import sys
 
@@ -136,6 +175,7 @@ import re
 import signal
 import stat
 import subprocess
+import time
 import unicodedata
 from pathlib import Path
 
@@ -153,7 +193,12 @@ CONFIG_KEYS = frozenset(("format-version", "families", "review-file-pattern", "v
 REGISTRY_KEYS = frozenset(("format-version", "target", "aliases", "dependencies", "id-pattern"))
 BLOCK_BEGIN = "BEGIN BRIEF-CLAIMS 1"
 BLOCK_END = "END BRIEF-CLAIMS"
-MARKER_KEYS = ("beginbriefclaims", "endbriefclaims")  # a line reading as one of these is a marker or a near miss
+# A near-miss marker: a whole line that, normalized, case-folded and stripped, is BEGIN or END, BRIEF, CLAIMS
+# and an optional version (v or version, then digits and dots) separated and surrounded only by non-word
+# characters. Ordinary prose ("Begin brief claims investigation tomorrow.") has other words and is not one.
+NEAR_MARKER_RE = re.compile(r"[\W_]*(?:begin|end)[\W_]*brief[\W_]*claims"
+                            r"(?:[\W_]*(?:(?:v|version)[\W_]*)?\d+(?:\.\d+)*)?[\W_]*")
+NEAR_MARKER_MAX = 80  # a stripped line longer than this is never read as a near-miss marker
 NAME_RE = re.compile(r"[!-.0-~]+")  # a block name: printable ASCII, no space, no slash
 VERDICT_TOKEN_RE = re.compile(r"[!-~]+(?: [!-~]+)*")
 TRAILER_PREFIX_RE = re.compile(r"[!-~][ -~]*")
@@ -189,21 +234,40 @@ MAX_RANGE = 50       # a wider id range is cannot-evaluate, never expanded
 MAX_PATTERN = 512    # an adopter regex longer than this is a malformed configuration or registry
 MAX_ROUND_DIGITS = 9  # a longer round, finding number or grade count is not parsed (cannot-evaluate)
 MAX_NUMBER_DIGITS = 18  # a predicate count with more digits is outside the supported number grammar
-REGEX_DEADLINE = 20.0  # wall-clock seconds for one adopter-regex run in the child interpreter
-CHILD_CPU = 10  # the child's CPU-time limit in seconds (RLIMIT_CPU): below the deadline, so a CPU-bound regex
-#                meets it first; the deadline bounds a child that is not using CPU
-CHILD_MEMORY = 1 << 30  # the child's address-space cap, where the platform allows one
-MATCH, MISMATCH, CANNOT, WARN, EXEMPT, UNCLAIMED = (
-    "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT", "UNCLAIMED")
+MAX_INPUT = 4 << 20  # bytes: a larger brief, review file, template, registry or configuration is cannot-evaluate
+RUN_DEADLINE = 7.0  # the check and --emit forms' total wall-clock bound in seconds (a 10-second hook kills later)
+REGEX_DEADLINE = 4.0  # wall-clock seconds for one adopter-regex run in the child interpreter
+CHILD_CPU = 3  # the child's CPU-time limit in seconds (RLIMIT_CPU): below the deadline, so a CPU-bound regex
+#               meets it first; the deadline bounds a child that is not using CPU
+ADVISORY_DEADLINE = 2.5  # wall-clock seconds for the advisory child (its CPU limit is the whole seconds below)
+ADVISORY_MAX = 256 << 10  # characters: advisory size budget (the brief's own text, sections, named files, template)
+RESERVE = 0.5  # seconds of the run deadline kept back for printing after the advisory child
+CHILD_MEMORY = 1 << 30  # a child's address-space cap, where the platform allows one
+MATCH, MISMATCH, CANNOT, WARN, EXEMPT, UNCLAIMED, ABSENT = (
+    "MATCH", "MISMATCH", "CANNOT-EVALUATE", "WARN", "EXEMPT", "UNCLAIMED", "ABSENT")
+_RUN_END = [None]  # the monotonic time the current run must end by (None outside a bounded run)
 
 
 class GateError(Exception):
     """An input the lint cannot read, parse or resolve: reported as exit 2 (fail-closed)."""
 
 
+class Overrun(BaseException):
+    """The run passed RUN_DEADLINE (raised by the SIGALRM handler): reported as exit 2 (fail-closed)."""
+
+
+def _overrun(signum, frame):
+    raise Overrun()
+
+
+def _remaining():
+    """Seconds left in the current run's deadline (infinite outside a bounded run)."""
+    return float("inf") if _RUN_END[0] is None else _RUN_END[0] - time.monotonic()
+
+
 def _read_bytes(path):
     with open(path, "rb") as handle:
-        return handle.read()
+        return handle.read(MAX_INPUT + 1)
 
 
 def read_text(path, what):
@@ -218,6 +282,8 @@ def read_text(path, what):
         data = _read_bytes(path)
     except OSError as exc:
         raise GateError("{} {} cannot be read ({})".format(what, path, exc.strerror or exc))
+    if len(data) > MAX_INPUT:
+        raise GateError("{} {} is larger than {} bytes".format(what, path, MAX_INPUT))
     try:
         return data.decode("utf-8"), hashlib.sha256(data).hexdigest()
     except UnicodeDecodeError:
@@ -351,14 +417,14 @@ def load_registry(path):
 
 # --- bounded adopter regexes ------------------------------------------------------------------------
 
-def _child_limits(parent):
-    """In the regex child only, before it runs: a CPU-time limit (RLIMIT_CPU: SIGXCPU after CHILD_CPU
+def _child_limits(parent, cpu):
+    """In a child (regex or advisory) only, before it runs: a CPU-time limit (RLIMIT_CPU: SIGXCPU after cpu
     seconds), which bounds the child even when no parent is left to enforce the deadline; on Linux,
     SIGKILL when the parent dies (PR_SET_PDEATHSIG) and an immediate exit when the parent is already
     gone; and an address-space cap (best effort). A failure of the first two raises, so the child never
     starts unbounded (subprocess reports it and bounded_regex fails closed)."""
     import resource
-    resource.setrlimit(resource.RLIMIT_CPU, (CHILD_CPU, CHILD_CPU + 1))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
     if sys.platform.startswith("linux"):
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
@@ -373,12 +439,17 @@ def _child_limits(parent):
 
 
 def bounded_regex(jobs):
-    """Match adopter regexes in a child interpreter under REGEX_DEADLINE seconds. A job is (pattern, op,
-    items): op "fullmatch" answers a groupdict or None per item, op "findall" the matched texts per item.
-    An overrun, a failed child, or a child that writes anything to stderr is a GateError (exit 2): an
-    adopter regex can never hang the gate, and a child's answers count only from a clean run."""
+    """Match adopter regexes in a child interpreter under REGEX_DEADLINE seconds (less when less of the run
+    deadline is left). A job is (pattern, op, items): op "fullmatch" answers a groupdict or None per item,
+    op "findall" the matched texts per item. An overrun, a failed child, or a child that writes anything to
+    stderr is a GateError (exit 2): an adopter regex can never hang the gate, and a child's answers count
+    only from a clean run."""
     if not any(items for _, _, items in jobs):
         return [[] for _ in jobs]
+    deadline = min(REGEX_DEADLINE, _remaining())
+    if deadline <= 0:
+        raise GateError("the run's {:g}-second deadline passed before an adopter regex could run".format(
+            RUN_DEADLINE))
     if not sys.executable:
         raise GateError("no interpreter path for the regex child")
     if os.name != "posix":
@@ -386,11 +457,11 @@ def bounded_regex(jobs):
     payload = json.dumps([dict(pattern=p, op=op, items=items) for p, op, items in jobs]).encode("ascii")
     argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--regex-worker"]
     try:
-        done = subprocess.run(argv, input=payload, capture_output=True, timeout=REGEX_DEADLINE,
-                              preexec_fn=functools.partial(_child_limits, os.getpid()))
+        done = subprocess.run(argv, input=payload, capture_output=True, timeout=deadline,
+                              preexec_fn=functools.partial(_child_limits, os.getpid(), CHILD_CPU))
     except subprocess.TimeoutExpired:
-        raise GateError("an adopter regex did not finish within the {:g}-second deadline (it exceeds "
-                        "the bound)".format(REGEX_DEADLINE))
+        raise GateError("an adopter regex did not finish within the {:.3g}-second deadline (it exceeds "
+                        "the bound)".format(deadline))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise GateError("the regex child could not run ({})".format(exc))
     xcpu = getattr(signal, "SIGXCPU", None)
@@ -436,13 +507,25 @@ def _invisible(c):
     return cat == "Cf" or (cat == "Cc" and not c.isspace()) or any(a <= o <= b for a, b in IGNORABLE)
 
 
+class _CleanTable(dict):
+    """The str.translate table of _clean, filled the first time each code point is seen: a blank-rendering
+    character becomes a space, any other invisible character is removed, whitespace becomes a space."""
+    def __missing__(self, o):
+        c = chr(o)
+        value = " " if o in BLANKS else None if _invisible(c) else " " if c.isspace() else c
+        self[o] = value
+        return value
+
+
+_CLEAN_TABLE = _CleanTable()
+
+
 def _clean(line):
     """One line with every invisible character removed and every whitespace or blank-rendering character
     a space. File names are read from this form."""
     if line.isascii() and line.isprintable():
         return line
-    return "".join(" " if c.isspace() or ord(c) in BLANKS else c for c in line
-                   if ord(c) in BLANKS or not _invisible(c))
+    return line.translate(_CLEAN_TABLE)
 
 
 def _norm(line):
@@ -549,6 +632,18 @@ def _blank(m):
     return " " * len(m.group(0))
 
 
+def _masked(line, spans):
+    """line with every (start, end) span blanked, in one pass (never one string copy per span)."""
+    out, at = [], 0
+    for a, b in sorted(spans):
+        a = max(a, at)
+        if b > a:
+            out.append(line[at:a] + " " * (b - a))
+            at = b
+    out.append(line[at:])
+    return "".join(out)
+
+
 def _tokens(own):
     for n, line in own:
         for m in TOKEN_RE.finditer(line):
@@ -631,15 +726,24 @@ def verdict_hits(text, cfg):
     """THE verdict classifier, shared by the brief side and the source side. Returns (hits, ambiguous),
     each [(start, end, token)] in text order. A space inside a token matches any run of whitespace; an
     occurrence lying inside a longer token's occurrence belongs to the longer token; occurrences that
-    otherwise overlap are ambiguous."""
+    otherwise overlap are ambiguous. One sort and two linear sweeps (no pairwise scan): two distinct
+    tokens never share a span (they are distinct word sequences), so an occurrence lies inside a longer
+    one exactly when an occurrence sorted before it (start ascending, end descending) reaches its end."""
     occ = []
     for token, regex in cfg["verdict_res"]:
         occ.extend((m.start(), m.end(), token) for m in regex.finditer(text))
-    occ = [o for o in occ if not any(p[0] <= o[0] and o[1] <= p[1] and p[1] - p[0] > o[1] - o[0]
-                                     for p in occ)]
-    amb = [o for k, o in enumerate(occ) if any(q != k and p[0] < o[1] and o[0] < p[1]
-                                               for q, p in enumerate(occ))]
-    return sorted(o for o in occ if o not in amb), sorted(amb)
+    occ.sort(key=lambda o: (o[0], -o[1]))
+    kept, reach = [], -1
+    for o in occ:
+        if reach < o[1]:
+            kept.append(o)
+        reach = max(reach, o[1])
+    hits, amb, reach = [], [], -1
+    for k, o in enumerate(kept):
+        after = kept[k + 1][0] if k + 1 < len(kept) else len(text) + 1
+        (amb if reach > o[0] or after < o[1] else hits).append(o)
+        reach = max(reach, o[1])
+    return hits, amb
 
 
 def classify_verdict(value, cfg):
@@ -743,11 +847,10 @@ def id_present(info, grade, num):
     return bool(lit.search(info["text"]))
 
 
-def _reading(toks, i):
+def _reading(toks, isnum, i):
     """How the source pairs the predicate word toks[i]: ("of", N, M) for "N of M word"; ("one", N) for the
     one number among the three words before it; ("unclear", wording) for two numbers there, or a number
-    that is itself the M of "N of M"; None for no number."""
-    isnum = [t[0] in SIGNS or t[0].isdigit() for t in toks]
+    that is itself the M of "N of M"; None for no number. isnum[k] tells whether toks[k] is a number."""
     if i >= 3 and isnum[i - 1] and toks[i - 2].lower() == "of" and isnum[i - 3]:
         return ("of", toks[i - 3], toks[i - 1])
     window = [j for j in range(max(0, i - 3), i) if isnum[j]]
@@ -759,21 +862,28 @@ def _reading(toks, i):
     return ("one", toks[j])
 
 
-def predicate_check(claim, pred, text):
-    """(status, detail) for a predicate claim, or None when the source never pairs the word. claim is the
-    brief's number tokens: (N,) for "N word", (N, M) for "N of M word". Clauses end at , ; : . ! ? before
-    whitespace and at line ends; _reading pairs the word within its clause. A number keeps its sign; a
-    number outside the supported grammar (_number) on either side, two numbers in the window, different
-    readings in different clauses, or a bare count that equals one number of an "N of M" reading is
-    ambiguous (cannot-evaluate), never a pairing across an intervening number."""
-    readings, unclear = [], []
+def pred_index(text):
+    """Every word's readings in the source, in one pass: dict(word lower-cased -> (readings, unclear))."""
+    index = dict()
     for clause in CLAUSE_RE.split(text):
         toks = SRC_WORD_RE.findall(clause)
+        isnum = [t[0] in SIGNS or t[0].isdigit() for t in toks]
         for i, t in enumerate(toks):
-            if t.lower() == pred:
-                r = _reading(toks, i)
-                if r is not None:
-                    (unclear if r[0] == "unclear" else readings).append(r)
+            r = None if isnum[i] else _reading(toks, isnum, i)
+            if r is not None:
+                index.setdefault(t.lower(), ([], []))[r[0] == "unclear"].append(r)
+    return index
+
+
+def predicate_check(claim, pred, index):
+    """(status, detail) for a predicate claim, or None when the source never pairs the word. claim is the
+    brief's number tokens: (N,) for "N word", (N, M) for "N of M word"; index is the source's pred_index.
+    Clauses end at , ; : . ! ? before whitespace and at line ends; _reading pairs the word within its
+    clause. A number keeps its sign; a number outside the supported grammar (_number) on either side, two
+    numbers in the window, different readings in different clauses, or a bare count that equals one
+    number of an "N of M" reading is ambiguous (cannot-evaluate), never a pairing across an intervening
+    number."""
+    readings, unclear = index.get(pred, ([], []))
     if not readings and not unclear:
         return None
     if unclear:
@@ -815,8 +925,7 @@ def parse_claims(text, cfg):
     options = _options(buf, hits)
     claims.extend(("verdict", h[2], None) for k, h in enumerate(hits) if k not in options)
     claims.extend(("verdict?", " ".join(buf[a:b].split()), None) for a, b in _clusters(amb))
-    for a, b, _ in hits + amb:
-        buf = buf[:a] + " " * (b - a) + buf[b:]
+    buf = _masked(buf, [(a, b) for a, b, _ in hits + amb])
 
     def take(regex, kind):
         nonlocal buf
@@ -963,7 +1072,9 @@ def judge_segment(seg, files, cfg, infos):
             out.append(_res(MATCH if have == num else MISMATCH, n, claim, src,
                             "the source grades {} finding(s) {}".format(have, grade)))
         else:
-            verdict = predicate_check(m[0], m[1], info["text"])
+            if "preds" not in info:
+                info["preds"] = pred_index(info["text"])
+            verdict = predicate_check(m[0], m[1], info["preds"])
             if verdict is not None:
                 out.append(_res(verdict[0], n, claim, src,
                                 verdict[1]))
@@ -1037,11 +1148,10 @@ def collect_segments(own, refs, cfg, files):
                                   "named {} file for item {} round {}".format(fam, g["item"], rnd))
             segs.append(dict(lineno=ref["lineno"], text=text, **bound))
     # Family-attributed claims elsewhere in the brief's own text bind to the named file of the family.
+    for ref in refs:
+        used.setdefault(ref["lineno"], []).append((ref["start"], ref["end"]))
     for n, line in own:
-        spans = list(used.get(n, [])) + [(r["start"], r["end"]) for r in refs if r["lineno"] == n]
-        for a, b in spans:
-            line = line[:a] + " " * (b - a) + line[b:]
-        line = _norm(line)
+        line = _norm(_masked(line, used.get(n, [])))
         marks = list(cfg["family_re"].finditer(line))
         for k, m in enumerate(marks):
             stop = marks[k + 1].start() if k + 1 < len(marks) else len(line)
@@ -1102,14 +1212,15 @@ def _title(own):
 def check_template(own, refs, parens, files, t_own, t_refs):
     out = []
     t_lines = dict(t_own)
-    t_parens = []
+    t_parens = dict()
     for ref in t_refs:
         found = _paren_after(t_lines[ref["lineno"]], ref["end"])
         if found is not None and found[1] is not None:
-            t_parens.append((ref["base"], " ".join(_norm(t_lines[ref["lineno"]][found[0] + 1:found[1]]).split())))
+            content = " ".join(_norm(t_lines[ref["lineno"]][found[0] + 1:found[1]]).split())
+            t_parens.setdefault(content, set()).add(ref["base"])
     for ref, content in parens:
         norm = " ".join(content.split())
-        moved = sorted(set(b for b, c in t_parens if c == norm and b != ref["base"]))
+        moved = sorted(t_parens.get(norm, set()) - set([ref["base"]]))
         f = files[ref["token"]]
         if moved:
             out.append(_res(MISMATCH, ref["lineno"], "({})".format(norm), (f["path"], f["sha"]),
@@ -1150,10 +1261,24 @@ def raw_lines(text):
 
 
 def trailer_verdict(text, cfg):
-    """(token, line number) of a review file's trailer record, or a GateError. Reading upward from the last
-    line, blank lines (empty or spaces and tabs) and lines starting with a configured trailer prefix are
-    skipped; the first other line must be exactly `VERDICT: <token>`. The body is never read."""
+    """(token, line number) of a review file's trailer record, or a GateError. A fence that is never closed
+    is a GateError (the record could be quoted text). Reading upward from the last line, blank lines (empty
+    or spaces and tabs) and lines starting with a configured trailer prefix are skipped; the first other
+    line must be exactly `VERDICT: <token>`. The body is scanned for fence delimiters only: its contents
+    never determine the token."""
     lines = raw_lines(text)
+    fence, opened = None, None
+    for n, line in enumerate(lines, 1):
+        if fence is not None:
+            if _closes(line, fence):
+                fence = None
+            continue
+        f = _fence(line)
+        if f:
+            fence, opened = f, n
+    if fence is not None:
+        raise GateError("no trailer record: a fence opened at line {} is never closed, so the last VERDICT "
+                        "line may be quoted text".format(opened))
     records = dict(("VERDICT: " + t, t) for t in cfg["verdicts"])
     for n in range(len(lines), 0, -1):
         line = lines[n - 1]
@@ -1166,11 +1291,15 @@ def trailer_verdict(text, cfg):
     raise GateError("no trailer record: the file holds no line but blank and trailer lines")
 
 
-def _marker_key(line):
-    """A line's marker reading: normalized, case-folded, with every character but letters and digits
-    removed. A line reading as BEGIN BRIEF-CLAIMS or END BRIEF-CLAIMS that is not exactly a marker is a
-    near miss (an indented, BOM-prefixed, lower-case, re-spaced or wrong-version marker)."""
-    return "".join(c for c in _norm(line).casefold() if c.isalnum())
+def _near_marker(line):
+    """True for a line that is not exactly a marker but reads as one as a WHOLE line (NEAR_MARKER_RE over
+    the normalized, case-folded, stripped line of at most NEAR_MARKER_MAX characters): an indented,
+    BOM-prefixed, lower-case, re-spaced, decorated or wrong-version marker. A line with any other word
+    is prose."""
+    if len(line) > 4 * NEAR_MARKER_MAX:
+        return False
+    key = _norm(line).casefold().strip()
+    return len(key) <= NEAR_MARKER_MAX and NEAR_MARKER_RE.fullmatch(key) is not None
 
 
 def parse_block(lines, cfg):
@@ -1211,8 +1340,7 @@ def parse_block(lines, cfg):
                 seen[m.group(1)] = n
                 entries.append((n, m.group(1), m.group(2)))
             continue
-        key = _marker_key(line)
-        if any(key.startswith(k) for k in MARKER_KEYS):
+        if _near_marker(line):
             problems.append("line {}: reads as a claims-block marker but is not exactly {!r} or {!r}: {!r}".format(
                 n, BLOCK_BEGIN, BLOCK_END, line[:120]))
     if opened is not None:
@@ -1237,7 +1365,8 @@ def _file_entry(name, cfg, opts, groups_of):
 def check_block(lines, own, cfg, opts, groups_of, entries, problems):
     """The blocking results: [(status, line)]. Block problems and unreadable files are cannot-evaluate,
     a token differing from the trailer is a MISMATCH, and a recognized named file with no block line is
-    UNCLAIMED (a mismatch)."""
+    UNCLAIMED (a mismatch), unless DIR holds no entry of that basename: such a file cannot be claimed
+    (a block line for it is cannot-evaluate), so it is reported ABSENT and does not change the exit code."""
     out = [(CANNOT, "CANNOT-EVALUATE block: " + p) for p in problems]
     for n, name, token in entries:
         try:
@@ -1258,6 +1387,14 @@ def check_block(lines, own, cfg, opts, groups_of, entries, problems):
         if groups_of.get(base) is not None and base not in claimed:
             first.setdefault(base, n)
     for base in sorted(first, key=lambda b: (first[b], b)):
+        try:
+            os.lstat(os.path.join(opts["input_dir"], base))
+        except FileNotFoundError:
+            out.append((ABSENT, "ABSENT {}: brief line {} names it and --input-dir holds no such file, so it "
+                                "cannot be claimed (reported, not checked)".format(base, first[base])))
+            continue
+        except OSError:
+            pass
         out.append((UNCLAIMED, "UNCLAIMED {}: brief line {} names it and the claims block has no line for "
                                "it".format(base, first[base])))
     return out
@@ -1286,6 +1423,7 @@ def advisory_prose(own, sections, cfg, opts, groups_of):
 def _advisory(own, sections, cfg, opts, groups_of):
     out = []
     template_text = read_text(opts["template"], "template")[0] if opts["template"] else None
+    size = _own_size(own, sections) + len(template_text or "")
     registry = load_registry(opts["registry"]) if opts["registry"] else None
     t_own = brief_regions(template_text, cfg, "template")[0] if template_text is not None else []
     t_bases = sorted(set(tok.rsplit("/", 1)[-1] for _, _, tok in _tokens(t_own)))
@@ -1309,6 +1447,10 @@ def _advisory(own, sections, cfg, opts, groups_of):
     if out:
         return out + ["ADVISORY CANNOT-EVALUATE prose: a file named in prose could not be read; the prose "
                       "was not analyzed"]
+    size += sum(len(f["text"]) for f in files.values())
+    if size > ADVISORY_MAX:
+        raise GateError("the brief's own text, its sections, the template and the files named in prose hold "
+                        "{} characters, over the advisory size budget of {}".format(size, ADVISORY_MAX))
     infos = dict((t, analyze_source(f["text"], cfg)) for t, f in files.items())
     segs, parens = collect_segments(own, refs, cfg, files)
     results = []
@@ -1322,12 +1464,74 @@ def _advisory(own, sections, cfg, opts, groups_of):
     return [_advisory_line(r) for r in results]
 
 
+def _own_size(own, sections):
+    return sum(len(line) for _, line in own) + sum(len(line) for sec in sections for line in sec["lines"])
+
+
+def advisory(own, sections, opts, groups_of):
+    """The advisory lines of one brief, computed in a child interpreter under its own budgets: at most
+    ADVISORY_MAX characters of input and ADVISORY_DEADLINE seconds of wall clock (less when less of the
+    run deadline is left), a CPU-time limit, and on Linux death with its parent. Past a budget, or on any
+    failure of the child, the answer is ONE ADVISORY CANNOT-EVALUATE line: the advisory layer never
+    delays or changes the blocking result, which is printed before this runs."""
+    def one(why):
+        return ["ADVISORY CANNOT-EVALUATE prose: {}; the prose was not analyzed".format(why)]
+    size = _own_size(own, sections)
+    if size > ADVISORY_MAX:
+        return one("the brief's own text and sections hold {} characters, over the advisory size budget of "
+                   "{}".format(size, ADVISORY_MAX))
+    budget = min(ADVISORY_DEADLINE, _remaining() - RESERVE)
+    if budget < 0.5:
+        return one("less than half a second of the run's {:g}-second deadline is left".format(RUN_DEADLINE))
+    if not sys.executable or os.name != "posix":
+        return one("the advisory child needs an interpreter path and a POSIX CPU-time limit")
+    job = dict(root=str(opts["root"]), own=own, sections=sections, groups_of=groups_of,
+               opts=dict((k, opts[k]) for k in ("input_dir", "template", "registry")),
+               regex_deadline=round(budget * 0.6, 3), child_cpu=max(1, int(budget * 0.6) - 1))
+    argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--advisory-worker"]
+    try:
+        done = subprocess.run(argv, input=json.dumps(job).encode("ascii"), capture_output=True, timeout=budget,
+                              preexec_fn=functools.partial(_child_limits, os.getpid(), max(1, int(budget))))
+    except subprocess.TimeoutExpired:
+        return one("the advisory analysis did not finish within its {:.3g}-second budget".format(budget))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return one("the advisory child could not run ({})".format(exc))
+    if done.returncode != 0 or done.stderr:
+        tail = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:]
+        return one("the advisory child failed with exit {} ({})".format(done.returncode, " ".join(tail)))
+    try:
+        lines = json.loads(done.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return one("the advisory child answered unreadably ({})".format(exc))
+    if not isinstance(lines, list) or not all(isinstance(x, str) and x.startswith("ADVISORY ")
+                                              and "\n" not in x and "\r" not in x for x in lines):
+        return one("the advisory child answered the wrong shape")
+    return lines
+
+
+def advisory_worker():
+    """The child side of advisory(): the job as JSON on stdin, the ADVISORY lines as JSON on stdout. The
+    configuration is read again here (the parent validated it); the job sets this child's regex bounds."""
+    global REGEX_DEADLINE, CHILD_CPU
+    job = json.loads(sys.stdin.buffer.read().decode("ascii"))
+    REGEX_DEADLINE, CHILD_CPU = float(job["regex_deadline"]), int(job["child_cpu"])
+    try:
+        cfg = load_config(Path(job["root"]) / CONFIG_REL)
+    except GateError as exc:
+        lines = ["ADVISORY CANNOT-EVALUATE prose: {}; the prose was not analyzed".format(exc)]
+    else:
+        lines = advisory_prose([tuple(x) for x in job["own"]], job["sections"], cfg, job["opts"],
+                               job["groups_of"])
+    sys.stdout.write(json.dumps(lines))
+    return 0
+
+
 # --- driver -----------------------------------------------------------------------------------------
 
 def check_brief(path, cfg, opts):
-    """Check one brief; print its blocking results, then its advisory lines, then its summary line.
-    Returns the brief's exit code 0/1/2 (the advisory lines never change it)."""
-    results, advisory = [], []
+    """Check one brief; print its blocking results and its summary line (flushed), THEN compute and print
+    its advisory lines. Returns the brief's exit code 0/1/2 (the advisory lines never change it)."""
+    results, own = [], None
     try:
         text, digest = read_text(path, "brief")
         print("BRIEF {} sha256={}".format(path, digest))
@@ -1338,19 +1542,20 @@ def check_brief(path, cfg, opts):
         found = bounded_regex([(cfg["pattern"].pattern, "fullmatch", names)])[0]
         groups_of = dict((b, _groups(f)) for b, f in zip(names, found) if f is not None)
         results = check_block(lines, own, cfg, opts, groups_of, entries, problems)
-        advisory = advisory_prose(own, sections, cfg, opts, groups_of)
     except GateError as exc:
         results.append((CANNOT, "CANNOT-EVALUATE brief {}: {}".format(path, exc)))
+        own = None
     for _, line in results:
-        print(line)
-    for line in advisory:
         print(line)
     statuses = [s for s, _ in results]
     rc = 2 if CANNOT in statuses else 1 if (MISMATCH in statuses or UNCLAIMED in statuses) else 0
-    tally = ", ".join("{} {}".format(statuses.count(s), s) for s in (MATCH, MISMATCH, UNCLAIMED, CANNOT)
+    tally = ", ".join("{} {}".format(statuses.count(s), s) for s in (MATCH, MISMATCH, UNCLAIMED, ABSENT, CANNOT)
                       if s in statuses) or "none"
-    print("brief-claims: {}: {} blocking result(s) ({}); {} advisory line(s); exit {}".format(
-        path, len(results), tally, len(advisory), rc))
+    print("brief-claims: {}: {} blocking result(s) ({}); exit {}".format(path, len(results), tally, rc))
+    sys.stdout.flush()
+    if own is not None:
+        for line in advisory(own, sections, opts, groups_of):
+            print(line)
     return rc
 
 
@@ -1380,9 +1585,34 @@ def emit(cfg, opts):
 
 
 def run(root, opts):
-    """Check the named briefs (or --emit a block) under the adopter configuration at root. Returns 0/1/2."""
-    config_path = Path(root) / CONFIG_REL
+    """Check the named briefs (or --emit a block) under the adopter configuration at root, within
+    RUN_DEADLINE seconds of wall clock (SIGALRM where the platform has it, plus every child's own
+    deadline). Returns 0/1/2."""
     stream = sys.stderr if opts["emit"] else sys.stdout
+    _RUN_END[0] = time.monotonic() + RUN_DEADLINE
+    armed, previous = False, None
+    try:
+        previous = signal.signal(signal.SIGALRM, _overrun)
+        armed = True
+        signal.setitimer(signal.ITIMER_REAL, RUN_DEADLINE)
+    except (AttributeError, ValueError, OSError):
+        pass  # no alarm here (not POSIX, or not the main thread): each child's deadline still holds
+    try:
+        return _run(root, opts, stream)
+    except Overrun:
+        print("CANNOT-EVALUATE run: the check did not finish within its {:g}-second deadline; "
+              "fail-closed".format(RUN_DEADLINE), file=stream)
+        return 2
+    finally:
+        _RUN_END[0] = None
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
+
+
+def _run(root, opts, stream):
+    config_path = Path(root) / CONFIG_REL
+    opts = dict(opts, root=str(root))
     try:
         try:
             st = os.lstat(config_path)
@@ -1415,8 +1645,12 @@ def run(root, opts):
         return 2
 
 
-def parse_args(argv):
-    """The options, or None for a usage error (exit 2)."""
+USAGE = ("check_brief_claims.py [--require-config] [--input-dir DIR] [--template PATH] [--registry PATH] "
+         "[BRIEF...] | --emit --input-dir DIR NAME... | --self-test [--execution-report ABS_PATH]")
+
+
+def _parse(argv):
+    """(options, None), or (None, the reason for a usage error)."""
     opts = dict(self_test=False, emit=False, require_config=False, input_dir=None, template=None,
                 registry=None, briefs=[])
     it = iter(argv)
@@ -1426,24 +1660,41 @@ def parse_args(argv):
         elif arg in ("--input-dir", "--template", "--registry"):
             value = next(it, None)
             if value is None:
-                return None
+                return None, "{} needs a value".format(arg)
             opts[arg[2:].replace("-", "_")] = value
         elif arg.startswith("-"):
-            return None
+            return None, "unknown option {!r}".format(arg)
         else:
             opts["briefs"].append(arg)
     if opts["emit"] and (opts["template"] or opts["registry"]):
-        return None
-    return opts
+        return None, "--emit takes no --template or --registry"
+    if opts["self_test"] and argv != ["--self-test"]:
+        return None, "--self-test takes no other argument"
+    return opts, None
+
+
+def parse_args(argv):
+    """The options, or None for a usage error (exit 2)."""
+    return _parse(argv)[0]
+
+
+def usage_error(argv, why):
+    """A usage error through the documented formatter: one CANNOT-EVALUATE line (on stderr for an --emit
+    invocation, which keeps stdout for the block, else on stdout). Returns 2."""
+    print("CANNOT-EVALUATE usage: {}; usage: {}; fail-closed".format(why, USAGE),
+          file=sys.stderr if "--emit" in argv else sys.stdout)
+    return 2
 
 
 # --- self-test --------------------------------------------------------------------------------------
 # Every vector runs the real run() over a synthetic tempdir tree: placeholder families, items and files
 # only. No randomness, no network; the clocks are the regex child's deadline (two vectors shorten it to
-# two seconds), its CPU limit (one vector lowers it to one second), and the Linux parent-death probe (a
-# copy of this gate in the tempdir, killed once its child exists). Every check id is a literal, and the
-# executed set is reconciled with this suite's entry in tools/selftest_checks.toml (in-run here, and by
-# tools/check_selftest_execution.py --suite brief-claims-selftest).
+# two seconds), its CPU limit (one vector lowers it to one second), the run deadline (one vector lowers
+# it to one second), the Linux parent-death probe (a copy of this gate in the tempdir, killed once its
+# child exists), and the size regressions (a copy of this gate in a capped child, which must end inside
+# ten seconds). Every check id is a literal, and the executed set is reconciled with this suite's entry in
+# tools/selftest_checks.toml (in-run here, and by tools/check_selftest_execution.py --suite
+# brief-claims-selftest).
 
 SUITE_ID = "brief-claims-selftest"
 CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
@@ -1516,9 +1767,9 @@ def _quiet(root, argv):
     import io
     from contextlib import redirect_stderr, redirect_stdout
     out, err = io.StringIO(), io.StringIO()
-    opts = parse_args(argv)
+    opts, why = _parse(argv)
     with redirect_stdout(out), redirect_stderr(err):
-        rc = 2 if opts is None else run(root, opts)
+        rc = usage_error(argv, why) if opts is None else run(root, opts)
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -1611,7 +1862,6 @@ def _cases_config(base):
     check("in/unreadable-brief", rc == 2 and "CANNOT-EVALUATE brief" in out, out)
     check("usage/strict-removed", parse_args(["--strict", "b.md"]) is None)
     check("usage/emit-takes-no-template", parse_args(["--emit", "--template", "t.md", "x.txt"]) is None)
-    check("usage/unknown-option", _quiet(root, ["--bogus"])[0] == 2)
 
     opened = []
     me = sys.modules[__name__]
@@ -1671,18 +1921,46 @@ def _cases_trailer(base):
             ("trailer/line-separator", BETA5.replace("NO BLOCKERS", "NO BLOCKERS\N{LINE SEPARATOR}"), 2),
             ("trailer/vertical-tab", BETA5.replace("NO BLOCKERS", "NO BLOCKERS\x0b"), 2),
             ("trailer/empty-file", "", 2),
-            ("trailer/only-trailer-lines", "WORKER_STATUS: COMPLETE\n", 2)):
+            ("trailer/only-trailer-lines", "WORKER_STATUS: COMPLETE\n", 2),
+            ("trailer/record-ending-unclosed-fence", "Review body: BLOCKERS FOUND, one MAJOR.\nVERDICT: BLOCKERS "
+             "FOUND\nQuoting the prior round:\n```text\nVERDICT: NO BLOCKERS\n", 2),
+            ("trailer/form-feed-line-not-blank", BETA5 + "\x0c\n", 2),
+            ("trailer/no-break-space-line-not-blank", BETA5 + "\N{NO-BREAK SPACE}\n", 2)):
         rc, out = sc(cid.replace("/", "_"), BLOCK_BETA, files=dict([("it7-r5-beta.txt", source)]))
         check(cid, rc == want and ("no trailer record" in out if want == 2 else True), out)
 
 
 def _cases_block(base):
-    """The claims block: a closed grammar; every deviation is cannot-evaluate."""
+    """The claims block: a closed grammar; every deviation is cannot-evaluate. A vector with a needle also
+    requires that problem's own message, so each guard is pinned even where another guard would refuse."""
     sc = functools.partial(_scenario, base)
     head = "BEGIN BRIEF-CLAIMS 1\n"
     tail = "END BRIEF-CLAIMS\n"
     a_line = "it7-r5-alpha.txt VERDICT BLOCKERS FOUND\n"
     named = "Inputs: it7-r5-alpha.txt and it7-r5-beta.txt.\n"
+    near = "reads as a claims-block marker"
+    for cid, brief, want, needle in (
+            ("block/two-different-blocks", BLOCK_ALPHA + BLOCK_BETA, 2, "a second claims block"),
+            ("block/nested-begin-message", head + head + a_line + tail, 2, "BEGIN inside the block"),
+            ("block/end-without-begin-message", BLOCK_OK + tail, 2, "END with no open block"),
+            ("block/empty-message", head + tail, 2, "is empty"),
+            ("block/unclosed-message", head + a_line, 2, "is never closed"),
+            ("block/duplicate-name-message", head + a_line + a_line + tail, 2, "already claimed"),
+            ("block/fenced-lower-case-near-miss", "```\n begin brief-claims 1\nit7-r5-alpha.txt VERDICT NO "
+             "BLOCKERS\n end brief-claims\n```\nProceed.\n", 2, near),
+            ("block/near-miss-alone-lower-case", BLOCK_OK + "begin brief-claims 1\n", 2, near),
+            ("block/near-miss-alone-version", BLOCK_OK + "**BEGIN BRIEF-CLAIMS v2**\n", 2, near),
+            ("block/near-miss-alone-fullwidth", BLOCK_OK + "\N{FULLWIDTH LATIN CAPITAL LETTER E}ND BRIEF-CLAIMS\n", 2,
+             near),
+            ("block/prose-is-not-a-near-miss", "Begin brief claims investigation tomorrow.\n", 0, "exit 0"),
+            ("block/prose-with-block-not-a-near-miss", "Begin brief-claims section below; it is generated by "
+             "--emit.\n" + BLOCK_OK, 0, "(2 MATCH)")):
+        rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief)
+        check(cid, rc == want and needle in out and (near in out) == (needle == near), out)
+    slashy = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>[a-z0-9/]+)")
+    rc, out = sc("block_slash_name_admitted", head + "sub/it7-r5-alpha.txt VERDICT BLOCKERS FOUND\n" + tail,
+                 files=dict([("sub/it7-r5-alpha.txt", ALPHA5)]), cfg=slashy)
+    check("block/slash-name-refused-when-pattern-admits", rc == 2 and "not '<name> VERDICT <token>'" in out, out)
     for cid, brief, want in (
             ("block/match", named + BLOCK_OK, 0),
             ("block/mismatch-swapped", named + BLOCK_SWAPPED, 1),
@@ -1734,7 +2012,11 @@ def _cases_completeness(base):
     for cid, brief, want in (
             ("complete/unclaimed-name", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt.\n" + BLOCK_ALPHA, 1),
             ("complete/incident-without-block", "Review it7-r5-alpha.txt (NO BLOCKERS).\n", 1),
-            ("complete/missing-file-unclaimed", "Read it7-r9-alpha.txt.\n", 1),
+            ("complete/missing-file-reported-absent", "Read it7-r9-alpha.txt.\n", 0),
+            ("complete/future-output-file-absent", "Review the inputs below and write your report to "
+             "it7-r6-alpha.txt.\n" + BLOCK_OK, 0),
+            ("complete/absent-file-block-line-cannot", "Write it7-r6-alpha.txt.\n" + BLOCK_ALPHA.replace(
+                "it7-r5-alpha.txt VERDICT BLOCKERS FOUND", "it7-r6-alpha.txt VERDICT NO BLOCKERS"), 2),
             ("complete/zero-width-name-recognized", "Inputs: \N{ZERO WIDTH SPACE}it7-r5-alpha.txt.\n", 1),
             ("complete/nothing-named", "Fix the parser.\n", 0),
             ("complete/name-in-fence-not-required", "```\nit7-r5-alpha.txt\n```\n", 0),
@@ -1743,7 +2025,8 @@ def _cases_completeness(base):
             ("complete/unclosed-fence-cannot", "```\nInputs: it7-r5-alpha.txt\n" + BLOCK_ALPHA, 2),
             ("complete/unclosed-verbatim-cannot", BLOCK_ALPHA + "BEGIN VERBATIM alpha\nx\n", 2)):
         rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief)
-        check(cid, rc == want and ("UNCLAIMED" in out) == (want == 1), out)
+        check(cid, rc == want and ("UNCLAIMED" in out) == (want == 1)
+              and ("ABSENT it7-r" in out) == ("absent" in cid and want == 0), out)
 
 
 def _cases_emit(base):
@@ -1772,6 +2055,11 @@ def _cases_emit(base):
             ("emit/one-bad-name-emits-nothing", ["it7-r5-alpha.txt", "it7-r9-beta.txt"], None)):
         rc, out, err, _, _ = _emit(base, cid.replace("/", "_").replace("-", "_"), names, files)
         check(cid, rc == 2 and out == "" and "CANNOT-EVALUATE" in err, out + err)
+    slashy = GOOD_CFG.replace("(?P<item>[a-z0-9]+)", "(?P<item>[a-z0-9/]+)")
+    rc, out, err, _, _ = _emit(base, "emit_slash_admitted", ["sub/it7-r5-alpha.txt"],
+                               dict([("sub/it7-r5-alpha.txt", ALPHA5)]), slashy)
+    check("emit/slash-name-refused-when-pattern-admits", rc == 2 and out == "" and "no space or slash" in err,
+          out + err)
     root, indir = _tree(base, "emit_nodir")
     rc, out, err = _quiet(root, ["--emit", "it7-r5-beta.txt"])
     check("emit/missing-input-dir", rc == 2 and out == "" and "--input-dir" in err, out + err)
@@ -1795,14 +2083,14 @@ def _cases_advisory(base):
             ("advisory/option-list-instruction", "alpha leg: end with VERDICT: BLOCKERS FOUND or VERDICT: NO "
              "BLOCKERS\n", None, (), "blocking result(s)"),
             ("advisory/respectively-swap-missed", "Inputs: it7-r5-alpha.txt, it7-r5-beta.txt (NO BLOCKERS/BLOCKERS "
-             "FOUND respectively)\n", None, (), "(2 MATCH); 0 advisory line(s)"),
+             "FOUND respectively)\n", None, (), None),
             ("advisory/predicate-crossing", "Inputs: it7-r5-alpha.txt (20 accepted)\n", sweep, (), "ADVISORY WARN"),
             ("advisory/n-of-m-restated", "Inputs: it7-r5-alpha.txt (41 of 42 mutants killed)\n", sweep, (),
              "ADVISORY MATCH"),
             ("advisory/n-of-m-grades", "Inputs: it7-r5-alpha.txt (1 of 3 MAJORs fixed)\n", sweep, (), "ADVISORY"),
             ("advisory/decimal-latency", "Inputs: it7-r5-alpha.txt (latency 1.5 seconds)\n", sweep, (), "ADVISORY"),
-            ("advisory/fullwidth-parentheses", "Inputs: it7-r5-alpha.txt \N{FULLWIDTH LEFT PARENTHESIS}NO "
-             "BLOCKERS\N{FULLWIDTH RIGHT PARENTHESIS}\n", None, (), "blocking result(s)"),
+            ("advisory/fullwidth-parentheses-missed", "Inputs: it7-r5-alpha.txt \N{FULLWIDTH LEFT PARENTHESIS}NO "
+             "BLOCKERS\N{FULLWIDTH RIGHT PARENTHESIS}\n", None, (), None),
             ("advisory/nbsp-before-parenthetical", "Inputs: it7-r5-alpha.txt\N{NO-BREAK SPACE}(NO BLOCKERS)\n", None,
              (), "ADVISORY WARN"),
             ("advisory/hangul-filler-prose", "Inputs: it7-r5-alpha.txt (NO\N{HANGUL FILLER} BLOCKERS)\n", None, (),
@@ -1822,18 +2110,54 @@ def _cases_advisory(base):
             ("advisory/embedded-swapped-family", named + "BEGIN VERBATIM beta\n3. **Major** - the cache key "
              "ignores the locale and returns stale rows.\nEND VERBATIM\n", None, (), "the source is family")):
         rc, out = sc(cid.replace("/", "_").replace("-", "_"), brief + BLOCK_OK, files=files, args=args, extra=reg)
-        check(cid, rc == 0 and needle in out, out)
+        advisory_lines = [line for line in out.splitlines() if line.startswith("ADVISORY ")]
+        # A needle of None pins a known miss: the prose rules report nothing for it.
+        check(cid, rc == 0 and "(2 MATCH)" in out and (needle in out if needle else not advisory_lines), out)
     me = sys.modules[__name__]
     real = me._advisory
 
     def broken(*args, **kwargs):
         raise RuntimeError("synthetic advisory fault")
+    root, _ = _tree(base, "adv_fault")
     me._advisory = broken
     try:
-        rc, out = sc("adv_fault", named + BLOCK_OK)
+        lines = advisory_prose([], [], load_config(Path(root) / CONFIG_REL), dict(), dict())
     finally:
         me._advisory = real
-    check("advisory/internal-fault-reported-not-refused", rc == 0 and "internal error RuntimeError" in out, out)
+    check("advisory/internal-fault-reported-not-refused", lines == [
+        "ADVISORY CANNOT-EVALUATE prose: internal error RuntimeError: synthetic advisory fault; the prose was "
+        "not analyzed"], lines)
+    real_run = me.subprocess.run
+    seen = []
+
+    def advisory_child(outcome):
+        def fake(argv, *args, **kwargs):
+            if argv[-1] != "--advisory-worker":
+                return real_run(argv, *args, **kwargs)
+            seen.append(sys.stdout.getvalue())
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            return subprocess.CompletedProcess(argv, outcome, b"", b"Traceback: synthetic crash\n")
+        return fake
+    for cid, outcome, needle in (("advisory/child-failure-one-line", 1, "failed with exit 1"),
+                                 ("advisory/child-timeout-one-line", "timeout", "did not finish within")):
+        me.subprocess.run = advisory_child(outcome)
+        try:
+            rc, out = sc(cid.replace("/", "_").replace("-", "_"), named + BLOCK_OK)
+        finally:
+            me.subprocess.run = real_run
+        advisory_lines = [line for line in out.splitlines() if line.startswith("ADVISORY ")]
+        check(cid, rc == 0 and len(advisory_lines) == 1 and needle in advisory_lines[0]
+              and out.splitlines()[-1] == advisory_lines[0], out)
+    check("advisory/verdict-printed-before-advisory-starts", len(seen) == 2 and all(
+        "(2 MATCH); exit 0" in s for s in seen), seen)
+    rc, out = sc("adv_brief_budget", "Inputs: it7-r5-alpha.txt.\n" + "x" * (ADVISORY_MAX + 10) + "\n" + BLOCK_OK)
+    check("advisory/brief-over-size-budget-one-line", rc == 0 and out.count("ADVISORY ") == 1
+          and "over the advisory size budget" in out, out)
+    big = dict([("it7-r5-alpha.txt", "y" * ADVISORY_MAX + "\n" + ALPHA5), ("it7-r5-beta.txt", BETA5)])
+    rc, out = sc("adv_file_budget", named + BLOCK_OK, files=big)
+    check("advisory/files-over-size-budget-one-line", rc == 0 and out.count("ADVISORY ") == 1
+          and "over the advisory size budget" in out, out)
     rc, out = sc("adv_block_wins", "Inputs: it7-r5-alpha.txt (BLOCKERS FOUND).\n" + BLOCK_SWAPPED)
     check("advisory/prose-match-does-not-rescue-block", rc == 1 and "MISMATCH it7-r5-alpha.txt" in out, out)
 
@@ -1853,7 +2177,7 @@ def _cases_regex(base):
         rc, out = sc("rx_idpat", "TASK: " + "a" * 40 + "c\n" + BLOCK_OK, extra=reg,
                      args=["--registry", "@ROOT@/reg.toml"])
         check("regex/id-pattern-deadline-advisory", rc == 0 and "ADVISORY CANNOT-EVALUATE" in out
-              and "deadline" in out, out)
+              and ("deadline" in out or "CPU-time limit" in out), out)
     finally:
         me.REGEX_DEADLINE, me.CHILD_CPU = saved
     me.REGEX_DEADLINE, me.CHILD_CPU = 60.0, 1
@@ -1862,6 +2186,14 @@ def _cases_regex(base):
     finally:
         me.REGEX_DEADLINE, me.CHILD_CPU = saved
     check("regex/child-cpu-limit", rc == 2 and "CPU-time limit" in out and "deadline" not in out, out)
+    # The SHIPPED bounds (every other regex vector overrides them): each child's CPU-time limit sits below
+    # its wall-clock deadline, so a CPU-bound child meets the CPU limit first, and the children's budgets
+    # fit inside the run deadline, which sits clearly below a 10-second hook bound.
+    check("regex/shipped-cpu-limit-below-deadline", type(CHILD_CPU) is int and 1 <= CHILD_CPU < REGEX_DEADLINE
+          and 1 <= int(ADVISORY_DEADLINE) < ADVISORY_DEADLINE,
+          (CHILD_CPU, REGEX_DEADLINE, ADVISORY_DEADLINE))
+    check("regex/shipped-budgets-inside-run-deadline", REGEX_DEADLINE + ADVISORY_DEADLINE + RESERVE <= RUN_DEADLINE
+          <= 7.0, (REGEX_DEADLINE, ADVISORY_DEADLINE, RESERVE, RUN_DEADLINE))
     real_run = me.subprocess.run
 
     def refuse(*args, **kwargs):
@@ -1903,22 +2235,113 @@ def _cases_regex(base):
 
 
 def _cases_contract(base):
-    """The machine contract: the summary line, and the highest exit across briefs."""
+    """The machine contract: the summary line before the advisory lines, the highest exit across briefs,
+    the fixed first words, usage errors through the formatter, and the run deadline."""
     root, indir = _tree(base, "contract")
-    for rel, text in (("ok.md", BLOCK_OK), ("bad.md", BLOCK_SWAPPED), ("cannot.md", BLOCK_OK + BLOCK_OK)):
+    for rel, text in (("ok.md", BLOCK_OK), ("bad.md", BLOCK_SWAPPED), ("cannot.md", BLOCK_OK + BLOCK_OK),
+                      ("prose.md", "Inputs: it7-r5-alpha.txt (NO BLOCKERS).\n" + BLOCK_OK)):
         _write(os.path.join(root, rel), text)
-    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "ok.md")])
-    last = out.splitlines()[-1] if out else ""
-    check("contract/summary-last-line", rc == 0 and re.fullmatch(
-        r"brief-claims: \S+: 2 blocking result\(s\) \(2 MATCH\); \d+ advisory line\(s\); exit 0", last), out)
+    rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "prose.md")])
+    lines = out.splitlines()
+    at = [k for k, line in enumerate(lines) if line.startswith("brief-claims: ")]
+    check("contract/summary-before-advisory", rc == 0 and len(at) == 1 and re.fullmatch(
+        r"brief-claims: \S+: 2 blocking result\(s\) \(2 MATCH\); exit 0", lines[at[0]])
+        and len(lines) > at[0] + 1 and all(line.startswith("ADVISORY ") for line in lines[at[0] + 1:]), out)
     rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "ok.md"), os.path.join(root, "bad.md")])
     check("contract/several-briefs-highest-mismatch", rc == 1, out)
     rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "bad.md"), os.path.join(root, "cannot.md")])
     check("contract/several-briefs-highest-cannot", rc == 2, out)
     rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "bad.md")])
-    words = ("BRIEF ", "MATCH ", "MISMATCH ", "CANNOT-EVALUATE ", "UNCLAIMED ", "ADVISORY ", "brief-claims: ")
+    words = ("BRIEF ", "MATCH ", "MISMATCH ", "CANNOT-EVALUATE ", "UNCLAIMED ", "ABSENT ", "ADVISORY ",
+             "brief-claims: ")
     check("contract/every-line-starts-with-a-fixed-word", rc == 1 and out and all(
         line.startswith(words) for line in out.splitlines()), out)
+    rc, out, err = _quiet(root, ["--bogus"])
+    check("usage/unknown-option", rc == 2 and out.startswith("CANNOT-EVALUATE usage: unknown option") and err == "",
+          out + err)
+    for cid, argv, stream in (("usage/main-output-unknown-option", ["--bogus"], 1),
+                              ("usage/main-output-require-config", ["--require-config", "--bogus"], 1),
+                              ("usage/main-output-joined-value", ["--input-dir=x", "b.md"], 1),
+                              ("usage/main-output-self-test-extra", ["--self-test", "b.md"], 1),
+                              ("usage/main-output-emit-on-stderr", ["--emit", "--bogus"], 2)):
+        done = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)] + argv, capture_output=True,
+                              timeout=60)
+        streams = (done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace"))
+        check(cid, done.returncode == 2 and streams[2 - stream] == "" and len(streams[stream - 1].splitlines()) == 1
+              and streams[stream - 1].startswith("CANNOT-EVALUATE usage: "), streams)
+    me = sys.modules[__name__]
+    saved, real_run = me.RUN_DEADLINE, me.subprocess.run
+
+    def stall(*args, **kwargs):
+        time.sleep(30)
+    me.RUN_DEADLINE, me.subprocess.run = 1.0, stall
+    began = time.monotonic()
+    try:
+        rc, out, _ = _quiet(root, ["--input-dir", indir, os.path.join(root, "ok.md")])
+    finally:
+        me.RUN_DEADLINE, me.subprocess.run = saved, real_run
+    check("contract/run-deadline-own-exit-2", rc == 2 and time.monotonic() - began < 10 and out.splitlines()[-1]
+          == "CANNOT-EVALUATE run: the check did not finish within its 1-second deadline; fail-closed", out)
+
+
+def _test_caps():
+    """In a size-regression child only: a 60-second CPU-time limit and a 2 GiB address-space cap."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_CPU, (60, 61))
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+    except (ValueError, OSError):
+        pass
+
+
+def _capped(base, name, brief, files):
+    """Run a copy of this gate on brief (with a GOOD_CFG tree holding files) in a capped child killed after
+    60 seconds, as the hook would: (rc, stdout lines, seconds, detail)."""
+    import shutil
+    root, indir = _tree(base, name, files)
+    gate = os.path.join(root, "tools", os.path.basename(__file__))
+    os.makedirs(os.path.dirname(gate))
+    shutil.copyfile(os.path.abspath(__file__), gate)
+    _write(os.path.join(root, "brief.md"), brief)
+    began = time.monotonic()
+    try:
+        done = subprocess.run([sys.executable, "-I", "-B", gate, "--input-dir", indir, os.path.join(root, "brief.md")],
+                              capture_output=True, timeout=60, preexec_fn=_test_caps)
+    except subprocess.TimeoutExpired:
+        return None, [], time.monotonic() - began, "killed after 60 seconds"
+    out = done.stdout.decode("utf-8", "replace").splitlines()
+    detail = "rc {} after {:.1f}s: {}".format(done.returncode, time.monotonic() - began, " | ".join(
+        [line[:160] for line in out[:4]] + [done.stderr.decode("utf-8", "replace")[-300:]]))
+    return done.returncode, out, time.monotonic() - began, detail
+
+
+def _verdict_first(out, rc):
+    """The summary line for exit rc is printed, and every line after it is an ADVISORY line."""
+    at = [k for k, line in enumerate(out) if line.startswith("brief-claims: ")]
+    return len(at) == 1 and out[at[0]].endswith("exit {}".format(rc)) and all(
+        line.startswith("ADVISORY ") for line in out[at[0] + 1:])
+
+
+def _cases_size(base):
+    """Adversarial sizes, each in a capped child running a copy of this gate as the hook would: the verdict
+    comes first, the advisory layer stays inside its budgets, and the run ends well inside 10 seconds."""
+    beta = dict([("it7-r5-beta.txt", BETA5)])
+    brief = "Read it7-r5-beta.txt (" + "NO BLOCKERS " * 80000 + ").\n" + BLOCK_BETA
+    brief += " " * (1048576 - len(brief))
+    rc, out, took, detail = _capped(base, "size_1mib_brief", brief, beta)
+    advisory_lines = [line for line in out if line.startswith("ADVISORY ")]
+    check("size/one-mib-brief-verdict-first", rc == 0 and took < 10 and _verdict_first(out, 0)
+          and len(advisory_lines) == 1 and "over the advisory size budget" in advisory_lines[0], detail)
+    review = "verdict " + "NO BLOCKERS " * 16000 + "\nVERDICT: BLOCKERS FOUND\n"
+    rc, out, took, detail = _capped(base, "size_review_line", "Review it7-r5-beta.txt.\n" + BLOCK_BETA.replace(
+        "NO BLOCKERS", "BLOCKERS FOUND"), dict([("it7-r5-beta.txt", review)]))
+    check("size/long-verdict-line-in-review-file", rc == 0 and took < 10 and _verdict_first(out, 0)
+          and not any(line.startswith("ADVISORY CANNOT-EVALUATE prose") for line in out), detail)
+    brief = "Inputs: it7-r5-beta.txt (" + "NO BLOCKERS " * 12000 + ")\n" + BLOCK_BETA
+    rc, out, took, detail = _capped(base, "size_prose_claims", brief, beta)
+    check("size/many-prose-verdict-claims", rc == 0 and took < 10 and _verdict_first(out, 0)
+          and not any(line.startswith("ADVISORY CANNOT-EVALUATE prose") for line in out)
+          and sum(line.startswith("ADVISORY MATCH") for line in out) == 12000, detail)
 
 
 def _proc_fields(pid):
@@ -2004,6 +2427,7 @@ def self_test(report_path=None):
         _cases_advisory(base)
         _cases_regex(base)
         _cases_contract(base)
+        _cases_size(base)
     finally:
         shutil.rmtree(base, ignore_errors=True)
     expected = _expected_check_ids()
@@ -2021,8 +2445,8 @@ def self_test(report_path=None):
         return 1
     summary = ("{} vector(s) held (configuration and input fail-closed, the trailer record, the claims-block "
                "grammar, completeness, --emit, the round 1 to 3 prose reproductions as advisory lines, regex "
-               "bounds, the machine contract); execution set reconciled against tools/selftest_checks.toml".format(
-                   len(EXECUTED)))
+               "bounds, the machine contract, adversarial sizes in capped children); execution set reconciled "
+               "against tools/selftest_checks.toml".format(len(EXECUTED)))
     if SKIPPED:
         print("SELF-TEST PASS (PARTIAL): {}; SKIPPED (UNVERIFIED this run): {}".format(summary, "; ".join(SKIPPED)))
     else:
@@ -2033,15 +2457,14 @@ def self_test(report_path=None):
 def main(argv):
     if argv == ["--regex-worker"]:
         return regex_worker()
+    if argv == ["--advisory-worker"]:
+        return advisory_worker()
     if (len(argv) in (2, 3) and argv[-2] == "--execution-report" and os.path.isabs(argv[-1])
             and argv[:-2] in ([], ["--self-test"])):
         return self_test(argv[-1])
-    opts = parse_args(argv)
-    if opts is None or (opts["self_test"] and argv != ["--self-test"]):
-        print("usage: check_brief_claims.py [--require-config] [--input-dir DIR] [--template PATH] "
-              "[--registry PATH] [BRIEF...] | --emit --input-dir DIR NAME... | --self-test "
-              "[--execution-report ABS_PATH]; fail-closed", file=sys.stderr)
-        return 2
+    opts, why = _parse(argv)
+    if opts is None:
+        return usage_error(argv, why)
     if opts["self_test"]:
         return self_test()
     return run(Path(__file__).resolve().parents[1], opts)
