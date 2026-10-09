@@ -72,10 +72,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    prior store (specification section 8.2: counters never restart, so record ids are never
    reissued). That scan follows the first-parent line only: a store that never reached a tree on
    HEAD's first-parent line (for example one created and deleted on a side branch, merged or not)
-   is not detected, and `opf adopt` is the path for re-adopting any prior ancestry. A repository
-   whose history the scan cannot trust as-is (a shallow clone, any entry at the legacy
-   `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as cannot-evaluate
-   rather than initialized.
+   is not detected. The scan also has a path limit: the scan checks the root's current path only
+   (a store committed under another directory, for example before a rename, is not detected).
+   `opf adopt` is the path for re-adopting any prior ancestry. When the scan does find a prior
+   store, the refusal also prints a `git checkout` command for restoring it from the commit it
+   names; that command is labelled NOT shell-ready when a path in it holds a non-printable
+   character. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
+   cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.

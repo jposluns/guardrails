@@ -46,9 +46,26 @@ _SIDELINE_LIMIT = ("a store that never reached a tree on HEAD's first-parent lin
                    "one created and deleted on a side branch, merged or not) is not detected")
 
 
+# The current-path limit (QA round 3 MINOR 4), worded identically at the same three sites and in
+# the docstring: the pathspecs are the root's PRESENT prefix and a pathspec walk follows no rename.
+_PATH_LIMIT = ("the scan checks the root's current path only (a store committed under another "
+               "directory, for example before a rename, is not detected)")
+
+
 def _states_sideline_limit(text):
     flat = " ".join(text.split())
     return _SIDELINE_LIMIT in flat and "unmerged" not in flat
+
+
+def _states_path_limit(text):
+    return _PATH_LIMIT in " ".join(text.split())
+
+
+def _limit_address_space():
+    """preexec_fn for a child that probes a FIFO: a 4 GiB address-space cap (RLIMIT_AS), so a
+    regression that reads the path cannot exhaust host memory; the caller's timeout bounds time."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
 
 
 def _run_init(argv):
@@ -515,6 +532,83 @@ def _suite_isolated(invoke):
                       resolution.status == _opf_store.RESOLVED
                       and resolution.machine_rel == working + "/" + machine_name)
 
+                # QA round 3 (MEDIUM, MINOR 2): every ancestry refusal vector compares the
+                # COMPLETE output with text built here, from the commit ids and paths this test
+                # computes itself, never by substring. The builders spell out each diagnostic
+                # in full, so any change to the refusal wording, its escaping (ascii, not repr),
+                # its remedy command (shlex quoting, --literal-pathspecs, the restored paths) or
+                # its stated limits fails every vector that reaches it.
+                history_stage = "checking git history for a prior store"
+
+                def prior_store_output(root, repo, commit, restored, shell_ready):
+                    rel = os.path.relpath(str(root), str(repo)).replace(os.sep, "/")
+                    rel = "" if rel == "." else rel + "/"
+                    paths = [rel + name for name in restored]
+                    if shell_ready:
+                        quote = shlex.quote
+                        label = "shell-ready; it restores the store paths that commit holds"
+                    else:
+                        quote = ascii
+                        label = ("NOT shell-ready: a path in it holds a non-printable "
+                                 "character, shown escaped as a Python string literal; "
+                                 "replace each escaped path with the real one")
+                    return (
+                        "opf init: REFUSED at " + ascii(str(root)) + " during " + history_stage
+                        + ": a prior store exists in this repository's git history: commit "
+                        + commit + " on HEAD's first-parent line holds "
+                        + ascii(rel + ".opf.toml") + " or a store manifest "
+                        + ascii(rel + ".working/<subdir>/manifest.toml")
+                        + " (spec 4.3, 4.5), and spec 8.2 forbids restarting its counters at "
+                        "zero (record ids would be reissued). Remedy: restore the store from "
+                        "that commit with the restore command below, or re-adopt the ancestry "
+                        "with `opf adopt`. Plain `opf init` refuses whenever this scan of "
+                        "HEAD's first-parent line finds a prior store, and " + _SIDELINE_LIMIT
+                        + " (adoption across such side lines is `opf adopt`'s authority); "
+                        + _PATH_LIMIT + "; exit 2\n"
+                        "opf init: restore command (" + label + "):\n"
+                        "  git -C " + quote(str(repo)) + " --literal-pathspecs checkout "
+                        + commit + " -- " + " ".join(quote(path) for path in paths) + "\n"
+                        "opf init: preflight refused; no publication attempted.\n")
+
+                def cannot_evaluate_output(root, message):
+                    return ("opf init: cannot evaluate at " + ascii(str(root)) + " during "
+                            + history_stage + ": " + ascii(RuntimeError(message)) + "; exit 2\n"
+                            "opf init: preflight refused; no publication attempted.\n")
+
+                def grafts_message(found, grafts_path):
+                    return ("cannot evaluate prior-store ancestry: found " + found
+                            + " at the legacy grafts path " + ascii(grafts_path)
+                            + "; git consults that path in every history walk, where grafts it "
+                            "can read may rewrite parent links (--no-replace-objects does not "
+                            "neutralize them), and this scan never interprets grafts, so a prior "
+                            "store, whose counters spec 8.2 forbids restarting, cannot be ruled "
+                            "out; convert or remove it (git replace --convert-graft-file turns a "
+                            "grafts file into replace refs, which this scan already ignores) and "
+                            "retry")
+
+                def head_of(repo):
+                    return git_call(repo, ["rev-parse", "HEAD"]).decode("ascii").strip()
+
+                def store_contents(root):
+                    # Bytes and link targets only: git checkout writes modes from the umask,
+                    # which init's own create modes need not match.
+                    return dict((path, entry[-1]) for path, entry in _snapshot(root).items()
+                                if entry[0] != "directory")
+
+                if shutil.which("sh") is None:
+                    raise OSError("no POSIX sh on PATH to run the printed restore command")
+
+                def run_restore(output):
+                    # Runs the printed restore line through a real POSIX shell, from a
+                    # directory outside the repository (the command carries its own -C).
+                    lines = [line for line in output.splitlines() if line.startswith("  git -C ")]
+                    if len(lines) != 1:
+                        return None
+                    proc = subprocess.run(["sh", "-c", lines[0].strip()], cwd=str(base),
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                          timeout=120)
+                    return proc.returncode
+
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
                 # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
@@ -557,6 +651,15 @@ def _suite_isolated(invoke):
                 # "only ever lived on an unmerged side branch" refusal wording) fails this.
                 check("ancestry: refusal states the exact first-parent limit",
                       _states_sideline_limit(output))
+                check("ancestry: refusal states the current-path limit", _states_path_limit(output))
+                # QA round 3 MEDIUM: the COMPLETE refusal, built independently. DISCRIMINATORS:
+                # M-remedy-allows ("forbids restarting its counters at zero" reworded),
+                # M-remedy-drop-path (a restored path dropped from the command),
+                # M-no-literal-pathspecs and an appended raw U+202E all fail (M-repr-for-ascii
+                # cannot fail here, where every path is ASCII: the cafe vector below kills it).
+                check("ancestry: the complete refusal text, built independently",
+                      output == prior_store_output(ancestry, ancestry, held_commit,
+                                                   [".opf.toml", ".working"], True))
                 check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
 
                 # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
@@ -572,6 +675,12 @@ def _suite_isolated(invoke):
                 rc, output = run(shallow_prior)
                 check("ancestry: shallow history refused as cannot-evaluate",
                       rc == EXIT_ERROR and "SHALLOW" in output and "unshallow" in output)
+                check("ancestry: the complete shallow refusal text",
+                      output == cannot_evaluate_output(shallow_prior, (
+                          "cannot evaluate prior-store ancestry: this repository is SHALLOW, "
+                          "so the first-parent history of HEAD is truncated and a prior store, "
+                          "whose counters spec 8.2 forbids restarting, cannot be ruled out; "
+                          "unshallow the clone (git fetch --unshallow) and retry")))
 
                 # SPEC 8.2 ancestry scope (first-parent line): a store that existed ONLY on a
                 # side branch and was deleted there before the merge never reached a
@@ -616,11 +725,15 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: mutant M-output-unmerged (the round-1 output lines) fails.
                 check("ancestry: success output states the exact first-parent limit",
                       "first-parent line only" in output and _states_sideline_limit(output))
+                check("ancestry: success output states the current-path limit",
+                      _states_path_limit(output))
                 # The quickstart's statement of the same limit (QA round 2 MAJOR 1), read the
                 # way check_opf_homes reads it. DISCRIMINATOR: the round-1 quickstart wording.
                 quickstart = Path(__file__).resolve().parents[1] / "spec" / "OPF-QUICKSTART.md"
                 check("ancestry: OPF-QUICKSTART.md states the exact first-parent limit",
                       _states_sideline_limit(quickstart.read_text(encoding="utf-8")))
+                check("ancestry: OPF-QUICKSTART.md states the current-path limit",
+                      _states_path_limit(quickstart.read_text(encoding="utf-8")))
 
                 # SPEC 8.2 ancestry, POINTER-ONLY marker (spec 4.3 relocated store): history
                 # holds ONLY the committed pointer .opf.toml (no .working tree at all), then
@@ -649,6 +762,17 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: pointer-only refusal names the holding commit",
                       ptr_commit in output)
+                # The restore command names only what that commit holds: git checkout fails
+                # outright on a pathspec the commit lacks, so a command naming .working too
+                # would restore nothing. DISCRIMINATOR: M-restore-both (every store path named
+                # whatever the commit holds) fails the text and the restore run.
+                check("ancestry: the complete pointer-only refusal text (pointer restored alone)",
+                      output == prior_store_output(ptr_only, ptr_only, ptr_commit,
+                                                   [".opf.toml"], True))
+                check("ancestry: the printed pointer-only restore command restores the pointer",
+                      run_restore(output) == 0
+                      and (ptr_only / ".opf.toml").read_bytes()
+                      == b'[store]\ntarget = "dir:../elsewhere"\n')
 
                 # SPEC 8.2 ancestry, MANIFEST-ONLY marker (spec 4.3 default location, pointer
                 # never committed), at the DEFAULT machine subdir: only the :(glob) manifest
@@ -676,6 +800,9 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: manifest-only refusal names the holding commit",
                       mf_commit in output)
+                check("ancestry: the complete manifest-only refusal text (.working alone)",
+                      output == prior_store_output(mf_only, mf_only, mf_commit,
+                                                   [".working"], True))
 
                 # The same manifest-only shape under a RENAMED machine subdir: spec 4.4/4.5
                 # admit any single-level subdir name, so the glob (and the listing arm) must
@@ -700,6 +827,9 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: renamed-machine refusal names the holding commit",
                       ren_commit in output)
+                check("ancestry: the complete renamed-machine refusal text",
+                      output == prior_store_output(mf_renamed, mf_renamed, ren_commit,
+                                                   [".working"], True))
 
                 # SPEC 8.2 ancestry, GRAFT fail-closed (QA round 1 MAJOR): a legacy
                 # .git/info/grafts line naming the deletion commit WITH NO PARENTS cuts the
@@ -725,6 +855,7 @@ def _suite_isolated(invoke):
                 git_call(grafted, ["--literal-pathspecs", "add", "-A"])
                 git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "-m", "BI high-water 7"])
+                g_held = head_of(grafted)
                 git_call(grafted, ["rm", "-r", "-q", "--",
                                    working, _opf_store.POINTER_REL])
                 git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
@@ -747,26 +878,50 @@ def _suite_isolated(invoke):
                 check("ancestry: grafts refusal names a regular file and its size",
                       "found a regular file of {} byte(s)".format(len(g_drop) + 1) in output
                       and "may rewrite parent links" in output)
+                check("ancestry: the complete grafts refusal text (regular file)",
+                      output == cannot_evaluate_output(grafted, grafts_message(
+                          "a regular file of " + str(len(g_drop) + 1) + " byte(s)",
+                          str(g_file))))
                 g_file.unlink()
                 g_file.write_bytes(b"")
                 rc, output = run(grafted)
                 check("ancestry: an EMPTY grafts file refuses, named as 0 bytes",
-                      rc == EXIT_ERROR and "found a regular file of 0 byte(s)" in output)
+                      rc == EXIT_ERROR and output == cannot_evaluate_output(
+                          grafted, grafts_message("a regular file of 0 byte(s)", str(g_file))))
                 g_file.unlink()
                 g_file.symlink_to("absent-grafts-target")
                 rc, output = run(grafted)
                 check("ancestry: a DANGLING grafts link refuses, named with its target",
-                      rc == EXIT_ERROR
-                      and "found a symbolic link to 'absent-grafts-target'" in output)
+                      rc == EXIT_ERROR and output == cannot_evaluate_output(
+                          grafted, grafts_message("a symbolic link to 'absent-grafts-target'",
+                                                  str(g_file))))
                 g_file.unlink()
                 g_file.mkdir()
                 rc, output = run(grafted)
                 check("ancestry: a grafts DIRECTORY refuses, named by kind",
-                      rc == EXIT_ERROR and "found an entry of kind directory" in output)
+                      rc == EXIT_ERROR and output == cannot_evaluate_output(
+                          grafted, grafts_message("an entry of kind directory", str(g_file))))
                 g_file.rmdir()
+                # QA round 3 MINOR 3: the "special" kind arm, through a FIFO at the grafts
+                # path. lstat never opens it, but a regression that read the path would block
+                # on the FIFO, so this vector always runs init in a child with a timeout and an
+                # address-space limit, never in this process. DISCRIMINATOR: M-special-kind
+                # (the else arm's description changed) fails the complete text.
+                os.mkfifo(g_file)
+                fifo_proc = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).resolve().parent / "opf.py"),
+                     "init", "--root", str(grafted)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
+                    preexec_fn=_limit_address_space)
+                check("ancestry: a grafts FIFO refuses, named as an entry of kind special",
+                      fifo_proc.returncode == EXIT_ERROR
+                      and fifo_proc.stdout + fifo_proc.stderr == cannot_evaluate_output(
+                          grafted, grafts_message("an entry of kind special", str(g_file))))
+                g_file.unlink()
                 rc, output = run(grafted)
                 check("ancestry: grafts file removed, the prior store is found again",
-                      rc == EXIT_ERROR and "prior store exists" in output)
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          grafted, grafted, g_held, [".opf.toml", ".working"], True))
 
                 # QA round 2 MINOR 4: the info/grafts PATH arms, pinned. git prints the
                 # grafts path of a separate git directory as an absolute path, so a git
@@ -791,11 +946,21 @@ def _suite_isolated(invoke):
                 check("ancestry: undecodable info/grafts path refused, never read as absent",
                       rc == EXIT_ERROR and "cannot evaluate" in output
                       and "undecodable info/grafts path" in output)
+                check("ancestry: the complete undecodable-grafts-path refusal text",
+                      output == cannot_evaluate_output(undecodable, (
+                          "git history preflight: undecodable info/grafts path "
+                          + ascii(os.fsencode(str(base)) + b"/gitdir-\xff/info/grafts\n")
+                          + "; refusing")))
                 newline_dir = make_separate("ancestry-newline-gitdir", b"gitdir-\nx")
                 rc, output = run(newline_dir)
                 check("ancestry: malformed (multi-line) info/grafts path refused",
                       rc == EXIT_ERROR and "cannot evaluate" in output
                       and "malformed info/grafts path" in output)
+                check("ancestry: the complete multi-line-grafts-path refusal text",
+                      output == cannot_evaluate_output(newline_dir, (
+                          "git history preflight: malformed info/grafts path "
+                          + ascii(os.fsencode(str(base)) + b"/gitdir-\nx/info/grafts\n")
+                          + "; refusing")))
 
                 # The lstat-failure arm: .git/info is a regular FILE, so lstat of info/grafts
                 # fails with NotADirectoryError; the refusal states that exact failure.
@@ -810,6 +975,21 @@ def _suite_isolated(invoke):
                 check("ancestry: an uninspectable grafts path refuses, naming the lstat failure",
                       rc == EXIT_ERROR and "lstat of the legacy grafts path" in output
                       and "NotADirectoryError" in output)
+                info_grafts = str(info_file / ".git" / "info" / "grafts")
+                try:
+                    os.lstat(info_grafts)
+                    info_failure = None
+                except OSError as exc:
+                    info_failure = exc
+                check("ancestry: the complete lstat-failure refusal text",
+                      isinstance(info_failure, NotADirectoryError)
+                      and output == cannot_evaluate_output(info_file, (
+                          "cannot evaluate prior-store ancestry: lstat of the legacy grafts "
+                          "path " + ascii(info_grafts) + " failed (" + ascii(info_failure)
+                          + "), which this scan does not take as proof that no grafts file is "
+                          "present; grafts that git can read at that path may rewrite parent "
+                          "links in every history walk and hide a prior store whose counters "
+                          "spec 8.2 forbids restarting; refusing")))
 
                 # The POSIX-separator helper, pinned on POSIX hosts: a Windows-flavoured prefix
                 # must still yield "/" pathspecs. DISCRIMINATOR: mutant M-as-posix-to-str
@@ -821,33 +1001,123 @@ def _suite_isolated(invoke):
                       opf._init_history_rels(PureWindowsPath("sub", "dir"))
                       == ("sub/dir/" + _opf_store.POINTER_REL, "sub/dir/" + working))
 
-                # QA round 2 MINOR 2: the REFUSED line escapes path-derived text. A root whose
-                # directory name carries ESC and BEL (a clone from an untrusted source can name
-                # directories this way) and whose history holds a store there: the refusal names
-                # that path several times, and none of it may reach the terminal raw.
-                # DISCRIMINATOR: mutant M-refusal-raw (the refusal formats its paths without
-                # ascii()) prints raw ESC/BEL characters and fails.
-                esc_repo = make_git("ancestry-control-chars")
-                esc_name = "a\x1b[31mred\x07b"
-                esc_root = esc_repo / esc_name
-                esc_root.mkdir()
-                rc, output = run(esc_root)
-                check("ancestry control-character fixture first init succeeds", rc == EXIT_OK)
-                git_call(esc_repo, ["--literal-pathspecs", "add", "-A"])
-                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                # QA round 3 MINOR 3: the missing-newline and NUL arms of the info/grafts shape
+                # check. Real git always ends the line with a newline and cannot print a NUL in
+                # a path, so these answers come from a stubbed _run_git (a commit-holding,
+                # unshallow history whose rev-list finds nothing), driving the scan directly.
+                # DISCRIMINATORS: M-endswith-arm (the endswith test removed) strips the last
+                # path character, lstats an absent path and PASSES (no exception);
+                # M-nul-arm (the NUL test removed) reaches lstat, which raises ValueError
+                # (embedded null character) instead of the refusal; both fail the exact text.
+                from unittest import mock
+
+                def stubbed_scan(grafts_answer):
+                    calls = []
+
+                    def fake_run_git(git_arg, repo_arg, args, **kwargs):
+                        calls.append(list(args))
+                        answers = [
+                            (["rev-parse", "--verify", "--quiet", "HEAD"], b"0" * 40 + b"\n"),
+                            (["rev-parse", "--is-shallow-repository"], b"false\n"),
+                            (["rev-parse", "--git-path", "info/grafts"], grafts_answer),
+                        ]
+                        for expected_args, out in answers:
+                            if list(args) == expected_args:
+                                return _opf_observe._GitOutcome(True, 0, out, "")
+                        if list(args[:1]) == ["rev-list"]:
+                            return _opf_observe._GitOutcome(True, 0, b"", "")
+                        return _opf_observe._GitOutcome(False, None, b"", "unexpected git call")
+
+                    stub_repo = base / "stub-repo"
+                    with mock.patch.object(opf._opf_observe, "_run_git", fake_run_git):
+                        try:
+                            opf._init_no_prior_store(git, stub_repo, stub_repo)
+                            return None, calls
+                        except Exception as exc:  # noqa: BLE001  the type is part of the verdict
+                            return (type(exc), str(exc)), calls
+
+                absent_grafts = os.fsencode(str(base / "stub-absent" / "info" / "grafts"))
+                verdict, calls = stubbed_scan(absent_grafts)
+                check("ancestry: a grafts path answer missing its newline refuses, before any walk",
+                      verdict == (RuntimeError, "git history preflight: malformed info/grafts "
+                                  "path " + ascii(absent_grafts) + "; refusing")
+                      and calls[-1] == ["rev-parse", "--git-path", "info/grafts"])
+                nul_grafts = os.fsencode(str(base / "stub-absent")) + b"/in\0fo/grafts\n"
+                verdict, calls = stubbed_scan(nul_grafts)
+                check("ancestry: a grafts path answer holding a NUL refuses, before any walk",
+                      verdict == (RuntimeError, "git history preflight: malformed info/grafts "
+                                  "path " + ascii(nul_grafts) + "; refusing")
+                      and calls[-1] == ["rev-parse", "--git-path", "info/grafts"])
+                verdict, calls = stubbed_scan(absent_grafts + b"\n")
+                check("ancestry: the stubbed scan passes a well-formed absent grafts path",
+                      verdict is None and calls[-1][:1] == ["rev-list"])
+
+                # QA round 2 MINOR 2, QA round 3 MEDIUM 1 and MINOR 2: path-derived text in the
+                # refusal. Each fixture commits a store at a sub-root with a hostile or non-ASCII
+                # name, deletes the store (CHANGELOG.md stays), and re-inits there; the complete
+                # output is compared with text built here. Non-printable names (C0 controls ESC
+                # and BEL; format characters U+202E and U+200B; the C1 control U+009B) must never
+                # reach the terminal raw, so the restore command is escaped and labelled NOT
+                # shell-ready. Printable names (cafe with U+00E9, and it's$HOME, whose quote and
+                # $ a shell would act on) get a shell-ready shlex-quoted command, which is run
+                # through a real POSIX shell and must restore the committed store byte for byte.
+                # DISCRIMINATORS: M-refusal-raw (paths formatted without ascii()) and
+                # M-no-printable-gate (shlex.quote for every path, so raw controls in the
+                # command) fail the non-printable vectors; M-repr-for-ascii (repr keeps a
+                # printable U+00E9 raw in the descriptive mentions) and M-ascii-in-command (the
+                # round-3 Python-quoted command, which bash cannot use for cafe) fail the cafe
+                # vector; M-no-shlex (paths unquoted) and M-ascii-in-command (Python's double
+                # quotes let the shell expand $HOME) fail the it's$HOME vector.
+                def sub_root_refusal(fixture, name):
+                    repo = make_git(fixture)
+                    sub = repo / name
+                    sub.mkdir()
+                    first_rc, _first = run(sub)
+                    git_call(repo, ["--literal-pathspecs", "add", "-A"])
+                    git_call(repo, ["-c", "user.email=t@t", "-c", "user.name=t",
                                     "commit", "-m", "store"])
-                git_call(esc_repo, ["--literal-pathspecs", "rm", "-r", "-q", "--", esc_name])
-                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                    commit = head_of(repo)
+                    held = store_contents(sub)
+                    git_call(repo, ["--literal-pathspecs", "rm", "-r", "-q", "--",
+                                    name + "/.working", name + "/.opf.toml"])
+                    git_call(repo, ["-c", "user.email=t@t", "-c", "user.name=t",
                                     "commit", "-m", "drop store"])
-                esc_root.mkdir(exist_ok=True)
-                rc, output = run(esc_root)
-                refused = [line for line in output.splitlines()
-                           if line.startswith("opf init: REFUSED")]
-                check("ancestry: control-character root with a prior store is refused",
-                      rc == EXIT_ERROR and "prior store exists" in output and len(refused) == 1)
-                check("ancestry: REFUSED line carries no raw control character from the path",
-                      len(refused) == 1 and "\x1b" not in refused[0] and "\x07" not in refused[0]
-                      and refused[0].count("a\\x1b[31mred\\x07b") >= 4)
+                    sub_rc, sub_output = run(sub)
+                    return repo, sub, commit, held, first_rc, sub_rc, sub_output
+
+                def raw_free(text):
+                    return all(ch.isprintable() or ch == "\n" for ch in text)
+
+                format_name = "f" + chr(0x202E) + "evil" + chr(0x200B) + "zw" + chr(0x9B) + "c1"
+                for label, fixture, name in (
+                        ("C0 controls ESC and BEL", "ancestry-control-chars", "a\x1b[31mred\x07b"),
+                        ("format characters U+202E and U+200B and the C1 control U+009B",
+                         "ancestry-format-chars", format_name)):
+                    repo, sub, commit, held, first_rc, rc, output = sub_root_refusal(
+                        fixture, name)
+                    check("ancestry " + label + ": fixture first init succeeds",
+                          first_rc == EXIT_OK)
+                    check("ancestry " + label + ": refused with the complete text, the restore "
+                          "command escaped and labelled NOT shell-ready",
+                          rc == EXIT_ERROR and output == prior_store_output(
+                              sub, repo, commit, [".opf.toml", ".working"], False))
+                    check("ancestry " + label + ": no raw non-printable character in the output",
+                          raw_free(output))
+
+                for label, fixture, name in (
+                        ("printable non-ASCII cafe", "ancestry-cafe", "caf" + chr(0xE9)),
+                        ("shell-active it's$HOME", "ancestry-shell-chars", "it's$HOME")):
+                    repo, sub, commit, held, first_rc, rc, output = sub_root_refusal(
+                        fixture, name)
+                    check("ancestry " + label + ": fixture first init succeeds",
+                          first_rc == EXIT_OK)
+                    check("ancestry " + label + ": refused with the complete text and a "
+                          "shell-ready restore command",
+                          rc == EXIT_ERROR and output == prior_store_output(
+                              sub, repo, commit, [".opf.toml", ".working"], True))
+                    check("ancestry " + label + ": the printed restore command, run by a POSIX "
+                          "shell, restores the committed store",
+                          run_restore(output) == 0 and store_contents(sub) == held)
 
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side
@@ -890,6 +1160,9 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "prior store exists" in output)
                 check("ancestry: first-parent refusal names the mainline store commit",
                       fp_store in output)
+                check("ancestry: the complete first-parent refusal text",
+                      output == prior_store_output(fp, fp, fp_store,
+                                                   [".opf.toml", ".working"], True))
 
                 # _init_glob_escape is LOAD-BEARING (no false refusal): a store committed at
                 # the sibling prefix weX/ must not block init at the metacharacter-named
@@ -935,10 +1208,16 @@ def _suite_isolated(invoke):
                 git_call(guess, ["rm", "-r", "-q", "--", _opf_store.POINTER_REL])
                 git_call(guess, ["-c", "user.email=t@t", "-c", "user.name=t",
                                  "commit", "-m", "drop the directory"])
+                guess_drop = head_of(guess)
                 rc, output = run(guess)
                 check("ancestry: non-store change at a store path refuses rather than guessing",
                       rc == EXIT_ERROR and "refusing rather than guessing" in output
                       and "prior store exists" not in output)
+                check("ancestry: the complete refuse-rather-than-guessing text",
+                      output == cannot_evaluate_output(guess, (
+                          "git history preflight: commit " + guess_drop + " changed a store "
+                          "path yet neither its tree nor its first parent's holds a store "
+                          "identifier; refusing rather than guessing")))
 
                 # SPEC 8.2 ancestry, no over-refusal: a history of ordinary commits that never
                 # held a store identifier proceeds (the no-hit arm; the empty-git-root vector
@@ -951,6 +1230,42 @@ def _suite_isolated(invoke):
                 rc, output = run(plain_history)
                 check("ancestry: committed history without a store proceeds",
                       rc == EXIT_OK and valid_sources(plain_history))
+
+                # QA round 3 MINOR 4: the CURRENT-PATH limit, pinned. A store committed at old/
+                # on the first-parent line, deleted there, and the directory then renamed to
+                # new/ (git mv): its counters did reach a first-parent tree, under another
+                # directory, and the scan, whose pathspecs are new/'s present prefix and follow
+                # no rename, does not detect it, so init PROCEEDS, and its output states that
+                # limit. DISCRIMINATOR: M-any-prefix (the pointer pathspec widened to any
+                # directory, a stand-in for a scan that looks beyond the current path) refuses
+                # here; a scan extended that way must update every limit statement with it.
+                moved = make_git("ancestry-renamed-root")
+                old_root = moved / "old"
+                old_root.mkdir()
+                rc, output = run(old_root)
+                check("ancestry renamed-root fixture first init succeeds", rc == EXIT_OK)
+                git_call(moved, ["--literal-pathspecs", "add", "-A"])
+                git_call(moved, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "store at old"])
+                old_commit = head_of(moved)
+                git_call(moved, ["rm", "-r", "-q", "--", "old/" + working,
+                                 "old/" + _opf_store.POINTER_REL])
+                git_call(moved, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "drop store at old"])
+                git_call(moved, ["mv", "old", "new"])
+                git_call(moved, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "rename old to new"])
+                check("ancestry renamed-root fixture: a HEAD ancestor held the store at old/",
+                      _opf_observe._run_git(git, moved, [
+                          "cat-file", "-e", old_commit + ":old/" + _opf_store.POINTER_REL]).rc == 0
+                      and _opf_observe._run_git(git, moved, [
+                          "merge-base", "--is-ancestor", old_commit, "HEAD"]).rc == 0)
+                rc, output = run(moved / "new")
+                check("ancestry: a store committed under the root's former name is not detected "
+                      "(current-path limit)",
+                      rc == EXIT_OK and valid_sources(moved / "new"))
+                check("ancestry: that success output states the current-path limit",
+                      _states_path_limit(output) and _states_sideline_limit(output))
 
                 # OPF-D2B round 6: in a PARTIAL clone a skip-worktree .gitignore whose blob is ABSENT locally
                 # reads as no-rule under the no-lazy-fetch probe, but the adopter's own `git add` fetches that

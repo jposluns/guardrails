@@ -14123,8 +14123,13 @@ def _init_glob_escape(text):
 
 class _InitPriorStoreRefusal(RuntimeError):
     """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
-    _cmd_init reports it under a REFUSED prefix in the finding's own words. The exit code is
-    the same 2 either way; only the reporting wording distinguishes the two verdicts."""
+    _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
+    restore_lines (a label line, then the restore command alone on its line). The exit code is the
+    same 2 either way; only the reporting wording distinguishes the two verdicts."""
+
+    def __init__(self, message, restore_lines):
+        super().__init__(message)
+        self.restore_lines = list(restore_lines)
 
 
 def _init_history_rels(prefix):
@@ -14152,6 +14157,12 @@ def _init_no_prior_store(git, repo, root):
     unsupported-older-store, never reads it as absent), and no blob content could downgrade the
     refusal. A found ancestor REFUSES, naming the newest first-parent commit whose tree held a
     store and the remedy (restore that commit's store, or `opf adopt`); it never passes silently.
+    The restore command, carried in restore_lines and printed alone on a line after the REFUSED
+    line, names only the store paths that commit's tree holds (git checkout fails outright on a
+    pathspec the commit lacks). It is shell-ready only when the repository path and every
+    restored path are printable (str.isprintable): each is then shlex-quoted, under
+    --literal-pathspecs as the staging hint is. Otherwise every path in it is ascii()-escaped
+    and the command is labelled NOT shell-ready. Descriptive path mentions always use ascii().
 
     SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
     proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
@@ -14159,8 +14170,11 @@ def _init_no_prior_store(git, repo, root):
     created and deleted on a side branch, merged or not) is NOT detected: it left no mainline
     state whose counters this init could restart, and distinguishing first adoption from
     re-adoption across such side lines is the section 14 adoption investigation's authority, not
-    init's. The refusal text, the successful init output and OPF-QUICKSTART.md state this same
-    limit in the same words.
+    init's. PATH SCOPE: the scan checks the root's current path only (a store committed under
+    another directory, for example before a rename, is not detected): every pathspec is built
+    from the root's present repo-relative prefix, and a pathspec history walk does not follow
+    renames. The refusal text, the successful init output and OPF-QUICKSTART.md state both
+    limits in the same words.
 
     FAIL-CLOSED BOUNDARIES: an unborn HEAD (rev-parse --verify --quiet rc 1, the _observe_prior
     convention) has no history and PROCEEDS; a SHALLOW repository's truncated history cannot
@@ -14203,16 +14217,18 @@ def _init_no_prior_store(git, repo, root):
                 "git history preflight: unexpected object id {}; refusing".format(ascii(raw)))
         return text
 
-    def tree_holds_store(commit):
-        """Whether the commit's raw tree holds the pointer blob or a store-manifest path. Raises
-        on any read it cannot complete: a missing tree object (a filtered partial clone, say) is
-        a refusal, never absence. The two destination paths are passed as --literal-pathspecs,
-        the same neutralization _init_untracked uses, so a metacharacter-named prefix stays a
-        path; ls-tree of an entry that is simply absent still answers rc 0 with no output, which
-        IS a proven absence."""
+    def tree_store_paths(commit):
+        """The store paths the commit's raw tree holds, empty when it holds no store identifier
+        (the pointer blob, or a store-manifest path): the pointer when it is a blob, and .working
+        when it is a tree beside that pointer or holds a store manifest. These are exactly the
+        paths the remedy restores. Raises on any read it cannot complete: a missing tree object
+        (a filtered partial clone, say) is a refusal, never absence. The two destination paths
+        are passed as --literal-pathspecs, the same neutralization _init_untracked uses, so a
+        metacharacter-named prefix stays a path; ls-tree of an entry that is simply absent still
+        answers rc 0 with no output, which IS a proven absence."""
         probe = read(["--literal-pathspecs", "ls-tree", "-z", commit, "--",
                       pointer_rel, working_rel])
-        has_working = False
+        has_pointer = has_working = False
         for entry in probe.out.split(b"\0"):
             if not entry:
                 continue
@@ -14222,19 +14238,22 @@ def _init_no_prior_store(git, repo, root):
                 raise RuntimeError("git history preflight: unparseable ls-tree entry {}; "
                                    "refusing".format(ascii(entry)))
             if name == os.fsencode(pointer_rel) and fields[1] == b"blob":
-                return True
+                has_pointer = True
             if name == os.fsencode(working_rel) and fields[1] == b"tree":
                 has_working = True
-        if not has_working:
-            return False
-        listing = read(["ls-tree", "-r", "-z", "--name-only",
-                        commit + ":" + working_rel])
-        manifest = os.fsencode(_opf_store.MANIFEST_NAME)
-        for name in listing.out.split(b"\0"):
-            parts = name.split(b"/")
-            if len(parts) == 2 and parts[0] and parts[1] == manifest:
-                return True
-        return False
+        held = [pointer_rel] if has_pointer else []
+        if has_working and has_pointer:
+            held.append(working_rel)
+        elif has_working:
+            listing = read(["ls-tree", "-r", "-z", "--name-only",
+                            commit + ":" + working_rel])
+            manifest = os.fsencode(_opf_store.MANIFEST_NAME)
+            for name in listing.out.split(b"\0"):
+                parts = name.split(b"/")
+                if len(parts) == 2 and parts[0] and parts[1] == manifest:
+                    held.append(working_rel)
+                    break
+        return held
 
     head = read(["rev-parse", "--verify", "--quiet", "HEAD"], ok=(0, 1))
     if head.rc == 1:
@@ -14275,7 +14294,7 @@ def _init_no_prior_store(git, repo, root):
     else:
         # Name exactly what was found; whether git can read it, and whether it rewrites any
         # parent link, is not interpreted here (an empty file or a dangling link rewrites
-        # nothing today, yet a later write through it would), so every kind refuses alike.
+        # nothing today, yet a later write through it could), so every kind refuses alike.
         kind = _init_kind(grafts_st)
         if kind == "file":
             found = "a regular file of {} byte(s)".format(grafts_st.st_size)
@@ -14299,35 +14318,52 @@ def _init_no_prior_store(git, repo, root):
     if not newest_raw:
         return   # no first-parent commit ever changed a store-identifying path: no prior store
     newest = oid(newest_raw)
-    if tree_holds_store(newest):
-        ancestor = newest
-    else:
+    ancestor = newest
+    held = tree_store_paths(newest)
+    if not held:
         # The newest first-parent change to a store path whose own tree holds no store
         # identifier is a deletion, so its first parent's tree held one (a parentless root
         # commit can only ADD, so it always holds what it changed).
         ancestor = oid(read(["rev-parse", "--verify", "--quiet",
                              newest + "^1"]).out.strip())
-        if not tree_holds_store(ancestor):
+        held = tree_store_paths(ancestor)
+        if not held:
             raise RuntimeError(
                 "git history preflight: commit {} changed a store path yet neither its tree "
                 "nor its first parent's holds a store identifier; refusing rather than "
                 "guessing".format(newest))
-    # Every path-derived value goes through ascii(), the escaping this file uses for paths in
-    # diagnostics, so a control character in a directory name cannot reach the terminal raw
-    # through the REFUSED line; the commit id is already validated hex (oid).
+    # Every descriptive path mention goes through ascii(), the escaping this file uses for
+    # paths in diagnostics, so a control character in a directory name cannot reach the
+    # terminal raw; the commit id is already validated hex (oid). The restore command is
+    # shell-ready only when every path in it is printable: shlex.quote then makes each path one
+    # literal shell word (a quote or $ in a name stays literal) and --literal-pathspecs keeps
+    # git from reading it as a pattern. A non-printable path (a control, format or separator
+    # character, or an undecodable byte) must not reach the terminal raw, so the command is
+    # then ascii()-escaped and labelled NOT shell-ready.
+    import shlex
+    if all(path.isprintable() for path in [str(repo)] + held):
+        quote = shlex.quote
+        label = "shell-ready; it restores the store paths that commit holds"
+    else:
+        quote = ascii
+        label = ("NOT shell-ready: a path in it holds a non-printable character, shown "
+                 "escaped as a Python string literal; replace each escaped path with the real one")
     raise _InitPriorStoreRefusal(
         "a prior store exists in this repository's git history: commit {} on HEAD's "
         "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec 8.2 "
         "forbids restarting its counters at zero (record ids would be reissued). Remedy: "
-        "restore the store from that commit (git checkout {} -- {} {}) or re-adopt the "
-        "ancestry with `opf adopt`; plain `opf init` refuses whenever this scan of HEAD's "
+        "restore the store from that commit with the restore command below, or re-adopt the "
+        "ancestry with `opf adopt`. Plain `opf init` refuses whenever this scan of HEAD's "
         "first-parent line finds a prior store, and a store that never reached a tree on "
         "HEAD's first-parent line (for example one created and deleted on a side branch, "
         "merged or not) is not detected (adoption across such side lines is `opf adopt`'s "
-        "authority)".format(
+        "authority); the scan checks the root's current path only (a store committed under "
+        "another directory, for example before a rename, is not detected)".format(
             ancestor, ascii(pointer_rel),
-            ascii(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME),
-            ancestor, ascii(pointer_rel), ascii(working_rel)))
+            ascii(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME)),
+        ["opf init: restore command ({}):".format(label),
+         "  git -C {} --literal-pathspecs checkout {} -- {}".format(
+             quote(str(repo)), ancestor, " ".join(quote(path) for path in held))])
 
 
 def _init_same_root(root, root_fd):
@@ -14553,16 +14589,21 @@ def _cmd_init(rest):
         print("  opf render --write --root {}".format(shlex.quote(str(root))))
         print("opf init: prior-store history was checked on HEAD's first-parent line only: a store")
         print("  that never reached a tree on HEAD's first-parent line (for example one created and")
-        print("  deleted on a side branch, merged or not) is not detected (see `opf adopt`).")
+        print("  deleted on a side branch, merged or not) is not detected (see `opf adopt`), and")
+        print("  the scan checks the root's current path only (a store committed under another")
+        print("  directory, for example before a rename, is not detected).")
         print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
         return EXIT_OK
     except _InitPriorStoreRefusal as exc:
         # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own words.
         # It is raised only by the read-only ancestry preflight, so publication never started.
         # Its text is printed unwrapped because _init_no_prior_store already passed every
-        # path-derived value through ascii() (the root here gets the same escaping).
+        # path-derived value through ascii() (the root here gets the same escaping), and its
+        # restore command holds raw paths only when every one of them is printable.
         print("opf init: REFUSED at {} during {}: {}; exit 2".format(
             ascii(str(root)), stage, exc), file=sys.stderr)
+        for line in exc.restore_lines:
+            print(line, file=sys.stderr)
         print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
         return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
