@@ -14121,73 +14121,65 @@ def _init_glob_escape(text):
     return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
 
 
-_INIT_INERT_SAFE = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_+,:@%=")
-
-# The prose form admits the space and parentheses too, so a diagnostic sentence stays
-# readable; both sets exclude every quote, "$", "`", the backslash, ";", "&", "|", "<", ">",
-# "#" and every control character, so escaped output can open no quote, start no substitution,
-# redirect nothing, separate no commands and continue no line (a backslash appears only inside
-# a backslash-x, backslash-u or backslash-U escape, never line-final, so a backslash-newline
-# can never form). The escape names are spelled in words above because the CLI self-test's
-# import structural check re-decodes this whole file under a planted raw_unicode_escape
+# The single inert alphabet: ASCII letters, digits, and . / - _ ONLY. It excludes every
+# quote, "$", "`", the backslash, the SPACE, "(", ")", ";", "&", "|", "<", ">", "#", the
+# newline and every other character a POSIX shell reads as a metacharacter or word break,
+# so a rendered value can open no quote, start no substitution, redirect nothing, separate
+# no words or commands and continue no line (a backslash appears only inside a backslash-x,
+# backslash-u or backslash-U escape, never line-final, so a backslash-newline can never
+# form). The escape names are spelled in words here because the CLI self-test's import
+# structural check re-decodes this whole file under a planted raw_unicode_escape
 # declaration, to which a raw backslash-u sequence in any comment or docstring is itself an
 # escape: well-formed it would decode to another character, truncated it fails the decode.
-_INIT_INERT_PROSE_SAFE = _INIT_INERT_SAFE | frozenset(" ()")
+_INIT_INERT_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
 
 
-def _init_inert_escape(ch):
-    code = ord(ch)
-    if code < 0x100:
-        return "\\x{:02x}".format(code)
-    if code < 0x10000:
-        return "\\u{:04x}".format(code)
-    return "\\U{:08x}".format(code)
+def _init_inert(value):
+    """THE one renderer for every value (path, argument, commit id, exception text, JSON
+    report string) interpolated into any line _cmd_init or _init_no_prior_store prints (QA
+    round 6): every character outside _INIT_INERT_SAFE becomes a Python string-literal
+    backslash-x, backslash-u or backslash-U escape, so the rendered form holds only
+    letters, digits, . / - _ and visible escapes. ascii() and repr() are NOT inert for this
+    purpose: a name holding a single quote and no double quote comes back as a
+    DOUBLE-quoted Python literal, in which $(...), `...` and $VAR stay live under POSIX
+    double-quote semantics (QA round 6 MAJOR, reached through the {!r} argument
+    diagnostics), and a name holding BOTH quote kinds comes back as a single-quoted literal
+    whose embedded backslash-quote ends the shell's quote early and re-arms them (QA round
+    5 MAJOR). The earlier second renderer that admitted the space and parentheses for prose
+    is retired: one alphabet, one renderer, and the init suite's AST gate fails any print
+    in these two functions that interpolates a value through anything else. A rendered
+    value reads back as a Python string literal; it is for reconstruction by hand, never
+    for pasting into a shell."""
 
+    def escape(ch):
+        code = ord(ch)
+        if code < 0x100:
+            return "\\x{:02x}".format(code)
+        if code < 0x10000:
+            return "\\u{:04x}".format(code)
+        return "\\U{:08x}".format(code)
 
-def _init_inert_path(path):
-    """Spell a path so no POSIX shell can execute any part of it: every character outside a
-    fixed safe set (ASCII letters, digits, and . / - _ + , : @ % =) becomes a Python
-    string-literal \\x / \\u / \\U escape. ascii() is NOT inert for this purpose: a name
-    holding a single quote and no double quote comes back as a DOUBLE-quoted Python literal, in
-    which $(...), `...` and $VAR stay live under POSIX double-quote semantics, and a name
-    holding BOTH quote kinds comes back as a single-quoted literal whose embedded \\' ends the
-    shell's quote early and re-arms them (QA
-    round 4 MINOR 2; QA round 5 MAJOR). Here "$", "`", every quote, the space and every other
-    metacharacter are
-    escaped, so a pasted detail line can reference no substitution or expansion at all; the
-    printed form is for reconstruction by hand, not for pasting."""
-    return "".join(ch if ch in _INIT_INERT_SAFE else _init_inert_escape(ch) for ch in path)
-
-
-def _init_inert_prose(text):
-    """The inert spelling for a SENTENCE a diagnostic interpolates (an exception's text, a
-    JSON report value): the same escaping as _init_inert_path over a safe set widened by the
-    space and parentheses only, so prose stays readable while every quote, "$", "`", the
-    backslash, ";" and every control character is escaped. Inside a shell's double quotes
-    (the context every printed JSON string sits in) $(...), `...` and $VAR stay LIVE, so a
-    raw value there could execute on paste (QA round 5 MAJOR); through this escaping no
-    printed line can reference a substitution, end a quote, separate commands, redirect, or
-    continue a line. A value made only of safe characters passes through unchanged; an
-    escaped value reads back as a Python string literal, like the inert detail lines."""
-    return "".join(ch if ch in _INIT_INERT_PROSE_SAFE else _init_inert_escape(ch)
-                   for ch in text)
+    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in value)
 
 
 def _init_inert_json(value):
-    """Apply _init_inert_prose to every string VALUE in a report bound for json.dumps (the
-    keys here are fixed literals, so only values are escaped, recursively through lists and
-    dicts). json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
-    leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context in
-    which a POSIX shell keeps substitutions live, so a pasted event line whose root or
-    foreign-entry name carries $(...) could execute it (QA round 5). An escaped value reads
-    back as a Python string literal."""
+    """Apply _init_inert to every string in a report bound for json.dumps, KEYS included,
+    recursively through lists and dicts (every key is a fixed safe-alphabet literal, so
+    rendering keys changes no output byte; doing it anyway means every string this returns
+    went through the one renderer, not only the strings a reviewer believed were values).
+    json.dumps alone is NOT shell-inert: it escapes quotes and control characters but
+    leaves "$" and "`" raw inside the JSON double quotes, exactly the double-quote context
+    in which a POSIX shell keeps substitutions live, so a pasted event line whose root or
+    foreign-entry name carries $(...) could execute it (QA round 5). An escaped value
+    reads back as a Python string literal."""
     if isinstance(value, str):
-        return _init_inert_prose(value)
+        return _init_inert(value)
     if isinstance(value, list):
         return [_init_inert_json(item) for item in value]
     if isinstance(value, dict):
-        return {key: _init_inert_json(item) for key, item in value.items()}
+        return {_init_inert_json(key): _init_inert_json(item)
+                for key, item in value.items()}
     return value
 
 
@@ -14195,9 +14187,10 @@ class _InitPriorStoreRefusal(RuntimeError):
     """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
     _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
     restore_lines (a label line and a restore command alone on its line, twice when the store
-    was deleted across two commits, or withheld-command detail lines when a path is not
-    printable, plus missing-store-path detail lines when the restorable trees provably lack a
-    structural store file). The exit code is the
+    was deleted across two commits, or withheld-command detail lines when the repository
+    path or a restored path does not render unchanged through _init_inert, plus
+    missing-store-path detail lines naming each structural store file the restorable
+    .working tree lacks). The exit code is the
     same 2 either way; only the reporting wording distinguishes the two verdicts."""
 
     def __init__(self, message, restore_lines):
@@ -14240,22 +14233,31 @@ def _init_no_prior_store(git, repo, root):
     store path it lacks is probed one step the same way (its newest first-parent change at or
     before the named commit, else that change's first parent), and a found holder is printed
     as a second, ADDITIONAL restore command. A deletion split INSIDE .working (QA round 5
-    MAJOR) is probed structurally through working_gaps: whichever named tree the remedy
-    restores .working from must hold a manifest.toml AND a counters.toml in each machine
-    subdirectory that holds either, and every absent one makes the remedy say the restore is
-    PARTIAL and name that missing path on its own detail line. No remedy text ever claims to
-    restore the whole store: each command is labelled with exactly the store paths its
-    commit's tree holds, as that tree holds them, because a file outside the two probed
-    structural files that an earlier commit deleted inside .working is not detected.
-    Commands are printed
-    ONLY when the repository path and every restored path are printable (str.isprintable): each
-    is then shell-quoted into one literal word. Otherwise NO command is printed at all, because
-    every escaped command form can leave a substitution live in some quoting (QA round 4 MINOR
-    2): the refusal instead names the repository, commit(s) and path(s) through
-    _init_inert_path. Descriptive path mentions always use _init_inert_path too, never
-    ascii(): for a name holding both quote kinds ascii() yields a single-quoted literal whose
-    embedded backslash-quote ends a POSIX shell's quote early and re-arms substitutions on
-    the printed line (QA round 5 MAJOR).
+    MAJOR; QA round 6 MAJOR for a subdirectory that lost BOTH structural files, or a whole
+    subdirectory, in an earlier commit) is probed structurally through working_gaps:
+    whichever named tree the remedy restores .working from must hold a manifest.toml AND a
+    counters.toml in each first-level subdirectory that tree holds, and in each
+    subdirectory where a first-parent commit at or before the named commit touched either
+    structural path; every absent one makes the remedy say the restore is PARTIAL and name
+    that missing path on its own detail line, in words that state only what the scan
+    observed (the restored tree lacks the path), never that the path once existed or was
+    deleted (QA round 6 MEDIUM: the counters of a manifest-only history never existed).
+    No remedy text ever claims to restore the whole store: each command is labelled with
+    exactly the store paths its commit's tree holds, as git checks them out (the adopter's
+    own attributes and filters apply to a checkout, so the written bytes need not equal
+    the committed blob's), and a file outside the two probed structural names that an
+    earlier commit deleted inside .working is not detected. Commands are printed ONLY when
+    the repository path and every restored path render UNCHANGED through _init_inert
+    (commit ids are validated hex, which always does): such a command holds no character a
+    POSIX shell could split, substitute, quote or continue, on any physical line
+    (shlex.quote is retired here: it kept a newline-holding root syntactically quoted
+    while the quoted value's middle physical lines ran standalone when the output was
+    pasted line by line, QA round 6 MAJOR). Otherwise NO command is printed at all: the
+    refusal instead names the repository, commit(s) and path(s) through _init_inert, the
+    one renderer every value interpolated into this function's output goes through
+    (ascii() is never used for output: for a name holding both quote kinds it yields a
+    single-quoted literal whose embedded backslash-quote ends a POSIX shell's quote early
+    and re-arms substitutions on the printed line, QA round 5 MAJOR).
 
     SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
     proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
@@ -14350,30 +14352,55 @@ def _init_no_prior_store(git, repo, root):
 
     def working_gaps(commit):
         """Structural store files a checkout of <commit>:.working would still LACK, as
-        repo-relative paths (QA round 5 MAJOR): a .working tree counts as a held store path
-        while a counters.toml or manifest.toml inside it was already deleted in an EARLIER
-        commit (a split deletion INSIDE .working), so a restore of that tree exits 0 with
-        spec 8.2's high-water counters still deleted. For each first-level subdirectory of
-        .working whose tree holds either structural file (the spec 4.4/4.5 manifest or the
-        spec 8.2 counters), BOTH are required, and each absent one is returned. Only these
-        two files are probed: a tree in which some OTHER file was deleted by an earlier
-        commit is not detected, which is one reason no printed remedy ever claims to restore
-        the whole store. Called only for a commit whose tree holds .working. Entry names are
-        fsdecoded (surrogateescape, never raising); the returned paths are DESCRIPTIVE
-        mentions only, always printed through _init_inert_path."""
+        repo-relative paths (QA round 5 MAJOR; QA round 6 MAJOR): a .working tree counts
+        as a held store path while a counters.toml or manifest.toml inside it was already
+        absent from it, so a restore of that tree exits 0 with spec 8.2's high-water
+        counters still missing. The expected set is built from two observations and
+        nothing else: (1) each first-level subdirectory the commit's .working tree holds
+        must hold BOTH structural files (the spec 4.4/4.5 manifest and the spec 8.2
+        counters), whatever else it holds (QA round 6 MAJOR: a subdirectory that kept only
+        non-structural files was previously never examined); and (2) each
+        .working/<subdir>/manifest.toml or counters.toml path that ANY first-parent commit
+        at or before <commit> touched (one `log` walk over the same escaped glob pathspecs
+        as the main scan, read under the shared hardened runner and its output bound,
+        whose overflow refuses like every other unreadable answer) must be in the tree, so
+        a machine subdirectory deleted WHOLE in an earlier commit is still disclosed. Each
+        expected path the tree lacks is returned; the caller reports it as a PARTIAL
+        restore in words that assert only this observed lack, never a prior existence or
+        deletion (QA round 6 MEDIUM: the counters of a manifest-only history never
+        existed). Only these two filenames are probed: a tree in which some OTHER file was
+        deleted by an earlier commit is not detected, which is one reason no printed
+        remedy ever claims to restore the whole store. Called only for a commit whose tree
+        holds .working. Entry names are fsdecoded (surrogateescape, never raising); the
+        returned paths are DESCRIPTIVE mentions only, always printed through
+        _init_inert."""
         listing = read(["ls-tree", "-r", "-z", "--name-only",
                         commit + ":" + working_rel])
         names = set(listing.out.split(b"\0")) - {b""}
         required = (os.fsencode(_opf_store.MANIFEST_NAME),
                     os.fsencode(_opf_check.COUNTERS_NAME))
-        missing = set()
+        expected = set()
         for name in names:
             parts = name.split(b"/")
-            if len(parts) == 2 and parts[0] and parts[1] in required:
+            if len(parts) == 2 and parts[0]:
                 for want in required:
-                    if parts[0] + b"/" + want not in names:
-                        missing.add(working_rel + "/"
-                                    + os.fsdecode(parts[0] + b"/" + want))
+                    expected.add(parts[0] + b"/" + want)
+        touched = read(["log", "--first-parent", "--format=", "--name-only", "-z",
+                        commit, "--"]
+                       + [":(glob)" + _init_glob_escape(working_rel) + "/*/"
+                          + _init_glob_escape(os.fsdecode(want)) for want in required])
+        prefix = os.fsencode(working_rel) + b"/"
+        for entry in set(touched.out.split(b"\0")) - {b""}:
+            if not entry.startswith(prefix):
+                raise RuntimeError(
+                    "git history preflight: unexpected --name-only entry {} outside the "
+                    "pathspec prefix; refusing".format(ascii(entry)))
+            rel = entry[len(prefix):]
+            parts = rel.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] in required:
+                expected.add(rel)
+        missing = {working_rel + "/" + os.fsdecode(rel)
+                   for rel in expected - names}
         return sorted(missing)
 
     head = read(["rev-parse", "--verify", "--quiet", "HEAD"], ok=(0, 1))
@@ -14498,89 +14525,96 @@ def _init_no_prior_store(git, repo, root):
         gaps = working_gaps(ancestor)
     elif working_rel in extra_paths:
         gaps = working_gaps(extra_commit)
-    # Every descriptive path mention goes through _init_inert_path, never ascii(): ascii() is
-    # not shell-inert (for a name holding both quote kinds it yields a single-quoted Python
+    # Every value interpolated below goes through _init_inert, never ascii() (ascii() is
+    # not shell-inert: for a name holding both quote kinds it yields a single-quoted Python
     # literal whose embedded backslash-quote ends a POSIX shell's quote early and re-arms
-    # $(...) on the very diagnostic line, QA round 5 MAJOR), while the inert escaping never
-    # emits a quote, "$", "`", ";", a newline or a line-final backslash, and keeps a control
-    # character in a directory name off the terminal raw; the commit ids are already
-    # validated hex (oid). Restore commands are
-    # printed ONLY when the repository path and every restored path are printable: shlex.quote
-    # then makes each path one literal shell word (a quote or $ in a name stays literal), and
-    # the printed command carries exactly two of the scan's neutralizations:
-    # --literal-pathspecs keeps git from reading it as a pattern, and --no-replace-objects
-    # keeps a replacement ref from substituting another commit's bytes for the named one's (QA
-    # round 4 MEDIUM: checkout honours replacement refs; the scan's own reads already run
-    # under that flag). The scan's OTHER neutralizations, listed exactly (QA round 5 MINOR),
-    # transfer to no printed command: the grafts refusal (any entry at the legacy grafts path
-    # refused above, before any command is built); the allowlist environment scrub with
-    # GIT_NO_LAZY_FETCH=1, -c core.fsmonitor=false and --no-pager, which guard only the
-    # scan's own child processes (the pasted command runs as the user's git in the user's
-    # environment, where a checkout may legitimately lazy-fetch the blobs it restores and the
-    # user's own pager and fsmonitor configuration applies); and -c core.commitGraph=false,
-    # which guards the scan's rev-list and rev-parse walks against a commit-graph's cached
-    # data, and is not needed in the printed command because a checkout named by a FULL
-    # commit id reads the commit object itself, never the graph's cached tree (QA round 5,
-    # verified against a tree-substituted commit-graph). For a NON-printable path (a control,
-    # format or separator
-    # character, or an undecodable byte) NO command is printed at all (QA round 4 MINOR 2):
-    # a printed escaped command could keep a command substitution, a backquote or a variable
-    # expansion live under the shell's quote reading, so the refusal instead names the
-    # repository, the commits and the paths on inert detail lines through _init_inert_path.
-    import shlex
-    if all(path.isprintable() for path in [str(repo)] + held + extra_paths):
+    # $(...) on the very diagnostic line, QA round 5 MAJOR), and the inert escaping never
+    # emits a quote, "$", "`", ";", a space, a newline or a line-final backslash, and keeps
+    # a control character in a directory name off the terminal raw; the commit ids are
+    # already validated hex (oid), which renders unchanged. Restore commands are printed
+    # ONLY when the repository path and every restored path render UNCHANGED through
+    # _init_inert: every word of such a command is then a bare literal the shell cannot
+    # split, substitute, quote or continue, on any physical line, so the command needs no
+    # quoting at all (shlex.quote is retired: it kept a newline-holding value syntactically
+    # quoted while its middle physical lines ran standalone when the output was pasted line
+    # by line, QA round 6 MAJOR). The printed command carries exactly two of the scan's
+    # neutralizations: --literal-pathspecs keeps git from reading a path as a pattern, and
+    # --no-replace-objects keeps a replacement ref from substituting another commit's bytes
+    # for the named one's (QA round 4 MEDIUM: checkout honours replacement refs; the scan's
+    # own reads already run under that flag). The scan's OTHER neutralizations, listed
+    # exactly (QA round 5 MINOR), transfer to no printed command: the grafts refusal (any
+    # entry at the legacy grafts path refused above, before any command is built); the
+    # allowlist environment scrub with GIT_NO_LAZY_FETCH=1, -c core.fsmonitor=false and
+    # --no-pager, which guard only the scan's own child processes (the pasted command runs
+    # as the user's git in the user's environment, where a checkout may legitimately
+    # lazy-fetch the blobs it restores and the user's own pager and fsmonitor configuration
+    # applies); and -c core.commitGraph=false, which guards the scan's rev-list and
+    # rev-parse walks against a commit-graph's cached data, and is not needed in the
+    # printed command because a checkout named by a FULL commit id reads the commit object
+    # itself, never the graph's cached tree (QA round 5, verified against a
+    # tree-substituted commit-graph). For any OTHER value (a space, a quote, a control or
+    # format character, an undecodable byte: anything outside the inert alphabet) NO
+    # command is printed at all (QA round 4 MINOR 2; QA round 6 MAJOR): a printed escaped
+    # command could keep a command substitution, a backquote or a variable expansion live
+    # under the shell's quote reading, so the refusal instead names the repository, the
+    # commits and the paths on inert detail lines through _init_inert.
+    if all(_init_inert(value) == value for value in [str(repo)] + held + extra_paths):
         if extra_commit:
             remedy = ("restore the store paths the restore commands below name, from the "
                       "commits they name (this history deleted the store across more than "
                       "one commit, so one command cannot restore every store path)")
             label = ("shell-ready; it restores only the store paths its commit holds, and "
                      "the additional command below restores the other named store path as "
-                     "its own commit's tree holds it")
+                     "git checks it out from its own commit")
         else:
             remedy = ("restore the store paths the restore command below names, from that "
                       "commit")
-            label = ("shell-ready; it restores the named store paths as that commit's tree "
-                     "holds them")
+            label = ("shell-ready; it restores the named store paths as git checks them "
+                     "out from that commit")
         restore_lines = [
             "opf init: restore command ({}):".format(label),
             "  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- {}".format(
-                shlex.quote(str(repo)), ancestor,
-                " ".join(shlex.quote(path) for path in held))]
+                _init_inert(str(repo)), _init_inert(ancestor),
+                " ".join(_init_inert(path) for path in held))]
         if extra_commit:
             restore_lines += [
                 "opf init: additional restore command (shell-ready; it restores the "
                 "remaining store path from the newest first-parent tree that holds it):",
                 "  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- {}".format(
-                    shlex.quote(str(repo)), extra_commit,
-                    " ".join(shlex.quote(path) for path in extra_paths))]
+                    _init_inert(str(repo)), _init_inert(extra_commit),
+                    " ".join(_init_inert(path) for path in extra_paths))]
     else:
         remedy = ("restore the store paths the lines below name, from the {} named below "
-                  "(no command is printed: a path in it would hold a non-printable "
-                  "character)".format("commits" if extra_commit else "commit"))
+                  "(no command is printed: a value in it would hold a character outside "
+                  "the inert alphabet)".format("commits" if extra_commit else "commit"))
         restore_lines = (
-            ["opf init: restore command withheld: a path in it holds a non-printable "
-             "character, and an escaped command could still carry a live shell substitution, "
-             "so no command is printed. Restore each path named below from the commit named "
+            ["opf init: restore command withheld: a value in it holds a character outside "
+             "the inert alphabet A-Za-z0-9 . / - _ and an escaped command could still "
+             "carry a live shell substitution or split across physical lines, so no "
+             "command is printed. Restore each path named below from the commit named "
              "above it, in the repository named below, by your own means, reading each "
-             "escaped path as a Python string literal in which every character outside "
-             "A-Za-z0-9 . / - _ + , : @ % = is written as an escape:",
-             "opf init:   repository: " + _init_inert_path(str(repo)),
-             "opf init:   commit: " + ancestor]
-            + ["opf init:   restore path: " + _init_inert_path(path) for path in held])
+             "escaped value as a Python string literal in which every character outside "
+             "that alphabet is written as an escape:",
+             "opf init:   repository: " + _init_inert(str(repo)),
+             "opf init:   commit: " + _init_inert(ancestor)]
+            + ["opf init:   restore path: " + _init_inert(path) for path in held])
         if extra_commit:
             restore_lines += (
-                ["opf init:   additional commit: " + extra_commit]
-                + ["opf init:   additional restore path: " + _init_inert_path(path)
+                ["opf init:   additional commit: " + _init_inert(extra_commit)]
+                + ["opf init:   additional restore path: " + _init_inert(path)
                    for path in extra_paths])
     if gaps:
         remedy += (", and the restore is PARTIAL (the missing-store-path lines below name "
-                   "what no named commit's tree holds)")
+                   "structural store files the restored .working tree lacks)")
         restore_lines += (
-            ["opf init: the restore is PARTIAL: each store path below was deleted in an "
-             "earlier commit, so no commit named above holds it and no command or path named "
-             "above brings it back; restore each from an older first-parent commit by your "
-             "own means, or re-adopt with opf adopt:"]
-            + ["opf init:   missing store path: " + _init_inert_path(path)
+            ["opf init: the restore is PARTIAL: the .working tree the command or lines "
+             "above restore lacks each store path below, so no command or path printed "
+             "above provides it (this scan checks only the two structural names, "
+             "manifest.toml and counters.toml, in the first-level .working subdirectories "
+             "that tree holds and in those this line's first-parent history touched at or "
+             "before the named commit); supply each missing path by your own means, or "
+             "re-adopt with opf adopt:"]
+            + ["opf init:   missing store path: " + _init_inert(path)
                for path in gaps])
     raise _InitPriorStoreRefusal(
         "a prior store exists in this repository's git history: commit {} on HEAD's "
@@ -14593,8 +14627,8 @@ def _init_no_prior_store(git, repo, root):
         "merged or not) is not detected (adoption across such side lines is opf adopt's "
         "authority); the scan checks the root's current path only (a store committed under "
         "another directory, for example before a rename, is not detected)".format(
-            ancestor, _init_inert_path(pointer_rel),
-            _init_inert_path(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME), remedy),
+            _init_inert(ancestor), _init_inert(pointer_rel),
+            _init_inert(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME), remedy),
         restore_lines)
 
 
@@ -14684,13 +14718,20 @@ def _cmd_init(rest):
                 return EXIT_MALFORMED
             val = rest[i + 1]
             if val == "" or val.startswith("-"):
-                print("opf init: --root requires a non-empty directory argument, not {!r}".format(val),
-                      file=sys.stderr)
+                # The rejected value is rendered inert, never {!r}: repr of a value
+                # holding a single quote and no double quote is a DOUBLE-quoted literal
+                # in which $(...) stays live when the printed line reaches a POSIX shell
+                # (QA round 6 MAJOR). An empty value renders as nothing; the sentence
+                # names that case.
+                print("opf init: --root requires a non-empty directory argument, not "
+                      "the inert-escaped value {} (an empty value shows as nothing "
+                      "here)".format(_init_inert(val)), file=sys.stderr)
                 return EXIT_MALFORMED
             root = val
             i += 2
         else:
-            print("opf init: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            print("opf init: unrecognized argument, inert-escaped: {}".format(
+                _init_inert(tok)), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     root_fd = None
@@ -14699,7 +14740,6 @@ def _cmd_init(rest):
     publishing = False
     stage = "preflight"
     try:
-        import shlex
         import _opf_init
 
         journal = _opf_store._journal
@@ -14710,9 +14750,9 @@ def _cmd_init(rest):
 
         inventory = _init_inventory(root_fd)
         if inventory["entries"] or not inventory["complete"]:
-            # Report values are inert-escaped (QA round 5): a raw root or foreign-entry name
-            # inside a printed JSON string sits in exactly the double-quote context where a
-            # POSIX shell keeps $(...) and `...` live on paste; keys are fixed literals.
+            # Report strings are inert-escaped, keys included (QA round 5): a raw root or
+            # foreign-entry name inside a printed JSON string sits in exactly the
+            # double-quote context where a POSIX shell keeps $(...) and `...` live on paste.
             print(json.dumps(_init_inert_json(dict(inventory, event="foreign-content",
                                                    root=str(root))),
                              sort_keys=True))
@@ -14738,7 +14778,7 @@ def _cmd_init(rest):
             # CANNOT-EVALUATE result as permission to initialize a partial store.
             raise RuntimeError("store resolution refused: {}".format(res.detail))
 
-        stage = "building and validating source payloads"
+        stage = "building-and-validating-source-payloads"
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
         documents = [
@@ -14759,7 +14799,7 @@ def _cmd_init(rest):
             payloads["CHANGELOG.md"] = b"# Changelog\n"
         directories = [working, machine]
 
-        stage = "checking the destination inventory"
+        stage = "checking-the-destination-inventory"
         for relpath in directories + list(payloads):
             journal._check_rel(relpath)
             if journal._lstat_contained(root_fd, relpath) is not None:
@@ -14773,13 +14813,13 @@ def _cmd_init(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
-        stage = "checking git history for a prior store"
+        stage = "checking-git-history-for-a-prior-store"
         _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
         publishing = True
         for relpath in directories:
-            stage = "creating directory " + relpath
+            stage = "creating-directory-" + relpath
             pfd, name = journal._open_parent(root_fd, relpath)
             try:
                 os.mkdir(name, 0o755, dir_fd=pfd)
@@ -14787,11 +14827,11 @@ def _cmd_init(rest):
             finally:
                 _opf_store._close_fd_exc_safe(pfd)
         for relpath, data in payloads.items():
-            stage = "creating " + relpath
+            stage = "creating-" + relpath
             _init_same_root(root, root_fd)
             _init_create(root_fd, relpath, data)
 
-        stage = "observing published source paths"
+        stage = "observing-published-source-paths"
         observed = _init_observed(root_fd, directories, payloads)
         if any(row["state"] != (
                 "directory" if row["path"] in directories else "matches-payload")
@@ -14814,50 +14854,78 @@ def _cmd_init(rest):
         _init_untracked(git, repo, root, index_paths)
 
         print("opf init: store SOURCES created and {} pointer written.".format(
-            _opf_store.POINTER_REL))
+            _init_inert(_opf_store.POINTER_REL)))
         print(json.dumps(_init_inert_json(
             {"event": "created", "root": str(root), "paths": list(payloads)}),
             sort_keys=True))
         print("opf init: these created paths are NOT yet git-tracked (final index read).")
-        print("Review the created files, then stage the reviewed paths:")
-        print("  git -C {} --literal-pathspecs add -- {}".format(
-            shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
-        print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
-        print("  before creation; a later ignore or config change can still affect staging (git add -f).")
-        print("Commit the reviewed init paths, then materialize the Markdown views:")
-        print("  opf render --write --root {}".format(shlex.quote(str(root))))
+        # The staging and render hints are printed ONLY when the root and every created
+        # path render UNCHANGED through _init_inert: every word of each hint is then a
+        # bare literal no POSIX shell can split, substitute, quote or continue, on any
+        # physical line. shlex.quote is retired here (QA round 6 MAJOR): it kept a
+        # newline-holding root syntactically quoted while the quoted value's middle
+        # physical lines ran standalone when the output was pasted line by line. For any
+        # other root the hints are withheld and the root is named inert on a detail line.
+        if all(_init_inert(value) == value for value in [str(root)] + list(payloads)):
+            print("Review the created files, then stage the reviewed paths:")
+            print("  git -C {} --literal-pathspecs add -- {}".format(
+                _init_inert(str(root)),
+                " ".join(_init_inert(path) for path in payloads)))
+            print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            print("  before creation; a later ignore or config change can still affect staging (git add -f).")
+            print("Commit the reviewed init paths, then materialize the Markdown views:")
+            print("  opf render --write --root {}".format(_init_inert(str(root))))
+        else:
+            print("opf init: staging and render command hints withheld: a value in them "
+                  "holds a character")
+            print("  outside the inert alphabet A-Za-z0-9 . / - _ and an escaped command "
+                  "could still carry")
+            print("  a live shell substitution or split across physical lines, so no "
+                  "command is printed.")
+            print("  Review the created files, stage and commit the created paths the "
+                  "event line above")
+            print("  names (git add), then materialize the Markdown views (opf render "
+                  "--write), in the")
+            print("  root named below, by your own means, reading the escaped root as a "
+                  "Python string literal:")
+            print("opf init:   root: " + _init_inert(str(root)))
+            print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+            print("  before creation; a later ignore or config change can still affect staging (git add -f).")
         print("opf init: prior-store history was checked on HEAD's first-parent line only: a store")
         print("  that never reached a tree on HEAD's first-parent line (for example one created and")
-        print("  deleted on a side branch, merged or not) is not detected (see `opf adopt`), and")
+        print("  deleted on a side branch, merged or not) is not detected (see opf adopt), and")
         print("  the scan checks the root's current path only (a store committed under another")
         print("  directory, for example before a rename, is not detected).")
         print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
         return EXIT_OK
     except _InitPriorStoreRefusal as exc:
-        # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own words.
-        # It is raised only by the read-only ancestry preflight, so publication never started.
-        # Its text is printed unwrapped because _init_no_prior_store already passed every
-        # path-derived value through the inert escaping (_init_inert_path, which the root here
-        # gets too, never ascii(): for a name holding both quote kinds ascii() yields a
-        # single-quoted literal whose embedded backslash-quote ends a POSIX shell's quote
-        # early and re-arms $(...) on the printed line, QA round 5 MAJOR), and its restore
-        # lines hold raw paths only inside shlex-quoted command words
-        # (for a non-printable path no command is printed and each detail line is inert-escaped).
+        # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own
+        # words. It is raised only by the read-only ancestry preflight, so publication
+        # never started. Its text and its restore lines are printed unwrapped because
+        # _init_no_prior_store already passed every interpolated value through _init_inert
+        # at construction (never ascii(): for a name holding both quote kinds ascii()
+        # yields a single-quoted literal whose embedded backslash-quote ends a POSIX
+        # shell's quote early and re-arms $(...) on the printed line, QA round 5 MAJOR),
+        # and its restore lines hold raw paths only when each renders unchanged through
+        # _init_inert (otherwise no command is printed and each detail line is
+        # inert-escaped). The init suite's AST gate pins both ends: these two prints may
+        # interpolate the caught refusal and its lines, and every value reaching them was
+        # rendered at the raise site.
         print("opf init: REFUSED at {} during {}: {}; exit 2".format(
-            _init_inert_path(str(root)), stage, exc), file=sys.stderr)
+            _init_inert(str(root)), _init_inert(stage), exc), file=sys.stderr)
         for line in exc.restore_lines:
             print(line, file=sys.stderr)
         print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
         return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
-        # Both interpolations are escaped shell-inert AT THE PRINT (QA round 5): the root
-        # through _init_inert_path, and the exception text, whose raising sites quote
-        # path-derived values with ascii() (not shell-inert on its own), through
-        # _init_inert_prose; the exception TYPE is printed by name around the escaped text,
-        # the readable part ascii(exc) used to carry.
+        # Every interpolation is rendered inert AT THE PRINT (QA round 5; QA round 6):
+        # the root, the stage token and the exception text through _init_inert, whose
+        # raising sites may quote path-derived values with ascii() (not shell-inert on its
+        # own); the exception TYPE is printed by name around the escaped text, the
+        # readable part ascii(exc) used to carry.
         print("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
-            _init_inert_path(str(root)), stage, type(exc).__name__,
-            _init_inert_prose(str(exc))), file=sys.stderr)
+            _init_inert(str(root)), _init_inert(stage), _init_inert(type(exc).__name__),
+            _init_inert(str(exc))), file=sys.stderr)
         if publishing and root_fd is not None:
             try:
                 _init_same_root(root, root_fd)

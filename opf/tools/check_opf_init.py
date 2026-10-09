@@ -21,6 +21,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import ast
 import contextlib
 import io
 import json
@@ -28,6 +29,7 @@ import os
 import shlex
 import shutil
 import stat
+import string
 import subprocess
 import tempfile
 from pathlib import Path
@@ -111,6 +113,173 @@ def _snapshot(root):
     return result
 
 
+def _inert_print_violations(source):
+    """AST gate (QA round 6, requirement B): parse opf.py and fail any print in _cmd_init
+    or _init_no_prior_store that interpolates a value through anything but the one inert
+    renderer. A print argument is accepted when it is a string literal, a _init_inert(...)
+    call, json.dumps of an _init_inert_json(...) call, a plain-field .format on a literal
+    (no {!r} or {!s} conversion, no format spec) whose every argument is accepted, a
+    " ".join over accepted elements, a concatenation / list / conditional of accepted
+    parts, or a NAME every binding of which is accepted (so remedy, label and
+    restore_lines, assembled from literals and _init_inert calls, pass). The
+    _InitPriorStoreRefusal flow is covered at BOTH ends: every raise of it inside
+    _init_no_prior_store must carry accepted arguments, and only then may _cmd_init's
+    matching except handler print the caught refusal and iterate its restore_lines. Any
+    .write call inside either function is a violation (there is no second output path to
+    slip a raw value through). Literal-only prints are accepted by the same classifier,
+    which is this gate's allowlist. Returns a list of violation descriptions; the suite
+    requires it empty, and requires it NON-empty on seeded mutants, so the gate itself is
+    discriminated."""
+    tree = ast.parse(source)
+    functions = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_cmd_init", "_init_no_prior_store"):
+            functions[node.name] = node
+    violations = []
+    if sorted(functions) != ["_cmd_init", "_init_no_prior_store"]:
+        return ["expected functions not found: " + repr(sorted(functions))]
+
+    def plain_fields(fmt):
+        try:
+            return all(conversion is None and not spec
+                       for _text, field, spec, conversion
+                       in string.Formatter().parse(fmt) if field is not None)
+        except ValueError:
+            return False
+
+    def accepted(node, names, trusted):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return True
+        if isinstance(node, ast.Name):
+            return node.id in names or node.id in trusted
+        if isinstance(node, ast.IfExp):
+            return (accepted(node.body, names, trusted)
+                    and accepted(node.orelse, names, trusted))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return (accepted(node.left, names, trusted)
+                    and accepted(node.right, names, trusted))
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return all(accepted(elt, names, trusted) for elt in node.elts)
+        if isinstance(node, ast.ListComp):
+            return accepted(node.elt, names, trusted)
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in ("_init_inert",
+                                                          "_init_inert_json"):
+                return True
+            if (isinstance(func, ast.Attribute) and func.attr == "dumps"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "json"):
+                return bool(node.args) and accepted(node.args[0], names, trusted)
+            if (isinstance(func, ast.Attribute) and func.attr == "format"
+                    and isinstance(func.value, ast.Constant)
+                    and isinstance(func.value.value, str)):
+                return (plain_fields(func.value.value)
+                        and all(accepted(arg, names, trusted) for arg in node.args)
+                        and all(accepted(kw.value, names, trusted)
+                                for kw in node.keywords))
+            if (isinstance(func, ast.Attribute) and func.attr == "join"
+                    and isinstance(func.value, ast.Constant)
+                    and isinstance(func.value.value, str)
+                    and len(node.args) == 1
+                    and isinstance(node.args[0], (ast.GeneratorExp, ast.ListComp))):
+                return accepted(node.args[0].elt, names, trusted)
+        return False
+
+    def proven_names(func, trusted):
+        bindings = {}
+        for node in ast.walk(func):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)):
+                bindings.setdefault(node.targets[0].id, []).append(
+                    ("=", node.value))
+            elif isinstance(node, ast.AugAssign) and isinstance(node.target,
+                                                                ast.Name):
+                kind = "+=" if isinstance(node.op, ast.Add) else "?"
+                bindings.setdefault(node.target.id, []).append(
+                    (kind, node.value))
+            elif isinstance(node, (ast.For, ast.withitem, ast.comprehension,
+                                   ast.ExceptHandler)):
+                target = getattr(node, "target", None) or getattr(
+                    node, "optional_vars", None)
+                if isinstance(node, ast.ExceptHandler) and node.name:
+                    bindings.setdefault(node.name, []).append(("bound", None))
+                for name_node in (ast.walk(target) if target is not None else ()):
+                    if isinstance(name_node, ast.Name):
+                        bindings.setdefault(name_node.id, []).append(
+                            ("bound", None))
+        names = set()
+        while True:
+            grown = set(names)
+            for name, entries in bindings.items():
+                if entries and all(
+                        kind in ("=", "+=") and value is not None
+                        and accepted(value, grown, trusted)
+                        for kind, value in entries):
+                    grown.add(name)
+            if grown == names:
+                return names
+            names = grown
+
+    # End 1: every _InitPriorStoreRefusal raised by the scan carries accepted arguments.
+    scan = functions["_init_no_prior_store"]
+    scan_names = proven_names(scan, set())
+    refusal_ok = True
+    for node in ast.walk(scan):
+        if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                and isinstance(node.exc.func, ast.Name)
+                and node.exc.func.id == "_InitPriorStoreRefusal"):
+            for arg in node.exc.args:
+                if not accepted(arg, scan_names, set()):
+                    refusal_ok = False
+                    violations.append(
+                        "_init_no_prior_store line {}: _InitPriorStoreRefusal "
+                        "argument not rendered through _init_inert".format(
+                            node.lineno))
+
+    # End 2: prints. Inside the matching except handler, and only when end 1 held, the
+    # caught refusal and the loop variable over its restore_lines are trusted.
+    cmd = functions["_cmd_init"]
+    cmd_names = proven_names(cmd, set())
+    handler_trusted = {}
+    for node in ast.walk(cmd):
+        if (isinstance(node, ast.ExceptHandler) and node.name and refusal_ok
+                and isinstance(node.type, ast.Name)
+                and node.type.id == "_InitPriorStoreRefusal"):
+            trusted = {node.name}
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.For) and isinstance(sub.target, ast.Name)
+                        and isinstance(sub.iter, ast.Attribute)
+                        and sub.iter.attr == "restore_lines"
+                        and isinstance(sub.iter.value, ast.Name)
+                        and sub.iter.value.id == node.name):
+                    trusted.add(sub.target.id)
+            for sub in ast.walk(node):
+                handler_trusted[id(sub)] = trusted
+    for name, func in functions.items():
+        for node in ast.walk(func):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "write"):
+                violations.append("{} line {}: .write call bypasses the print "
+                                  "discipline".format(name, node.lineno))
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"):
+                trusted = handler_trusted.get(id(node), set())
+                names = cmd_names if name == "_cmd_init" else scan_names
+                for arg in node.args:
+                    if not accepted(arg, names, trusted):
+                        violations.append(
+                            "{} line {}: print interpolates a value without "
+                            "_init_inert".format(name, node.lineno))
+                for kw in node.keywords:
+                    if kw.arg not in ("file",):
+                        violations.append(
+                            "{} line {}: unexpected print keyword {}".format(
+                                name, node.lineno, kw.arg))
+    return violations
+
+
 def _suite(invoke):
     """Isolate fixture configuration and restore the caller even on failure."""
     import tempfile
@@ -149,6 +318,26 @@ def _suite_isolated(invoke):
 
         def run(root):
             return call(["init", "--root", str(root)])
+
+        def inert(text):
+            # An independent spelling of init's ONE inert renderer (QA round 6):
+            # every character outside the fixed alphabet (ASCII letters, digits,
+            # and . / - _ ONLY; the space, "+", ",", ":", "@", "%", "=", "(" and
+            # ")" of the earlier two-renderer split are escaped now too) becomes a
+            # Python \\x / \\u / \\U escape (written doubled so a
+            # raw_unicode_escape re-decode of this file stays well formed), so "$", "`", every quote, every space
+            # and every other shell metacharacter never reach a printed line raw.
+            def escape(ch):
+                code = ord(ch)
+                if code < 0x100:
+                    return "\\x%02x" % code
+                if code < 0x10000:
+                    return "\\u%04x" % code
+                return "\\U%08x" % code
+            safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                       "0123456789./-_")
+            return "".join(ch if ch in safe else escape(ch) for ch in text)
+
 
         def good(result):
             return result.status == _opf_store.VALID and not result.findings
@@ -322,7 +511,7 @@ def _suite_isolated(invoke):
                 before = _snapshot(clean)
                 rc, output = run(clean)
                 check("second init names existing state",
-                      rc == EXIT_ERROR and "existing pointer" in output
+                      rc == EXIT_ERROR and inert("existing pointer") in output
                       and _opf_store.POINTER_REL in output)
                 check("second init preserves source", _snapshot(clean) == before)
 
@@ -344,7 +533,7 @@ def _suite_isolated(invoke):
                     (working + "/link", "symlink"),
                 }
                 check("foreign content is refused with reason",
-                      rc == EXIT_ERROR and "foreign .working content" in output)
+                      rc == EXIT_ERROR and inert("foreign .working content") in output)
                 check("foreign inventory is surfaced", any(
                     row.get("event") == "foreign-content"
                     and row.get("root") == str(foreign)
@@ -358,13 +547,15 @@ def _suite_isolated(invoke):
                 nongit.mkdir()
                 before = _snapshot(nongit)
                 rc, output = run(nongit)
-                check("non-git refused with reason", rc == EXIT_ERROR and "git preflight" in output)
+                check("non-git refused with reason",
+                      rc == EXIT_ERROR and inert("git preflight") in output)
                 check("non-git untouched", _snapshot(nongit) == before)
 
                 bare = make_git("bare", bare=True)
                 before = _snapshot(bare)
                 rc, output = run(bare)
-                check("bare git refused with reason", rc == EXIT_ERROR and "git preflight" in output)
+                check("bare git refused with reason",
+                      rc == EXIT_ERROR and inert("git preflight") in output)
                 check("bare git untouched", _snapshot(bare) == before)
 
                 for number, pointer in enumerate(
@@ -374,7 +565,8 @@ def _suite_isolated(invoke):
                     before = _snapshot(target)
                     rc, output = run(target)
                     check(pointer + " refused",
-                          rc == EXIT_ERROR and "existing pointer" in output and pointer in output)
+                          rc == EXIT_ERROR and inert("existing pointer") in output
+                          and pointer in output)
                     check(pointer + " preserved", _snapshot(target) == before)
 
                 empty_working = make_git("empty-working")
@@ -382,7 +574,7 @@ def _suite_isolated(invoke):
                 before = _snapshot(empty_working)
                 rc, output = run(empty_working)
                 check("empty partial store refused",
-                      rc == EXIT_ERROR and "store resolution refused" in output)
+                      rc == EXIT_ERROR and inert("store resolution refused") in output)
                 check("empty partial store preserved", _snapshot(empty_working) == before)
 
                 changelog = make_git("existing-changelog")
@@ -429,7 +621,8 @@ def _suite_isolated(invoke):
                 before = _snapshot(tracked)
                 rc, output = run(tracked)
                 check("tracked destination refused",
-                      rc == EXIT_ERROR and "planned destination already git-tracked" in output)
+                      rc == EXIT_ERROR
+                      and inert("planned destination already git-tracked") in output)
                 check("tracked destination preserved", _snapshot(tracked) == before)
 
                 # A planned destination under a .gitignore rule: init must refuse, because an ignored
@@ -535,42 +728,21 @@ def _suite_isolated(invoke):
                 # QA round 3 (MEDIUM, MINOR 2): every ancestry refusal vector compares the
                 # COMPLETE output with text built here, from the commit ids and paths this test
                 # computes itself, never by substring. The builders spell out each diagnostic
-                # in full, so any change to the refusal wording, its escaping (ascii, not repr),
-                # its remedy command (shlex quoting, --literal-pathspecs, the restored paths) or
-                # its stated limits fails every vector that reaches it.
-                history_stage = "checking git history for a prior store"
-
-                def inert_escape(ch):
-                    code = ord(ch)
-                    if code < 0x100:
-                        return "\\x%02x" % code
-                    if code < 0x10000:
-                        return "\\u%04x" % code
-                    return "\\U%08x" % code
-
-                def inert_path(path):
-                    # An independent spelling of the inert escape: every character outside
-                    # the fixed safe set becomes a Python \x / \u / \U escape, so "$", "`",
-                    # every quote and every space never reach a printed detail line raw.
-                    safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                               "0123456789./-_+,:@%=")
-                    return "".join(ch if ch in safe else inert_escape(ch) for ch in path)
-
-                def inert_prose(text):
-                    # The prose form admits the space and parentheses only, so sentences
-                    # stay readable; quotes, "$", "`", the backslash, ";" and every control
-                    # character are escaped, so no printed JSON string or exception text can
-                    # carry a live substitution under a shell's double-quote reading (QA
-                    # round 5).
-                    safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                               "0123456789./-_+,:@%= ()")
-                    return "".join(ch if ch in safe else inert_escape(ch) for ch in text)
+                # in full, so any change to the refusal wording, its escaping (the one inert
+                # renderer, never ascii or repr), its remedy command (the render-unchanged
+                # gate, --literal-pathspecs, the restored paths) or its stated limits fails
+                # every vector that reaches it.
+                history_stage = "checking-git-history-for-a-prior-store"
 
                 def restore_command(repo, commit, paths):
-                    return ("  git -C " + shlex.quote(str(repo))
+                    # Printed by init only when every interpolated value renders UNCHANGED
+                    # through the inert escape, so the command carries the raw words bare,
+                    # with no quoting at all (shlex.quote is retired: it kept a
+                    # newline-holding value syntactically quoted while its middle physical
+                    # lines ran standalone when pasted line by line, QA round 6 MAJOR).
+                    return ("  git -C " + str(repo)
                             + " --no-replace-objects --literal-pathspecs checkout "
-                            + commit + " -- "
-                            + " ".join(shlex.quote(path) for path in paths))
+                            + commit + " -- " + " ".join(paths))
 
                 def prior_store_output(root, repo, commit, restored, shell_ready,
                                        extra=None, gaps=None):
@@ -588,13 +760,13 @@ def _suite_isolated(invoke):
                                       "one command cannot restore every store path)")
                             label = ("shell-ready; it restores only the store paths its "
                                      "commit holds, and the additional command below "
-                                     "restores the other named store path as its own "
-                                     "commit's tree holds it")
+                                     "restores the other named store path as git checks "
+                                     "it out from its own commit")
                         else:
                             remedy = ("restore the store paths the restore command below "
                                       "names, from that commit")
                             label = ("shell-ready; it restores the named store paths as "
-                                     "that commit's tree holds them")
+                                     "git checks them out from that commit")
                         restore = ["opf init: restore command (" + label + "):",
                                    restore_command(repo, commit, paths)]
                         if extra:
@@ -606,44 +778,50 @@ def _suite_isolated(invoke):
                     else:
                         remedy = ("restore the store paths the lines below name, from the "
                                   + ("commits" if extra else "commit")
-                                  + " named below (no command is printed: a path in it "
-                                  "would hold a non-printable character)")
+                                  + " named below (no command is printed: a value in it "
+                                  "would hold a character outside the inert alphabet)")
                         restore = (
-                            ["opf init: restore command withheld: a path in it holds a "
-                             "non-printable character, and an escaped command could still "
-                             "carry a live shell substitution, so no command is printed. "
-                             "Restore each path named below from the commit named above it, "
-                             "in the repository named below, by your own means, reading each "
-                             "escaped path as a Python string literal in which every "
-                             "character outside A-Za-z0-9 . / - _ + , : @ % = is written as "
-                             "an escape:",
-                             "opf init:   repository: " + inert_path(str(repo)),
+                            ["opf init: restore command withheld: a value in it holds a "
+                             "character outside the inert alphabet A-Za-z0-9 . / - _ and "
+                             "an escaped command could still carry a live shell "
+                             "substitution or split across physical lines, so no command "
+                             "is printed. Restore each path named below from the commit "
+                             "named above it, in the repository named below, by your own "
+                             "means, reading each escaped value as a Python string "
+                             "literal in which every character outside that alphabet is "
+                             "written as an escape:",
+                             "opf init:   repository: " + inert(str(repo)),
                              "opf init:   commit: " + commit]
-                            + ["opf init:   restore path: " + inert_path(path)
+                            + ["opf init:   restore path: " + inert(path)
                                for path in paths])
                         if extra:
                             restore += (
                                 ["opf init:   additional commit: " + extra_commit]
-                                + ["opf init:   additional restore path: " + inert_path(path)
+                                + ["opf init:   additional restore path: " + inert(path)
                                    for path in extra_paths])
                     if gaps:
                         remedy += (", and the restore is PARTIAL (the missing-store-path "
-                                   "lines below name what no named commit's tree holds)")
+                                   "lines below name structural store files the restored "
+                                   ".working tree lacks)")
                         restore += (
-                            ["opf init: the restore is PARTIAL: each store path below was "
-                             "deleted in an earlier commit, so no commit named above holds "
-                             "it and no command or path named above brings it back; restore "
-                             "each from an older first-parent commit by your own means, or "
-                             "re-adopt with opf adopt:"]
-                            + ["opf init:   missing store path: " + inert_path(path)
+                            ["opf init: the restore is PARTIAL: the .working tree the "
+                             "command or lines above restore lacks each store path below, "
+                             "so no command or path printed above provides it (this scan "
+                             "checks only the two structural names, manifest.toml and "
+                             "counters.toml, in the first-level .working subdirectories "
+                             "that tree holds and in those this line's first-parent "
+                             "history touched at or before the named commit); supply "
+                             "each missing path by your own means, or re-adopt with opf "
+                             "adopt:"]
+                            + ["opf init:   missing store path: " + inert(path)
                                for path in gap_paths])
                     return (
-                        "opf init: REFUSED at " + inert_path(str(root)) + " during "
+                        "opf init: REFUSED at " + inert(str(root)) + " during "
                         + history_stage
                         + ": a prior store exists in this repository's git history: commit "
                         + commit + " on HEAD's first-parent line holds "
-                        + inert_path(rel + ".opf.toml") + " or a store manifest "
-                        + inert_path(rel + ".working/<subdir>/manifest.toml")
+                        + inert(rel + ".opf.toml") + " or a store manifest "
+                        + inert(rel + ".working/<subdir>/manifest.toml")
                         + " (spec 4.3, 4.5), and spec 8.2 forbids restarting its counters at "
                         "zero (record ids would be reissued). Remedy: " + remedy
                         + ", or re-adopt the ancestry "
@@ -655,11 +833,12 @@ def _suite_isolated(invoke):
                         "opf init: preflight refused; no publication attempted.\n")
 
                 def cannot_evaluate_output(root, message, kind="RuntimeError"):
-                    # The exception text is prose-inert-escaped at the print (QA round 5),
+                    # The exception text is rendered by the one inert escaper at the print
+                    # (QA rounds 5 and 6: the space-admitting prose renderer is retired),
                     # and the exception TYPE is printed by name around the escaped text.
-                    return ("opf init: cannot evaluate at " + inert_path(str(root))
+                    return ("opf init: cannot evaluate at " + inert(str(root))
                             + " during " + history_stage + ": " + kind + "("
-                            + inert_prose(message) + "); exit 2\n"
+                            + inert(message) + "); exit 2\n"
                             "opf init: preflight refused; no publication attempted.\n")
 
                 def grafts_message(found, grafts_path):
@@ -702,26 +881,39 @@ def _suite_isolated(invoke):
                     return 0
 
                 def sh_inert_probe(output, tag):
-                    # QA round 5 (requirement A): EVERY line init prints must be shell-inert.
-                    # Runs the WHOLE output, then each line alone, through the real POSIX sh
-                    # from a fresh EMPTY directory, and returns the sorted union of entries
-                    # created there across both runs (expected: none). The fixed prose may
-                    # make sh print not-found or syntax errors; those run nothing. What must
-                    # never happen is a name-derived substitution running (the PWNED
-                    # sentinel) or a redirect creating an entry. Shell-ready "  git -C ..."
-                    # lines execute against the fixture their -C names, by design; they
-                    # create nothing in the probe directory.
+                    # QA round 5 (requirement A): EVERY line init prints must be
+                    # shell-inert. Three legs, each from the same fresh EMPTY directory,
+                    # returning the sorted union of entries created there (expected:
+                    # none). Leg 1 runs the WHOLE output through the real POSIX sh, which
+                    # EXITS at its first syntax error, so that leg alone proves nothing
+                    # past the first unparsable line (QA round 6 MINOR: the earlier
+                    # docstring claimed the whole output ran). Leg 2 runs each line alone
+                    # through sh -c, a fresh parse per line. Leg 3 feeds the whole output
+                    # to sh -i, whose interactive error recovery keeps reading after a
+                    # syntax error and carries an unbalanced quote across physical lines,
+                    # the closest non-tty stand-in for a paste into a terminal. The fixed
+                    # prose may make sh print not-found or syntax errors; those run
+                    # nothing. What must never happen is a name-derived substitution
+                    # running (the PWNED sentinel) or a redirect creating an entry. Every
+                    # output probed here was produced for a hostile-named fixture, whose
+                    # command hints init withholds, so no leg reaches a runnable git line.
                     probe = base / ("inert-probe-" + tag)
                     probe.mkdir()
+                    created = set()
                     subprocess.run(["sh"], input=output.encode("utf-8"), cwd=str(probe),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    timeout=120)
-                    created = {entry.name for entry in probe.iterdir()}
+                    created |= {entry.name for entry in probe.iterdir()}
                     for line in output.splitlines():
                         subprocess.run(["sh", "-c", line], cwd=str(probe),
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        timeout=120)
-                    return sorted(created | {entry.name for entry in probe.iterdir()})
+                    created |= {entry.name for entry in probe.iterdir()}
+                    subprocess.run(["sh", "-i"], input=output.encode("utf-8"),
+                                   cwd=str(probe), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=120)
+                    created |= {entry.name for entry in probe.iterdir()}
+                    return sorted(created)
 
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
@@ -995,8 +1187,9 @@ def _suite_isolated(invoke):
                 # file or a dangling link rewrites nothing). DISCRIMINATOR: mutant
                 # M-grafts-found (one fixed description for every kind) fails the kind checks.
                 check("ancestry: grafts refusal names a regular file and its size",
-                      "found a regular file of {} byte(s)".format(len(g_drop) + 1) in output
-                      and "may rewrite parent links" in output)
+                      inert("found a regular file of {} byte(s)".format(len(g_drop) + 1))
+                      in output
+                      and inert("may rewrite parent links") in output)
                 check("ancestry: the complete grafts refusal text (regular file)",
                       output == cannot_evaluate_output(grafted, grafts_message(
                           "a regular file of " + str(len(g_drop) + 1) + " byte(s)",
@@ -1064,7 +1257,7 @@ def _suite_isolated(invoke):
                 rc, output = run(undecodable)
                 check("ancestry: undecodable info/grafts path refused, never read as absent",
                       rc == EXIT_ERROR and "cannot evaluate" in output
-                      and "undecodable info/grafts path" in output)
+                      and inert("undecodable info/grafts path") in output)
                 check("ancestry: the complete undecodable-grafts-path refusal text",
                       output == cannot_evaluate_output(undecodable, (
                           "git history preflight: undecodable info/grafts path "
@@ -1074,7 +1267,7 @@ def _suite_isolated(invoke):
                 rc, output = run(newline_dir)
                 check("ancestry: malformed (multi-line) info/grafts path refused",
                       rc == EXIT_ERROR and "cannot evaluate" in output
-                      and "malformed info/grafts path" in output)
+                      and inert("malformed info/grafts path") in output)
                 check("ancestry: the complete multi-line-grafts-path refusal text",
                       output == cannot_evaluate_output(newline_dir, (
                           "git history preflight: malformed info/grafts path "
@@ -1092,7 +1285,7 @@ def _suite_isolated(invoke):
                 (info_file / ".git" / "info").write_bytes(b"not a directory\n")
                 rc, output = run(info_file)
                 check("ancestry: an uninspectable grafts path refuses, naming the lstat failure",
-                      rc == EXIT_ERROR and "lstat of the legacy grafts path" in output
+                      rc == EXIT_ERROR and inert("lstat of the legacy grafts path") in output
                       and "NotADirectoryError" in output)
                 info_grafts = str(info_file / ".git" / "info" / "grafts")
                 try:
@@ -1182,23 +1375,16 @@ def _suite_isolated(invoke):
                 # path-derived text in the refusal. Each fixture commits a store at a sub-root
                 # with a hostile or non-ASCII name, deletes the store (CHANGELOG.md stays), and
                 # re-inits there; the complete output is compared with text built here.
-                # Non-printable names (C0 controls ESC and BEL; format characters U+202E and
-                # U+200B; the C1 control U+009B) must never reach the terminal raw, and NO
-                # command is printed for them at all (the round-3 ascii()-escaped command could
-                # keep a substitution live in some quotings): the refusal carries only inert
-                # withheld-command detail lines. Printable names (cafe with U+00E9, and
-                # it's$HOME, whose quote and $ a shell would act on) get a shell-ready
-                # shlex-quoted command, which is run through a real POSIX shell and must
-                # restore the committed store byte for byte.
-                # DISCRIMINATORS: M-refusal-raw (paths formatted without ascii()) and
-                # M-no-printable-gate (shlex.quote for every path, so raw controls in the
-                # command) fail the non-printable vectors, as does M-ascii-fallback (the
-                # round-3 escaped command printed instead of the withheld detail lines);
-                # M-repr-for-ascii (repr keeps a printable U+00E9 raw in the descriptive
-                # mentions) and M-ascii-in-command (a Python-quoted command, which bash cannot
-                # use for cafe) fail the cafe vector; M-no-shlex (paths unquoted) and
-                # M-ascii-in-command (Python's double quotes let the shell expand $HOME) fail
-                # the it's$HOME vector.
+                # QA round 6: a command is printed ONLY when every value in it renders
+                # UNCHANGED through the one inert renderer; any name outside the inert
+                # alphabet (a control or format character, a space, a quote, "$", an
+                # accent) withholds the command, and the refusal carries only inert
+                # withheld-command detail lines, because an escaped or quoted command can
+                # stay syntactically whole while a pasted physical line of it runs (the
+                # round-6 newline MAJOR). DISCRIMINATORS: M-refusal-raw (paths formatted
+                # raw) fails every hostile vector; the round-6 shlex-quoting code prints a
+                # shell-ready command for cafe, it's$HOME and the both-quotes name and
+                # fails their complete withheld texts.
                 def sub_root_refusal(fixture, name):
                     repo = make_git(fixture)
                     sub = repo / name
@@ -1242,17 +1428,38 @@ def _suite_isolated(invoke):
                 for label, fixture, name in (
                         ("printable non-ASCII cafe", "ancestry-cafe", "caf" + chr(0xE9)),
                         ("shell-active it's$HOME", "ancestry-shell-chars", "it's$HOME")):
-                    (repo, sub, commit, held, first_rc, _first,
+                    (repo, sub, commit, held, first_rc, first_out,
                      rc, output) = sub_root_refusal(fixture, name)
                     check("ancestry " + label + ": fixture first init succeeds",
                           first_rc == EXIT_OK)
-                    check("ancestry " + label + ": refused with the complete text and a "
-                          "shell-ready restore command",
+                    check("ancestry " + label + ": refused with the complete text, the "
+                          "command withheld under the render-unchanged gate",
                           rc == EXIT_ERROR and output == prior_store_output(
-                              sub, repo, commit, [".opf.toml", ".working"], True))
-                    check("ancestry " + label + ": the printed restore command, run by a POSIX "
-                          "shell, restores the committed store",
-                          run_restore(output) == 0 and store_contents(sub) == held)
+                              sub, repo, commit, [".opf.toml", ".working"], False))
+                    check("ancestry " + label + ": no runnable restore line is printed",
+                          not any(line.startswith("  git")
+                                  for line in output.splitlines()))
+                    check("ancestry " + label + ": the success output withholds the "
+                          "staging and render hints",
+                          "command hints withheld" in first_out
+                          and not any(line.startswith("  git")
+                                      for line in first_out.splitlines())
+                          and "opf render --write --root" not in first_out)
+
+                # The shell-ready arm at a SUB-ROOT (relative restored paths), under a
+                # name inside the inert alphabet: the command is printed bare (no quoting
+                # exists to drop) and a POSIX shell restores the committed store from it.
+                (repo, sub, commit, held, first_rc, _first,
+                 rc, output) = sub_root_refusal("ancestry-plain-sub", "plain-sub.dir")
+                check("ancestry plain sub-root: fixture first init succeeds",
+                      first_rc == EXIT_OK)
+                check("ancestry plain sub-root: refused with the complete text and a "
+                      "shell-ready restore command",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          sub, repo, commit, [".opf.toml", ".working"], True))
+                check("ancestry plain sub-root: the printed restore command, run by a "
+                      "POSIX shell, restores the committed store",
+                      run_restore(output) == 0 and store_contents(sub) == held)
 
                 # QA round 4 MINOR 2 and QA round 5 MAJOR (treated as security fixes): the
                 # refusal must print NOTHING a shell would execute, on ANY line. The round-3
@@ -1609,35 +1816,41 @@ def _suite_isolated(invoke):
                 # PRINTABLE name holding BOTH quote kinds plus $(...), a backquote payload,
                 # ";" and "#". ascii() rendered such a name as a single-quoted Python literal
                 # whose embedded backslash-quote ended the shell's quote early, so pasting
-                # the REFUSED line itself executed the embedded payload. Every line of the
-                # refusal (shell-ready branch) and of the successful first init must now be
-                # shell-inert: the probes run the whole output and each single line through
-                # the real POSIX sh from an empty directory. DISCRIMINATOR: an
-                # ascii()-interpolated REFUSED line or a raw JSON root creates PWNED.
+                # the REFUSED line itself executed the embedded payload. QA round 6: the
+                # name renders CHANGED through the inert escaper, so the restore command
+                # and the success staging and render hints are all withheld; every line of
+                # the refusal and of the successful first init goes through the three-leg
+                # sh probe. DISCRIMINATOR: an ascii()-interpolated REFUSED line or a raw
+                # JSON root creates PWNED; the round-6 shlex-quoting code prints commands
+                # here and fails both complete texts.
                 bq_name = "b'$(touch PWNED)" + '"' + "`touch PWNED`;#"
                 (bq_repo, bq_sub, bq_commit, bq_held, first_rc, bq_first,
                  rc, output) = sub_root_refusal("ancestry-both-quotes", bq_name)
                 check("ancestry both-quotes name: fixture first init succeeds",
                       first_rc == EXIT_OK)
-                check("ancestry both-quotes name: refused with the complete text and a "
-                      "shell-ready restore command",
+                check("ancestry both-quotes name: refused with the complete text, the "
+                      "command withheld under the render-unchanged gate",
                       rc == EXIT_ERROR and output == prior_store_output(
-                          bq_sub, bq_repo, bq_commit, [".opf.toml", ".working"], True))
+                          bq_sub, bq_repo, bq_commit, [".opf.toml", ".working"], False))
                 check("ancestry both-quotes name: refusal and first-init outputs are "
                       "shell-inert through sh, whole and line by line, and no payload ran",
                       sh_inert_probe(output, "both-quotes-refusal") == []
                       and sh_inert_probe(bq_first, "both-quotes-success") == []
                       and not (bq_repo / "PWNED").exists()
                       and not (bq_sub / "PWNED").exists())
-                check("ancestry both-quotes name: the printed restore command, run by a "
-                      "POSIX shell, still restores the committed store",
-                      run_restore(output) == 0 and store_contents(bq_sub) == bq_held)
+                check("ancestry both-quotes name: no command line is printed anywhere "
+                      "and the success output withholds the staging and render hints",
+                      run_restore(output) is None
+                      and not any(line.startswith("  git")
+                                  for line in output.splitlines())
+                      and "command hints withheld" in bq_first
+                      and "opf render --write --root" not in bq_first)
                 bq_rows = [json.loads(line) for line in bq_first.splitlines()
                            if line.startswith("{")]
                 check("ancestry both-quotes name: the created-event JSON carries the root "
                       "inert-escaped, never raw",
                       any(row.get("event") == "created"
-                          and row.get("root") == inert_prose(str(bq_sub))
+                          and row.get("root") == inert(str(bq_sub))
                           for row in bq_rows)
                       and all("$(" not in json.dumps(row) and "`" not in json.dumps(row)
                               for row in bq_rows))
@@ -1745,6 +1958,277 @@ def _suite_isolated(invoke):
                 check("ancestry non-store holder: no additional command or path is disclosed",
                       "additional" not in output)
 
+                # QA round 6 MAJOR (argument diagnostics): the {!r} rendering of a
+                # rejected argument is a quoted Python literal in which $(...) stays live
+                # when the printed line reaches a POSIX shell; both early-return
+                # diagnostics now render the value through the inert escaper, and both
+                # outputs go through the three-leg sh probe. DISCRIMINATOR: the round-6
+                # {!r} code prints the raw payload and the probe creates PWNED.
+                arg_payload = "x'$(touch PWNED)" + '"' + "`touch PWNED`;#"
+                rc, output = call(["init", arg_payload])
+                check("argument error: unrecognized argument renders the value inert, "
+                      "as the complete line",
+                      rc == EXIT_ERROR and output ==
+                      "opf init: unrecognized argument, inert-escaped: "
+                      + inert(arg_payload) + "\n")
+                check("argument error: unrecognized-argument output is shell-inert and "
+                      "ran no payload",
+                      sh_inert_probe(output, "arg-unrecognized") == []
+                      and "$" not in output and "`" not in output)
+                root_payload = "-'$(touch PWNED)" + '"' + "`touch PWNED`;#"
+                rc, output = call(["init", "--root", root_payload])
+                check("argument error: rejected --root value renders inert, as the "
+                      "complete line",
+                      rc == EXIT_ERROR and output ==
+                      "opf init: --root requires a non-empty directory argument, not "
+                      "the inert-escaped value " + inert(root_payload)
+                      + " (an empty value shows as nothing here)\n")
+                check("argument error: rejected --root output is shell-inert and ran "
+                      "no payload",
+                      sh_inert_probe(output, "arg-root") == []
+                      and "$" not in output and "`" not in output)
+                check("argument error: no payload file appeared beside the fixtures",
+                      not (base / "PWNED").exists())
+
+                # QA round 6 MAJOR (newline-holding root): a root whose name holds
+                # newlines, both quote kinds and $(...) payloads. The repository preflight
+                # cannot confirm such a worktree, so init refuses fail-closed BEFORE any
+                # command hint could be built, and the refusal renders the name inert:
+                # no physical output line carries a payload fragment, and the three-leg
+                # probe (including sh -i, where quote state crosses lines) creates
+                # nothing. DISCRIMINATOR: any raw interpolation of the root emits the
+                # standalone "touch PWNED-NL" physical line, which leg 2 executes.
+                nl_name = "nl'$(touch PWNED)\ntouch PWNED-NL\n" + '"' + "x`y"
+                nl_repo = make_git(nl_name)
+                before = _snapshot(nl_repo)
+                rc, output = run(nl_repo)
+                check("newline root: refused fail-closed as cannot-evaluate",
+                      rc == EXIT_ERROR and "cannot evaluate" in output)
+                check("newline root: no output line carries a payload fragment raw",
+                      "touch PWNED-NL" not in output and "$" not in output
+                      and "`" not in output and "'" not in output
+                      and all(ch.isprintable() for line in output.splitlines()
+                              for ch in line))
+                check("newline root: output is shell-inert through all three sh legs",
+                      sh_inert_probe(output, "newline-root") == []
+                      and not (base / "PWNED").exists()
+                      and not (base / "PWNED-NL").exists())
+                check("newline root: refusing init wrote nothing",
+                      _snapshot(nl_repo) == before)
+
+                # QA round 6 MAJOR (split deletion of BOTH structural files): one commit
+                # deletes manifest.toml AND counters.toml inside .working, a later commit
+                # deletes the rest of the store. The named tree still holds .working (the
+                # other sources survive into it), so the round-6 working_gaps, which
+                # examined only subdirectories still holding one structural file, saw no
+                # gap: the printed command exited 0 with the spec 8.2 high-water counters
+                # and the manifest still deleted and NO disclosure. Now every first-level
+                # subdirectory of the restored tree requires both files, so the refusal
+                # says PARTIAL and names both. DISCRIMINATOR: the round-6 code prints this
+                # refusal with no PARTIAL block and fails the complete text.
+                sb = make_git("ancestry-split-both-structural")
+                rc, output = run(sb)
+                check("ancestry split-both fixture first init succeeds", rc == EXIT_OK)
+                git_call(sb, ["--literal-pathspecs", "add", "-A"])
+                git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store"])
+                sb_counters = sb / working / machine_name / _opf_check.COUNTERS_NAME
+                sb_seeded = sb_counters.read_text(encoding="utf-8").replace(
+                    "BI = 0", "BI = 7")
+                if "BI = 7" not in sb_seeded:
+                    raise OSError("split-both fixture: counters.toml carried no BI = 0")
+                sb_counters.write_text(sb_seeded, encoding="utf-8")
+                git_call(sb, ["--literal-pathspecs", "add", "-A"])
+                git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "BI high-water 7"])
+                sb_manifest = working + "/" + machine_name + "/" + _opf_store.MANIFEST_NAME
+                sb_missing = working + "/" + machine_name + "/" + _opf_check.COUNTERS_NAME
+                git_call(sb, ["rm", "-q", "--", sb_manifest, sb_missing])
+                git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop both structural files"])
+                sb_named = head_of(sb)
+                git_call(sb, ["rm", "-r", "-q", "--", working, _opf_store.POINTER_REL])
+                git_call(sb, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the rest"])
+                rc, output = run(sb)
+                check("ancestry split-both: the complete refusal says PARTIAL and names "
+                      "both structural paths",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          sb, sb, sb_named, [".opf.toml", ".working"], True,
+                          gaps=sorted([sb_missing, sb_manifest])))
+                check("ancestry split-both: the printed command runs clean yet provably "
+                      "brings back neither structural file, as disclosed",
+                      run_restore(output) == 0
+                      and (sb / _opf_store.POINTER_REL).is_file()
+                      and not (sb / sb_missing).exists()
+                      and not (sb / sb_manifest).exists())
+
+                # QA round 6 MAJOR, second shape: a SECOND machine subdirectory deleted
+                # WHOLE in an earlier commit. The restored tree holds no trace of it, so
+                # only the first-parent history walk can expect its structural files; the
+                # refusal must say PARTIAL and name both of them. DISCRIMINATOR: a
+                # working_gaps without the history union sees a complete surviving
+                # subdirectory and prints no PARTIAL block, failing the complete text.
+                ws = make_git("ancestry-whole-subdir")
+                rc, output = run(ws)
+                check("ancestry whole-subdir fixture first init succeeds", rc == EXIT_OK)
+                ws_zeta = ws / working / "zeta-machine"
+                ws_zeta.mkdir()
+                (ws_zeta / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (ws_zeta / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                git_call(ws, ["--literal-pathspecs", "add", "-A"])
+                git_call(ws, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store with second machine subdir"])
+                git_call(ws, ["rm", "-r", "-q", "--", working + "/zeta-machine"])
+                git_call(ws, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the second subdir whole"])
+                ws_named = head_of(ws)
+                git_call(ws, ["rm", "-r", "-q", "--", working, _opf_store.POINTER_REL])
+                git_call(ws, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the rest"])
+                rc, output = run(ws)
+                ws_gaps = sorted([working + "/zeta-machine/" + _opf_check.COUNTERS_NAME,
+                                  working + "/zeta-machine/" + _opf_store.MANIFEST_NAME])
+                check("ancestry whole-subdir: the complete refusal says PARTIAL and "
+                      "names the deleted subdirectory's structural paths",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          ws, ws, ws_named, [".opf.toml", ".working"], True,
+                          gaps=ws_gaps))
+                check("ancestry whole-subdir: the printed command runs clean yet the "
+                      "second subdirectory stays absent, as disclosed",
+                      run_restore(output) == 0 and not ws_zeta.exists()
+                      and (ws / working / machine_name
+                           / _opf_check.COUNTERS_NAME).is_file())
+
+                # QA round 6 (the three inert-JSON report arms, each driven with hostile
+                # values): removing the _init_inert_json wrapper from any of them left the
+                # suite green, because no vector put a substitution payload into the
+                # reported values. Each arm now gets one. DISCRIMINATOR: with the wrapper
+                # removed the raw $(touch PWNED) sits inside the printed JSON double
+                # quotes, where a POSIX shell keeps it live, and the probe creates PWNED.
+                fc_repo = make_git("foreign'$(touch PWNED)" + '"' + "`;#x")
+                (fc_repo / working).mkdir()
+                (fc_repo / working / "junk").write_bytes(b"j\n")
+                fc_before = _snapshot(fc_repo)
+                rc, output = run(fc_repo)
+                fc_rows = [json.loads(line) for line in output.splitlines()
+                           if line.startswith("{")]
+                check("foreign-content report at a hostile root: refused with the root "
+                      "inert in the JSON event",
+                      rc == EXIT_ERROR and inert("foreign .working content") in output
+                      and any(row.get("event") == "foreign-content"
+                              and row.get("root") == inert(str(fc_repo))
+                              and {(entry["path"], entry["kind"])
+                                   for entry in row.get("entries", [])}
+                              == {(working + "/junk", "file")}
+                              for row in fc_rows))
+                check("foreign-content report at a hostile root: output is shell-inert "
+                      "and ran no payload",
+                      sh_inert_probe(output, "foreign-hostile") == []
+                      and "$" not in output and "`" not in output
+                      and not (fc_repo / "PWNED").exists()
+                      and not (base / "PWNED").exists())
+                check("foreign-content report at a hostile root: fixture preserved",
+                      _snapshot(fc_repo) == fc_before)
+
+                # The partial-publication and post-publish-inventory arms need a fault
+                # DURING publication, which no filesystem precondition can arrange (the
+                # destination checks run before publishing starts), so each is driven
+                # in-process with one injected fault, against a hostile-named repository,
+                # and the complete captured output goes through the same probes.
+                def drive_cmd_init(root, patches):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stdout(buffer), \
+                            contextlib.redirect_stderr(buffer):
+                        with contextlib.ExitStack() as stack:
+                            for attr, value in patches.items():
+                                stack.enter_context(
+                                    mock.patch.object(opf, attr, value))
+                            rc = opf._cmd_init(["--root", str(root)])
+                    return rc, buffer.getvalue()
+
+                pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
+
+                def fail_create(root_fd, relpath, data):
+                    raise RuntimeError("driven create failure '$(touch PWNED)`;#")
+
+                rc, output = drive_cmd_init(pp_repo, {"_init_create": fail_create})
+                pp_rows = [json.loads(line) for line in output.splitlines()
+                           if line.startswith("{")]
+                check("partial-publication report at a hostile root: the event carries "
+                      "the root and the planned paths inert",
+                      rc == EXIT_ERROR
+                      and inert("driven create failure") in output
+                      and "publication may be partial" in output
+                      and any(row.get("event") == "partial-publication"
+                              and row.get("root") == inert(str(pp_repo))
+                              and row.get("root_binding") == "same-root"
+                              and any(entry.get("path") == _opf_store.POINTER_REL
+                                      for entry in row.get("paths", []))
+                              for row in pp_rows))
+                check("partial-publication report at a hostile root: output is "
+                      "shell-inert and ran no payload",
+                      sh_inert_probe(output, "partial-publication") == []
+                      and "$" not in output and "`" not in output
+                      and not (pp_repo / "PWNED").exists()
+                      and not (base / "PWNED").exists())
+
+                pi_repo = make_git("postpub'$(touch PWNED)" + '"' + "`;#")
+                pi_hostile = working + "/x'$(touch PWNED)`"
+                pi_state = {"calls": 0}
+                pi_real = opf._init_inventory
+
+                def fake_inventory(root_fd):
+                    pi_state["calls"] += 1
+                    if pi_state["calls"] == 1:
+                        return pi_real(root_fd)
+                    return {"complete": True,
+                            "entries": [{"path": pi_hostile, "kind": "file"}]}
+
+                rc, output = drive_cmd_init(pi_repo, {"_init_inventory": fake_inventory})
+                pi_rows = [json.loads(line) for line in output.splitlines()
+                           if line.startswith("{")]
+                check("post-publish-inventory report at a hostile root: the event "
+                      "carries the root and the hostile entry inert",
+                      rc == EXIT_ERROR
+                      and inert("working inventory changed during publication") in output
+                      and any(row.get("event") == "post-publish-inventory"
+                              and row.get("root") == inert(str(pi_repo))
+                              and [entry.get("path")
+                                   for entry in row.get("entries", [])]
+                              == [inert(pi_hostile)]
+                              for row in pi_rows))
+                check("post-publish-inventory report at a hostile root: output is "
+                      "shell-inert and ran no payload",
+                      sh_inert_probe(output, "post-publish-inventory") == []
+                      and "$" not in output and "`" not in output
+                      and not (pi_repo / "PWNED").exists()
+                      and not (base / "PWNED").exists())
+
+                # QA round 6 (requirement B): the AST gate over the real source, plus one
+                # seeded violation per guarded construct, so the gate itself is
+                # discriminated: a gate that stops flagging raw interpolations fails here.
+                gate_source = (Path(__file__).resolve().parent / "opf.py").read_text(
+                    encoding="utf-8")
+                check("inert AST gate: every print in _cmd_init and _init_no_prior_store "
+                      "routes interpolated values through the one renderer",
+                      _inert_print_violations(gate_source) == [])
+                for mutant_label, old, new in (
+                        ("a raw argument diagnostic", "_init_inert(val)", "val"),
+                        ("a raw JSON report",
+                         "json.dumps(_init_inert_json(", "json.dumps(("),
+                        ("a raw withheld detail line",
+                         '"opf init:   restore path: " + _init_inert(path)',
+                         '"opf init:   restore path: " + path'),
+                        ("a raw REFUSED interpolation",
+                         "_init_inert(str(root)), _init_inert(stage), exc",
+                         "str(root), _init_inert(stage), exc")):
+                    if old not in gate_source:
+                        check("inert AST gate mutant source carries " + mutant_label, False)
+                        continue
+                    check("inert AST gate flags " + mutant_label,
+                          _inert_print_violations(gate_source.replace(old, new)) != [])
+
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side
                 # parent) drops the mainline store. On HEAD's first-parent line that merge
@@ -1840,7 +2324,7 @@ def _suite_isolated(invoke):
                 guess_drop = head_of(guess)
                 rc, output = run(guess)
                 check("ancestry: non-store change at a store path refuses rather than guessing",
-                      rc == EXIT_ERROR and "refusing rather than guessing" in output
+                      rc == EXIT_ERROR and inert("refusing rather than guessing") in output
                       and "prior store exists" not in output)
                 check("ancestry: the complete refuse-rather-than-guessing text",
                       output == cannot_evaluate_output(guess, (
@@ -1918,7 +2402,7 @@ def _suite_isolated(invoke):
                 mb_before = _snapshot(missing_blob)
                 rc, output = run(missing_blob)
                 check("partial-clone missing ignore-blob refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("partial-clone missing ignore-blob preserved",
                       _snapshot(missing_blob) == mb_before)
 
@@ -1968,7 +2452,7 @@ def _suite_isolated(invoke):
                 sb_before = _snapshot(symlink_blob)
                 rc, output = run(symlink_blob)
                 check("symlink .gitignore over absent blob refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("symlink .gitignore fixture preserved", _snapshot(symlink_blob) == sb_before)
 
                 # OPF-D2B round 7 / FINDING 3a: an ordinary stage-0 entry WITHOUT skip-worktree is one git
@@ -2069,7 +2553,7 @@ def _suite_isolated(invoke):
                 cr_before = _snapshot(colon_root)
                 rc, output = run(colon_root)
                 check("colon-magic candidate refused (literal-pathspec finds ignoring blob)",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("colon-magic store fixture preserved", _snapshot(colon_root) == cr_before)
 
                 # OPF-D2B / D1 (BLOCKER): an UNREADABLE directory at the worktree .gitignore path. git's
@@ -2092,7 +2576,7 @@ def _suite_isolated(invoke):
                 finally:
                     os.chmod(str(ud_gi), 0o755)   # restore so cleanup can traverse the fixture
                 check("unreadable directory at .gitignore path refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("unreadable directory at .gitignore path preserved",
                       not (unread_dir / working).exists()
                       and not (unread_dir / _opf_store.POINTER_REL).exists()
@@ -2119,7 +2603,7 @@ def _suite_isolated(invoke):
                 sm_before = _snapshot(symmode)
                 rc, output = run(symmode)
                 check("symlink-mode index .gitignore refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("symlink-mode index .gitignore preserved", _snapshot(symmode) == sm_before)
 
                 # OPF-D2B / D4 (MAJOR): a --literal-pathspecs ls-files still matches DESCENDANTS of a
@@ -2170,7 +2654,7 @@ def _suite_isolated(invoke):
                 gl_before = _snapshot(gitlink)
                 rc, output = run(gitlink)
                 check("gitlink-mode index .gitignore over fetchable blob refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("gitlink-mode index .gitignore preserved", _snapshot(gitlink) == gl_before)
 
                 # OPF-D2B round 8 / D5 control (no over-refusal): the SAME gitlink-mode (160000) skip-worktree
@@ -2279,7 +2763,7 @@ def _suite_isolated(invoke):
                 fo_before = _snapshot(filt_only)
                 rc, output = run(filt_only)
                 check("partialclonefilter-only partial clone refused (R10-1)",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("partialclonefilter-only fixture preserved", _snapshot(filt_only) == fo_before)
 
                 # R10-2 (MAJOR over-refusal): promisor=false alone, no filter, no extension. A false promisor
@@ -2302,7 +2786,7 @@ def _suite_isolated(invoke):
                 fpf_before = _snapshot(filt_pf)
                 rc, output = run(filt_pf)
                 check("partialclonefilter overrides promisor=false: refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("filter-over-promfalse fixture preserved", _snapshot(filt_pf) == fpf_before)
 
                 # extensions.partialClone OVERRIDES promisor=false (format 1): the extension registers the
@@ -2315,7 +2799,7 @@ def _suite_isolated(invoke):
                 epf_before = _snapshot(ext_pf)
                 rc, output = run(ext_pf)
                 check("extensions.partialClone overrides promisor=false (format 1): refused",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("ext-over-promfalse fixture preserved", _snapshot(ext_pf) == epf_before)
 
                 # extensions.partialClone at core.repositoryformatversion=0: the empirically-settled case.
@@ -2330,7 +2814,7 @@ def _suite_isolated(invoke):
                 ev0_before = _snapshot(ext_v0)
                 rc, output = run(ext_v0)
                 check("extensions.partialClone at format 0 refused (git honours the extension at v0)",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("ext-format0 fixture preserved", _snapshot(ext_v0) == ev0_before)
 
                 # OPF-D2B round 12 / R11-1 (BLOCKER, fail-open false pass): a promisor remote whose NAME
@@ -2365,7 +2849,7 @@ def _suite_isolated(invoke):
                 nu_before = _snapshot(nonutf8)
                 rc, output = run(nonutf8)
                 check("non-UTF-8-named promisor remote refused (R11-1)",
-                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                      rc == EXIT_ERROR and inert("indexed .gitignore blob is unavailable") in output)
                 check("non-UTF-8-named promisor fixture preserved", _snapshot(nonutf8) == nu_before)
 
                 # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
