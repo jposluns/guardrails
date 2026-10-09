@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "938292399bb3c108f4a93adb82cca7416d0830bc4b0c9793436aac580a36646e"
+tree-sha256 = "2887894b00e6b1c760665aec45914d3ceb1b5e694c4ebbf14574ddf08f623750"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2251,8 +2251,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41966
-sha256 = "33d408270b1c6eb701bddfdcb71eb0801b6839deef8b5dd9ae2d8219f5ac2cbc"
+bytes = 42058
+sha256 = "d98dad3ae90b257a4d8819f6d8617db16c2a3e79b25491b1bf8552a16fd4d041"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2475,14 +2475,24 @@ bytes = 10627
 sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
 
 [[sources]]
+path = "opf/prompt-pack/adopt/SKILL.md"
+bytes = 17157
+sha256 = "7dcdca974e2697803a87bc3aca9f3f54546af8a8e5eea70fb8fbc53d2ff38dfd"
+
+[[sources]]
+path = "opf/prompt-pack/adopt/clean-start.md"
+bytes = 4326
+sha256 = "bbcea5c264995510b74a9151e056faf49bd2f3808290935d25bf044305512047"
+
+[[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
 bytes = 115690
-sha256 = "87ef3ca951e0f60e1f9ea8a397e594b86e0fdcf5f61de2749453d016bb274492"
+sha256 = "deb4c717bba3cefb3f42f83ec454702a7890894426d38f7eed1506f4ae6d1b07"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
-bytes = 1239
-sha256 = "4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847"
+bytes = 1621
+sha256 = "08bc9cc8cd5ab13ae338f9801df372c6a6832e6166c38b2a327200fb83c2f763"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -2496,13 +2506,13 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 37568
-sha256 = "281655f818934c5955f40b5eb94dfb6f3801bf702074ad5416fc5b7a609b0989"
+bytes = 42391
+sha256 = "5911addf31635486a3e4b9f5b8fbf1e59c750fcd7c30ceadf747337fdcd40477"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 5012
-sha256 = "54c6ca7434e5946bc1a0a9fad7371767ac630023127b1843c6d27b7806291736"
+bytes = 7112
+sha256 = "af863354ccac5a74abf0b6b63a6925e4d62ea031864869e5e4ec1195ac647555"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2516,8 +2526,8 @@ sha256 = "664c263516f5edd3cebb5f882ff66a456d33774ec8a1174b51c847b32b58551e"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 11546
-sha256 = "3c3f26a96eb41376f5ba44a6b77087b603501b1f0ab6b57641244b068fbc8108"
+bytes = 12913
+sha256 = "a4bffa618968833c44a584373885771693b9d92bb457906e76ffa7c9ecc806a6"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2531,8 +2541,8 @@ sha256 = "3a9836b35190f19e4d01925c785f6e8a96dba5f63f45467d895777bed2c5c77a"
 
 [[sources]]
 path = "opf/site/llms.txt"
-bytes = 1765
-sha256 = "8d8dbd959ea23e8a70f6667de83ca7a201b52d406f3b403f9312abad80d28f32"
+bytes = 2293
+sha256 = "9516b469eb83cd4d9ff746cb0df720580b92a466a72a5a9ae8bc5a3009bcedf2"
 
 [[sources]]
 path = "opf/site/record-indexes.html"

@@ -12,9 +12,21 @@ By default, the store lives under `.working/` in your product repository; the co
 
 Before scaffolding or applying anything to your project, obtain the pack's artifact digest and compare it against the published hashes at posluns.dev/hashes.txt. Proceed only on a match; refuse if the digest differs or the reference evidence is unavailable. This is a required adopter action on both paths below, not an automatic step that something else performs for you.
 
-## The recommended path: assistant-guided adoption
+## The recommended path: assistant-guided adoption with `opf adopt`
 
-Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review the plan before authorizing changes, then inspect the scaffolded store, the validation results, and any records-first instructions added to your project. If adopting AIQT, include OPFiles in that plan.
+The standard's adoption flow (OPF-SPEC.md section 14) runs in this order: investigate, propose one plan, take one approval, apply, then a completion check before any old file is recorded as retired. The adopter approves one concrete plan, once; any change to a bound item takes a fresh plan and a fresh approval. Clean start is first-class: preserve and retire the old operational files, establish the new store and its enforcement, and import nothing.
+
+The prompt pack ships the instructions an assistant follows: `adopt/SKILL.md`, the adoption procedure, and `adopt/clean-start.md`, the guidance for a project with no prior records, both under `opf/prompt-pack/` in the reference repository (github.com/jposluns/guardrails) and listed with their digests in the pack's `pack.toml`. Give them to your assistant with this guide.
+
+What the reference CLI runs today:
+
+- Investigation, through the planner's read-only library entry; no `opf adopt` subcommand prints the inventory yet. It records a digest-stamped inventory, tells first adoption from re-adoption, and lists each file in its scope that needs a disposition: keep, migrate, move, or retire.
+- `opf adopt plan --inputs FILE`, which freezes and prints the plan from a planning worksheet and writes nothing. Its output is an inert, digest-bound proposal, never permission to apply. The planner checks the shape of the release, prompt-pack, enforcement and postimage digests the worksheet supplies, not the bytes they name.
+- `opf adopt status`, which reports adoption runs and the adoption journal and writes nothing.
+
+What it does not run yet: `opf adopt approve`, `apply`, `complete` and `reconcile` refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and post-adoption import, are not available either. An assistant following the pack stops at the approval step and reports, rather than doing the missing stages by hand.
+
+For a project with no prior records, the clean-start guidance describes one interim route: `opf init`, review and commit, `opf render --write`, commit, then `opf doctor --require-store` and `opf render --check`. That route initializes a store; it is not an adoption. It records no plan, approval, receipt or completion check, and installs no enforcement. If you are adopting AIQT, include OPFiles in the plan.
 
 ## Adopting by hand
 
@@ -31,4 +43,5 @@ Conformance you assert by hand is self-asserted until the reference validator ha
 
 - The standard: /standard
 - Reference tooling: /tooling
+- The prompt pack: `opf/prompt-pack/` in the reference repository
 - The disclosure of current limits: /disclosure

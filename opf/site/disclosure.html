@@ -104,6 +104,21 @@
         cannot-evaluate when legality depends on an
         unidentified last-transition actor or a rejection requires unavailable pre-proposal state.
         Doctor does not check behind, ahead, or divergence against a sync target.</li>
+      <li><b style="color:var(--ink)">Adoption and the prompt pack</b>: the reference CLI runs
+        adoption investigation and <code>opf adopt plan</code> read-only. <code>opf adopt
+        approve</code>, <code>apply</code>, <code>complete</code>, and <code>reconcile</code> refuse
+        with exit 2, so no approval, receipt, completion check, or retirement is recorded, and
+        adoption cannot install the enforcement pack. A frozen plan is an inert proposal, not
+        permission to apply. Investigation covers only its detection roots and the paths the
+        adopter names, detects by path rather than content, and does not read git history. The
+        planner checks the shape of the release identity, prompt-pack binding, enforcement member
+        digests, and planned postimage digests a worksheet supplies, not the bytes they name. The
+        prompt pack's adoption procedure and clean-start guidance are instructions an assistant is
+        asked to follow; they do not control what the assistant does. The pack's digest gate checks
+        that its manifest matches the member bytes; it does not authenticate them or review what
+        they say. The interim clean-start route initializes a store with <code>opf init</code>; it
+        is not an adoption, and a later <code>opf adopt</code> run reads that store as
+        re-adoption.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
