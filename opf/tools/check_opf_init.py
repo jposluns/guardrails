@@ -38,6 +38,18 @@ EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_ERROR = 2
 
+# The first-parent scan limit, worded identically in the init refusal, the successful init output
+# and OPF-QUICKSTART.md (QA round 2 MAJOR 1). Asserted literally against whitespace-normalized
+# text, so the earlier "unmerged side branch" wording, which missed a store created and deleted
+# on a side branch that WAS merged, fails every site check.
+_SIDELINE_LIMIT = ("a store that never reached a tree on HEAD's first-parent line (for example "
+                   "one created and deleted on a side branch, merged or not) is not detected")
+
+
+def _states_sideline_limit(text):
+    flat = " ".join(text.split())
+    return _SIDELINE_LIMIT in flat and "unmerged" not in flat
+
 
 def _run_init(argv):
     """Run the real dispatcher isolated; preserve its output for discriminating assertions."""
@@ -96,6 +108,7 @@ def _suite_isolated(invoke):
     """Run parser, publication, refusal, and preservation vectors against fresh fixtures."""
     try:
         import tomllib
+        from pathlib import PureWindowsPath
         import _opf_check
         import _opf_observe
         import _opf_release
@@ -539,6 +552,11 @@ def _suite_isolated(invoke):
                 # its own words, never under the generic cannot-evaluate prefix (exit stays 2).
                 check("ancestry: definite finding reported as REFUSED, not cannot-evaluate",
                       "opf init: REFUSED" in output and "cannot evaluate" not in output)
+                # QA round 2 MAJOR 1: the refusal states the first-parent limit exactly
+                # (merged or not). DISCRIMINATOR: mutant M-refusal-unmerged (the round-1
+                # "only ever lived on an unmerged side branch" refusal wording) fails this.
+                check("ancestry: refusal states the exact first-parent limit",
+                      _states_sideline_limit(output))
                 check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
 
                 # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
@@ -585,13 +603,24 @@ def _suite_isolated(invoke):
                 git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
                                     "merge", "-q", "--no-ff", "-m",
                                     "merge feature", "feature"])
+                # The side branch IS merged (the case the round-1 "unmerged" wording missed).
+                check("ancestry-sideline fixture: the store's side branch is merged into HEAD",
+                      _opf_observe._run_git(git, sideline, ["merge-base", "--is-ancestor",
+                                                            "feature", "HEAD"]).rc == 0)
                 rc, output = run(sideline)
                 check("ancestry: side-branch-only store does not block init (first-parent scope)",
                       rc == EXIT_OK and valid_sources(sideline))
                 # QA round 1: the first-parent limit is disclosed WHERE USERS SEE IT -- the
-                # successful init output -- not only in the docstring.
-                check("ancestry: success output states the first-parent scan scope",
-                      "first-parent line only" in output and "side branch" in output)
+                # successful init output -- not only in the docstring. QA round 2 MAJOR 1: in
+                # exact words, since this very fixture's store sat on a MERGED side branch.
+                # DISCRIMINATOR: mutant M-output-unmerged (the round-1 output lines) fails.
+                check("ancestry: success output states the exact first-parent limit",
+                      "first-parent line only" in output and _states_sideline_limit(output))
+                # The quickstart's statement of the same limit (QA round 2 MAJOR 1), read the
+                # way check_opf_homes reads it. DISCRIMINATOR: the round-1 quickstart wording.
+                quickstart = Path(__file__).resolve().parents[1] / "spec" / "OPF-QUICKSTART.md"
+                check("ancestry: OPF-QUICKSTART.md states the exact first-parent limit",
+                      _states_sideline_limit(quickstart.read_text(encoding="utf-8")))
 
                 # SPEC 8.2 ancestry, POINTER-ONLY marker (spec 4.3 relocated store): history
                 # holds ONLY the committed pointer .opf.toml (no .working tree at all), then
@@ -711,10 +740,114 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and "grafts" in output and "cannot evaluate" in output)
                 check("ancestry: grafted re-init wrote nothing (counters never re-zeroed)",
                       _snapshot(grafted) == before)
+                # QA round 2 MINOR 3: the grafts refusal states exactly what it found, for
+                # every kind of entry, never that the entry "rewrites parent links" (an empty
+                # file or a dangling link rewrites nothing). DISCRIMINATOR: mutant
+                # M-grafts-found (one fixed description for every kind) fails the kind checks.
+                check("ancestry: grafts refusal names a regular file and its size",
+                      "found a regular file of {} byte(s)".format(len(g_drop) + 1) in output
+                      and "may rewrite parent links" in output)
                 g_file.unlink()
+                g_file.write_bytes(b"")
+                rc, output = run(grafted)
+                check("ancestry: an EMPTY grafts file refuses, named as 0 bytes",
+                      rc == EXIT_ERROR and "found a regular file of 0 byte(s)" in output)
+                g_file.unlink()
+                g_file.symlink_to("absent-grafts-target")
+                rc, output = run(grafted)
+                check("ancestry: a DANGLING grafts link refuses, named with its target",
+                      rc == EXIT_ERROR
+                      and "found a symbolic link to 'absent-grafts-target'" in output)
+                g_file.unlink()
+                g_file.mkdir()
+                rc, output = run(grafted)
+                check("ancestry: a grafts DIRECTORY refuses, named by kind",
+                      rc == EXIT_ERROR and "found an entry of kind directory" in output)
+                g_file.rmdir()
                 rc, output = run(grafted)
                 check("ancestry: grafts file removed, the prior store is found again",
                       rc == EXIT_ERROR and "prior store exists" in output)
+
+                # QA round 2 MINOR 4: the info/grafts PATH arms, pinned. git prints the
+                # grafts path of a separate git directory as an absolute path, so a git
+                # directory name carrying a non-UTF-8 byte, or a newline, reaches the shape
+                # checks. DISCRIMINATORS: mutant M-undecodable-arm (lenient decode, no
+                # refusal) lstat()s a mangled path, reads it as absent and passes (rc 0);
+                # mutant M-malformed-arm (shape check removed) passes the same way (rc 0).
+                def make_separate(name, gitdir_name):
+                    sep_root = base / name
+                    sep_root.mkdir()
+                    git_call(sep_root, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main",
+                                        "init", "--separate-git-dir",
+                                        str(base / os.fsdecode(gitdir_name))])
+                    (sep_root / "seed.txt").write_bytes(b"base\n")
+                    git_call(sep_root, ["--literal-pathspecs", "add", "-A"])
+                    git_call(sep_root, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                        "commit", "-m", "base"])
+                    return sep_root
+
+                undecodable = make_separate("ancestry-undecodable-gitdir", b"gitdir-\xff")
+                rc, output = run(undecodable)
+                check("ancestry: undecodable info/grafts path refused, never read as absent",
+                      rc == EXIT_ERROR and "cannot evaluate" in output
+                      and "undecodable info/grafts path" in output)
+                newline_dir = make_separate("ancestry-newline-gitdir", b"gitdir-\nx")
+                rc, output = run(newline_dir)
+                check("ancestry: malformed (multi-line) info/grafts path refused",
+                      rc == EXIT_ERROR and "cannot evaluate" in output
+                      and "malformed info/grafts path" in output)
+
+                # The lstat-failure arm: .git/info is a regular FILE, so lstat of info/grafts
+                # fails with NotADirectoryError; the refusal states that exact failure.
+                # DISCRIMINATOR: mutant M-lstat-arm (any OSError read as absent) passes (rc 0).
+                info_file = make_git("ancestry-info-not-a-directory")
+                (info_file / "seed.txt").write_bytes(b"base\n")
+                git_call(info_file, ["--literal-pathspecs", "add", "-A"])
+                git_call(info_file, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                     "commit", "-m", "base"])
+                (info_file / ".git" / "info").write_bytes(b"not a directory\n")
+                rc, output = run(info_file)
+                check("ancestry: an uninspectable grafts path refuses, naming the lstat failure",
+                      rc == EXIT_ERROR and "lstat of the legacy grafts path" in output
+                      and "NotADirectoryError" in output)
+
+                # The POSIX-separator helper, pinned on POSIX hosts: a Windows-flavoured prefix
+                # must still yield "/" pathspecs. DISCRIMINATOR: mutant M-as-posix-to-str
+                # (str(Path) instead of as_posix) yields backslashes and fails.
+                import opf
+                if opf._bootstrap() != EXIT_OK:
+                    raise OSError("opf helper modules could not be imported")
+                check("ancestry: history pathspecs use POSIX separators for a Windows prefix",
+                      opf._init_history_rels(PureWindowsPath("sub", "dir"))
+                      == ("sub/dir/" + _opf_store.POINTER_REL, "sub/dir/" + working))
+
+                # QA round 2 MINOR 2: the REFUSED line escapes path-derived text. A root whose
+                # directory name carries ESC and BEL (a clone from an untrusted source can name
+                # directories this way) and whose history holds a store there: the refusal names
+                # that path several times, and none of it may reach the terminal raw.
+                # DISCRIMINATOR: mutant M-refusal-raw (the refusal formats its paths without
+                # ascii()) prints raw ESC/BEL characters and fails.
+                esc_repo = make_git("ancestry-control-chars")
+                esc_name = "a\x1b[31mred\x07b"
+                esc_root = esc_repo / esc_name
+                esc_root.mkdir()
+                rc, output = run(esc_root)
+                check("ancestry control-character fixture first init succeeds", rc == EXIT_OK)
+                git_call(esc_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                git_call(esc_repo, ["--literal-pathspecs", "rm", "-r", "-q", "--", esc_name])
+                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store"])
+                esc_root.mkdir(exist_ok=True)
+                rc, output = run(esc_root)
+                refused = [line for line in output.splitlines()
+                           if line.startswith("opf init: REFUSED")]
+                check("ancestry: control-character root with a prior store is refused",
+                      rc == EXIT_ERROR and "prior store exists" in output and len(refused) == 1)
+                check("ancestry: REFUSED line carries no raw control character from the path",
+                      len(refused) == 1 and "\x1b" not in refused[0] and "\x07" not in refused[0]
+                      and refused[0].count("a\\x1b[31mred\\x07b") >= 4)
 
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side
