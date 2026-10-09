@@ -113,170 +113,155 @@ def _snapshot(root):
     return result
 
 
-def _inert_print_violations(source):
-    """AST gate (QA round 6, requirement B): parse opf.py and fail any print in _cmd_init
-    or _init_no_prior_store that interpolates a value through anything but the one inert
-    renderer. A print argument is accepted when it is a string literal, a _init_inert(...)
-    call, json.dumps of an _init_inert_json(...) call, a plain-field .format on a literal
-    (no {!r} or {!s} conversion, no format spec) whose every argument is accepted, a
-    " ".join over accepted elements, a concatenation / list / conditional of accepted
-    parts, or a NAME every binding of which is accepted (so remedy, label and
-    restore_lines, assembled from literals and _init_inert calls, pass). The
-    _InitPriorStoreRefusal flow is covered at BOTH ends: every raise of it inside
-    _init_no_prior_store must carry accepted arguments, and only then may _cmd_init's
-    matching except handler print the caught refusal and iterate its restore_lines. Any
-    .write call inside either function is a violation (there is no second output path to
-    slip a raw value through). Literal-only prints are accepted by the same classifier,
-    which is this gate's allowlist. Returns a list of violation descriptions; the suite
-    requires it empty, and requires it NON-empty on seeded mutants, so the gate itself is
-    discriminated."""
+_ROUTE_EMITTER = "_init_echo"
+_ROUTE_RENDERED = ("_InitRestoreLine", "_InitPriorStoreRefusal")
+_ROUTE_PINNED = ("_init_echo", "_init_inert", "_init_inert_json",
+                 "_InitRestoreLine", "_InitPriorStoreRefusal")
+_ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
+                           "write", "writelines", "warnings", "logging"])
+
+
+def _route_binding_names(node):
+    """Names a statement or clause BINDS (not reads): assignment targets of every kind
+    (plain, annotated, augmented, starred, tuple/list, walrus), loop / with / except /
+    comprehension targets, import aliases, and nested def / class statements. Used for
+    two refusals: a rebinding of a pinned route name anywhere in opf.py, and a
+    module-level rebinding of any function on the init call graph."""
+    names = []
+    targets = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        targets = [node.target]
+    elif isinstance(node, ast.For):
+        targets = [node.target]
+    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+        targets = [node.optional_vars]
+    elif isinstance(node, ast.comprehension):
+        targets = [node.target]
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        names.append(node.name)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            names.append(alias.asname or alias.name.split(".")[0])
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.append(node.name)
+    elif isinstance(node, (ast.Global, ast.Nonlocal)):
+        names.extend(node.names)
+    elif isinstance(node, ast.Delete):
+        targets = list(node.targets)
+    for target in targets:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name):
+                names.append(sub.id)
+    return names
+
+
+def _init_route_violations(source):
+    """Closed-NAME output-route gate over opf.py (QA round 7, requirement B; it replaces
+    the round-6 dataflow proof, which annotated assignments, print aliases, in-place
+    list mutation and out-of-scope helpers all bypassed). It computes the set of
+    module-level opf.py functions and classes REACHABLE from _cmd_init (every Name that
+    resolves to a module-level def, transitively; a duplicate module-level definition
+    or a module-level rebinding of a reachable def refuses as unresolvable) and, in
+    every reachable function except the one emitter _init_echo, refuses BY NAME any
+    reference to print, builtins, stdout, stderr, write, writelines, warnings or
+    logging (as a bare name, an attribute, an import or a keyword target), any binding
+    of a pinned route name (the emitter, the renderers and the two rendering types)
+    anywhere in the file, and any _InitRestoreLine or _InitPriorStoreRefusal
+    construction whose template argument is not a string literal. Returns a list of
+    violation descriptions; the suite requires it empty on the real source and
+    NON-empty on every seeded mutant, so each recognizer is discriminated. RESIDUAL
+    (stated, not waved away): a name check sees names, not values or dataflow. It
+    cannot see WHAT a permitted _init_echo call prints, output written through a raw
+    file descriptor (os.write on an integer), output produced inside the sibling
+    _opf_* modules the init path calls into, or a route reached through an attribute
+    chain it does not name. The suite's RUNTIME paste test, which drives hostile
+    values through every init exit path and feeds every printed line alone to a real
+    POSIX sh, is the primary guard for those; this gate only keeps the output routes
+    closed by name so a reviewer can enumerate them."""
     tree = ast.parse(source)
-    functions = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in (
-                "_cmd_init", "_init_no_prior_store"):
-            functions[node.name] = node
     violations = []
-    if sorted(functions) != ["_cmd_init", "_init_no_prior_store"]:
-        return ["expected functions not found: " + repr(sorted(functions))]
+    top = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in top:
+                violations.append(
+                    "call graph unresolved: {} is defined more than once at module "
+                    "level (lines {} and {})".format(
+                        node.name, top[node.name].lineno, node.lineno))
+            top[node.name] = node
+    if violations:
+        return violations
+    if "_cmd_init" not in top:
+        return ["call graph unresolved: _cmd_init is not a module-level definition"]
+    if (_ROUTE_EMITTER not in top
+            or not isinstance(top[_ROUTE_EMITTER], ast.FunctionDef)):
+        return ["output route gate: the emitter {} is not a module-level "
+                "function".format(_ROUTE_EMITTER)]
 
-    def plain_fields(fmt):
-        try:
-            return all(conversion is None and not spec
-                       for _text, field, spec, conversion
-                       in string.Formatter().parse(fmt) if field is not None)
-        except ValueError:
-            return False
+    reachable = {"_cmd_init"}
+    queue = ["_cmd_init"]
+    while queue:
+        for sub in ast.walk(top[queue.pop()]):
+            if (isinstance(sub, ast.Name) and sub.id in top
+                    and sub.id not in reachable):
+                reachable.add(sub.id)
+                queue.append(sub.id)
 
-    def accepted(node, names, trusted):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return True
-        if isinstance(node, ast.Name):
-            return node.id in names or node.id in trusted
-        if isinstance(node, ast.IfExp):
-            return (accepted(node.body, names, trusted)
-                    and accepted(node.orelse, names, trusted))
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return (accepted(node.left, names, trusted)
-                    and accepted(node.right, names, trusted))
-        if isinstance(node, (ast.List, ast.Tuple)):
-            return all(accepted(elt, names, trusted) for elt in node.elts)
-        if isinstance(node, ast.ListComp):
-            return accepted(node.elt, names, trusted)
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id in ("_init_inert",
-                                                          "_init_inert_json"):
-                return True
-            if (isinstance(func, ast.Attribute) and func.attr == "dumps"
-                    and isinstance(func.value, ast.Name)
-                    and func.value.id == "json"):
-                return bool(node.args) and accepted(node.args[0], names, trusted)
-            if (isinstance(func, ast.Attribute) and func.attr == "format"
-                    and isinstance(func.value, ast.Constant)
-                    and isinstance(func.value.value, str)):
-                return (plain_fields(func.value.value)
-                        and all(accepted(arg, names, trusted) for arg in node.args)
-                        and all(accepted(kw.value, names, trusted)
-                                for kw in node.keywords))
-            if (isinstance(func, ast.Attribute) and func.attr == "join"
-                    and isinstance(func.value, ast.Constant)
-                    and isinstance(func.value.value, str)
-                    and len(node.args) == 1
-                    and isinstance(node.args[0], (ast.GeneratorExp, ast.ListComp))):
-                return accepted(node.args[0].elt, names, trusted)
-        return False
+    # A module-level statement that rebinds a reachable definition makes the name's
+    # runtime binding ambiguous: refuse as unresolvable rather than guessing.
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for name in _route_binding_names(node):
+            if name in reachable:
+                violations.append(
+                    "call graph unresolved: module-level statement at line {} rebinds "
+                    "the reachable definition {}".format(node.lineno, name))
 
-    def proven_names(func, trusted):
-        bindings = {}
-        for node in ast.walk(func):
-            if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)):
-                bindings.setdefault(node.targets[0].id, []).append(
-                    ("=", node.value))
-            elif isinstance(node, ast.AugAssign) and isinstance(node.target,
-                                                                ast.Name):
-                kind = "+=" if isinstance(node.op, ast.Add) else "?"
-                bindings.setdefault(node.target.id, []).append(
-                    (kind, node.value))
-            elif isinstance(node, (ast.For, ast.withitem, ast.comprehension,
-                                   ast.ExceptHandler)):
-                target = getattr(node, "target", None) or getattr(
-                    node, "optional_vars", None)
-                if isinstance(node, ast.ExceptHandler) and node.name:
-                    bindings.setdefault(node.name, []).append(("bound", None))
-                for name_node in (ast.walk(target) if target is not None else ()):
-                    if isinstance(name_node, ast.Name):
-                        bindings.setdefault(name_node.id, []).append(
-                            ("bound", None))
-        names = set()
-        while True:
-            grown = set(names)
-            for name, entries in bindings.items():
-                if entries and all(
-                        kind in ("=", "+=") and value is not None
-                        and accepted(value, grown, trusted)
-                        for kind, value in entries):
-                    grown.add(name)
-            if grown == names:
-                return names
-            names = grown
+    # A binding of a pinned route name ANYWHERE in the file (outside the pinned
+    # definition itself) can redirect or disarm the route: refused by name.
+    for node in ast.walk(tree):
+        if node in tree.body and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for name in _route_binding_names(node):
+            if name in _ROUTE_PINNED:
+                violations.append(
+                    "line {}: binding of the pinned route name {}".format(
+                        getattr(node, "lineno", 0), name))
 
-    # End 1: every _InitPriorStoreRefusal raised by the scan carries accepted arguments.
-    scan = functions["_init_no_prior_store"]
-    scan_names = proven_names(scan, set())
-    refusal_ok = True
-    for node in ast.walk(scan):
-        if (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-                and isinstance(node.exc.func, ast.Name)
-                and node.exc.func.id == "_InitPriorStoreRefusal"):
-            for arg in node.exc.args:
-                if not accepted(arg, scan_names, set()):
-                    refusal_ok = False
+    for name in sorted(reachable):
+        if name == _ROUTE_EMITTER:
+            continue
+        for sub in ast.walk(top[name]):
+            if isinstance(sub, ast.Name) and sub.id in _ROUTE_BANNED:
+                violations.append("{} line {}: reference to the banned name "
+                                  "{}".format(name, sub.lineno, sub.id))
+            elif isinstance(sub, ast.Attribute) and sub.attr in _ROUTE_BANNED:
+                violations.append("{} line {}: reference to the banned attribute "
+                                  "{}".format(name, sub.lineno, sub.attr))
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                module = getattr(sub, "module", None) or ""
+                pieces = [alias.name.split(".")[0] for alias in sub.names]
+                pieces += [alias.asname for alias in sub.names if alias.asname]
+                pieces.append(module.split(".")[0])
+                for piece in pieces:
+                    if piece in _ROUTE_BANNED:
+                        violations.append(
+                            "{} line {}: import of the banned name {}".format(
+                                name, sub.lineno, piece))
+            elif isinstance(sub, ast.keyword) and sub.arg in _ROUTE_BANNED:
+                violations.append("{} line {}: keyword named {}".format(
+                    name, sub.lineno, sub.arg))
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                    and sub.func.id in _ROUTE_RENDERED):
+                if not (sub.args and isinstance(sub.args[0], ast.Constant)
+                        and isinstance(sub.args[0].value, str)):
                     violations.append(
-                        "_init_no_prior_store line {}: _InitPriorStoreRefusal "
-                        "argument not rendered through _init_inert".format(
-                            node.lineno))
-
-    # End 2: prints. Inside the matching except handler, and only when end 1 held, the
-    # caught refusal and the loop variable over its restore_lines are trusted.
-    cmd = functions["_cmd_init"]
-    cmd_names = proven_names(cmd, set())
-    handler_trusted = {}
-    for node in ast.walk(cmd):
-        if (isinstance(node, ast.ExceptHandler) and node.name and refusal_ok
-                and isinstance(node.type, ast.Name)
-                and node.type.id == "_InitPriorStoreRefusal"):
-            trusted = {node.name}
-            for sub in ast.walk(node):
-                if (isinstance(sub, ast.For) and isinstance(sub.target, ast.Name)
-                        and isinstance(sub.iter, ast.Attribute)
-                        and sub.iter.attr == "restore_lines"
-                        and isinstance(sub.iter.value, ast.Name)
-                        and sub.iter.value.id == node.name):
-                    trusted.add(sub.target.id)
-            for sub in ast.walk(node):
-                handler_trusted[id(sub)] = trusted
-    for name, func in functions.items():
-        for node in ast.walk(func):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "write"):
-                violations.append("{} line {}: .write call bypasses the print "
-                                  "discipline".format(name, node.lineno))
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "print"):
-                trusted = handler_trusted.get(id(node), set())
-                names = cmd_names if name == "_cmd_init" else scan_names
-                for arg in node.args:
-                    if not accepted(arg, names, trusted):
-                        violations.append(
-                            "{} line {}: print interpolates a value without "
-                            "_init_inert".format(name, node.lineno))
-                for kw in node.keywords:
-                    if kw.arg not in ("file",):
-                        violations.append(
-                            "{} line {}: unexpected print keyword {}".format(
-                                name, node.lineno, kw.arg))
+                        "{} line {}: {} template is not a string literal".format(
+                            name, sub.lineno, sub.func.id))
     return violations
 
 
@@ -320,13 +305,15 @@ def _suite_isolated(invoke):
             return call(["init", "--root", str(root)])
 
         def inert(text):
-            # An independent spelling of init's ONE inert renderer (QA round 6):
-            # every character outside the fixed alphabet (ASCII letters, digits,
-            # and . / - _ ONLY; the space, "+", ",", ":", "@", "%", "=", "(" and
-            # ")" of the earlier two-renderer split are escaped now too) becomes a
+            # An independent spelling of init's ONE renderer (QA rounds 6 and 7):
+            # every character a POSIX shell can act on to run or redirect something
+            # ("$", the backquote, ";", "&", "|", "<", ">", the backslash), every
+            # control character and DEL, and every non-ASCII character becomes a
             # Python \\x / \\u / \\U escape (written doubled so a
-            # raw_unicode_escape re-decode of this file stays well formed), so "$", "`", every quote, every space
-            # and every other shell metacharacter never reach a printed line raw.
+            # raw_unicode_escape re-decode of this file stays well formed); quotes,
+            # spaces and ordinary punctuation stay raw so diagnostics read plainly
+            # (QA round 7 MINOR 5), while no substitution, separator, redirection
+            # or line break ever reaches a printed line raw.
             def escape(ch):
                 code = ord(ch)
                 if code < 0x100:
@@ -335,7 +322,7 @@ def _suite_isolated(invoke):
                     return "\\u%04x" % code
                 return "\\U%08x" % code
             safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                       "0123456789./-_")
+                       "0123456789./-_ !\"#%'()*+,:=?@[]^" + chr(123) + chr(125) + "~")
             return "".join(ch if ch in safe else escape(ch) for ch in text)
 
 
@@ -779,17 +766,25 @@ def _suite_isolated(invoke):
                         remedy = ("restore the store paths the lines below name, from the "
                                   + ("commits" if extra else "commit")
                                   + " named below (no command is printed: a value in it "
-                                  "would hold a character outside the inert alphabet)")
+                                  "would hold a character outside the bare-command "
+                                  "alphabet)")
                         restore = (
                             ["opf init: restore command withheld: a value in it holds a "
-                             "character outside the inert alphabet A-Za-z0-9 . / - _ and "
-                             "an escaped command could still carry a live shell "
-                             "substitution or split across physical lines, so no command "
-                             "is printed. Restore each path named below from the commit "
-                             "named above it, in the repository named below, by your own "
-                             "means, reading each escaped value as a Python string "
-                             "literal in which every character outside that alphabet is "
-                             "written as an escape:",
+                             "character outside the bare-command alphabet "
+                             "A-Za-z0-9 . / - _ and an escaped "
+                             "command could still carry a live shell "
+                             "substitution or split across "
+                             "physical lines, so no command is printed. Restore each "
+                             "path named "
+                             "below from the commit named above it, in the repository "
+                             "named below, "
+                             "by your own means, reading each rendered value literally, "
+                             "with every "
+                             "character a POSIX shell could act on, every control or "
+                             "format "
+                             "character and every non-ASCII character written as a "
+                             "backslash "
+                             "escape of its code point:",
                              "opf init:   repository: " + inert(str(repo)),
                              "opf init:   commit: " + commit]
                             + ["opf init:   restore path: " + inert(path)
@@ -805,14 +800,24 @@ def _suite_isolated(invoke):
                                    ".working tree lacks)")
                         restore += (
                             ["opf init: the restore is PARTIAL: the .working tree the "
-                             "command or lines above restore lacks each store path below, "
-                             "so no command or path printed above provides it (this scan "
-                             "checks only the two structural names, manifest.toml and "
-                             "counters.toml, in the first-level .working subdirectories "
-                             "that tree holds and in those this line's first-parent "
-                             "history touched at or before the named commit); supply "
-                             "each missing path by your own means, or re-adopt with opf "
-                             "adopt:"]
+                             "command or "
+                             "lines above restore lacks each store path below, so no "
+                             "command or "
+                             "path printed above provides it (this scan treats a "
+                             "first-level "
+                             ".working subdirectory as a machine store only when it "
+                             "directly holds "
+                             "manifest.toml or counters.toml, in that tree or in this "
+                             "line's "
+                             "first-parent history at or before the named commit; a "
+                             "store found "
+                             "either way is expected to hold both files, and a "
+                             "subdirectory "
+                             "holding only other files or only deeper directories is "
+                             "neither "
+                             "expected nor named); supply each missing path by your own "
+                             "means, or "
+                             "re-adopt with opf adopt:"]
                             + ["opf init:   missing store path: " + inert(path)
                                for path in gap_paths])
                     return (
@@ -2004,9 +2009,15 @@ def _suite_isolated(invoke):
                 rc, output = run(nl_repo)
                 check("newline root: refused fail-closed as cannot-evaluate",
                       rc == EXIT_ERROR and "cannot evaluate" in output)
+                # QA round 7 MINOR 5: quotes and spaces now print raw (the renderer
+                # escapes only what a shell acts on), so the payload WORDS appear
+                # rendered mid-line; what must never happen is a payload fragment
+                # LANDING AT A LINE START (the newline is escaped) or a raw
+                # substitution or separator character surviving anywhere.
                 check("newline root: no output line carries a payload fragment raw",
-                      "touch PWNED-NL" not in output and "$" not in output
-                      and "`" not in output and "'" not in output
+                      "$" not in output and "`" not in output
+                      and not any(line.startswith("touch")
+                                  for line in output.splitlines())
                       and all(ch.isprintable() for line in output.splitlines()
                               for ch in line))
                 check("newline root: output is shell-inert through all three sh legs",
@@ -2205,29 +2216,571 @@ def _suite_isolated(invoke):
                       and not (pi_repo / "PWNED").exists()
                       and not (base / "PWNED").exists())
 
-                # QA round 6 (requirement B): the AST gate over the real source, plus one
-                # seeded violation per guarded construct, so the gate itself is
-                # discriminated: a gate that stops flagging raw interpolations fails here.
+                # QA round 7 (requirement B): the closed-name route gate over the
+                # real source, plus one seeded mutant per recognizer, so the gate
+                # itself is discriminated. The roster includes every round-7 bypass of
+                # the retired dataflow gate that a NAME can catch: the
+                # annotated-assignment print, the print alias and the external helper,
+                # plus builtins.print, sys.stderr.writelines, warnings.warn and the
+                # print inside _init_same_root. The round-7 binding mutants that carry
+                # no banned name are neutralized at RUNTIME by the rendering
+                # constructors and are covered in the runtime mutant block below.
                 gate_source = (Path(__file__).resolve().parent / "opf.py").read_text(
                     encoding="utf-8")
-                check("inert AST gate: every print in _cmd_init and _init_no_prior_store "
-                      "routes interpolated values through the one renderer",
-                      _inert_print_violations(gate_source) == [])
-                for mutant_label, old, new in (
-                        ("a raw argument diagnostic", "_init_inert(val)", "val"),
-                        ("a raw JSON report",
-                         "json.dumps(_init_inert_json(", "json.dumps(("),
-                        ("a raw withheld detail line",
-                         '"opf init:   restore path: " + _init_inert(path)',
-                         '"opf init:   restore path: " + path'),
-                        ("a raw REFUSED interpolation",
-                         "_init_inert(str(root)), _init_inert(stage), exc",
-                         "str(root), _init_inert(stage), exc")):
-                    if old not in gate_source:
-                        check("inert AST gate mutant source carries " + mutant_label, False)
-                        continue
-                    check("inert AST gate flags " + mutant_label,
-                          _inert_print_violations(gate_source.replace(old, new)) != [])
+                check("route gate: the real source is clean",
+                      _init_route_violations(gate_source) == [])
+                gate_anchor = '    stage = "preflight"'
+                check("route gate: the mutation anchor is present once",
+                      gate_source.count(gate_anchor) == 1)
+                deep_anchor = "    check_fd = _opf_store._open_dir_nofollow(root)"
+                check("route gate: the deep-helper anchor is present once",
+                      gate_source.count(deep_anchor) == 1)
+                gate_mutants = [
+                    ("a print in _cmd_init", "    print(str(root))"),
+                    ("an annotated assignment feeding print",
+                     "    diagnostic: str = str(root)@N@    print(diagnostic)"),
+                    ("a print alias", "    _p = print@N@    _p(str(root))"),
+                    ("builtins.print",
+                     "    import builtins@N@    builtins.print(str(root))"),
+                    ("sys.stderr.writelines",
+                     "    sys.stderr.writelines([str(root)])"),
+                    ("sys.stdout.write", "    sys.stdout.write(str(root))"),
+                    ("warnings.warn", "    warnings.warn(str(root))"),
+                    ("logging.error", "    logging.error(str(root))"),
+                    ("the emitter rebound by assignment", "    _init_echo = None"),
+                    ("the renderer rebound by an annotated assignment",
+                     "    _init_inert: object = str"),
+                    ("the emitter rebound as a loop target",
+                     "    for _init_echo in []:@N@        pass"),
+                    ("the emitter shadowed by a nested def",
+                     "@N@    def _init_echo(line, err=False):@N@        pass"),
+                    ("the emitter rebound by an import alias",
+                     "    import json as _init_echo"),
+                    ("a restore-line template that is not a literal",
+                     "    _InitRestoreLine(str(root))"),
+                    ("a refusal template that is not a literal",
+                     "    _InitPriorStoreRefusal(str(root), (), [])"),
+                ]
+                newline = chr(10)
+                for mutant_label, insertion in gate_mutants:
+                    mutated = gate_source.replace(
+                        gate_anchor,
+                        gate_anchor + newline + insertion.replace("@N@", newline))
+                    check("route gate flags " + mutant_label,
+                          _init_route_violations(mutated) != [])
+                check("route gate flags a print inside the reached helper "
+                      "_init_same_root",
+                      _init_route_violations(gate_source.replace(
+                          deep_anchor,
+                          "    print(str(root))" + newline + deep_anchor)) != [])
+                check("route gate flags an external helper that prints",
+                      _init_route_violations(
+                          gate_source.replace(
+                              gate_anchor,
+                              gate_anchor + newline
+                              + "    _qa_route_helper(str(root))")
+                          + newline + newline + "def _qa_route_helper(value):"
+                          + newline + "    print(value)" + newline) != [])
+                check("route gate refuses a duplicate module-level definition",
+                      _init_route_violations(
+                          gate_source + newline + newline
+                          + "def _init_same_root(root, root_fd):" + newline
+                          + "    return None" + newline) != [])
+                check("route gate refuses a module-level rebinding of a reachable "
+                      "definition",
+                      _init_route_violations(
+                          gate_source + newline + newline
+                          + "_init_same_root = None" + newline) != [])
+                check("route gate refuses a source without _cmd_init",
+                      _init_route_violations(gate_source.replace(
+                          "def _cmd_init(rest):",
+                          "def _cmd_init_renamed(rest):")) != [])
+                check("route gate refuses a source without the emitter",
+                      _init_route_violations(gate_source.replace(
+                          "def _init_echo(line, err=False):",
+                          "def _init_echo_gone(line, err=False):")) != [])
+
+                # QA round 7 (requirement A): the RUNTIME paste test, the primary
+                # guard. ONE table of hostile values (both quote kinds, a command
+                # substitution, a backquote, ";", "#", LF, CRLF, the direction
+                # override U+202E, the line separator U+2028, the next-line control
+                # U+0085, the empty value and a printable non-ASCII name) is driven
+                # through EVERY init exit path: argument errors, the prior-store
+                # refusal with its PARTIAL block, the cannot-evaluate report, the
+                # success report and the foreign-content report. Every physical
+                # stdout and stderr line is then passed ALONE to a real POSIX sh -c
+                # in its own fresh empty directory; the probe fails on ANY entry
+                # created there or on the payload marker appearing alone on an
+                # output line. The two intended, deliberately runnable hint lines
+                # are excluded by an EXACT prefix list, and every hostile-value run
+                # additionally asserts that NO printed line matches those prefixes
+                # (so the exclusion cannot mask a leak).
+                paste_hint_prefixes = ("  git -C ", "  opf render --write --root ")
+                paste_marker = "QA-PASTE-MARKER-LINE"
+
+                def paste_probe(output, tag):
+                    probe_root = base / ("paste-probe-" + tag)
+                    probe_root.mkdir()
+                    violations = []
+                    for number, line in enumerate(output.splitlines()):
+                        if line.startswith(paste_hint_prefixes):
+                            continue
+                        cell = probe_root / str(number)
+                        cell.mkdir()
+                        proc = subprocess.run(
+                            ["sh", "-c", line], cwd=str(cell),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=60)
+                        created = sorted(entry.name for entry in cell.iterdir())
+                        echoed = [
+                            answer for answer in
+                            (proc.stdout.decode("utf-8", "replace").splitlines()
+                             + proc.stderr.decode("utf-8", "replace").splitlines())
+                            if answer.strip() == paste_marker]
+                        if created or echoed:
+                            violations.append((number, line, created, echoed))
+                    return violations
+
+                paste_payload = "$(touch PASTE-PWNED)"
+                paste_echo = "$(echo " + paste_marker + ")"
+                paste_values = [
+                    ("double-quote", 'd"q" ' + paste_payload + ' "' + paste_echo + '"'),
+                    ("single-quote", "s'q' " + paste_payload + " '" + paste_echo + "'"),
+                    ("backtick",
+                     "b`touch PASTE-PWNED``echo " + paste_marker + "`x"),
+                    ("semicolon",
+                     "v; touch PASTE-PWNED; echo " + paste_marker + " ;x"),
+                    ("hash", "v; touch PASTE-PWNED #" + paste_payload),
+                    ("linefeed", "v\ntouch PASTE-PWNED\necho " + paste_marker),
+                    ("crlf", "v\r\ntouch PASTE-PWNED\r\necho " + paste_marker),
+                    ("rtl-override", "v\u202e; touch PASTE-PWNED"),
+                    ("line-separator", "v\u2028touch PASTE-PWNED"),
+                    ("next-line", "v\u0085touch PASTE-PWNED"),
+                    ("empty", ""),
+                    ("non-ascii", "caf\u00e9 " + paste_payload),
+                ]
+
+                def paste_clean(output, tag):
+                    return (paste_probe(output, tag) == []
+                            and not any(line.startswith(paste_hint_prefixes)
+                                        for line in output.splitlines()))
+
+                # Exit path 1: argument errors (the only path an EMPTY value reaches;
+                # a directory name cannot be empty).
+                for tag, value in paste_values:
+                    rc, output = call(["init", value])
+                    check("paste " + tag + ": the unrecognized-argument error is "
+                          "paste-inert",
+                          rc == EXIT_ERROR and paste_clean(output, "arg-" + tag))
+                rc, output = call(["init", "--root", ""])
+                check("paste empty: the empty --root error is paste-inert",
+                      rc == EXIT_ERROR and paste_clean(output, "arg-empty-root"))
+                rc, output = call(["init", "--root", "-" + paste_payload])
+                check("paste dash-led --root value: the rejected-value error is "
+                      "paste-inert",
+                      rc == EXIT_ERROR and paste_clean(output, "arg-dash-root"))
+
+                # Exit paths 2 to 5 need the value as a DIRECTORY name; the empty
+                # value cannot form one and is covered by path 1 above.
+                paste_dir_values = [(tag, value) for tag, value in paste_values
+                                    if value]
+                for tag, value in paste_dir_values:
+                    # Path 2: the prior-store refusal, with a PARTIAL block (the
+                    # history held old-machine/manifest.toml only, so BOTH of that
+                    # store's structural files are expected and missing) and the
+                    # restore command withheld (the repository name is hostile).
+                    hist = make_git("paste-hist-" + tag + "-" + value)
+                    hist_machine = hist / working / machine_name
+                    hist_machine.mkdir(parents=True)
+                    (hist_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                    (hist_machine / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                    hist_old = hist / working / "old-machine"
+                    hist_old.mkdir()
+                    (hist_old / _opf_store.MANIFEST_NAME).write_bytes(b"z = 1\n")
+                    (hist / _opf_store.POINTER_REL).write_bytes(
+                        b'[store]\ntarget = "dir:."\n')
+                    git_call(hist, ["--literal-pathspecs", "add", "-A"])
+                    git_call(hist, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                    git_call(hist, ["rm", "-q", "--",
+                                    working + "/old-machine/"
+                                    + _opf_store.MANIFEST_NAME])
+                    git_call(hist, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop the old manifest"])
+                    git_call(hist, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                    git_call(hist, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop the store"])
+                    rc, output = run(hist)
+                    line_broken = chr(10) in value or chr(13) in value
+                    if line_broken:
+                        # A root whose name holds a line break cannot be confirmed
+                        # as a worktree (the rev-parse answer is line-oriented), so
+                        # the repository preflight refuses fail-closed BEFORE the
+                        # ancestry scan: these values exercise the cannot-evaluate
+                        # exit here, and their refusal/success legs below assert the
+                        # same fail-closed shape. Both stay paste-inert.
+                        check("paste " + tag + ": the line-broken root refuses "
+                              "fail-closed and is paste-inert",
+                              rc == EXIT_ERROR and "cannot evaluate" in output
+                              and paste_clean(output, "refusal-" + tag))
+                    else:
+                        check("paste " + tag + ": the withheld refusal with its "
+                              "PARTIAL block is paste-inert",
+                              rc == EXIT_ERROR
+                              and "opf init: the restore is PARTIAL" in output
+                              and "opf init:   missing store path: "
+                              + inert(working + "/old-machine/"
+                                      + _opf_check.COUNTERS_NAME) in output
+                              and "opf init:   missing store path: "
+                              + inert(working + "/old-machine/"
+                                      + _opf_store.MANIFEST_NAME) in output
+                              and paste_clean(output, "refusal-" + tag))
+
+                    # Path 3: the cannot-evaluate report (a non-git root).
+                    nongit_dir = base / ("paste-nongit-" + tag + "-" + value)
+                    nongit_dir.mkdir()
+                    rc, output = call(["init", "--root", str(nongit_dir)])
+                    check("paste " + tag + ": the cannot-evaluate report is "
+                          "paste-inert",
+                          rc == EXIT_ERROR and "cannot evaluate" in output
+                          and paste_clean(output, "cannot-evaluate-" + tag))
+
+                    # Path 4: the success report (hints withheld: the name is not
+                    # bare).
+                    ok_repo = make_git("paste-ok-" + tag + "-" + value)
+                    rc, output = run(ok_repo)
+                    if line_broken:
+                        check("paste " + tag + ": the line-broken root refuses "
+                              "fail-closed before publication and is paste-inert",
+                              rc == EXIT_ERROR and "cannot evaluate" in output
+                              and paste_clean(output, "success-" + tag))
+                    else:
+                        check("paste " + tag + ": the success report withholds the "
+                              "hints and is paste-inert",
+                              rc == EXIT_OK and "command hints withheld" in output
+                              and paste_clean(output, "success-" + tag))
+
+                    # Path 5: the foreign-content report (the value as an entry name).
+                    foreign_repo = make_git("paste-foreign-" + tag)
+                    (foreign_repo / working).mkdir()
+                    (foreign_repo / working / value).write_bytes(b"f\n")
+                    rc, output = run(foreign_repo)
+                    check("paste " + tag + ": the foreign-content report is "
+                          "paste-inert",
+                          rc == EXIT_ERROR
+                          and inert("foreign .working content") in output
+                          and paste_clean(output, "foreign-" + tag))
+
+                check("paste: no payload file appeared beside the fixtures",
+                      not (base / "PASTE-PWNED").exists())
+
+                # A BARE-named success prints the two intended hint lines; they are
+                # excluded by the exact prefixes, every other line is paste-inert,
+                # and both hints are really present (the exclusion list names real
+                # lines, not dead ones).
+                bare_ok = make_git("paste-ok-bare")
+                rc, output = run(bare_ok)
+                check("paste bare success: hints print and the rest is paste-inert",
+                      rc == EXIT_OK
+                      and any(line.startswith("  git -C ")
+                              for line in output.splitlines())
+                      and any(line.startswith("  opf render --write --root ")
+                              for line in output.splitlines())
+                      and paste_probe(output, "success-bare") == [])
+
+                # QA round 7: the round-7 BINDING mutants carry no banned name, so
+                # the route gate deliberately passes them (its docstring states that
+                # residual); the rendering CONSTRUCTORS neutralize them at runtime.
+                # Each mutant is loaded as its own module from a mutated copy of the
+                # real source (importlib, never exec), driven in process against a
+                # hostile-named fixture, and must answer rc 2 with every hostile
+                # character rendered: no raw substitution opener, no raw backquote,
+                # and a paste probe that creates nothing.
+                import importlib.util
+
+                def load_mutant(tag, mutated_source):
+                    mutant_path = base / ("route-mutant-" + tag + ".py")
+                    mutant_path.write_text(mutated_source, encoding="utf-8")
+                    spec = importlib.util.spec_from_file_location(
+                        "opf_route_mutant_" + tag.replace("-", "_"),
+                        str(mutant_path))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    if module._bootstrap() != EXIT_OK:
+                        raise OSError("route mutant could not bootstrap: " + tag)
+                    return module
+
+                def drive_module_init(module, argv):
+                    buffer = io.StringIO()
+                    with contextlib.redirect_stdout(buffer), \
+                            contextlib.redirect_stderr(buffer):
+                        rc = module._cmd_init(list(argv))
+                    return rc, buffer.getvalue()
+
+                rt_repo = make_git("route-mutant'$(touch PWNED-RT)`; #a")
+                rt_machine = rt_repo / working / machine_name
+                rt_machine.mkdir(parents=True)
+                (rt_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (rt_machine / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                (rt_repo / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(rt_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(rt_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "store"])
+                git_call(rt_repo, ["rm", "-r", "-q", "--",
+                                   working, _opf_store.POINTER_REL])
+                git_call(rt_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "drop the store"])
+                raise_anchor = "    raise _InitPriorStoreRefusal("
+                check("route runtime: the raise anchor is present once",
+                      gate_source.count(raise_anchor) == 1)
+                runtime_mutants = [
+                    ("append", "    restore_lines.append(str(repo))"),
+                    ("setitem", "    restore_lines[0] = str(repo)"),
+                    ("extend", "    restore_lines.extend([str(repo)])"),
+                    ("annassign-remedy", "    remedy: str = str(repo)"),
+                    ("chained-remedy", "    remedy = _qa_x = str(repo)"),
+                    ("tuple-remedy", "    remedy, _qa_x = str(repo), 0"),
+                ]
+                for tag, insertion in runtime_mutants:
+                    mutated = gate_source.replace(
+                        raise_anchor, insertion + newline + raise_anchor)
+                    check("route gate passes the no-banned-name mutant " + tag
+                          + " (its stated residual)",
+                          _init_route_violations(mutated) == [])
+                    module = load_mutant(tag, mutated)
+                    rc, output = drive_module_init(
+                        module, ["--root", str(rt_repo)])
+                    check("route runtime: mutant " + tag
+                          + " is rendered by the constructors, never raw",
+                          rc == EXIT_ERROR and "$(" not in output
+                          and "`" not in output
+                          and inert(str(rt_repo)) in output
+                          and paste_probe(output, "route-" + tag) == [])
+
+                # Claude round-7 mutant 12, adapted to the constructor signature: a
+                # refusal raised from _init_same_root with the raw root as message
+                # value and restore line. The gate passes it (the template is a
+                # literal); the constructor renders both channels.
+                sr_repo = make_git("route-same'$(touch PWNED-SR)`x")
+                sr_mutated = gate_source.replace(
+                    deep_anchor,
+                    "    raise _InitPriorStoreRefusal(" + chr(34) + chr(123)
+                    + chr(125) + chr(34) + ", (str(root),), [str(root)])"
+                    + newline + deep_anchor)
+                check("route gate passes the raw-refusal-from-_init_same_root mutant "
+                      "(its stated residual)",
+                      _init_route_violations(sr_mutated) == [])
+                sr_module = load_mutant("same-root-refusal", sr_mutated)
+                rc, output = drive_module_init(sr_module, ["--root", str(sr_repo)])
+                check("route runtime: a refusal raised from _init_same_root is "
+                      "rendered by the constructors, never raw",
+                      rc == EXIT_ERROR and "REFUSED" in output
+                      and "$(" not in output and "`" not in output
+                      and inert(str(sr_repo)) in output
+                      and paste_probe(output, "route-same-root") == [])
+
+                # POTENCY: a mutant that interpolates the rejected argument RAW. The
+                # gate passes it (no banned name: that is the stated residual), and
+                # the paste probe DISCRIMINATES it: the payload line executes in the
+                # probe cell, so the probe reports violations. This pins the paste
+                # test as the primary guard.
+                check("route runtime: the raw-interpolation anchor is present once",
+                      gate_source.count("_init_inert(tok)") == 1)
+                pot_mutated = gate_source.replace("_init_inert(tok)", "tok")
+                check("route gate passes the raw-interpolation mutant (its stated "
+                      "residual)",
+                      _init_route_violations(pot_mutated) == [])
+                pot_module = load_mutant("raw-arg", pot_mutated)
+                rc, output = drive_module_init(
+                    pot_module, ["pot; touch PASTE-PWNED #"])
+                check("route runtime: the paste probe discriminates the raw "
+                      "interpolation (the primary guard is potent)",
+                      rc == EXIT_ERROR
+                      and paste_probe(output, "route-raw-arg") != [])
+
+                # QA round 7 MINOR 4: the key-rendering arm of _init_inert_json,
+                # driven with a hostile KEY (no CLI path binds one today, so this
+                # in-process vector is the arm's discriminator: dropping it fails
+                # here).
+                hostile_key = "k$(x)`"
+                hostile_item = "v$(y)"
+                hostile_report = dict()
+                hostile_report[hostile_key] = [hostile_item]
+                rendered_report = dict()
+                rendered_report[inert(hostile_key)] = [inert(hostile_item)]
+                check("inert JSON renders keys through the one renderer",
+                      opf._init_inert_json(hostile_report) == rendered_report)
+
+                # QA round 7 (requirement B): the rendering constructors, pinned in
+                # process. The refusal message values and the restore lines are
+                # rendered at construction, and a non-line entry is coerced to the
+                # line type.
+                probe_exc = opf._InitPriorStoreRefusal(
+                    "qa " + chr(123) + chr(125) + " qa",
+                    ("$(touch QA-X)`;",), ["raw $(touch QA-X)"])
+                check("refusal constructor renders message values and coerces "
+                      "restore lines",
+                      str(probe_exc) == "qa " + inert("$(touch QA-X)`;") + " qa"
+                      and list(probe_exc.restore_lines)
+                      == [inert("raw $(touch QA-X)")]
+                      and type(probe_exc.restore_lines[0]).__name__
+                      == "_InitRestoreLine")
+
+                # The handler accepts only the line type: a raw string appended to
+                # the caught exception AFTER construction (past the constructor's
+                # coercion) is re-rendered by the handler, never printed raw.
+                # DISCRIMINATOR: a handler that prints restore lines unchecked fails
+                # the no-raw assertions and the probe.
+                def post_append_refusal(git_arg, repo_arg, root_arg):
+                    smuggled = opf._InitPriorStoreRefusal(
+                        "qa post-append refusal", (), [])
+                    smuggled.restore_lines.append(
+                        "$(touch PWNED-HANDLER); `touch PWNED-HANDLER`")
+                    raise smuggled
+
+                handler_repo = make_git("route-handler-coercion")
+                rc, output = drive_cmd_init(
+                    handler_repo, dict(_init_no_prior_store=post_append_refusal))
+                check("the refusal handler re-renders a restore line smuggled in "
+                      "after construction",
+                      rc == EXIT_ERROR and "REFUSED" in output
+                      and "$(" not in output and "`" not in output
+                      and inert("$(touch PWNED-HANDLER); `touch PWNED-HANDLER`")
+                      in output
+                      and paste_probe(output, "handler-coercion") == [])
+
+                # QA round 7 MAJOR 2 (claude): an adopter-kept NON-STORE file in a
+                # first-level .working subdirectory (the adoption "keep" disposition
+                # leaves such files in place). notes/ holds no structural file in the
+                # tree or in history, so it is NOT a store: the refusal must carry NO
+                # PARTIAL block and never name notes/. DISCRIMINATOR: the round-7
+                # code expected both structural files in every first-level
+                # subdirectory holding a direct file and printed a false PARTIAL
+                # naming notes/, failing the complete text here.
+                nk = make_git("ancestry-kept-file")
+                nk_machine = nk / working / machine_name
+                nk_machine.mkdir(parents=True)
+                (nk_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (nk_machine / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                nk_notes = nk / working / "notes"
+                nk_notes.mkdir()
+                (nk_notes / "plan.md").write_bytes(b"adopter notes\n")
+                (nk / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(nk, ["--literal-pathspecs", "add", "-A"])
+                git_call(nk, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store with kept notes"])
+                nk_commit = head_of(nk)
+                git_call(nk, ["rm", "-r", "-q", "--",
+                              working, _opf_store.POINTER_REL])
+                git_call(nk, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the store"])
+                rc, output = run(nk)
+                check("ancestry notes-keep: a kept non-store file causes NO PARTIAL "
+                      "block and is never named",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          nk, nk, nk_commit, [".opf.toml", ".working"], True)
+                      and "PARTIAL" not in output
+                      and inert(working + "/notes") not in output)
+                check("ancestry notes-keep: the printed command restores the store "
+                      "cleanly",
+                      run_restore(output) == 0
+                      and (nk_notes / "plan.md").is_file()
+                      and (nk_machine / _opf_check.COUNTERS_NAME).is_file())
+
+                # QA round 7 MINOR 3 (claude): a first-level subdirectory holding
+                # ONLY deeper directories is not a store either; beside it, a real
+                # store with a missing counters.toml still discloses its own gap, in
+                # the NEW scope wording (a store is a subdirectory that directly
+                # holds a structural file, in the tree or in history).
+                # DISCRIMINATOR: the round-7 scope sentence differs, so the complete
+                # text fails against the round-7 code.
+                no2 = make_git("ancestry-nested-only")
+                no2_machine = no2 / working / machine_name
+                no2_machine.mkdir(parents=True)
+                (no2_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                no2_nested = no2 / working / "m2" / "archive" / "2026"
+                no2_nested.mkdir(parents=True)
+                (no2_nested / "archive.toml").write_bytes(b"a = 1\n")
+                (no2 / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(no2, ["--literal-pathspecs", "add", "-A"])
+                git_call(no2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "store with nested-only subdir"])
+                no2_commit = head_of(no2)
+                git_call(no2, ["rm", "-r", "-q", "--",
+                               working, _opf_store.POINTER_REL])
+                git_call(no2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "drop the store"])
+                rc, output = run(no2)
+                check("ancestry nested-only: the PARTIAL block names the real "
+                      "store's gap in the new scope wording and never names the "
+                      "nested-only subdirectory",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          no2, no2, no2_commit, [".opf.toml", ".working"], True,
+                          gaps=[working + "/" + machine_name + "/"
+                                + _opf_check.COUNTERS_NAME])
+                      and inert(working + "/m2") not in output)
+
+                # QA round 7 MEDIUM (codex): a store known ONLY from history
+                # (old-machine/manifest.toml was committed and deleted before the
+                # named commit) expects BOTH structural files, so the PARTIAL block
+                # names its counters.toml too. DISCRIMINATOR: the round-7 code added
+                # only the touched path itself and omitted the counters, failing the
+                # complete text here.
+                om = make_git("ancestry-old-manifest-history")
+                om_machine = om / working / machine_name
+                om_machine.mkdir(parents=True)
+                (om_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (om_machine / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                om_old = om / working / "old-machine"
+                om_old.mkdir()
+                (om_old / _opf_store.MANIFEST_NAME).write_bytes(b"z = 1\n")
+                (om / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(om, ["--literal-pathspecs", "add", "-A"])
+                git_call(om, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store with an old machine subdir"])
+                git_call(om, ["rm", "-q", "--",
+                              working + "/old-machine/" + _opf_store.MANIFEST_NAME])
+                git_call(om, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the old manifest"])
+                om_commit = head_of(om)
+                git_call(om, ["rm", "-r", "-q", "--",
+                              working, _opf_store.POINTER_REL])
+                git_call(om, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the store"])
+                rc, output = run(om)
+                om_gaps = sorted([
+                    working + "/old-machine/" + _opf_check.COUNTERS_NAME,
+                    working + "/old-machine/" + _opf_store.MANIFEST_NAME])
+                check("ancestry old-manifest-history: a store found only in history "
+                      "expects BOTH structural files",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          om, om, om_commit, [".opf.toml", ".working"], True,
+                          gaps=om_gaps))
+
+                # The store definition is stated in the SAME words at the two sites
+                # users read it: the PARTIAL scope text (asserted by the complete
+                # texts above) and OPF-QUICKSTART.md (asserted here with backticks
+                # stripped and whitespace collapsed).
+                store_rule_a = ("treats a first-level .working subdirectory as a "
+                                "machine store only when it directly holds "
+                                "manifest.toml or counters.toml")
+                store_rule_b = ("a store found either way is expected to hold both "
+                                "files, and a subdirectory holding only other files "
+                                "or only deeper directories is neither expected nor "
+                                "named")
+                quickstart_flat = " ".join(
+                    quickstart.read_text(encoding="utf-8").replace("`", "").split())
+                check("ancestry: OPF-QUICKSTART.md states the store definition",
+                      store_rule_a in quickstart_flat
+                      and store_rule_b in quickstart_flat)
+                check("ancestry: the PARTIAL scope text states the store definition",
+                      store_rule_a in " ".join(output.split())
+                      and store_rule_b in " ".join(output.split()))
 
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side

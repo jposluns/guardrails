@@ -83,20 +83,24 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    restores the other named store path from its own commit. No printed command is ever
    labelled as restoring the whole store: each restores the named paths as git checks them
    out from that commit (the adopter's own attribute and filter configuration applies to a
-   checkout, so the written bytes need not equal the committed blob's), and when the
-   `.working` tree a command restores lacks a structural store file the scan expected in a
-   first-level `.working` subdirectory (a `manifest.toml` or a `counters.toml`, expected
-   from that tree's own subdirectories or from the first-parent history at or before the
-   named commit), the refusal says the restore is PARTIAL and names each missing path, in
-   words that state only that observed lack. A command is printed only when the repository
-   path and every restored path consist solely of the inert alphabet (ASCII letters,
-   digits, and `. / - _`); for any other value no command is printed at all, and the
-   refusal instead names the repository, commit, and paths in the inert escaped form, for a
-   restore performed by hand. Every value interpolated into init's output (paths, rejected
-   arguments, commit ids, exception text, and the JSON event lines included) is rendered by
-   that one inert escaper into the same alphabet plus visible escapes, so an interpolated
-   value can carry no quote, substitution, separator, space, or newline for a POSIX shell
-   to act on. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   checkout, so the written bytes need not equal the committed blob's). The scan treats a
+   first-level `.working` subdirectory as a machine store only when it directly holds
+   `manifest.toml` or `counters.toml`, in the restored tree or in the first-parent history
+   at or before the named commit; a store found either way is expected to hold both files,
+   and a subdirectory holding only other files or only deeper directories is neither
+   expected nor named. When the `.working` tree a command restores lacks such an expected
+   structural file, the refusal says the restore is PARTIAL and names each missing path,
+   in words that state only that observed lack. A command is printed only when the
+   repository path and every restored path consist solely of the bare-command alphabet
+   (ASCII letters, digits, and `. / - _`); for any other value no command is printed at
+   all, and the refusal instead names the repository, commit, and paths in a rendered
+   form, for a restore performed by hand. Every value interpolated into init's output
+   (paths, rejected arguments, commit ids, exception text, and the JSON event lines
+   included) is rendered by one escaper that escapes every character a POSIX shell acts
+   on (substitutions, separators, redirections, the backslash, every control, and every
+   non-ASCII character), so an interpolated value can carry no substitution, separator,
+   redirection, or line break for a POSIX shell to act on, while quotes, spaces, and
+   ordinary punctuation stay readable. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
