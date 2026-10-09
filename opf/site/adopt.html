@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Adopt OPFiles | OPFiles</title>
-<meta name="description" content="Adopt OPFiles with your AI development assistant or by hand: the two adoption paths, a per-command reference for the opf CLI, and the tooling-independent manual steps.">
+<meta name="description" content="Adopt OPFiles with your AI development assistant through the opf adopt flow, or by hand: what the reference CLI runs today, a per-command reference, and the tooling-independent manual steps.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Adopt OPFiles | OPFiles">
-<meta property="og:description" content="Adopt OPFiles with your AI development assistant or by hand: the two adoption paths, a per-command reference for the opf CLI, and the tooling-independent manual steps.">
+<meta property="og:description" content="Adopt OPFiles with your AI development assistant through the opf adopt flow, or by hand: what the reference CLI runs today, a per-command reference, and the tooling-independent manual steps.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -53,13 +53,14 @@
   <p class="lead">There are two ways in. The recommended path is to let your AI development assistant do
     the adoption; adopting by hand is the fallback for when you cannot. Both paths target the same store format:
     machine-written TOML sources, generated human-readable views, and a drift gate that re-renders the
-    views and compares them. This page walks the paths, then documents each <code>opf</code> command
-    one by one, then lays out the manual steps.</p>
+    views and compares them. This page walks the paths and the <code>opf adopt</code> flow, then
+    documents each <code>opf</code> command one by one, then lays out the manual steps.</p>
 </div>
 
 <div class="wrap">
   <nav class="anchornav" aria-label="On this page">
     <a href="#paths">Two paths</a>
+    <a href="#flow">The adoption flow</a>
     <a href="#commands">Command reference</a>
     <a href="#byhand">Adopt by hand</a>
     <a href="#limits">Honest limits</a>
@@ -74,9 +75,11 @@
     <div class="grid">
       <div class="card">
         <h3>Assistant-driven (recommended)</h3>
-        <p>Ask your AI development assistant to read the standard, inspect your project, and propose an
-          adoption plan. Review the plan before authorizing scaffolding and validation. The standard
-          requires no particular assistant or tool.</p>
+        <p>Your AI development assistant follows the adoption procedure in the prompt pack: it
+          investigates your project, proposes one plan, and asks for one approval of that plan. The
+          reference CLI runs investigation and planning today; approval, apply and completion are
+          not executable yet, so the assistant stops there and reports. The standard requires no
+          particular assistant or tool.</p>
       </div>
       <div class="card">
         <h3>By hand (fallback)</h3>
@@ -89,13 +92,57 @@
           doctor's overall verdict is cannot-evaluate (exit 2).</p>
       </div>
     </div>
-    <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
-      pieces fit together. Authorize the reviewed changes, then inspect the <code>.working/</code> store,
-      validation results, and the records-first instructions added to your project.</p>
-    <p>Provide the machine-readable <a href="/llms.txt"><code>/llms.txt</code></a> index and
-      <a href="/adopt.md"><code>/adopt.md</code></a> guide as starting material. If adopting AIQT,
-      include OPFiles and any existing operational files in the plan, and review the plan before
-      authorizing it. You can also adopt OPFiles alone.</p>
+    <p>On the assistant-driven path, give your assistant the prompt pack's adoption procedure,
+      <code>adopt/SKILL.md</code>, and its clean-start guidance, <code>adopt/clean-start.md</code>.
+      Both are under <code>opf/prompt-pack/</code> in the reference repository, listed with their
+      digests in the pack's <code>pack.toml</code>. Provide the machine-readable
+      <a href="/llms.txt"><code>/llms.txt</code></a> index and
+      <a href="/adopt.md"><code>/adopt.md</code></a> guide as well. If adopting AIQT, include
+      OPFiles and any existing operational files in the plan. You can also adopt OPFiles alone.</p>
+  </div>
+</section>
+
+<section id="flow">
+  <div class="wrap">
+    <p class="eyebrow">The adoption flow</p>
+    <h2>Investigate, plan, one approval, apply, verify</h2>
+    <p>The standard's adoption flow (specification section 14) runs in this order: investigate,
+      propose one plan, take one approval, apply, then a completion check before any old file is
+      recorded as retired. The adopter approves one concrete plan, once; any change to a bound item
+      takes a fresh plan and a fresh approval. Clean start is first-class: preserve and retire the
+      old operational files, establish the new store and its enforcement, and import nothing.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>What the reference CLI runs today</h3>
+        <ul class="clean">
+          <li>Investigation, through the planner's read-only library entry; no <code>opf adopt</code>
+            subcommand prints the inventory yet. It records a digest-stamped inventory, tells first
+            adoption from re-adoption, and lists each file in its scope that needs a disposition:
+            keep, migrate, move, or retire.</li>
+          <li><code>opf adopt plan --inputs FILE</code> freezes and prints the plan from a planning
+            worksheet and writes nothing. Its output is an inert, digest-bound proposal, never
+            permission to apply. The planner checks the shape of the release, prompt-pack,
+            enforcement and postimage digests the worksheet supplies, not the bytes they name, with
+            one exception: when a kept file registers into a store the plan creates, the digest
+            planned for its manifest must be the default manifest's real digest.</li>
+          <li><code>opf adopt status</code> reports adoption runs and the adoption journal and writes
+            nothing.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>What it does not run yet</h3>
+        <p><code>opf adopt approve</code>, <code>apply</code>, <code>complete</code> and
+          <code>reconcile</code> refuse with exit 2, so no approval is recorded, nothing is applied,
+          and nothing is retired. Installing the enforcement pack through adoption, and
+          post-adoption import, are not available either. An assistant following the pack stops at
+          the approval step and reports, rather than doing the missing stages by hand.</p>
+      </div>
+    </div>
+    <p>For a project with no prior records, the clean-start guidance describes one interim route:
+      <code>opf init</code>, review and commit, <code>opf render --write</code>, commit, then
+      <code>opf doctor --require-store</code> and <code>opf render --check</code>. That route
+      initializes a store; it is not an adoption. It records no plan, approval, receipt or
+      completion check, and installs no enforcement.</p>
   </div>
 </section>
 
@@ -119,9 +166,32 @@
       only exit 0 and exit 2.
       Where a command is aimed at a directory that has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
-      <code>absorb</code>) report NOT APPLICABLE and exit 0. The nine commands, documented one by one below, are <code>init</code>,
-      <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
-      <code>migrate</code>, <code>sync</code>, <code>absorb</code>, and <code>record</code>.</p>
+      <code>absorb</code>) report NOT APPLICABLE and exit 0. The commands documented one by one below
+      are <code>adopt</code>, <code>init</code>, <code>render</code>, <code>doctor</code>,
+      <code>import</code>, <code>upgrade</code>, <code>migrate</code>, <code>sync</code>,
+      <code>absorb</code>, and <code>record</code>.</p>
+
+    <h3 id="cmd-adopt"><code>opf adopt</code></h3>
+    <p><b style="color:var(--ink)">Status.</b> Partly implemented. The read-only <code>plan</code> and
+      <code>status</code> subcommands run; <code>approve</code>, <code>apply</code>,
+      <code>complete</code>, and <code>reconcile</code> refuse with exit 2 before reading anything.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Guide setup and wiring of an existing project:
+      investigate, plan, one approval, apply, and completion (specification section 14).</p>
+    <p><b style="color:var(--ink)">How it works.</b> <code>plan --inputs FILE</code> reads a
+      planning worksheet: the observation digest from investigation, a disposition for each
+      candidate file, the operations to run, and the plan bindings (the observed revision, the tool
+      release, the prompt pack, one enforcement row per platform, and the skip policy). It
+      re-investigates the tree, refuses if the inventory changed, and freezes the
+      <code>opf.adoption.plan/v2</code> proposal with its plan and inventory digests.
+      <code>status</code> lists the adoption evidence bundles, checking each one, and reports any
+      open transaction or held lock in the adoption journal. Neither needs an existing store.</p>
+    <p><b style="color:var(--ink)">Result.</b> <code>plan</code> prints the frozen plan on stdout and
+      exits 0, exits 1 when an operation or the plan breaks the plan schema, and exits 2 when it
+      cannot evaluate (an unreadable worksheet, a malformed decision, a changed inventory, an
+      unresolved disposition).
+      <code>status</code> exits 0 clean, 1 on a finding, and 2 when it cannot evaluate. Both write
+      nothing.</p>
+    <p class="refchips"><code>opf adopt plan --inputs worksheet.toml</code> <code>opf adopt status</code> <code>opf adopt apply</code> <span>refused, exit 2</span></p>
 
     <h3 id="cmd-init"><code>opf init</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Create validated source documents and a
