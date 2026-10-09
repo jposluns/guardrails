@@ -5,9 +5,9 @@ OPFiles is a neutral operational-files standard: lowercase TOML sources paired w
 ## Key pages
 
 - [The standard](/standard): what OPFiles specifies, its formats, layout, naming, record lifecycle, and enforcement posture.
-- [Adopt](/adopt): adopt with your AI development assistant, or create the plain-TOML store and wire its checks by hand.
-- [Adopt, machine-readable](/adopt.md): the machine-readable adoption guide an assistant follows, including the digest-verification and scaffolding steps.
-- [Reference tooling](/tooling): the nine standard verbs are init, import, doctor, render, migrate, sync, upgrade, absorb, and record. The reference CLI implements six; the ordinary import modes are retired and refuse, and migrate and sync are planned.
+- [Adopt](/adopt): adopt with your AI development assistant through the `opf adopt` flow (investigate, propose one plan, take one approval, apply, verify), or create the plain-TOML store and wire its checks by hand. The reference CLI runs investigation and planning today; approval, apply and completion are not yet executable.
+- [Adopt, machine-readable](/adopt.md): the machine-readable adoption guide: the digest-verification step, what `opf adopt` runs today, where to find the prompt pack's adoption procedure (`adopt/SKILL.md`) and clean-start guidance (`adopt/clean-start.md`), and the manual steps.
+- [Reference tooling](/tooling): the page documents nine of the standard verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record. The reference CLI implements six; the ordinary import modes are retired and refuse, and migrate and sync are planned. The specification also names a tenth, adopt; the reference CLI runs its read-only plan and status subcommands, and its approve, apply, complete and reconcile subcommands refuse.
 - [Core store files](/core-files): the manifest, the ID counters, the version ledger, the durable worklog, and the single-writer lease.
 - [Record indexes](/record-indexes): the eleven baseline typed indexes and their declared generated views; baseline record schemas are validated in both layouts, while per-record views and module-tier or importer record schemas have additional implementation limits.
 - [Pointer, meta and generated](/store-meta): the committed store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.
