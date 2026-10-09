@@ -85,16 +85,16 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | PREVIEW-FLEET-PORT | Planned | Port ten more generally useful hooks to the .preview/ channel, separate from the hooks already published there (M, L) | `[public]` `[tooling]` |
 | OPF-INIT | Partly done | `opf init` base: the shared setup code that creates a project's OPF store and that adoption reuses (store creation that resumes after an interruption, the first build of the readable views, and a lock against concurrent changes) (H, L) | `[public]` `[tooling]` `[1.1.1]` |
 | OPF-INIT-LATER | Not started | `opf init` after the base: the later steps, such as staging the created files in git, publishing them, finishing the run, and the command-line commands (not yet assigned to a release) (H, L) | `[public]` `[tooling]` |
-| OPF-DOGFOOD | Planned | Move this project's own operational records into OPF (M, M) | `[public]` `[tooling]` `[1.1.1]` |
+| OPF-DOGFOOD | Planned | Move this project's own operational records into OPF (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-ENTRY | Planned | Adoption entry point for the pack: a generated instructions file on the website that a coding assistant can read and follow to adopt the pack by itself (hand-written adoption guides for OPFiles (the operational-files format), opf/site/adopt.md and opf/site/llms.txt, already exist since #274) (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-VALIDATE | Planned | Adoption testing: a standing check that adopting the pack still works, including trial adoptions by live coding assistants (M, M) | `[public]` `[tooling]` |
 | OPF-EARLYCUT | Planned | Early release of clean-start OPF adoption for first adopters (M, S) | `[public]` `[tooling]` |
 | OPF-ENFORCE-PACK | Partly done | OPF enforcement pack: CI and pre-commit checks, plus hooks for each supported coding assistant that block direct record edits, with the known gaps published (H, L) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-PROMPT-PACK | Partly done | OPF prompt pack: adoption instructions, then post-adoption import instructions with an example for every type (M, S) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-IMPORTED-SERIES | Planned | OPF imported records: a looser but still validated format for records brought in from a project's history, with their own IDs and health checks, and a safeguard so an old imported record never counts as a current approval (H, L) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-RECORD-IMPORT | Planned | OPF record import: a write mode for batches of historical records (H, M) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-IMPORT-COMPLETION | Planned | OPF import completion: prompt, status and verify modes with a per-source completion check (M, M) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-CONSUMER | Planned | Switch this project's own work-tracking tools to read the backlog and other project records from the OPF store (M, M) | `[public]` `[tooling]` `[1.1.1]` |
+| OPF-PROMPT-PACK | Partly done | OPF prompt pack: adoption instructions, then post-adoption import instructions with an example for every type (M, S) | `[public]` `[tooling]` |
+| OPF-IMPORTED-SERIES | Planned | OPF imported records: a looser but still validated format for records brought in from a project's history, with their own IDs and health checks, and a safeguard so an old imported record never counts as a current approval (H, L) | `[public]` `[tooling]` |
+| OPF-RECORD-IMPORT | Planned | OPF record import: a write mode for batches of historical records (H, M) | `[public]` `[tooling]` |
+| OPF-IMPORT-COMPLETION | Planned | OPF import completion: prompt, status and verify modes with a per-source completion check (M, M) | `[public]` `[tooling]` |
+| OPF-CONSUMER | Planned | Switch this project's own work-tracking tools to read the backlog and other project records from the OPF store (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-ORCH | Partly done | OPF adoption component: investigate a project, propose a plan, take one approval, then apply it deterministically (H, XL) | `[public]` `[tooling]` `[1.1.1]` |
 | OPF-ADOPT-U2 | Planned | Adoption apply: create, move and retire file operations (M, L) | `[public]` `[tooling]` `[1.1.1]` |
 | OPF-ADOPT-U3 | Not started | Adoption apply: create the project's OPF store with the same initialization code `opf init` uses (M, M) | `[public]` `[tooling]` `[1.1.1]` |
