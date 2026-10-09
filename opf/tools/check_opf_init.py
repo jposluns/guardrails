@@ -502,6 +502,101 @@ def _suite_isolated(invoke):
                       resolution.status == _opf_store.RESOLVED
                       and resolution.machine_rel == working + "/" + machine_name)
 
+                # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
+                # over a store git HISTORY shows existed. Reproduction: init, commit the store,
+                # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
+                # commit, then init again. The unfixed init passed (rc 0) and re-zeroed every
+                # namespace, so record ids could be reissued; it must refuse (exit 2), NAME the
+                # newest first-parent commit whose tree held the store (the counter-bump commit,
+                # not the deletion commit), and give the remedy (restore, or `opf adopt`).
+                # DISCRIMINATOR: rc 0 against the pre-fix init.
+                ancestry = make_git("ancestry-prior-store")
+                rc, output = run(ancestry)
+                check("ancestry fixture first init succeeds", rc == EXIT_OK)
+                git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                counters_path = ancestry / working / machine_name / _opf_check.COUNTERS_NAME
+                seeded = counters_path.read_text(encoding="utf-8").replace("BI = 0", "BI = 7")
+                if "BI = 7" not in seeded:
+                    raise OSError("ancestry fixture: counters.toml carried no BI = 0 to raise")
+                counters_path.write_text(seeded, encoding="utf-8")
+                git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "BI high-water 7"])
+                held_commit = git_call(ancestry, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(ancestry, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store"])
+                before = _snapshot(ancestry)
+                rc, output = run(ancestry)
+                check("ancestry: re-init over a deleted committed store refused",
+                      rc == EXIT_ERROR and "prior store" in output)
+                check("ancestry: refusal names the newest holding commit", held_commit in output)
+                check("ancestry: refusal gives the adopt remedy", "opf adopt" in output)
+                check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
+
+                # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
+                # history, so it cannot prove no prior store existed -- the clipped commits of
+                # THIS fixture do hold one, and the pathspec walk stops silently at the shallow
+                # boundary -- so init is a cannot-evaluate refusal, never a silent pass.
+                # DISCRIMINATOR: rc 0 (the truncation hides the store from an ungated scan)
+                # against a scan without the shallow gate.
+                shallow_prior = base / "ancestry-shallow"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone",
+                                "--depth", "1",
+                                "file://" + str(ancestry), str(shallow_prior)])
+                rc, output = run(shallow_prior)
+                check("ancestry: shallow history refused as cannot-evaluate",
+                      rc == EXIT_ERROR and "SHALLOW" in output and "unshallow" in output)
+
+                # SPEC 8.2 ancestry scope (first-parent line): a store that existed ONLY on a
+                # side branch and was deleted there before the merge never reached a
+                # first-parent tree, so the mainline being initialized never held its counters;
+                # the scan follows the first-parent line (the same line the adoption seed is
+                # proven on, _opf_init_operation decision 6) and init PROCEEDS -- side-line
+                # ancestry is the section 14 adoption investigation concern. (A store that WAS
+                # merged to the mainline is caught: the merge commit tree holds it on the
+                # first-parent line.)
+                sideline = make_git("ancestry-sideline")
+                (sideline / "seed.txt").write_bytes(b"base\n")
+                git_call(sideline, ["--literal-pathspecs", "add", "-A"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "base"])
+                git_call(sideline, ["checkout", "-q", "-b", "feature"])
+                side_machine = sideline / working / machine_name
+                side_machine.mkdir(parents=True)
+                (side_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (sideline / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(sideline, ["--literal-pathspecs", "add", "-A"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store on side"])
+                git_call(sideline, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store on side"])
+                git_call(sideline, ["checkout", "-q", "main"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "merge", "-q", "--no-ff", "-m",
+                                    "merge feature", "feature"])
+                rc, output = run(sideline)
+                check("ancestry: side-branch-only store does not block init (first-parent scope)",
+                      rc == EXIT_OK and valid_sources(sideline))
+
+                # SPEC 8.2 ancestry, no over-refusal: a history of ordinary commits that never
+                # held a store identifier proceeds (the no-hit arm; the empty-git-root vector
+                # above already covers the unborn-HEAD arm, which also proceeds).
+                plain_history = make_git("ancestry-plain-history")
+                (plain_history / "seed.txt").write_bytes(b"s\n")
+                git_call(plain_history, ["--literal-pathspecs", "add", "-A"])
+                git_call(plain_history, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit", "-m", "seed"])
+                rc, output = run(plain_history)
+                check("ancestry: committed history without a store proceeds",
+                      rc == EXIT_OK and valid_sources(plain_history))
+
                 # OPF-D2B round 6: in a PARTIAL clone a skip-worktree .gitignore whose blob is ABSENT locally
                 # reads as no-rule under the no-lazy-fetch probe, but the adopter's own `git add` fetches that
                 # blob and can then silently ignore the store. That divergence is a cannot-evaluate init must
