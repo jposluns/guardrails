@@ -4,14 +4,26 @@
 # every member row. Maintainers must update the row, version and digest when a member changes.
 # The gate checks byte and digest agreement; it does not enforce the version-bump obligation.
 # Member documents are consumed by deployment (an adopter or deployer copies a member beside its digest
-# into the assistant harness, for example flow/SKILL.md into a skills directory), by a deployer that
-# renders a member with a per-project overlay into a per-account command (the member doubles as the
-# render template; its overlay slots and the drift check are specified inside the member) and, once
-# the adoption stage driver lands, by a plan's prompt_pack {version, digest} binding.
+# into the assistant harness, for example flow/SKILL.md, or adopt/SKILL.md with adopt/clean-start.md,
+# into a skills directory; adopt/SKILL.md asks the assistant for this manifest's version and digest, and
+# names this file at the pack root, or in the reference repository when a deployment copied the member
+# without it), by a deployer that renders a member with a per-project overlay into a
+# per-account command (the member doubles as the render template; its overlay slots and the drift check
+# are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
+# which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
+# against this manifest yet.
 format = "opf.prompt-pack/v1"
-version = "0.3.0"
-digest = "sha256:05d733b6d2e8180e7152cf0b3fb93e424284fe2338753589c306751a008b6847"
+version = "0.4.1"
+digest = "sha256:334c300e9f451aed9c6426971c0ccedf55e9340898d923aa30f52efc6145c1a0"
+
+[[members]]
+path = "adopt/SKILL.md"
+sha256 = "7b84cabc7c3447d2c1c8c7d6f9d186d13f45e1a90789ca55b0aabf34100985ff"
+
+[[members]]
+path = "adopt/clean-start.md"
+sha256 = "9229160a53785a58f3d5c3e945add7815e84ed7f038dd68b41e7710471b3386b"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "87ef3ca951e0f60e1f9ea8a397e594b86e0fdcf5f61de2749453d016bb274492"
+sha256 = "deb4c717bba3cefb3f42f83ec454702a7890894426d38f7eed1506f4ae6d1b07"
