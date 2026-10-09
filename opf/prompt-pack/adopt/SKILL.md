@@ -377,16 +377,24 @@ Run `opf adopt plan --inputs <worksheet> --root <product root>`:
   proposal, never permission or readiness to apply. Save stdout as it is, outside the
   repository.
 - Exit 1: an operation row, or the frozen plan, breaks the plan schema. Examples: an operation
-  missing a required field, enforcement rows that are not the six platforms in order, or a
-  means without its required residual. Fix the worksheet and rerun.
+  missing a required field; enforcement rows that are not the six platforms, each once and in
+  order; a means its platform does not allow, or a means without its required residual; an
+  enforcement member that no `install-pack`, `plant-governance` or `enable-hook` row installs
+  with the same path and digest; an `anchor_sha256` that differs from `manifest_sha256`; and a
+  `move` destination the frozen plan refuses, such as one inside the store tree but not beneath
+  `.working/archive/moved/`, or one that another effect of the plan also writes. Fix the
+  worksheet and rerun.
 - Exit 2: cannot-evaluate. A worksheet that is unreadable, malformed or carries an unknown key
-  refuses here, and so does every fault in a decision row (an unknown key, an unknown
-  disposition, a missing actor, a path that is not a candidate). So do an unknown operation
-  name, a `product` or `skip_policy` outside its vocabulary, and a planner binding rule such as
-  `render-views` members that are not exactly the declared views. "inventory changed; discuss
-  a fresh observation" means the tree moved since section 3, or the digest was mistyped:
-  investigate again. "unresolved source disposition: <path>" names a candidate or empty
-  directory with no disposition. Other findings name the rule that refused.
+  refuses here. So do the decision-row faults the planner finds before it freezes the plan: a
+  missing or unknown key, an unknown disposition or a field it does not take (a `retire` with a
+  `destination`), an empty actor, a path that is not a candidate or that two rows name, a
+  `keep` of an occupying candidate, and a `move` destination with no observed absence. So do a
+  value outside its closed vocabulary (an operation name, `product`, `skip_policy`, or an
+  enforcement `platform`, `means` or residual) and a planner binding rule, such as a missing
+  `init-store` row or `render-views` members that are not exactly the declared views.
+  "inventory changed; discuss a fresh observation" means the tree moved since section 3, or the
+  digest was mistyped: investigate again. "unresolved source disposition: <path>" names a
+  candidate or empty directory with no disposition. Other findings name the rule that refused.
 
 Each run reads the clock and draws a random 8-byte nonce to form a new `run_id`, so a rerun
 gives different plan bytes in practice, though nothing checks run ids for uniqueness. The plan

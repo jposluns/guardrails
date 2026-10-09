@@ -13,12 +13,12 @@
 # which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
 # against this manifest yet.
 format = "opf.prompt-pack/v1"
-version = "0.4.0"
-digest = "sha256:025d4d4b3abb0d96b8d1437c2374259269e12a130b567769322803f3bc184eb4"
+version = "0.4.1"
+digest = "sha256:334c300e9f451aed9c6426971c0ccedf55e9340898d923aa30f52efc6145c1a0"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "9a22be46673a8de58af60d22d264747bb1ef83fe1e7585233f6f0d4c15741bd2"
+sha256 = "7b84cabc7c3447d2c1c8c7d6f9d186d13f45e1a90789ca55b0aabf34100985ff"
 
 [[members]]
 path = "adopt/clean-start.md"
