@@ -18,14 +18,16 @@ end marker indented as a Markdown code block.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
+    import os
     try:
         sys.stderr.write(
             "error: gen_reference_facts.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
             "Nothing was run (cannot evaluate).\n"
             % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
     except BaseException:
         pass
-    raise SystemExit(2)
+    os._exit(2)
 
 from pathlib import Path
 

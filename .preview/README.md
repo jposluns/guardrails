@@ -178,16 +178,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `37aace81ce089a355f30d3225df10a3c29d94deca2e1587021647e771d1fb733` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `c8e5b7533f4237a81e1ca5720e9c845c52542beaeb1eaf88d5e69e3782cf6b75` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `65c10a940249ca0b484253ac7fd2f0948003de39a891c3fb272f0ec48e427ddd` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `68639754dccd7d48bce7fbff2966c8c95f7b59fe34abb1dd2401f6816baa0675` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `e0f87a9dda2dbbfafab1a5fcb7ccba8eaf2a20ec8e24be61956c4bcfd47841be` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `a718d5d6e00a142247f89f17c364d01ffb35e171fca0e984663783784f47ab98` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `4d8454a1aa53cb33de7620890c623c37035d4235cf1cfe208add17ac72a9369e` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `bea75225528d1116af670756885c8bbbf2e1122b63d659b86019002765dadbe6` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `6e6cded9cd93223742a0593b21ae2f14c87541d62f6346b201b7477d5aea49df` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `7af4e1af9c748113306cd045c582d797379c3b7dac2a4f8f436d6e4c8e9888a2` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `86cc7c7e4c709575149a749f6c527892a7e93539473d82ff4d288cd9682696ac` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `e43a1df6603ddc9220bba2a89667f103f7cec124cc912b75415158eb39f6007d` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `dcf1481b4bcea890663592e8b58ebb4596672f41c6e3489d5c30ff3567f414b0` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `f18c3a13867965b17986e1dcec5e540c45dfb2047bff150e3dcbe64904f18446` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `eef4d2c12fd79ba124643b760bb84ab462b7851f22931eb175b2b672dc8fcd36` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `c8f91f9cd1f5b4979faa74cc89fd86e8e24987b5b8ba75627ecd02ea960788c1` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `e1c74fe3cea9912cd00dae7f95c4537979fea5d60055c3d08c46eb76bec0dd6e` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `d71423d0e4277e26dcc7ba56d119d0ebf31fc88e8379f8e6ba51aa24c8977f89` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `1d5543d5a23fc9bd1cc461bfb0598cd15fa0bd15c647d0fef2358cdc0f0f2550` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `3ebbb4bf3305a0d15ec20a8e331f17f04c3897890418c7db002bd59549af402d` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -272,9 +272,10 @@ fails and report it; do not work around a failed check.
      Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
      `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
      start the hook, each hook reads no input, writes one line beginning
-     `error: <file> requires Python 3.14 or newer` to standard error, and exits. The write is
-     best-effort: the exit status does not depend on it, so the refusal holds even when standard
-     error is unavailable.
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits. The write and its
+     flush are best-effort: the exit status does not depend on them (each hook exits without the
+     interpreter's own exit-time stream flush, so a stream whose flush fails cannot replace the
+     exit), and the refusal holds even when standard error is unavailable or failing.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the six `PreToolUse` hooks the exit is 2 and every matching

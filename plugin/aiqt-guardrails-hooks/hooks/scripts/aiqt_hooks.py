@@ -179,20 +179,26 @@ import sys
 # an error must never do; blocks every Stop, with no cap as above, and every TeammateIdle, the two
 # FAIL_OPEN_EVENTS this file names exit 2 as the block for; on PostToolUse its tool has already run but the
 # recorder records nothing; and SessionStart cannot block at all.
-# The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped so a write
-# failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves sys.stderr
-# None) the deny path still exits 2 and a fail-open mode still exits 0, rather than exiting 1 as an
-# escaping write error once did, which on PreToolUse would let the call through unchecked.
+# The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
+# so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
+# sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
+# exiting 1 as an escaping write error once did, which on PreToolUse would let the call through
+# unchecked. Both paths exit through os._exit, which skips the interpreter-exit flush of the std
+# streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
+# as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
+# os._exit discards no other buffered output; the warning itself is flushed before the exit.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
+    import os
     _floor_refusal = (
         "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     try:
         sys.stderr.write(_floor_refusal)
+        sys.stderr.flush()
     except BaseException:
         pass
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
@@ -201,10 +207,11 @@ if tuple(sys.version_info[:2]) < (3, 14):
             sys.stdout.write(json.dumps(dict(systemMessage=(
                 "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
                 "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
+            sys.stdout.flush()
         except BaseException:
             pass
-        raise SystemExit(0)
-    raise SystemExit(2)
+        os._exit(0)
+    os._exit(2)
 
 import collections
 import datetime
