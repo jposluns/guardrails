@@ -575,6 +575,14 @@ and a clean filter can transform the captured bytes, so the snapshot is not guar
 exception is limited to recovery snapshots written for the actor's own protection; it is not a general
 licence to mutate repository metadata.
 
+Running code a worker returns is an apply step, not an inspection. A label, a claimed print-only purpose,
+or a check the deliverable carries does not show that its code changes nothing, so the orchestrator
+extracts, decodes, and prints a deliverable with a reader it wrote or reviewed, never with code the
+deliverable supplies. Deliverable code that has to run to be evaluated is first read in full, then run in
+a disposable copy that is its working directory and every target it names, with no live checkout named in
+its environment; a changed working directory alone is not that isolation. That code reaches a live
+checkout only through the orchestrator's own verified apply.
+
 ## Use absolute paths, not relative
 
 A file path the assistant passes to a tool call, command, or file reference is absolute, not relative to
