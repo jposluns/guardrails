@@ -79,10 +79,18 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    named commit holds, under `--no-replace-objects` (so a replacement ref cannot substitute
    other bytes for that commit's) and `--literal-pathspecs`; when the store was deleted across
    more than one commit, that commit holds only part of the store, so the first command is
-   labelled incomplete by itself and an additional command restores the rest. When a path in a
+   labelled as restoring only the store paths its commit holds, and an additional command
+   restores the other named store path as its own commit's tree holds it. No printed command
+   is ever labelled as restoring the whole store: each restores the named paths exactly as
+   the named commit's tree holds them, and when that tree provably lacks a structural store
+   file (a `manifest.toml` or a `counters.toml` deleted inside `.working` by an earlier
+   commit), the refusal says the restore is PARTIAL and names each missing path. When a path in a
    command would hold a non-printable character, no command is printed at all: the refusal
    instead names the repository, commit, and paths in an inert escaped form, for a restore
-   performed by hand. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   performed by hand. Every other value interpolated into init's output (the refusal's own
+   path mentions and the JSON event lines included) is printed in the same inert escaped
+   form, so no line init prints can carry a live shell substitution or quote for a POSIX
+   shell to act on. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
