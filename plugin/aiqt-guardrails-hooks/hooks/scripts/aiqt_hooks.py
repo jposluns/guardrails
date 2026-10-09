@@ -14,7 +14,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
-  gate_weakening      PreToolUse  gatdis  deny a git hook bypass; deny a swallowed or truncated checker
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
@@ -206,6 +206,7 @@ import json
 import math
 import os
 import pathlib
+import posixpath
 import re
 import selectors
 import shlex
@@ -7101,8 +7102,10 @@ _GATE_LONG_ARG_OPTS = {
 # known checker COMMAND WORD; a command whose NAME PARTS (basename split on non-alphanumerics, exact
 # part match so 'latest' never trips a 'test' substring) contain a checker part; or a known RUNNER
 # whose non-option, non-assignment operand qualifies by either test ('make test', 'python -m pytest',
-# 'bash tools/run_all_checks.sh'). The lexicon is deliberately a heuristic: it routes to ASK only,
-# never a deny, so an over-match costs a prompt and an under-match is the disclosed residue.
+# 'bash tools/run_all_checks.sh'). The broad checker-shape test (_is_checker_segment) is deliberately a
+# heuristic: it feeds the allow-with-note tier only, so an over-match costs a note and an under-match is
+# the disclosed residue. The narrow deny tier (_is_verification_run) reuses these words, and a name part
+# only as a runner's exact target ('make test'), under a stricter run-mode grammar.
 _CHECKER_WORDS = frozenset((
     "pytest", "tox", "nox", "unittest", "mypy", "pyright", "ruff", "flake8", "pylint", "bandit",
     "eslint", "tsc", "jest", "vitest", "mocha", "rspec", "rubocop", "phpunit", "phpstan",
@@ -7111,16 +7114,19 @@ _CHECKER_WORDS = frozenset((
 _CHECKER_RUNNERS = frozenset((
     "make", "npm", "pnpm", "yarn", "npx", "node", "go", "cargo", "mvn", "mvnw", "gradle", "gradlew",
     "python", "python3", "py", "rake", "bundle", "poetry", "pipenv", "uv", "uvx",
-    "sh", "bash", "zsh", "dash"))
+    "sh", "bash", "zsh", "dash", "php", "rails", "mix", "dotnet", "swift", "bazel", "bazelisk", "ninja",
+    "just", "deno", "bun", "perl", "ruby"))
 _CHECKER_NAME_PARTS = frozenset((
     "test", "tests", "selftest", "selftests", "check", "checks", "checker", "lint", "linter",
     "verify", "validate", "audit", "conformance", "vet", "clippy", "gate", "gates"))
 _NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
-# The failure-discarding right-hand sides: an exit-status swallow after '||' (true or the ':' builtin),
-# and a truncating stdout sink after '|' that, under default pipeline semantics, replaces the checker
-# exit status with its own and can cut the failing tail of the output. tee/cat/less are NOT truncating
-# and never qualify.
+# The failure-discarding right-hand sides of the broad note tier: an exit-status swallow after '||' (true
+# or the ':' builtin), and a truncating stdout sink after '|' that may pass on only part of the output; under
+# default pipeline semantics a pipeline's exit status is that of its final stage, not the checker's. tee/cat/less
+# are NOT truncating and never qualify. The deny tier uses its own sink allow-list (_truncating_sink_kind:
+# head or tail with one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l), and the note tier also counts
+# any other head, tail, cut or limiting grep spelling and any sed or awk program.
 _EXIT_SWALLOWS = frozenset(("true", ":"))
 _TRUNCATING_SINKS = frozenset(("head", "tail"))
 
@@ -7145,6 +7151,10 @@ _RAW_CHECKER_RE = re.compile(
     r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
 _RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
 _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
+# A process substitution or here-string (the lexer cannot parse either) with a head, tail or cut word: the
+# checker's output may reach the sink through it, so the fallback notes it as it notes a raw '| head'.
+_RAW_FLOW_RE = re.compile(r"<<<|<\(|>\(")
+_RAW_SINK_WORD_RE = re.compile(r"\b(?:head|tail|cut)\b")
 _RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 _RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
@@ -7211,14 +7221,573 @@ def _is_checker_segment(tokens):
     lw = word.lower()
     if lw in _CHECKER_WORDS or _name_parts_hit(lw):
         return True
+    if lw in ("node", "nodejs") and "--test" in tokens:
+        return True   # the node built-in test runner
     if lw not in _CHECKER_RUNNERS:
         return False
+    operands_only = False   # after '--' every token is an operand ('python3 -- -c-check.py')
     for tok in tokens[_command_word_index(tokens) + 1:]:
-        if tok.startswith("-") or _ENV_ASSIGN_RE.match(tok):
+        if tok == "--":
+            operands_only = True
             continue
-        if tok.lower() in _CHECKER_WORDS or _name_parts_hit(tok):
+        if (tok.startswith("-") and not operands_only) or _ENV_ASSIGN_RE.match(tok):
+            continue
+        if tok.rsplit("/", 1)[-1].lower() in _CHECKER_WORDS or _name_parts_hit(tok):
             return True
     return False
+
+
+# --- gatdis deny tier: a VERIFICATION RUN piped straight into a truncating sink ----------------------------
+# The deny is held to ONE canonical shape, and both of its ends are ALLOW-LISTS, so a shape the lists do not
+# name costs the broad tier's note and never a false refusal: the first simple command of a pipeline (no
+# reserved word, no substitution, stdout not redirected; every earlier top-level segment known-benign,
+# _gate_benign_prefix, and the pipeline not joined to it by '||') is a run form listed in _GATE_VERIFY_RUNS
+# (_is_verification_run), and its stdout reaches, through zero or more plain pass-through stages
+# (_gate_plain_filter: cat, tee, tr, uniq), a sink on the sink allow-list (_truncating_sink_kind: head or tail
+# with one positive line count, or a grep-family stage with exactly one limiting flag and one pattern). Every
+# other shape (compound and grouped producers, substitutions, here-strings, process substitution, wrappers
+# beyond nice/timeout/time, a producer whose environment the command sets, an earlier command in the same line
+# that is not known-benign (export, set, typeset, an assignment, a redirection), an unlisted tool, subcommand,
+# operand or option, a sed, awk, sort or grep filter stage, a sink spelling off the list, cut) keeps the
+# note tier (_gate_flow_note). The PreToolUse hook sees only the command, so the run form is the lexical
+# stand-in for "its status is the verdict".
+_GATE_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+                            "do", "done", "case", "esac", "select", "function", "in", "[[", "]]", "coproc"))
+_GATE_PIPES = frozenset(("|", "|&"))
+_GATE_LIST_SEPS = frozenset(("", ";", "&&", "||", "&"))
+# The four plain wrappers the deny tier peels, each with its option grammar: (options that take a separate
+# value, options that take none). Any other option (env -S/--split-string re-splits a string into a
+# command) leaves the producer outside the canonical shape. command, type, which and hash are never peeled:
+# 'command -v pytest' only looks the name up.
+_GATE_WRAPPER_GRAMMAR = dict((
+    ("env", (frozenset(("-u", "--unset", "-C", "--chdir")),
+             frozenset(("-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug")))),
+    ("nice", (frozenset(("-n", "--adjustment")), frozenset())),
+    ("timeout", (frozenset(("-s", "--signal", "-k", "--kill-after")),
+                 frozenset(("--preserve-status", "--foreground", "-v", "--verbose", "-f")))),
+    ("time", (frozenset(("-o", "--output", "-f", "--format")),
+              frozenset(("-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet")))),
+))
+# Commands whose operands are text, a pattern or a name, never a check's options ('printf --verify',
+# 'rg -- --check FILE'): the note tier never reads a verify option on them as a check (_gate_verify_shaped).
+_GATE_TEXT_COMMANDS = frozenset((
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+    "cat", "head", "tail", "less", "more", "man", "info", "which", "type", "hash", "command", "whereis",
+    "find", "xargs", "jq", "yq", "wc", "sort", "tee", "git", "test", "[", "[["))
+_GATE_VERIFY_FLAGS = frozenset(("--self-test", "--selftest", "--check", "--verify"))
+
+
+def _gate_form(sub=(), short="", short_values="", long=(), long_values=(), operands=False, required=None,
+               numeric="", refuse=(), valid=()):
+    """One run form of _GATE_VERIFY_RUNS: the subcommand words that must lead its operands, the short flag
+    letters, the short letters that take a value, the long (or single-dash multi-letter) flags and value
+    options, whether further positional operands are accepted, an option the form requires, the value
+    letters whose separated value is consumed only when it is all digits, (option, value) pairs that leave
+    the form ('go test -run ^$' runs no test), and (option, pattern) pairs whose value must match the pattern
+    in full ('go test -shuffle' takes off, on or an integer seed)."""
+    return (tuple(sub), short, short_values, frozenset(long), frozenset(long_values), operands, required,
+            numeric, frozenset(refuse), dict((name, re.compile(pattern)) for name, pattern in valid))
+
+
+# These options, which supply configuration on the command line, are never listed: pytest -o/--override-ini and
+# -c, ruff --config (which also takes inline TOML such as fix-only=true), mypy --config-file, eslint -c/--config
+# and tox -c. Each can set a mode the table excludes (pytest -o addopts=--collect-only). Other listed options also
+# select rules or name a configuration file (eslint --rule, ruff --select, pytest --cov-config); none of those is
+# known to change the run's mode. Neither is a leading VAR=value word, the env wrapper, a make VAR=value argument
+# (PYTEST_ADDOPTS, MAKEFLAGS=n) or an earlier command in the same line (_gate_benign_prefix).
+# eslint: the options eslint 6.4.0 --help lists (checked 2026-10-07); --no-config-lookup and
+# --no-error-on-unmatched-pattern are not among them (eslint 6.4.0 rejects both), so they are not listed.
+_GATE_PYTEST_FORM = _gate_form(
+    short="qvxsl", short_values="kmpnrW", operands=True,
+    long=("--quiet", "--verbose", "--exitfirst", "--lf", "--last-failed", "--ff", "--failed-first", "--sw",
+          "--stepwise", "--nf", "--new-first", "--showlocals", "--disable-warnings", "--disable-pytest-warnings",
+          "--strict-markers", "--strict-config", "--no-header", "--no-summary", "--runxfail", "--cache-clear",
+          "--pyargs", "--cov", "--cov-branch", "--doctest-modules"),
+    long_values=("--tb", "--maxfail", "--durations", "--durations-min", "--junitxml", "--junit-xml",
+                 "--cov-report", "--cov-fail-under", "--cov-config", "--rootdir", "--basetemp", "--import-mode",
+                 "--color", "--capture", "--timeout", "--deselect", "--ignore", "--ignore-glob",
+                 "--confcutdir", "--log-level", "--log-cli-level", "--numprocesses", "--dist",
+                 "--maxprocesses"))
+# ruff: quiet, silent, verbose and no-cache; its -e is --exit-zero and its -w is --watch, so neither is listed.
+_GATE_RUFF_SHORT = "qsvn"
+_GATE_RUFF_COMMON = ("--quiet", "--silent", "--verbose", "--no-cache", "--preview", "--no-preview", "--isolated",
+                     "--force-exclude")
+_GATE_RUFF_VALUES = ("--line-length", "--target-version", "--exclude", "--extend-exclude",
+                     "--cache-dir")
+# make: -s (--silent, --quiet), -k (--keep-going), -C (--directory), -f (--file, --makefile), -I
+# (--include-dir), -j (--jobs), -l (--load-average, --max-load) and --no-print-directory (GNU Make 4.4.1).
+_GATE_MAKE_FORM = dict(short="sk", short_values="CfIjl", numeric="jl",
+                       long=("--silent", "--quiet", "--keep-going", "--no-print-directory"),
+                       long_values=("--directory", "--file", "--makefile", "--jobs", "--include-dir",
+                                    "--load-average", "--max-load"))
+# The deny tier's PRODUCER ALLOW-LIST: the known verification invocations, each written as its tool and the
+# exact run forms it accepts (_gate_form). A subcommand, positional operand or option outside a form leaves
+# the run outside the deny tier (it only notes), so an information or maintenance mode (--help, --version,
+# --collect-only, --cache-show, a listing, a config dump, a dry run, a fixer, an installer) is never listed.
+# A python interpreter is judged by _gate_python_run; the nice, timeout and time wrappers are peeled first,
+# and a leading VAR=value word or the env wrapper leaves the run outside the table (_gate_peel).
+_GATE_VERIFY_RUNS = dict((
+    ("pytest", (_GATE_PYTEST_FORM,)),
+    ("mypy", (_gate_form(
+        short="v", short_values="pm", operands=True,
+        long=("--strict", "--ignore-missing-imports", "--pretty", "--show-error-codes", "--hide-error-codes",
+              "--no-error-summary", "--show-column-numbers", "--no-incremental", "--warn-unused-ignores",
+              "--check-untyped-defs", "--disallow-untyped-defs", "--show-traceback", "--no-color-output",
+              "--namespace-packages", "--explicit-package-bases", "--verbose", "--warn-unreachable"),
+        long_values=("--package", "--module", "--python-version", "--cache-dir", "--exclude",
+                     "--follow-imports", "--platform")),)),
+    ("eslint", (_gate_form(
+        short_values="f", operands=True,
+        long=("--quiet", "--cache", "--no-eslintrc", "--no-inline-config", "--report-unused-disable-directives",
+              "--color", "--no-color"),
+        long_values=("--max-warnings", "--format", "--ext", "--ignore-path", "--ignore-pattern",
+                     "--rule", "--parser", "--plugin", "--cache-location", "--env", "--global",
+                     "--resolve-plugins-relative-to")),)),
+    ("ruff", (_gate_form(sub=("check",), short=_GATE_RUFF_SHORT, operands=True,
+                         long=_GATE_RUFF_COMMON + ("--no-fix",),
+                         long_values=_GATE_RUFF_VALUES + ("--select", "--ignore", "--extend-select",
+                                                          "--extend-ignore", "--output-format",
+                                                          "--per-file-ignores", "--fixable", "--unfixable")),
+              _gate_form(sub=("format",), short=_GATE_RUFF_SHORT, operands=True, required="--check",
+                         long=_GATE_RUFF_COMMON + ("--check",), long_values=_GATE_RUFF_VALUES))),
+    ("make", tuple(_gate_form(sub=(target,), **_GATE_MAKE_FORM) for target in ("test", "check", "lint"))),
+    ("npm", (_gate_form(sub=("test",)), _gate_form(sub=("run", "test")), _gate_form(sub=("run", "lint")),
+             _gate_form(sub=("run", "check")))),
+    ("go", (_gate_form(
+        sub=("test",), operands=True, refuse=(("-run", "^$"),),
+        valid=(("-shuffle", r"(?:off|on|-?[0-9]+)\Z"), ("-mod", r"(?:readonly|vendor)\Z")),
+        long=("-v", "-race", "-short", "-failfast", "-cover", "-json"),
+        long_values=("-run", "-count", "-timeout", "-p", "-tags", "-coverprofile", "-covermode", "-coverpkg",
+                     "-cpu", "-skip", "-shuffle", "-mod")),)),
+    ("cargo", (_gate_form(
+        sub=("test",), short="qvr", short_values="pjF", operands=True,
+        long=("--release", "--all-targets", "--workspace", "--all", "--all-features", "--no-default-features",
+              "--lib", "--bins",
+              "--tests", "--doc", "--quiet", "--verbose", "--locked", "--frozen", "--offline", "--no-fail-fast"),
+        long_values=("--package", "--features", "--test", "--jobs", "--target", "--manifest-path", "--exclude",
+                     "--profile")),
+               _gate_form(sub=("fmt",), short="qv", required="--check",
+                          long=("--check", "--all", "--quiet", "--verbose"),
+                          long_values=("--package", "--manifest-path")))),
+    ("tox", tuple(_gate_form(sub=sub, short="rqv", short_values="e", long=("--recreate", "--quiet", "--verbose"))
+                  for sub in ((), ("run",)))),
+    ("nox", (_gate_form(
+        short="rRvx", short_values="sekptf",
+        long=("--reuse-existing-virtualenvs", "--no-reuse-existing-virtualenvs", "--verbose",
+              "--stop-on-first-error", "--error-on-missing-interpreters", "--no-error-on-missing-interpreters"),
+        long_values=("--session", "--sessions", "--keywords", "--python", "--tags", "--noxfile")),)),
+))
+_GATE_PYTHONS = frozenset(("python", "python3"))
+_GATE_PYTHON_FLAGS = frozenset(("-I", "-B", "-IB", "-BI"))
+# A python script (or a bash or sh script, 'bash tools/run_all_checks.sh') whose basename starts with one of
+# these runs as a check with no argument at all.
+_GATE_SCRIPT_PREFIXES = ("selftest", "check_", "run_all_checks")
+_GATE_SHELLS = frozenset(("bash", "sh"))
+
+
+def _gate_word(token):
+    """The lowercased basename of a command token, a literal alias-suppressing backslash stripped."""
+    return token.lstrip("\\").rsplit("/", 1)[-1].lower()
+
+
+def _gate_peel(argv, producer=False):
+    """The argv of the command a segment runs after leading VAR-assignment words and the env, nice, timeout
+    and time wrappers with their option grammar (_GATE_WRAPPER_GRAMMAR; timeout's duration operand too) are
+    peeled; [] when no command word remains; None when a wrapper carries an option outside that grammar. For
+    a PRODUCER (producer=True) a leading VAR=value word or an env wrapper is None too: the environment can
+    set the run's mode (PYTEST_ADDOPTS=--collect-only, MAKEFLAGS=n). Purely lexical."""
+    i = _command_word_index(argv)
+    if producer and i:
+        return None
+    n = len(argv)
+    while i < n:
+        word = _gate_word(argv[i])
+        grammar = _GATE_WRAPPER_GRAMMAR.get(word)
+        if grammar is None:
+            return argv[i:]
+        if producer and word == "env":
+            return None
+        value_opts, flag_opts = grammar
+        i += 1
+        while i < n:
+            tok = argv[i]
+            if word == "env" and _ENV_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "--":
+                i += 1
+                break
+            if not tok.startswith("-") or (tok == "-" and word != "env"):
+                break
+            if tok in value_opts:
+                i += 2
+            elif (tok in flag_opts or tok.split("=", 1)[0] in value_opts
+                  or (not tok.startswith("--") and tok[:2] in value_opts)
+                  or (word == "nice" and tok[1:].isdigit())):
+                i += 1
+            else:
+                return None
+        if word == "timeout":
+            i += 1   # the duration operand
+    return []
+
+
+def _gate_form_matches(form, args):
+    """True when args are exactly one run of the _gate_form: every option is a listed flag or value option
+    (a separated value never starts with '-', which may be an option the form does not list), the positional
+    operands start with the form's subcommand words, with further operands only where the form takes them,
+    its required option is present, no refused (option, value) pair appears, and every value a pattern
+    checks matches it. '--', a VAR=value operand and anything unlisted leave the form."""
+    sub, short, short_values, long, long_values, operands, required, numeric, refuse, valid = form
+    positional = []
+    seen = set()
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if not tok.startswith("-") or tok == "-":
+            positional.append(tok)
+            continue
+        name, eq, value = tok.partition("=")
+        if name in long or name in long_values:
+            if name in long_values and not eq:
+                if i >= len(args) or args[i].startswith("-"):
+                    return False
+                value = args[i]
+                i += 1
+            if (name, value) in refuse or (name in valid and not valid[name].match(value)):
+                return False
+            seen.add(name)
+            continue
+        body = tok[1:]   # an unlisted long option or '--' fails here too: '-' is never a listed letter
+        for k, ch in enumerate(body):
+            if ch in short_values:
+                attached = body[k + 1:]
+                if ch in numeric:
+                    if attached and not attached.isdigit():
+                        return False
+                    if not attached and i < len(args) and args[i].isdigit():
+                        i += 1   # an optional all-digit value ('make -j 4 test'; a bare 'make -j test' runs test)
+                elif not attached:
+                    if i >= len(args) or args[i].startswith("-"):
+                        return False
+                    i += 1
+                break
+            if ch not in short:
+                return False
+    return (positional[:len(sub)] == list(sub) and (operands or len(positional) == len(sub))
+            and (required is None or required in seen))
+
+
+def _gate_python_run(args):
+    """True when a python interpreter's args, after any -I and -B, run a listed check: '-m pytest' (or
+    '-mpytest') with a pytest run form, a script whose basename starts with selftest, check_ or run_all_checks with no argument,
+    or any .py script whose ONLY argument is one exact --self-test, --selftest, --check or --verify."""
+    i = 0
+    while i < len(args) and args[i] in _GATE_PYTHON_FLAGS:
+        i += 1
+    rest = args[i:]
+    if rest[:1] == ["-mpytest"]:
+        rest = ["-m", "pytest"] + rest[1:]
+    if rest[:2] == ["-m", "pytest"]:
+        return _gate_form_matches(_GATE_PYTEST_FORM, rest[2:])
+    if not rest or rest[0].startswith("-"):
+        return False
+    script, extra = _gate_word(rest[0]), rest[1:]
+    if not extra:
+        return script.startswith(_GATE_SCRIPT_PREFIXES)
+    return script.endswith(".py") and len(extra) == 1 and extra[0] in _GATE_VERIFY_FLAGS
+
+
+def _is_verification_run(tokens):
+    """gatdis deny tier: True when a command is a KNOWN VERIFICATION INVOCATION (the producer allow-list). The
+    command is the argv after _gate_peel; its word is a python interpreter judged by _gate_python_run, bash or
+    sh running a _GATE_SCRIPT_PREFIXES script with no option or argument, or a tool in _GATE_VERIFY_RUNS whose args match one of its run forms (_gate_form_matches). Anything else,
+    including every information, maintenance or listing mode of a listed tool, is not a verification run
+    here; the broad _is_checker_segment heuristic and _gate_verify_shaped still feed the note tier. A run
+    whose environment the command sets (a leading VAR=value word or the env wrapper) is not one either."""
+    argv = _gate_peel(tokens, producer=True)
+    if not argv:
+        return False
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in _GATE_PYTHONS:
+        return _gate_python_run(args)
+    if word in _GATE_SHELLS:
+        return len(args) == 1 and _gate_word(args[0]).startswith(_GATE_SCRIPT_PREFIXES)
+    return any(_gate_form_matches(form, args) for form in _GATE_VERIFY_RUNS.get(word, ()))
+
+
+def _gate_verify_shaped(argv):
+    """The note tier's view of a verify option: True when a command that is not a text or lookup command
+    (_GATE_TEXT_COMMANDS) carries an exact --self-test, --selftest, --check or --verify argument (alone or
+    with an attached value). Over-matching by design: it costs a note, never a refusal."""
+    argv = argv[_command_word_index(argv):]
+    return (bool(argv) and _gate_word(argv[0]) not in _GATE_TEXT_COMMANDS
+            and any(tok.split("=", 1)[0] in _GATE_VERIFY_FLAGS for tok in argv[1:]))
+
+
+def _gate_simple(seg):
+    """True when a lexed segment is a simple command: a command word that is not a reserved word, no
+    command substitution or backquote in its raw text, and not ended by a '(' or ')' separator."""
+    return (bool(seg.argv) and seg.argv[0] not in _GATE_RESERVED and "$(" not in seg.raw and "`" not in seg.raw
+            and seg.sep_after not in ("(", ")"))
+
+
+def _gate_stdout_redirected(seg):
+    """True when any redirection of the segment touches its stdout ('>', '>>', '&>', '1>', '>&2')."""
+    return any(r.stdout_effect for r in seg.redirects)
+
+
+def _gate_stdin_redirected(seg):
+    """True when the segment's stdin comes from a redirection rather than the pipe."""
+    return any(r.op in ("<", "<>", "<&") and r.src_fd == 0 for r in seg.redirects)
+
+
+def _gate_tee_file(argv):
+    """The first real-file operand of a tee stage (not a /dev/ path), or None."""
+    if _gate_word(argv[0]) != "tee":
+        return None
+    for tok in argv[1:]:
+        if not tok.startswith("-"):
+            return None if tok.startswith("/dev/") else tok
+    return None
+
+
+# The deny tier's PASS-THROUGH ALLOW-LIST: the stages a verification run's output may cross on its way to a
+# sink, each reading its stdin and writing what it read (or a transform of it) to its stdout. The value is the
+# set of option tokens the stage may carry and whether it takes operands (tee's output files, tr's sets).
+_GATE_PLAIN_FILTERS = dict((
+    ("cat", (frozenset(("-",)), False)),
+    ("tee", (frozenset(("-a", "--append", "-i", "--ignore-interrupts")), True)),
+    ("tr", (frozenset(("-c", "-C", "-d", "-s", "-t", "-cd", "-ds", "-cs", "--complement", "--delete",
+                       "--squeeze-repeats", "--truncate-set1")), True)),
+    ("uniq", (frozenset(), False)),
+))
+
+
+def _gate_plain_filter(argv):
+    """True when a pipeline stage (VAR assignments aside, no wrapper) is a _GATE_PLAIN_FILTERS stage: plain
+    cat (no operand but '-'), tee with only its append and ignore-interrupts options and output files, tr
+    with only its own options, or uniq with no option or operand. Any other stage (a grep, sed, awk or sort
+    filter, an option outside the list) leaves the canonical shape, so the pipeline only notes."""
+    argv = argv[_command_word_index(argv):]
+    if not argv:
+        return False
+    spec = _GATE_PLAIN_FILTERS.get(_gate_word(argv[0]))
+    if spec is None:
+        return False
+    options, operands = spec
+    return all(tok in options or (operands and not tok.startswith("-")) for tok in argv[1:])
+
+
+def _gate_case_depths(records):
+    """The number of case compounds open at each segment (a segment opens one when 'case' follows only
+    reserved words, and one starting with 'esac' closes one). Inside a case its pattern words and the ')'
+    and '|' between them lex as commands and separators, so no pipeline there is canonical."""
+    depths = []
+    depth = 0
+    for seg in records:
+        if seg.argv and seg.argv[0] == "esac" and depth:
+            depth -= 1
+        depths.append(depth)
+        for word in seg.argv:
+            if word == "case":
+                depth += 1
+            if word not in _GATE_RESERVED:
+                break
+    return depths
+
+
+# The commands that may come before the producer pipeline in the same command while the deny tier still holds,
+# each in one exact shape: cd with one directory operand, echo whose every argument is a plain literal word
+# (_GATE_PLAIN_WORD_RE, with no '$', backslash or quote anywhere in the segment's raw text, so no ANSI-C or
+# quoted spelling hides an option), and true, ':' or pwd alone. printf is never benign: a format can assign a
+# variable ('printf %n PATH' sets PATH to 0, and -v can be spelled $'\x2dv'). Any other earlier command (an
+# assignment, export, declare or typeset, set, source or '.', alias, unset, a function definition, a
+# redirection, anything else) can change the run's environment, options or configuration (export
+# PYTEST_ADDOPTS=--collect-only, set -a, echo addopts > pytest.ini), so the pipeline notes. A pipeline joined
+# by '&&' to a known-benign command runs whenever that command succeeds, and the deny text holds whenever it
+# runs, so it denies as after ';'. A pipeline joined by '||' notes (_gate_conditional_run): it runs only when
+# the command before it fails, and after 'true ||' it never runs.
+_GATE_BENIGN_ALONE = frozenset(("true", ":", "pwd"))
+_GATE_PLAIN_WORD_RE = re.compile(r"[A-Za-z0-9_./:,@%+=][A-Za-z0-9_./:,@%+=-]*\Z")
+
+
+def _gate_benign_prefix(seg):
+    """True when a segment before the producer pipeline is known-benign: an empty newline segment, or a simple
+    command (_gate_simple) with no redirection and no '${' or '$[' in its raw text (either can assign a variable,
+    as ${X:=v} does), ended by ';', '&&', '||', '&' or a newline (never a pipe), that is 'cd DIR' (one operand
+    that does not start with '-'), echo whose raw text has no '$', backslash or quote and whose every argument is
+    a plain literal word (_GATE_PLAIN_WORD_RE: no leading '-', no glob or brace), or true, ':' or pwd with no
+    argument. printf is never benign."""
+    if seg.redirects or seg.sep_after not in _GATE_LIST_SEPS:
+        return False
+    if not seg.argv:
+        return True
+    if not _gate_simple(seg) or "${" in seg.raw or "$[" in seg.raw:
+        return False
+    word, args = seg.argv[0], seg.argv[1:]
+    if word == "cd":
+        return len(args) == 1 and not args[0].startswith("-")
+    if word == "echo":
+        return not any(ch in seg.raw for ch in "$\\'\"") and all(_GATE_PLAIN_WORD_RE.match(tok) for tok in args)
+    return word in _GATE_BENIGN_ALONE and not args
+
+
+def _gate_conditional_run(records, i):
+    """True when the pipeline whose first command is records[i] is joined to the command before it by '||'
+    (empty newline segments between them skipped, as bash continues the list after it): it runs only when that
+    command fails, or never ('true || pytest | head'). A join by '&&' is False: every earlier segment is
+    _gate_benign_prefix by then (_verification_sink), so the pipeline runs whenever they succeed, and the deny
+    text holds whenever it runs ('cd /x && pytest | head' denies as 'cd /x; pytest | head' does)."""
+    for seg in reversed(records[:i]):
+        if seg.argv or seg.redirects or seg.sep_after:
+            return seg.sep_after == "||"
+    return False
+
+
+def _verification_sink(records):
+    """gatdis deny tier: (producer word, sink kind, tee file or None, filtered before the tee) for the first
+    canonical verification pipeline, or None. Canonical: every segment before the producer is
+    _gate_benign_prefix, the producer is outside every case compound
+    (_gate_case_depths), the first command of its pipeline (start of the command or after ';', '&&', '&' or a
+    newline; a pipeline joined by '||' to the command before it only notes, _gate_conditional_run), _gate_simple,
+    stdout not redirected, ending in '|' or '|&', and a listed run form
+    (_is_verification_run); each later stage (an empty newline segment after a pipe is skipped, as bash
+    continues the pipeline) is _gate_simple with its stdin not redirected; the first stage
+    _truncating_sink_kind matches is the sink; every stage before it is a pass-through stage
+    (_gate_plain_filter) with stdout not redirected, ending in '|' or '|&'. A real-file tee stage does NOT
+    exempt the pipeline (by default the status is still the final stage's); it is returned so the message can
+    say what the file holds, and a tr or uniq stage before it marks that file as filtered."""
+    case_depths = _gate_case_depths(records)
+    n = len(records)
+    for i, seg in enumerate(records):
+        if i and not _gate_benign_prefix(records[i - 1]):
+            return None   # an earlier command may set the run's environment or configuration: it only notes
+        if (seg.sep_after not in _GATE_PIPES
+                or case_depths[i] or not _gate_simple(seg) or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
+            continue
+        if _gate_conditional_run(records, i):
+            return None   # a pipeline run only when an earlier command fails, or never: it only notes
+        tee, filtered = None, False
+        for j in range(i + 1, n):
+            stage = records[j]
+            if not stage.argv and not stage.sep_after and not stage.redirects:
+                continue
+            if not _gate_simple(stage) or _gate_stdin_redirected(stage):
+                break
+            kind = _truncating_sink_kind(stage.argv)
+            if kind is not None:
+                return _gate_word(_gate_peel(seg.argv, producer=True)[0]), kind, tee, filtered
+            if (stage.sep_after not in _GATE_PIPES or _gate_stdout_redirected(stage)
+                    or not _gate_plain_filter(stage.argv)):
+                break
+            if tee is None:
+                tee = _gate_tee_file(stage.argv)
+                filtered = filtered or _gate_word(stage.argv[_command_word_index(stage.argv)]) in ("tr", "uniq")
+    return None
+
+
+def _verification_sink_message(hit):
+    """The (reason, banner) of the deny-and-educate decision for a _verification_sink hit. It claims only the
+    allow-listed shape: a known verification invocation whose output reaches a sink on the allow-list, and
+    it says what that sink passes on (_truncating_sink_kind) and that a pipeline's status is its final stage's
+    (the sink need not be the final stage). The
+    suggested capture runs the check alone with no pipe after it, to a file at an ABSOLUTE path
+    (bash_absolute_paths denies a relative truncating redirect target), and the message never suggests an
+    exit-status echo trailer (the rule's propagation clause). A tee file is never called the full output
+    when a filter stage precedes the tee."""
+    word, (label, effect), tee, filtered = hit
+    if tee is None:
+        held = ""
+    elif filtered:
+        held = ("The tee stage writes '{}', but only what passed the filter stages before it, and by default the "
+                "pipeline's status is still not the check's. ".format(tee))
+    else:
+        held = "The tee stage writes '{}', but by default the pipeline's status is still not the check's. ".format(tee)
+    return (
+        "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification "
+        "runs, and its output is piped into '{}', {}. The rule: no piping a check to a "
+        "truncating sink. The sink can cut the lines that explain a failure, and by default a pipeline's exit "
+        "status is that of its final stage, not the check's, so a failing check can read as a pass ('set -o "
+        "pipefail' makes the pipeline fail when any stage fails, though not always with the check's own status, "
+        "and the output is still cut). {}Run the check alone with its full output in a file at an absolute path and "
+        "no pipe after it, for example `<command> > /abs/path/check.log 2>&1`, take the verdict from that "
+        "command's own exit status, then read the file in a separate step.".format(word, label, effect, held),
+        "AIQT guardrail: denied a known verification run piped into a truncating sink ({}) (rule gatdis); "
+        "write the full output to a file and read it.".format(label))
+
+
+# The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
+# deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe.
+_GATE_NOTE_WRAPPERS = frozenset((
+    "env", "nice", "timeout", "time", "command", "builtin", "exec", "nohup", "stdbuf", "sudo", "doas",
+    "ionice", "chrt", "taskset", "xvfb-run", "unbuffer", "script", "watch", "busybox", "setsid", "flock",
+    "strace", "ltrace"))
+_GATE_SUBST_WORD_RE = re.compile(r"(?:\$\(|`)\s*([^\s()`|;&<>]+)")
+
+
+def _gate_suffixes(argv):
+    """The argv suffixes the note tier judges as a command: after any leading reserved words, the command
+    itself, and, when its word is a wrapper (_GATE_NOTE_WRAPPERS), every later suffix too."""
+    k = 0
+    while k < len(argv) and argv[k] in _GATE_RESERVED:
+        k += 1
+    if k >= len(argv):
+        return []
+    if _gate_word(argv[k]) not in _GATE_NOTE_WRAPPERS:
+        return [argv[k:]]
+    return [argv[m:] for m in range(k, len(argv))]
+
+
+# A '|' that is not part of '||', then head or tail, in the raw text: the substitution note's trigger.
+_GATE_SUBST_PIPE_RE = re.compile(r"(?<!\|)\|&?\s*(?:head|tail)\b")
+_GATE_NOTE_ADVICE = (" If the check gates this work, run it alone with its full output in a file at an absolute path "
+                     "and read the file, so its failure signal is not cut; if this is only an output glance, this is "
+                     "allowed.")
+_GATE_NOTE_TAIL = (" The hook does not prove that this stage receives the check's output or that it drops any of "
+                   "it, so this is a note, not a refusal." + _GATE_NOTE_ADVICE)
+_GATE_SUBST_TEXT = ("AIQT guardrail (rule gatdis, gate-discipline): the text of this command appears to contain a "
+                    "command substitution whose first word looks like a check")
+
+
+def _gate_flow_note(records, command):
+    """gatdis note tier, for a command the canonical deny does not prove: the note text, or None. It notes
+    when the raw text holds a checker word right inside a $( or backquote substitution and a '| head' or
+    '| tail' (_GATE_SUBST_PIPE_RE; '||' is not a pipe), and when a checker-shaped command (_is_checker_segment or
+    _gate_verify_shaped on a _gate_suffixes suffix) is followed by a pipe and, after that pipe, by a stage that
+    may pass on only part of its input (_gate_note_sink_kind on a suffix); with no such command, a raw-text
+    substitution and any lexed pipe followed by such a stage. Each text claims only what its reason proves:
+    raw-text evidence may be quoted text, so the substitution texts say 'appears' and assert neither that the
+    substitution runs nor where it sits. Over-matching by design: it costs a note, never a refusal."""
+    subst = any(_is_checker_segment([w]) for w in _GATE_SUBST_WORD_RE.findall(command))
+    if subst and _GATE_SUBST_PIPE_RE.search(command):
+        return (_GATE_SUBST_TEXT + ", and appears to pipe into 'head' or 'tail'. The hook reads both from the raw "
+                "text, where either may be quoted text, so it does not prove that the substitution runs, that the "
+                "pipe exists, or that any output is dropped; this is a note, not a refusal." + _GATE_NOTE_ADVICE)
+    first = next((i for i, seg in enumerate(records)
+                  if any(_is_checker_segment(s) or _gate_verify_shaped(s) for s in _gate_suffixes(seg.argv))), None)
+    by_subst = first is None and subst
+    if by_subst:
+        first = 0
+    if first is None:
+        return None
+    pipe = next((p for p in range(first, len(records)) if records[p].sep_after in _GATE_PIPES), None)
+    if pipe is None:
+        return None
+    kind = next((k for k in (_gate_note_sink_kind(s) for seg in records[pipe + 1:]
+                             for s in _gate_suffixes(seg.argv)) if k is not None), None)
+    if kind is None:
+        return None
+    if by_subst:
+        return (_GATE_SUBST_TEXT + ", and the command has a pipe followed, later, by a stage that may pass on only "
+                "part of what it reads ('{}'). The hook reads the substitution from the raw text, where it may be "
+                "quoted text, so it does not prove that the substitution runs, that this stage receives its output, "
+                "or that the stage drops any of it; this is a note, not a refusal.".format(kind) + _GATE_NOTE_ADVICE)
+    return ("AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+            "pipe and, later in this command, by a stage that may pass on only part of what it reads ('{}')."
+            .format(kind) + _GATE_NOTE_TAIL)
 
 
 def _gate_weakening_fallback(command):
@@ -7246,14 +7815,17 @@ def _gate_weakening_fallback(command):
             "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)):
+            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
         # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
-        # probe is common), so even on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; only
-        # the --no-verify bypass spellings above (a deliberate, unambiguous gate bypass) still deny fail-safe.
+        # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
+        # --no-verify bypass spellings above still deny fail-safe, and the caller first denies a verification
+        # run piped into a truncating sink that the partially lexed prefix proves (the gatdis deny tier).
         return _allow_note(
             "AIQT guardrail (rule gatdis, gate-discipline): the command could not be parsed by the shell "
             "lexer (likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
-            "signal ('|| true', '|| :', '| head', '| tail'). If it gates this work, run the checker bare and "
+            "signal ('|| true', '|| :', '| head', '| tail', or a head/tail/cut fed by a process substitution or "
+            "here-string). If it gates this work, run the checker bare and "
             "let its exit status stand (redirect output to a file if you need to page it), rather than "
             "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
@@ -7264,12 +7836,31 @@ def gate_weakening(data):
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
-    is deliberately not flagged there). ROUND-2 FINDING 14: the checker-shape HEURISTIC (a checker-shaped
-    segment whose failure signal is swallowed by a following '|| true'/'|| :', or piped into a truncating
-    sink head/tail) is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
-    iterating) is common and is not a gate bypass - so it ALLOWS-WITH-NOTE (educating to run the gate bare if
-    it genuinely gates the work), not deny. Only the CONFIRMED --no-verify bypass, a deliberate and
-    unambiguous gate bypass, still DENIES (certain, returned immediately)."""
+    is deliberately not flagged there); the CONFIRMED --no-verify bypass DENIES (certain, returned
+    immediately). The checker-output check has TWO TIERS. DENY tier, held to one canonical shape whose two
+    ends are ALLOW-LISTS (_verification_sink): the first simple command of a pipeline is a KNOWN VERIFICATION
+    INVOCATION (_is_verification_run: a run form in _GATE_VERIFY_RUNS, or a python script form) and pipes
+    through pass-through stages (_gate_plain_filter: cat, tee, tr, uniq) into a sink on the sink allow-list
+    (_truncating_sink_kind: head or tail with no option or one positive line count, grep, egrep or fgrep
+    with exactly one of -m N/-q/-c/-l/-L and one pattern, rg with one of -q/-c/-l) DENIES-and-educates, naming
+    the fix (run the check alone with its full output in a file at an absolute path and read it). The rule
+    forbids piping a check to a truncating sink without conditions, and 'set -o pipefail' gives no exemption
+    (it makes the pipeline fail when any stage fails, though not always with the check's own status, and the
+    output is still cut). The deny is held until the segment loop ends so a
+    --no-verify deny keeps its own message, and it suppresses the note. NOTE tier (ROUND-2 FINDING 14): every
+    other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
+    '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
+    canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
+    a substitution, a wrapper beyond nice/timeout/time, a producer whose environment the command sets, a producer
+    pipeline after an earlier command in the same line that is not known-benign (_gate_benign_prefix) or joined
+    to one by '||' (_gate_conditional_run), a sed,
+    awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
+    followed by a pipe and later a stage that may pass on only part of its input). On a parse error
+    the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
+    otherwise the raw fallback stands. Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
+    xargs body; R2 an alias or shell function; R3 a gate whose name and options carry no checker part
+    (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
+    counted as truncating sinks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -7285,9 +7876,21 @@ def gate_weakening(data):
             "so the gate-weakening check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
     try:
-        segments = _segments(command)
+        records = _lex_command(command)
     except ValueError:
+        # DENY outranks the parse error (the branch_root precedent): the COMPLETE segments recovered before
+        # the unparseable construct are judged first for a verification run piped into a truncating sink;
+        # otherwise the raw fallback stands. The in-progress segment the lexer was inside is dropped, since
+        # its unseen tokens could change it.
+        recovered, complete = _lex_command(command, partial=True)
+        if not complete:
+            recovered = recovered[:-1]
+        hit = _verification_sink(recovered)
+        if hit is not None:
+            reason, banner = _verification_sink_message(hit)
+            return _deny(reason, banner)
         return _gate_weakening_fallback(command)
+    segments = [(seg.argv, seg.sep_after) for seg in records]
     pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
@@ -7312,11 +7915,11 @@ def gate_weakening(data):
         while nxt_index < len(segments) and not segments[nxt_index][0]:
             nxt_index += 1
         nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
-        # ROUND-2 FINDING 14: the checker-shape swallow ('|| true'/'|| :') and truncating-pipe ('| head/tail')
-        # HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
-        # iterating, 'make | head' to glance at output) is common and is not a gate bypass - so it becomes an
-        # ALLOW-WITH-NOTE, not a deny. Only the CONFIRMED --no-verify bypass above (a deliberate, unambiguous
-        # gate bypass) still DENIES.
+        # ROUND-2 FINDING 14: the broad checker-shape swallow ('|| true'/'|| :') and truncating-pipe
+        # ('| head/tail') HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest
+        # || true' while iterating, 'make | head' to glance at output) is common and is not a gate bypass - so
+        # it stays an ALLOW-WITH-NOTE. The narrow deny tier (a verification run whose output reaches a
+        # truncating sink, _verification_sink below) and the CONFIRMED --no-verify bypass above DENY.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_note is None:
                 pending_note = (
@@ -7329,12 +7932,22 @@ def gate_weakening(data):
             if pending_note is None:
                 pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
-                    "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
-                    "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
-                    "to a file and read that) so its failure signal is not discarded; if it is only a benign "
-                    "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
+                    "is piped into '{}', which may pass on only part of its output, and under default pipeline "
+                    "semantics a pipeline's exit status is that of its final stage, not the checker's. If it gates "
+                    "this work, run it bare (or redirect the output to a file and read that) so its failure signal "
+                    "is not discarded; if it is only a benign output glance, this is allowed."
+                    .format(_command_word(tokens), _command_word(nxt)))
+    # The deny tier is held until the loop ends, so a --no-verify deny anywhere in the command returns first
+    # with its own message; a verification-sink deny then outranks (and suppresses) the broad-tier note.
+    hit = _verification_sink(records)
+    if hit is not None:
+        reason, banner = _verification_sink_message(hit)
+        return _deny(reason, banner)
     if pending_note is not None:
         return _allow_note(pending_note)
+    flow_note = _gate_flow_note(records, command)
+    if flow_note is not None:
+        return _allow_note(flow_note)
     return _allow()
 
 
@@ -10263,6 +10876,397 @@ def _orch_effective_sink_word(argv):
     return "" if idx is None else argv[idx].lstrip("\\").rsplit("/", 1)[-1]
 
 
+# gatdis deny tier (gate_weakening): the SINK ALLOW-LIST, the exact pipeline stages proved to pass on only
+# part of a verification run's output (_truncating_sink_kind). This list is the gate-discipline guard's own,
+# kept apart from _ORCH_TRUNCATING_SINKS so orch_truncation_guard's behaviour is unchanged. It is a closed list
+# of shapes, not of words: head or tail with no option or with exactly one of -n N, -nN, --lines=N or -N (N a
+# positive decimal integer with no sign; tail +N, head -n -N, -c, -f and every other option keep the whole input
+# or are not modelled); grep, egrep or fgrep with exactly one limiting flag (-m N with N >= 1, -q, -c, -l or -L)
+# and otherwise one pattern; rg with exactly one of -q, -c or -l and otherwise one pattern. rg -m is not on the
+# list: an rg configuration file named by RIPGREP_CONFIG_PATH can add --passthru, and rg 15.1.0 then passes every
+# line on under -m 1 (checked 2026-10-07); the hook cannot see that file. cut is never a deny sink ('cut -c1-'
+# keeps every byte). Every other spelling of these words, and any sed or awk program (the hook parses no
+# program), may cut its input or may not, so it only notes (_gate_note_sink_kind). A plain filter ('grep FAIL',
+# 'wc') is a sink in neither tier (residual R4).
+_GATE_CUTTING_WORDS = frozenset(("head", "tail", "cut"))
+_GATE_COUNT_RE = re.compile(r"[0-9]+\Z")
+_GATE_GREP_SINKS = frozenset(("grep", "egrep", "fgrep", "rg"))
+_GATE_PROGRAM_FILTERS = frozenset(("sed", "gsed", "awk", "gawk", "mawk", "nawk"))
+_GATE_GREP_TRUNC_SHORT = frozenset("mqclL")
+_GATE_GREP_VALUE_SHORT = frozenset("efABCdD")   # a short cluster stops at a value letter (its value follows)
+# ripgrep shares -m, -q, -c and -l, but its -L is --follow (not files-without-match) and its value letters
+# differ (-E, -j, -g, -t, -T, -M, -r take a value; rg 15.1.0 -h, checked 2026-10-07).
+_GATE_RG_TRUNC_SHORT = frozenset("mqcl")
+_GATE_RG_VALUE_SHORT = frozenset("efEjgdtTABCMr")
+_GATE_GREP_TRUNC_LONG = ("--max-count", "--quiet", "--silent", "--count", "--files-with")
+_GATE_GREP_VALUE_LONG = frozenset(("--regexp", "--file"))
+# Which sink stages read their STDIN (the pipe) rather than a named file: word -> (short letters that take a
+# value, short letters that take none, long options that take a value, long options that take none or only an
+# attached '=' value, pattern operands before the input files, options that supply that pattern instead). A stage
+# reads its stdin when it has no input operand, recursive or not, or when any input operand, or the value of a file
+# option such as a -f pattern file (_GATE_STDIN_FILE_OPTIONS), names the stdin (_gate_stdin_name), even beside other
+# files or under -r. GNU grep 3.12 with -r, -R, --recursive, --dereference-recursive or -d/--directories recurse and
+# no input operand reads the working directory and not its stdin, unless a later -d/--directories read or skip sets
+# the mode back, when it reads its stdin (checked 2026-10-08), but a grep word may run another grep: the ugrep a shell
+# function may run as grep reads its stdin under -r too (checked 2026-10-08), so a recursive grep-family stage with
+# no input operand may read its stdin. The same ugrep reads a GNU grep operand list differently in two shapes it may
+# read its stdin through, so a grep word may read its stdin in each (reported 2026-10-08; ugrep was not installed
+# where this was written): a first operand '-' (GNU grep: the pattern; ugrep: the stdin, the next operand being the
+# pattern) and an operand before an -f/--file (GNU grep: an input file; ugrep: the pattern, so only later operands
+# are input; an operand between two -f is read so too, conservatively, as ugrep's reading of it was not reported). Each grammar is the option list of the installed
+# tool's --help (checked 2026-10-07): GNU grep 3.12 (/usr/bin/grep; -NUM is a context count, so the digits are
+# flags), ripgrep 15.1.0 (with the negations and alternative spellings its --help names, such as --no-heading and
+# --maxdepth; the --print0 it names is find's) and uutils coreutils 0.8.0 head, tail and cut. An option outside
+# its grammar (an unknown one, an abbreviated long one such as grep --max=5, an option of another grep such as
+# ugrep) has an arity the hook does not know, so the stage may read its stdin (_gate_reads_stdin). So may a
+# stage with a -d/--directories value GNU grep rejects (attached, separated or '='; a value abbreviated as grep's
+# argmatch accepts is a mode) or an option left without its value at the end (grep -d, cut log.txt -f),
+# conservatively: GNU grep exits on either, though an earlier '-f -' pattern file is read from its stdin first
+# (grep -f - -d waits for its stdin, checked 2026-10-08). A stage that may read its stdin notes when it is a head,
+# tail or cut, or a grep-family stage that also carries a limiting option (_gate_note_sink_kind), rather than
+# allowing silently. Not resolved: any other path
+# to the stdin (a symlink to it or a path through one, such as /dev/fd/../../self/fd/0, /proc/PID/fd/0 for a
+# literal PID, a relative path).
+_GATE_GREP_STDIN = (
+    "efmABCdD", "EFGPiwxzsvVbnHhoqaIrRLlcTZU0123456789",
+    frozenset(("--regexp", "--file", "--max-count", "--label", "--binary-files", "--directories", "--devices",
+               "--include", "--exclude", "--exclude-from", "--exclude-dir", "--before-context", "--after-context",
+               "--context", "--group-separator")),
+    frozenset(("--extended-regexp", "--fixed-strings", "--basic-regexp", "--perl-regexp", "--ignore-case",
+               "--no-ignore-case", "--word-regexp", "--line-regexp", "--null-data", "--no-messages",
+               "--invert-match", "--version", "--help", "--byte-offset", "--line-number", "--line-buffered",
+               "--with-filename", "--no-filename", "--only-matching", "--quiet", "--silent", "--text", "--recursive",
+               "--dereference-recursive", "--files-without-match", "--files-with-matches", "--count", "--initial-tab",
+               "--null", "--no-group-separator", "--color", "--colour", "--binary")),
+    1, ("-e", "-f", "--regexp", "--file"))
+_GATE_STDIN_GRAMMAR = dict((
+    ("head", ("nc", "qvzhV0123456789", frozenset(("--lines", "--bytes")),
+              frozenset(("--quiet", "--silent", "--verbose", "--zero-terminated", "--help", "--version")), 0, ())),
+    ("tail", ("ncs", "fFqvzhV0123456789",
+              frozenset(("--lines", "--bytes", "--pid", "--sleep-interval", "--max-unchanged-stats")),
+              frozenset(("--follow", "--quiet", "--silent", "--verbose", "--zero-terminated", "--use-polling",
+                         "--retry", "--debug", "--help", "--version")), 0, ())),
+    ("cut", ("bcdf", "wsznhV", frozenset(("--bytes", "--characters", "--delimiter", "--fields", "--output-delimiter")),
+             frozenset(("--complement", "--only-delimited", "--zero-terminated", "--help", "--version")), 0, ())),
+    ("grep", _GATE_GREP_STDIN), ("egrep", _GATE_GREP_STDIN), ("fgrep", _GATE_GREP_STDIN),
+    ("rg", ("efEmjgdtTABCMr", ".0FHILNPSUVabchilnopqsuvwxz",
+            frozenset(("--regexp", "--file", "--encoding", "--max-count", "--threads", "--glob", "--max-depth",
+                       "--maxdepth",
+                       "--type", "--type-not", "--after-context", "--before-context", "--context", "--max-columns",
+                       "--replace", "--pre", "--pre-glob", "--dfa-size-limit", "--engine", "--regex-size-limit",
+                       "--iglob", "--ignore-file", "--max-filesize", "--type-add", "--type-clear", "--color",
+                       "--colors", "--context-separator", "--field-context-separator", "--field-match-separator",
+                       "--hostname-bin", "--hyperlink-format", "--path-separator", "--sort", "--sortr",
+                       "--generate")),
+            frozenset(("--search-zip", "--case-sensitive", "--crlf", "--fixed-strings", "--ignore-case",
+                       "--invert-match", "--line-regexp", "--mmap", "--multiline", "--multiline-dotall",
+                       "--no-unicode", "--null-data", "--pcre2", "--smart-case", "--stop-on-nonmatch", "--text",
+                       "--word-regexp", "--auto-hybrid-regex", "--no-pcre2-unicode", "--binary", "--follow",
+                       "--glob-case-insensitive", "--ignore-file-case-insensitive", "--no-ignore", "--no-ignore-dot",
+                       "--no-ignore-exclude", "--no-ignore-files", "--no-ignore-global", "--no-ignore-parent",
+                       "--no-ignore-vcs", "--no-require-git", "--one-file-system", "--unrestricted",
+                       "--block-buffered", "--byte-offset", "--column", "--heading", "--help", "--include-zero",
+                       "--line-buffered", "--line-number", "--no-line-number", "--max-columns-preview", "--null",
+                       "--only-matching", "--passthru", "--pretty", "--quiet", "--trim", "--vimgrep",
+                       "--with-filename", "--no-filename", "--sort-files", "--count", "--count-matches",
+                       "--files-with-matches", "--files-without-match", "--json", "--debug", "--no-ignore-messages",
+                       "--no-messages", "--stats", "--trace", "--files", "--no-config", "--pcre2-version",
+                       "--type-list", "--version", "--hidden", "--no-context-separator", "--passthrough",
+                       "--ignore", "--ignore-dot", "--ignore-exclude", "--ignore-files", "--ignore-global",
+                       "--ignore-messages", "--ignore-parent", "--ignore-vcs", "--messages", "--no-auto-hybrid-regex",
+                       "--no-binary", "--no-block-buffered", "--no-byte-offset", "--no-column", "--no-crlf",
+                       "--no-encoding", "--no-fixed-strings", "--no-follow", "--no-glob-case-insensitive",
+                       "--no-heading", "--no-hidden", "--no-ignore-file-case-insensitive", "--no-include-zero",
+                       "--no-invert-match", "--no-json", "--no-line-buffered", "--no-max-columns-preview",
+                       "--no-mmap", "--no-multiline", "--no-multiline-dotall", "--no-one-file-system", "--no-pcre2",
+                       "--no-pre", "--no-search-zip", "--no-sort-files", "--no-stats", "--no-text", "--no-trim",
+                       "--pcre2-unicode", "--require-git", "--unicode")),
+            1, ("-e", "-f", "--regexp", "--file"))),
+))
+
+
+# The operands that name a stage's stdin: '-' (GNU grep: "When FILE is '-', read standard input"; rg, head, tail
+# and cut alike) and the fixed device paths of the stdin, an absolute path compared after its repeated slashes
+# are collapsed and its '.' and '..' are resolved lexically (_gate_stdin_name: GNU grep 3.12 reads its stdin
+# through //dev/stdin, /dev/./stdin, /dev/../dev/stdin and /proc/thread-self/fd/0, checked 2026-10-08). The
+# file options whose value can name it too: a pattern file (grep and rg -f/--file) and GNU grep's
+# --exclude-from list (grep 3.12 reads '-' there from its stdin, checked 2026-10-08); rg --ignore-file was not
+# probed.
+_GATE_STDIN_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0", "/proc/thread-self/fd/0"))
+_GATE_GREP_STDIN_FILES = ("-f", "--file", "--exclude-from")
+_GATE_STDIN_FILE_OPTIONS = dict((("grep", _GATE_GREP_STDIN_FILES), ("egrep", _GATE_GREP_STDIN_FILES),
+                                 ("fgrep", _GATE_GREP_STDIN_FILES), ("rg", ("-f", "--file"))))
+_GATE_GREP_DIRECTORIES = ("read", "recurse", "skip")
+
+
+def _gate_stdin_name(tok):
+    """True when an operand or file-option value names the stdin: '-', or an absolute path that is one of
+    _GATE_STDIN_PATHS once its repeated slashes are collapsed and posixpath.normpath has resolved its '.' and
+    '..' (lexically: a symlink or a literal PID is not followed)."""
+    if tok == "-":
+        return True
+    return tok.startswith("/") and posixpath.normpath(re.sub("/+", "/", tok)) in _GATE_STDIN_PATHS
+
+
+def _gate_grep_directories(value):
+    """The GNU grep directory mode a -d/--directories value selects ('read', 'recurse' or 'skip'; an
+    unambiguous prefix is accepted, as grep's argmatch does), or None for a value grep rejects ('r', '')."""
+    modes = [mode for mode in _GATE_GREP_DIRECTORIES if mode.startswith(value)]
+    return modes[0] if value and len(modes) == 1 else None
+
+
+def _gate_reads_stdin(word, args):
+    """True when a sink stage may read its stdin rather than a named file (_GATE_STDIN_GRAMMAR). The operands are
+    resolved first: the stage reads its stdin when an input operand or a _GATE_STDIN_FILE_OPTIONS value names
+    it (_gate_stdin_name; even beside other files or under -r), or when there is no input operand, recursive or
+    not (GNU grep -r then reads the working directory, unless a later -d read or skip sets the mode back, but a
+    grep word may run another grep, such as the ugrep that reads its stdin under -r too). For a grep word it is
+    True as well when the first operand is '-' or an operand comes before an -f/--file with no later operand or
+    a later one naming the stdin: ugrep reads that '-' as its stdin and that operand as the pattern,
+    where GNU grep reads them as the pattern and an input file. An option outside the stage's grammar leaves open
+    whether the stage reads its stdin, so it is True too; so are a -d/--directories value grep rejects
+    (_gate_grep_directories) and an option left without its value at the end, conservatively: GNU grep exits on
+    either, though only after reading an earlier '-f -' pattern file from its stdin. True makes a head, tail or cut
+    stage note, and a grep-family stage note when it also carries a limiting option (_gate_note_sink_kind), rather
+    than allowing silently. An unknown word is False."""
+    grammar = _GATE_STDIN_GRAMMAR.get(word)
+    if grammar is None:
+        return False
+    value_short, flag_short, value_long, flag_long, program, explicit = grammar
+    stdin_files = _GATE_STDIN_FILE_OPTIONS.get(word, ())
+    grep = word in ("grep", "egrep", "fgrep")
+    operands = []
+    pending = None   # the option whose value is the next token
+    opts_done = False
+    file_at = None   # for a grep word, how many operands came before its last -f/--file
+    for tok in args:
+        if pending is not None:
+            if pending in stdin_files and _gate_stdin_name(tok):
+                return True
+            if grep and pending in ("-d", "--directories") and _gate_grep_directories(tok) is None:
+                return True   # grep rejects the value: True, conservatively
+            pending = None
+        elif opts_done or tok == "-" or not (tok.startswith("-") or (word == "tail" and tok.startswith("+"))):
+            operands.append(tok)
+        elif tok == "--":
+            opts_done = True
+        elif tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name in explicit:
+                program = 0
+            if grep and name == "--file":
+                file_at = len(operands)
+            if name in value_long:
+                if not eq:
+                    pending = name
+                elif name in stdin_files and _gate_stdin_name(value):
+                    return True
+                elif grep and name == "--directories" and _gate_grep_directories(value) is None:
+                    return True   # grep rejects the value: True, conservatively
+            elif name not in flag_long:
+                return True   # an unknown or abbreviated long option: its arity is unknown
+        else:
+            for k, ch in enumerate(tok[1:]):
+                if "-" + ch in explicit:
+                    program = 0
+                if grep and ch == "f":
+                    file_at = len(operands)
+                if ch in value_short:
+                    value = tok[k + 2:]
+                    if not value:
+                        pending = "-" + ch   # a bare value letter: its value is the next token
+                    elif "-" + ch in stdin_files and _gate_stdin_name(value):
+                        return True
+                    elif grep and ch == "d" and _gate_grep_directories(value) is None:
+                        return True   # grep rejects the value: True, conservatively
+                    break
+                if ch not in flag_short:
+                    return True   # an unknown short letter: its arity is unknown
+    if pending is not None:
+        return True   # an option left without its value at the end (grep -d, cut log.txt -f)
+    if grep and operands and operands[0] == "-":
+        return True   # another grep (ugrep) reads a first operand '-' as its stdin, not as the pattern
+    if grep and file_at and len(operands) == 1:
+        return True   # another grep (ugrep) reads an operand before -f as the pattern, leaving no input operand
+    inputs = operands[program:]
+    return not inputs or any(_gate_stdin_name(op) for op in inputs)
+
+
+def _grep_truncation(word, args):
+    """gatdis note tier. The limiting option a grep-family stage may carry, or None: -m/-q/-c/-l/-L anywhere
+    in a short cluster (the scan of a cluster stops at a value letter e/f/A/B/C/d/D, whose value is the rest
+    of the token or the next token), or a --max-count/--quiet/--silent/--count/--files-with(out)-match(es)
+    long option, or an abbreviation of one ('--m 1', '--max=1', '--q'; GNU grep resolves a long name that is no
+    exact option as a prefix, as getopt does, so a name that is no exact option of the stage's _GATE_STDIN_GRAMMAR
+    and starts one of those options, at any length, is read as it, and an ambiguous one such as '--c' that could
+    be one notes too: '--file' stays the pattern-file option). For rg the short letters are -m/-q/-c/-l (rg -L is
+    --follow) and its own value letters stop the scan. Scanning stops at '--'. It models only a few value
+    options, so it can read an option's value as a flag ('grep --label -m .'): over-matching by design, it only
+    ever costs a note."""
+    trunc_short, value_short = ((_GATE_RG_TRUNC_SHORT, _GATE_RG_VALUE_SHORT) if word == "rg"
+                                else (_GATE_GREP_TRUNC_SHORT, _GATE_GREP_VALUE_SHORT))
+    grammar = _GATE_STDIN_GRAMMAR[word]
+    exact = grammar[2] | grammar[3]
+    skip = False
+    for tok in args:
+        if skip:
+            skip = False
+            continue
+        if tok == "--":
+            break
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            abbrev = name not in exact
+            if any(name.startswith(opt) or (abbrev and opt.startswith(name)) for opt in _GATE_GREP_TRUNC_LONG):
+                return "{} {}".format(word, name)
+            if name in _GATE_GREP_VALUE_LONG and "=" not in tok:
+                skip = True
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in trunc_short:
+                    return "{} -{}".format(word, ch)
+                if ch in value_short:
+                    skip = i == len(body) - 1   # a bare value letter: its value is the next token
+                    break
+    return None
+
+
+def _gate_count(text):
+    """True when text is a positive decimal integer with no sign: ASCII digits only, at least one of them not 0.
+    Decided lexically, so no count of any length reaches int() (Python refuses to convert over 4,300 digits)."""
+    return bool(_GATE_COUNT_RE.match(text)) and bool(text.lstrip("0"))
+
+
+def _gate_line_count(args):
+    """The line count of a head or tail stage on the sink allow-list, as text, or None: '10' for no argument
+    at all, else N for exactly one of '-n N', '-nN', '--lines=N' or '-N' where N is _gate_count. Any other
+    argument list (tail +N, head -n -N, a byte count, an option or operand outside those) is None."""
+    if not args:
+        return "10"
+    if len(args) == 2 and args[0] == "-n":
+        count = args[1]
+    elif len(args) != 1 or not args[0].startswith("-"):
+        return None
+    elif args[0].startswith("--lines="):
+        count = args[0][len("--lines="):]
+    else:
+        count = args[0][2:] if args[0].startswith("-n") else args[0][1:]
+    return count if _gate_count(count) else None
+
+
+def _gate_grep_limit(word, args):
+    """The limiting flag of a grep-family stage on the sink allow-list ('-q', '-m 5', ...), or None: exactly
+    one limiting flag, each its own word (grep, egrep and fgrep: -m N with N a _gate_count, -q, -c, -l or -L;
+    rg: -q, -c or -l), and otherwise exactly one pattern, either one '-e PATTERN' or a positional operand that
+    is the last word. A second limiting flag or pattern, a cluster, a long option, any other option, a '--'
+    or an input operand leaves the stage off the list."""
+    limits = "qcl" if word == "rg" else "mqclL"
+    flag = None
+    patterns = 0
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok == "-e" and i < len(args):
+            patterns += 1
+            i += 1
+        elif len(tok) == 2 and tok[0] == "-" and tok[1] in limits and flag is None:
+            flag = tok
+            if tok == "-m":
+                if i >= len(args) or not _gate_count(args[i]):
+                    return None
+                flag = "-m " + args[i]
+                i += 1
+        elif not tok.startswith("-") and i == len(args) and not patterns:
+            patterns = 1
+        else:
+            return None
+    return flag if patterns == 1 else None
+
+
+# What each sink on the allow-list does to its input, for the deny message (a limiting flag's letter keys it; a
+# count is named with its leading zeros stripped). GNU grep 3.12 reads no configuration file and ignores
+# GREP_OPTIONS (checked 2026-10-07). rg reads the configuration file RIPGREP_CONFIG_PATH names, which the hook
+# cannot see, so its texts say "normally" and name an option that changes them (ripgrep 15.1.0, checked
+# 2026-10-07: under --stats, rg -q, -c and -l add statistics; under --invert-match, -c counts and -l names by
+# the lines that do not match; no configuration option tried made them pass the input on).
+_GATE_GREP_EFFECTS = dict((
+    ("m", "which passes on only the first {}"),
+    ("q", "which prints nothing at all"),
+    ("c", "which prints only a count of the lines that match its pattern"),
+    ("l", "which prints only a name when a line matches its pattern"),
+    ("L", "which prints only a name when no line matches its pattern"),
+))
+_GATE_RG_CONFIG = (" (an rg configuration file named by RIPGREP_CONFIG_PATH can add an option that changes this, as "
+                   "{} does)")
+_GATE_RG_EFFECTS = dict((
+    ("q", "which normally prints nothing at all" + _GATE_RG_CONFIG.format("--stats")),
+    ("c", "which normally prints only a count of the lines that match its pattern"
+          + _GATE_RG_CONFIG.format("--stats or --invert-match")),
+    ("l", "which normally prints only a name when a line matches its pattern"
+          + _GATE_RG_CONFIG.format("--stats or --invert-match")),
+))
+
+
+def _truncating_sink_kind(argv):
+    """gatdis deny tier. (label, effect) of one pipeline stage on the sink allow-list, or None: head or tail
+    with a _gate_line_count, or a grep-family stage with a _gate_grep_limit (the comment above
+    _GATE_CUTTING_WORDS gives the list). The label is the stage as typed, its wrappers aside ('tail -20', and for a
+    grep-family stage its word and limiting flag, 'grep -m 007'); the effect says what the stage passes on, naming
+    a count with its leading zeros stripped. The stage's command word is resolved through the four
+    plain wrappers by _gate_peel ('| env head', '| timeout 5 head', an alias-suppressing '| \\tail'); a
+    stage behind any other wrapper ('| command tail', '| sudo head', '| busybox tail') is not matched here
+    and only notes. Every other stage, cut included, is None. Purely lexical."""
+    argv = _gate_peel(argv)
+    if not argv:
+        return None
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in ("head", "tail"):
+        count = _gate_line_count(args)
+        if count is None:
+            return None
+        count = count.lstrip("0")
+        return " ".join(argv), "which passes on only the {} {} of its input".format(
+            "first" if word == "head" else "last", "line" if count == "1" else count + " lines")
+    if word in _GATE_GREP_SINKS:
+        flag = _gate_grep_limit(word, args)
+        if flag is None:
+            return None
+        effects = _GATE_RG_EFFECTS if word == "rg" else _GATE_GREP_EFFECTS
+        count = flag[3:].lstrip("0")
+        return "{} {}".format(argv[0], flag), effects[flag[1]].format(
+            "line that matches its pattern" if count == "1" else count + " lines that match its pattern")
+    return None
+
+
+def _gate_note_sink_kind(argv):
+    """gatdis note tier. The kind of a stage that may pass on only part of its input, or None: a deny-tier
+    sink (_truncating_sink_kind), a head, tail or cut that reads its stdin with any arguments
+    (_gate_reads_stdin), a grep-family stage reading its stdin with a limiting option the broad scan
+    (_grep_truncation) sees, or any sed or awk program (_GATE_PROGRAM_FILTERS), which the hook does not
+    parse; each through the four plain wrappers. Over-matching by design: it costs a note, never a refusal."""
+    kind = _truncating_sink_kind(argv)
+    if kind is not None:
+        return kind[0]
+    argv = _gate_peel(argv)
+    if not argv:
+        return None
+    word = _gate_word(argv[0])
+    args = argv[1:]
+    if word in _GATE_PROGRAM_FILTERS:
+        return "{} program".format(word)
+    if not _gate_reads_stdin(word, args):
+        return None
+    if word in _GATE_CUTTING_WORDS:
+        return word
+    if word in _GATE_GREP_SINKS:
+        return _grep_truncation(word, args)
+    return None
+
+
 def _orch_json_kind(value):
     """A short JSON type phrase for a malformed-input deny message ('null', 'a string', 'an array')."""
     if value is None:
@@ -10567,7 +11571,8 @@ def orch_truncation_guard(data):
                     "full output AND its exit status are discarded - the completion signal would bind to the "
                     "truncated output and a failing producer would read as a clean, finished run. It is "
                     "denied. Capture the producer's FULL output durably instead: redirect its own stdout to a "
-                    "real file (producer > out.log) and read the file, or run it in the foreground and wait; "
+                    "real file at an absolute path (producer > /abs/path/out.log) and read the file, or run it "
+                    "in the foreground and wait; "
                     "never bind a tracked dispatch's completion to a head/tail-truncated view.".format(_cw),
                     "AIQT guardrail: denied a background dispatch piped into a truncating sink ({}) that "
                     "discards the producer's output and failure (rules trkasy/vrfdlv); capture the full "
