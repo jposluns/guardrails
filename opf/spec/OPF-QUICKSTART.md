@@ -75,9 +75,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    is not detected. The scan also has a path limit: the scan checks the root's current path only
    (a store committed under another directory, for example before a rename, is not detected).
    `opf adopt` is the path for re-adopting any prior ancestry. When the scan does find a prior
-   store, the refusal also prints a `git checkout` command for restoring it from the commit it
-   names; that command is labelled NOT shell-ready when a path in it holds a non-printable
-   character. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   store, the refusal also prints a `git checkout` command for restoring the store paths the
+   named commit holds, under `--no-replace-objects` (so a replacement ref cannot substitute
+   other bytes for that commit's) and `--literal-pathspecs`; when the store was deleted across
+   more than one commit, that commit holds only part of the store, so the first command is
+   labelled incomplete by itself and an additional command restores the rest. When a path in a
+   command would hold a non-printable character, no command is printed at all: the refusal
+   instead names the repository, commit, and paths in an inert escaped form, for a restore
+   performed by hand. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.

@@ -540,18 +540,81 @@ def _suite_isolated(invoke):
                 # its stated limits fails every vector that reaches it.
                 history_stage = "checking git history for a prior store"
 
-                def prior_store_output(root, repo, commit, restored, shell_ready):
+                def inert_path(path):
+                    # An independent spelling of the inert escape: every character outside
+                    # the fixed safe set becomes a Python \x / \u / \U escape, so "$", "`",
+                    # every quote and every space never reach a printed detail line raw.
+                    safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                               "0123456789./-_+,:@%=")
+
+                    def escape(ch):
+                        code = ord(ch)
+                        if code < 0x100:
+                            return "\\x%02x" % code
+                        if code < 0x10000:
+                            return "\\u%04x" % code
+                        return "\\U%08x" % code
+
+                    return "".join(ch if ch in safe else escape(ch) for ch in path)
+
+                def restore_command(repo, commit, paths):
+                    return ("  git -C " + shlex.quote(str(repo))
+                            + " --no-replace-objects --literal-pathspecs checkout "
+                            + commit + " -- "
+                            + " ".join(shlex.quote(path) for path in paths))
+
+                def prior_store_output(root, repo, commit, restored, shell_ready, extra=None):
                     rel = os.path.relpath(str(root), str(repo)).replace(os.sep, "/")
                     rel = "" if rel == "." else rel + "/"
                     paths = [rel + name for name in restored]
+                    extra_commit = extra[0] if extra else None
+                    extra_paths = [rel + name for name in extra[1]] if extra else []
                     if shell_ready:
-                        quote = shlex.quote
-                        label = "shell-ready; it restores the store paths that commit holds"
+                        if extra:
+                            remedy = ("restore the store from the commits with the restore "
+                                      "commands below (this history deleted the store across "
+                                      "more than one commit, so one command cannot restore "
+                                      "it whole)")
+                            label = ("shell-ready; it restores only the store paths its "
+                                     "commit holds, and the additional command below "
+                                     "restores the rest")
+                        else:
+                            remedy = ("restore the store from that commit with the restore "
+                                      "command below")
+                            label = ("shell-ready; it restores the store paths that commit "
+                                     "holds")
+                        restore = ["opf init: restore command (" + label + "):",
+                                   restore_command(repo, commit, paths)]
+                        if extra:
+                            restore += [
+                                "opf init: additional restore command (shell-ready; it "
+                                "restores the remaining store path from the newest "
+                                "first-parent tree that holds it):",
+                                restore_command(repo, extra_commit, extra_paths)]
                     else:
-                        quote = ascii
-                        label = ("NOT shell-ready: a path in it holds a non-printable "
-                                 "character, shown escaped as a Python string literal; "
-                                 "replace each escaped path with the real one")
+                        remedy = ("restore the store from the "
+                                  + ("commits" if extra else "commit")
+                                  + " and the paths the lines below name (no command is "
+                                  "printed: a path in it would hold a non-printable "
+                                  "character)")
+                        restore = (
+                            ["opf init: restore command withheld: a path in it holds a "
+                             "non-printable character, and an escaped command could still "
+                             "carry a live shell substitution, so no command is printed. "
+                             "Restore each path named below from the commit named above it, "
+                             "in the repository named below, by your own means, reading each "
+                             "escaped path as a Python string literal in which every "
+                             "character outside A-Za-z0-9 . / - _ + , : @ % = is written as "
+                             "an escape:",
+                             "opf init:   repository: " + inert_path(str(repo)),
+                             "opf init:   commit: " + commit]
+                            + ["opf init:   restore path: " + inert_path(path)
+                               for path in paths])
+                        if extra:
+                            restore += (
+                                ["opf init:   additional commit: " + extra_commit]
+                                + ["opf init:   additional restore path: " + inert_path(path)
+                                   for path in extra_paths])
                     return (
                         "opf init: REFUSED at " + ascii(str(root)) + " during " + history_stage
                         + ": a prior store exists in this repository's git history: commit "
@@ -559,15 +622,13 @@ def _suite_isolated(invoke):
                         + ascii(rel + ".opf.toml") + " or a store manifest "
                         + ascii(rel + ".working/<subdir>/manifest.toml")
                         + " (spec 4.3, 4.5), and spec 8.2 forbids restarting its counters at "
-                        "zero (record ids would be reissued). Remedy: restore the store from "
-                        "that commit with the restore command below, or re-adopt the ancestry "
+                        "zero (record ids would be reissued). Remedy: " + remedy
+                        + ", or re-adopt the ancestry "
                         "with `opf adopt`. Plain `opf init` refuses whenever this scan of "
                         "HEAD's first-parent line finds a prior store, and " + _SIDELINE_LIMIT
                         + " (adoption across such side lines is `opf adopt`'s authority); "
                         + _PATH_LIMIT + "; exit 2\n"
-                        "opf init: restore command (" + label + "):\n"
-                        "  git -C " + quote(str(repo)) + " --literal-pathspecs checkout "
-                        + commit + " -- " + " ".join(quote(path) for path in paths) + "\n"
+                        + "\n".join(restore) + "\n"
                         "opf init: preflight refused; no publication attempted.\n")
 
                 def cannot_evaluate_output(root, message):
@@ -599,15 +660,20 @@ def _suite_isolated(invoke):
                     raise OSError("no POSIX sh on PATH to run the printed restore command")
 
                 def run_restore(output):
-                    # Runs the printed restore line through a real POSIX shell, from a
-                    # directory outside the repository (the command carries its own -C).
+                    # Runs every printed restore line through a real POSIX shell, in the
+                    # printed order, from a directory outside the repository (each command
+                    # carries its own -C); None when no command line was printed at all, 0
+                    # only when every printed command succeeded.
                     lines = [line for line in output.splitlines() if line.startswith("  git -C ")]
-                    if len(lines) != 1:
+                    if not lines:
                         return None
-                    proc = subprocess.run(["sh", "-c", lines[0].strip()], cwd=str(base),
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                          timeout=120)
-                    return proc.returncode
+                    for line in lines:
+                        proc = subprocess.run(["sh", "-c", line.strip()], cwd=str(base),
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                              timeout=120)
+                        if proc.returncode != 0:
+                            return proc.returncode
+                    return 0
 
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
                 # over a store git HISTORY shows existed. Reproduction: init, commit the store,
@@ -1001,6 +1067,13 @@ def _suite_isolated(invoke):
                       opf._init_history_rels(PureWindowsPath("sub", "dir"))
                       == ("sub/dir/" + _opf_store.POINTER_REL, "sub/dir/" + working))
 
+                # QA round 4 MINOR 4: the docstring's statement of the current-path limit,
+                # pinned like the three user-facing sites (the refusal, the success output and
+                # OPF-QUICKSTART.md), so the fourth copy cannot drift from them silently.
+                check("ancestry: the _init_no_prior_store docstring states the current-path "
+                      "limit in the shared words",
+                      _states_path_limit(opf._init_no_prior_store.__doc__))
+
                 # QA round 3 MINOR 3: the missing-newline and NUL arms of the info/grafts shape
                 # check. Real git always ends the line with a newline and cannot print a NUL in
                 # a path, so these answers come from a stubbed _run_git (a commit-holding,
@@ -1052,22 +1125,27 @@ def _suite_isolated(invoke):
                 check("ancestry: the stubbed scan passes a well-formed absent grafts path",
                       verdict is None and calls[-1][:1] == ["rev-list"])
 
-                # QA round 2 MINOR 2, QA round 3 MEDIUM 1 and MINOR 2: path-derived text in the
-                # refusal. Each fixture commits a store at a sub-root with a hostile or non-ASCII
-                # name, deletes the store (CHANGELOG.md stays), and re-inits there; the complete
-                # output is compared with text built here. Non-printable names (C0 controls ESC
-                # and BEL; format characters U+202E and U+200B; the C1 control U+009B) must never
-                # reach the terminal raw, so the restore command is escaped and labelled NOT
-                # shell-ready. Printable names (cafe with U+00E9, and it's$HOME, whose quote and
-                # $ a shell would act on) get a shell-ready shlex-quoted command, which is run
-                # through a real POSIX shell and must restore the committed store byte for byte.
+                # QA round 2 MINOR 2, QA round 3 MEDIUM 1 and MINOR 2, QA round 4 MINOR 2:
+                # path-derived text in the refusal. Each fixture commits a store at a sub-root
+                # with a hostile or non-ASCII name, deletes the store (CHANGELOG.md stays), and
+                # re-inits there; the complete output is compared with text built here.
+                # Non-printable names (C0 controls ESC and BEL; format characters U+202E and
+                # U+200B; the C1 control U+009B) must never reach the terminal raw, and NO
+                # command is printed for them at all (the round-3 ascii()-escaped command could
+                # keep a substitution live in some quotings): the refusal carries only inert
+                # withheld-command detail lines. Printable names (cafe with U+00E9, and
+                # it's$HOME, whose quote and $ a shell would act on) get a shell-ready
+                # shlex-quoted command, which is run through a real POSIX shell and must
+                # restore the committed store byte for byte.
                 # DISCRIMINATORS: M-refusal-raw (paths formatted without ascii()) and
                 # M-no-printable-gate (shlex.quote for every path, so raw controls in the
-                # command) fail the non-printable vectors; M-repr-for-ascii (repr keeps a
-                # printable U+00E9 raw in the descriptive mentions) and M-ascii-in-command (the
-                # round-3 Python-quoted command, which bash cannot use for cafe) fail the cafe
-                # vector; M-no-shlex (paths unquoted) and M-ascii-in-command (Python's double
-                # quotes let the shell expand $HOME) fail the it's$HOME vector.
+                # command) fail the non-printable vectors, as does M-ascii-fallback (the
+                # round-3 escaped command printed instead of the withheld detail lines);
+                # M-repr-for-ascii (repr keeps a printable U+00E9 raw in the descriptive
+                # mentions) and M-ascii-in-command (a Python-quoted command, which bash cannot
+                # use for cafe) fail the cafe vector; M-no-shlex (paths unquoted) and
+                # M-ascii-in-command (Python's double quotes let the shell expand $HOME) fail
+                # the it's$HOME vector.
                 def sub_root_refusal(fixture, name):
                     repo = make_git(fixture)
                     sub = repo / name
@@ -1097,12 +1175,15 @@ def _suite_isolated(invoke):
                         fixture, name)
                     check("ancestry " + label + ": fixture first init succeeds",
                           first_rc == EXIT_OK)
-                    check("ancestry " + label + ": refused with the complete text, the restore "
-                          "command escaped and labelled NOT shell-ready",
+                    check("ancestry " + label + ": refused with the complete text, the "
+                          "command withheld and the details inert-escaped",
                           rc == EXIT_ERROR and output == prior_store_output(
                               sub, repo, commit, [".opf.toml", ".working"], False))
                     check("ancestry " + label + ": no raw non-printable character in the output",
                           raw_free(output))
+                    check("ancestry " + label + ": no runnable restore line is printed",
+                          not any(line.startswith("  git")
+                                  for line in output.splitlines()))
 
                 for label, fixture, name in (
                         ("printable non-ASCII cafe", "ancestry-cafe", "caf" + chr(0xE9)),
@@ -1118,6 +1199,213 @@ def _suite_isolated(invoke):
                     check("ancestry " + label + ": the printed restore command, run by a POSIX "
                           "shell, restores the committed store",
                           run_restore(output) == 0 and store_contents(sub) == held)
+
+                # QA round 4 MINOR 2 (treated as a security fix): the withheld-command
+                # refusal must print NOTHING a shell would execute. The round-3 fallback
+                # printed an ascii()-escaped command, and for a name holding a single quote
+                # and no double quote, ascii() yields a DOUBLE-quoted Python literal in which
+                # $(touch PWNED) stays live under POSIX double-quote semantics: pasting that
+                # line created PWNED. Now no command line is printed for a non-printable path,
+                # the detail lines carry no "$" or "`" at all, and this vector runs the
+                # complete remedy block, and separately each of its lines, through a real
+                # POSIX shell from an EMPTY directory and asserts nothing was created. (The
+                # REFUSED line above the block is diagnostic prose, not a remedy to paste; the
+                # remedy block is the paste surface this vector locks down.) DISCRIMINATORS:
+                # M-ascii-fallback (the round-3 escaped command printed) creates PWNED in the
+                # empty directory; a safe set widened to admit "$" fails the no-dollar check.
+                subst_name = "x'$(touch PWNED)\x07"
+                repo, sub, commit, held, first_rc, rc, output = sub_root_refusal(
+                    "ancestry-subst", subst_name)
+                check("ancestry substitution name: fixture first init succeeds",
+                      first_rc == EXIT_OK)
+                check("ancestry substitution name: refused with the complete withheld text",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          sub, repo, commit, [".opf.toml", ".working"], False))
+                check("ancestry substitution name: no raw non-printable character in the output",
+                      raw_free(output))
+                remedy_block = output.splitlines()[1:-1]
+                check("ancestry substitution name: the remedy block is the withheld form, "
+                      "with no command line and no substitution character anywhere",
+                      len(remedy_block) >= 4
+                      and remedy_block[0].startswith("opf init: restore command withheld")
+                      and not any(line.startswith("  git") for line in remedy_block)
+                      and "$" not in "\n".join(remedy_block)
+                      and "`" not in "\n".join(remedy_block))
+                subst_probe = base / "subst-empty-probe"
+                subst_probe.mkdir()
+                subprocess.run(["sh"],
+                               input=("\n".join(remedy_block) + "\n").encode("utf-8"),
+                               cwd=str(subst_probe), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=120)
+                whole_block_created = sorted(p.name for p in subst_probe.iterdir())
+                for line in remedy_block:
+                    subprocess.run(["sh", "-c", line], cwd=str(subst_probe),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   timeout=120)
+                check("ancestry substitution name: the remedy block run through sh in an "
+                      "empty directory, whole and line by line, created nothing",
+                      whole_block_created == []
+                      and sorted(p.name for p in subst_probe.iterdir()) == [])
+
+                # QA round 4 MINOR 3: the REPOSITORY-path half of the printable gate, with the
+                # root at the repository top and every restored path printable, so only
+                # str(repo) can trip the gate. A gate reading the restored paths alone would
+                # label this remedy shell-ready and print the raw ESC control character.
+                # DISCRIMINATOR: M-gate-ignores-repo ([str(repo)] dropped from the gate)
+                # prints a shell-ready command with a raw ESC and fails both checks.
+                ctl_repo = make_git("ancestry-repo\x1b[31mred")
+                rc, output = run(ctl_repo)
+                check("ancestry control-character repository: fixture first init succeeds",
+                      rc == EXIT_OK)
+                git_call(ctl_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(ctl_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                ctl_commit = head_of(ctl_repo)
+                git_call(ctl_repo, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                git_call(ctl_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store"])
+                rc, output = run(ctl_repo)
+                check("ancestry control-character repository: refused with the complete "
+                      "withheld text, the repository path alone tripping the gate",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          ctl_repo, ctl_repo, ctl_commit,
+                          [".opf.toml", ".working"], False))
+                check("ancestry control-character repository: no raw non-printable character "
+                      "and no runnable restore line in the output",
+                      raw_free(output)
+                      and not any(line.startswith("  git")
+                                  for line in output.splitlines()))
+
+                # QA round 4 MEDIUM (replacement refs): the printed command carries
+                # --no-replace-objects, the neutralization every scan read already runs
+                # under, because git checkout honours replacement refs: without the flag a
+                # replacement ref from the named commit to one with different store bytes
+                # makes a shell-ready command exit 0 while writing the SUBSTITUTED bytes.
+                # Fixture: commit the store, commit a substituted-counters variant on a side
+                # branch, delete the store on main, install git replace from the store commit
+                # to the variant, re-init. The scan ignores the replacement and names the real
+                # store commit; the printed command must restore that commit's ORIGINAL
+                # bytes. The potency probe shows a flagless checkout of the same commit really
+                # follows the replacement in this fixture, so the byte comparison
+                # DISCRIMINATES M-no-replace-flag (the flag dropped from the printed command).
+                repl = make_git("ancestry-replace")
+                rc, output = run(repl)
+                check("ancestry replacement fixture first init succeeds", rc == EXIT_OK)
+                git_call(repl, ["--literal-pathspecs", "add", "-A"])
+                git_call(repl, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "store"])
+                repl_commit = head_of(repl)
+                repl_original = store_contents(repl)
+                git_call(repl, ["checkout", "-q", "-b", "substituted"])
+                repl_counters = repl / working / machine_name / _opf_check.COUNTERS_NAME
+                repl_sub = repl_counters.read_text(encoding="utf-8").replace("BI = 0", "BI = 9")
+                if "BI = 9" not in repl_sub:
+                    raise OSError("replacement fixture: counters.toml carried no BI = 0 "
+                                  "to substitute")
+                repl_counters.write_text(repl_sub, encoding="utf-8")
+                git_call(repl, ["--literal-pathspecs", "add", "-A"])
+                git_call(repl, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "substituted counters"])
+                repl_bad = head_of(repl)
+                git_call(repl, ["checkout", "-q", "main"])
+                git_call(repl, ["rm", "-r", "-q", "--",
+                                working, _opf_store.POINTER_REL])
+                git_call(repl, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "drop store"])
+                git_call(repl, ["replace", repl_commit, repl_bad])
+                rc, output = run(repl)
+                check("ancestry: a replacement ref changes neither the scan nor the complete "
+                      "refusal text",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          repl, repl, repl_commit, [".opf.toml", ".working"], True))
+                # Potency: git_input runs raw git (no --no-replace-objects), so this checkout
+                # resolves the store commit THROUGH the replacement and writes the variant.
+                git_input(repl, ["--literal-pathspecs", "checkout", repl_commit, "--",
+                                 _opf_store.POINTER_REL, working], b"")
+                check("ancestry replacement fixture potency: a flagless checkout of the same "
+                      "commit restores the substituted bytes",
+                      repl_counters.read_text(encoding="utf-8") == repl_sub
+                      and store_contents(repl) != repl_original)
+                check("ancestry: the printed restore command restores the ORIGINAL store "
+                      "bytes with the replacement ref still installed",
+                      run_restore(output) == 0 and store_contents(repl) == repl_original)
+
+                # QA round 4 MEDIUM 1 (split deletion): .working deleted in one commit and
+                # the pointer in a later one left the round-3 remedy restoring the pointer
+                # ALONE while presenting that one command as the store restore: the named
+                # commit (the final deletion's first parent) holds only .opf.toml, whose
+                # dir:. target, counters included, stayed deleted after an exit-0 command.
+                # Now the refusal labels the first command incomplete by itself and prints an
+                # ADDITIONAL command restoring .working from the newest first-parent tree
+                # that holds it (here the counter-bump commit); running both restores the
+                # whole store, high-water included. DISCRIMINATOR: M-no-split-probe (the
+                # probe removed) prints the round-3 single pointer-only command labelled as
+                # the store restore and fails the text and the byte comparison.
+                split = make_git("ancestry-split-working-first")
+                rc, output = run(split)
+                check("ancestry split-deletion fixture first init succeeds", rc == EXIT_OK)
+                git_call(split, ["--literal-pathspecs", "add", "-A"])
+                git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "store"])
+                split_counters = split / working / machine_name / _opf_check.COUNTERS_NAME
+                split_seeded = split_counters.read_text(encoding="utf-8").replace(
+                    "BI = 0", "BI = 7")
+                if "BI = 7" not in split_seeded:
+                    raise OSError("split fixture: counters.toml carried no BI = 0 to raise")
+                split_counters.write_text(split_seeded, encoding="utf-8")
+                git_call(split, ["--literal-pathspecs", "add", "-A"])
+                git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "BI high-water 7"])
+                split_full = head_of(split)
+                split_original = store_contents(split)
+                git_call(split, ["rm", "-r", "-q", "--", working])
+                git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "drop working first"])
+                split_ptr = head_of(split)
+                git_call(split, ["rm", "-q", "--", _opf_store.POINTER_REL])
+                git_call(split, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "drop pointer second"])
+                rc, output = run(split)
+                check("ancestry split deletion: the complete refusal names both commits and "
+                      "labels the pointer-only command incomplete by itself",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          split, split, split_ptr, [".opf.toml"], True,
+                          extra=(split_full, [".working"])))
+                check("ancestry split deletion: running both printed commands restores the "
+                      "whole store, high-water counters included",
+                      run_restore(output) == 0
+                      and store_contents(split) == split_original)
+
+                # The same split in the OTHER order (pointer deleted first), exercising the
+                # pointer arm of the probe: the named commit holds .working alone and the
+                # additional command restores .opf.toml.
+                split2 = make_git("ancestry-split-pointer-first")
+                rc, output = run(split2)
+                check("ancestry pointer-first split fixture first init succeeds",
+                      rc == EXIT_OK)
+                git_call(split2, ["--literal-pathspecs", "add", "-A"])
+                git_call(split2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                  "commit", "-m", "store"])
+                split2_full = head_of(split2)
+                split2_original = store_contents(split2)
+                git_call(split2, ["rm", "-q", "--", _opf_store.POINTER_REL])
+                git_call(split2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                  "commit", "-m", "drop pointer first"])
+                split2_wrk = head_of(split2)
+                git_call(split2, ["rm", "-r", "-q", "--", working])
+                git_call(split2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                  "commit", "-m", "drop working second"])
+                rc, output = run(split2)
+                check("ancestry pointer-first split: the complete refusal restores .working "
+                      "first and the pointer through the additional command",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          split2, split2, split2_wrk, [".working"], True,
+                          extra=(split2_full, [".opf.toml"])))
+                check("ancestry pointer-first split: running both printed commands restores "
+                      "the whole store",
+                      run_restore(output) == 0
+                      and store_contents(split2) == split2_original)
 
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side

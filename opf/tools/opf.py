@@ -14121,10 +14121,36 @@ def _init_glob_escape(text):
     return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
 
 
+_INIT_INERT_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_+,:@%=")
+
+
+def _init_inert_path(path):
+    """Spell a path so no POSIX shell can execute any part of it: every character outside a
+    fixed safe set (ASCII letters, digits, and . / - _ + , : @ % =) becomes a Python
+    string-literal \\x / \\u / \\U escape. ascii() is NOT inert for this purpose: a name
+    holding a single quote and no double quote comes back as a DOUBLE-quoted Python literal, in
+    which $(...), `...` and $VAR stay live under POSIX double-quote semantics, and in a
+    single-quoted form a quote in the name ends the shell's quote early and re-arms them (QA
+    round 4 MINOR 2). Here "$", "`", every quote, the space and every other metacharacter are
+    escaped, so a pasted detail line can reference no substitution or expansion at all; the
+    printed form is for reconstruction by hand, not for pasting."""
+    def escape(ch):
+        code = ord(ch)
+        if code < 0x100:
+            return "\\x{:02x}".format(code)
+        if code < 0x10000:
+            return "\\u{:04x}".format(code)
+        return "\\U{:08x}".format(code)
+    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in path)
+
+
 class _InitPriorStoreRefusal(RuntimeError):
     """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
     _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
-    restore_lines (a label line, then the restore command alone on its line). The exit code is the
+    restore_lines (a label line and a restore command alone on its line, twice when the store
+    was deleted across two commits, or withheld-command detail lines when a path is not
+    printable). The exit code is the
     same 2 either way; only the reporting wording distinguishes the two verdicts."""
 
     def __init__(self, message, restore_lines):
@@ -14157,12 +14183,22 @@ def _init_no_prior_store(git, repo, root):
     unsupported-older-store, never reads it as absent), and no blob content could downgrade the
     refusal. A found ancestor REFUSES, naming the newest first-parent commit whose tree held a
     store and the remedy (restore that commit's store, or `opf adopt`); it never passes silently.
-    The restore command, carried in restore_lines and printed alone on a line after the REFUSED
-    line, names only the store paths that commit's tree holds (git checkout fails outright on a
-    pathspec the commit lacks). It is shell-ready only when the repository path and every
-    restored path are printable (str.isprintable): each is then shlex-quoted, under
-    --literal-pathspecs as the staging hint is. Otherwise every path in it is ascii()-escaped
-    and the command is labelled NOT shell-ready. Descriptive path mentions always use ascii().
+    Each restore command, carried in restore_lines and printed alone on a line after the REFUSED
+    line, names only the store paths its commit's tree holds (git checkout fails outright on a
+    pathspec the commit lacks) and runs under --no-replace-objects, the neutralization every
+    read of this scan already runs under, because checkout honours replacement refs: without the
+    flag a replacement ref could substitute other bytes for the named commit's (QA round 4), and
+    under --literal-pathspecs as the staging hint is. A history that deleted the store across
+    MORE than one commit leaves the named commit's tree holding only part of the store: the
+    store path it lacks is probed one step the same way (its newest first-parent change at or
+    before the named commit, else that change's first parent), a found holder is printed as a
+    second, ADDITIONAL restore command, and the first command's label says it is incomplete by
+    itself, so a partial restore is never presented as the whole store. Commands are printed
+    ONLY when the repository path and every restored path are printable (str.isprintable): each
+    is then shell-quoted into one literal word. Otherwise NO command is printed at all, because
+    every escaped command form can leave a substitution live in some quoting (QA round 4 MINOR
+    2): the refusal instead names the repository, commit(s) and path(s) through
+    _init_inert_path. Descriptive path mentions always use ascii().
 
     SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
     proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
@@ -14332,27 +14368,101 @@ def _init_no_prior_store(git, repo, root):
                 "git history preflight: commit {} changed a store path yet neither its tree "
                 "nor its first parent's holds a store identifier; refusing rather than "
                 "guessing".format(newest))
+    # A SPLIT deletion can leave the newest holding tree PARTIAL (QA round 4 MEDIUM 1): with
+    # .working deleted in one commit and the pointer in a later one (or the reverse), the
+    # commit named above holds only one store path while an older first-parent tree still
+    # holds the other, so a command restoring only what the named commit holds would quietly
+    # leave the counters deleted while exiting 0. Each store path the named commit lacks is
+    # therefore probed with its own single-hit first-parent walk from that commit, under the
+    # same one-step parent convention as the main walk (a hit whose own tree lacks the marker
+    # is a deletion, so its first parent's tree is read; a parentless hit can only ADD, so its
+    # tree lacking a REAL marker means none existed). A holder found there becomes a second,
+    # ADDITIONAL restore command and the first command's label says it is incomplete by
+    # itself. A probe that finds no real holder (nothing at or before the named commit ever
+    # held the path, or only a non-store entry such as a committed directory at the pointer
+    # path changed it) omits only this additional disclosure, never the refusal.
+    extra_commit = None
+    extra_paths = []
+    for marker, spec in ((pointer_rel, specs[0]), (working_rel, specs[1])):
+        if marker in held:
+            continue
+        hit_raw = read(["rev-list", "--first-parent", "--max-count=1", ancestor, "--",
+                        spec]).out.strip()
+        if not hit_raw:
+            continue   # proven: no first-parent tree at or before the named commit held it
+        hit = oid(hit_raw)
+        holder = hit
+        if marker not in tree_store_paths(hit):
+            parent = read(["rev-parse", "--verify", "--quiet", hit + "^1"], ok=(0, 1))
+            if parent.rc == 1:
+                continue   # a parentless commit only ADDS; lacking the marker, it added none
+            holder = oid(parent.out.strip())
+            if marker not in tree_store_paths(holder):
+                continue   # a non-store change at the path, not a restorable store
+        extra_commit = holder
+        extra_paths.append(marker)
     # Every descriptive path mention goes through ascii(), the escaping this file uses for
     # paths in diagnostics, so a control character in a directory name cannot reach the
-    # terminal raw; the commit id is already validated hex (oid). The restore command is
-    # shell-ready only when every path in it is printable: shlex.quote then makes each path one
-    # literal shell word (a quote or $ in a name stays literal) and --literal-pathspecs keeps
-    # git from reading it as a pattern. A non-printable path (a control, format or separator
-    # character, or an undecodable byte) must not reach the terminal raw, so the command is
-    # then ascii()-escaped and labelled NOT shell-ready.
+    # terminal raw; the commit ids are already validated hex (oid). Restore commands are
+    # printed ONLY when the repository path and every restored path are printable: shlex.quote
+    # then makes each path one literal shell word (a quote or $ in a name stays literal),
+    # --literal-pathspecs keeps git from reading it as a pattern, and --no-replace-objects
+    # keeps a replacement ref from substituting another commit's bytes for the named one's (QA
+    # round 4 MEDIUM: checkout honours replacement refs; the scan's own reads already run
+    # under that flag, and of the scan's other neutralizations none applies to a printed
+    # command: grafts never reach this point, and the environment scrub guards only the scan's
+    # own child processes). For a NON-printable path (a control, format or separator
+    # character, or an undecodable byte) NO command is printed at all (QA round 4 MINOR 2):
+    # a printed escaped command could keep a command substitution, a backquote or a variable
+    # expansion live under the shell's quote reading, so the refusal instead names the
+    # repository, the commits and the paths on inert detail lines through _init_inert_path.
     import shlex
-    if all(path.isprintable() for path in [str(repo)] + held):
-        quote = shlex.quote
-        label = "shell-ready; it restores the store paths that commit holds"
+    if all(path.isprintable() for path in [str(repo)] + held + extra_paths):
+        if extra_commit:
+            remedy = ("restore the store from the commits with the restore commands below "
+                      "(this history deleted the store across more than one commit, so one "
+                      "command cannot restore it whole)")
+            label = ("shell-ready; it restores only the store paths its commit holds, and "
+                     "the additional command below restores the rest")
+        else:
+            remedy = "restore the store from that commit with the restore command below"
+            label = "shell-ready; it restores the store paths that commit holds"
+        restore_lines = [
+            "opf init: restore command ({}):".format(label),
+            "  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- {}".format(
+                shlex.quote(str(repo)), ancestor,
+                " ".join(shlex.quote(path) for path in held))]
+        if extra_commit:
+            restore_lines += [
+                "opf init: additional restore command (shell-ready; it restores the "
+                "remaining store path from the newest first-parent tree that holds it):",
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- {}".format(
+                    shlex.quote(str(repo)), extra_commit,
+                    " ".join(shlex.quote(path) for path in extra_paths))]
     else:
-        quote = ascii
-        label = ("NOT shell-ready: a path in it holds a non-printable character, shown "
-                 "escaped as a Python string literal; replace each escaped path with the real one")
+        remedy = ("restore the store from the {} and the paths the lines below name (no "
+                  "command is printed: a path in it would hold a non-printable character)"
+                  .format("commits" if extra_commit else "commit"))
+        restore_lines = (
+            ["opf init: restore command withheld: a path in it holds a non-printable "
+             "character, and an escaped command could still carry a live shell substitution, "
+             "so no command is printed. Restore each path named below from the commit named "
+             "above it, in the repository named below, by your own means, reading each "
+             "escaped path as a Python string literal in which every character outside "
+             "A-Za-z0-9 . / - _ + , : @ % = is written as an escape:",
+             "opf init:   repository: " + _init_inert_path(str(repo)),
+             "opf init:   commit: " + ancestor]
+            + ["opf init:   restore path: " + _init_inert_path(path) for path in held])
+        if extra_commit:
+            restore_lines += (
+                ["opf init:   additional commit: " + extra_commit]
+                + ["opf init:   additional restore path: " + _init_inert_path(path)
+                   for path in extra_paths])
     raise _InitPriorStoreRefusal(
         "a prior store exists in this repository's git history: commit {} on HEAD's "
         "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec 8.2 "
         "forbids restarting its counters at zero (record ids would be reissued). Remedy: "
-        "restore the store from that commit with the restore command below, or re-adopt the "
+        "{}, or re-adopt the "
         "ancestry with `opf adopt`. Plain `opf init` refuses whenever this scan of HEAD's "
         "first-parent line finds a prior store, and a store that never reached a tree on "
         "HEAD's first-parent line (for example one created and deleted on a side branch, "
@@ -14360,10 +14470,8 @@ def _init_no_prior_store(git, repo, root):
         "authority); the scan checks the root's current path only (a store committed under "
         "another directory, for example before a rename, is not detected)".format(
             ancestor, ascii(pointer_rel),
-            ascii(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME)),
-        ["opf init: restore command ({}):".format(label),
-         "  git -C {} --literal-pathspecs checkout {} -- {}".format(
-             quote(str(repo)), ancestor, " ".join(quote(path) for path in held))])
+            ascii(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME), remedy),
+        restore_lines)
 
 
 def _init_same_root(root, root_fd):
@@ -14599,7 +14707,8 @@ def _cmd_init(rest):
         # It is raised only by the read-only ancestry preflight, so publication never started.
         # Its text is printed unwrapped because _init_no_prior_store already passed every
         # path-derived value through ascii() (the root here gets the same escaping), and its
-        # restore command holds raw paths only when every one of them is printable.
+        # restore lines hold raw paths only when every path in a printed command is printable
+        # (for a non-printable path no command is printed and each detail line is inert-escaped).
         print("opf init: REFUSED at {} during {}: {}; exit 2".format(
             ascii(str(root)), stage, exc), file=sys.stderr)
         for line in exc.restore_lines:
