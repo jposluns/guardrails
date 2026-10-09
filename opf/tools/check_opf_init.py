@@ -38,6 +38,18 @@ EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_ERROR = 2
 
+# The first-parent scan limit, worded identically in the init refusal, the successful init output
+# and OPF-QUICKSTART.md (QA round 2 MAJOR 1). Asserted literally against whitespace-normalized
+# text, so the earlier "unmerged side branch" wording, which missed a store created and deleted
+# on a side branch that WAS merged, fails every site check.
+_SIDELINE_LIMIT = ("a store that never reached a tree on HEAD's first-parent line (for example "
+                   "one created and deleted on a side branch, merged or not) is not detected")
+
+
+def _states_sideline_limit(text):
+    flat = " ".join(text.split())
+    return _SIDELINE_LIMIT in flat and "unmerged" not in flat
+
 
 def _run_init(argv):
     """Run the real dispatcher isolated; preserve its output for discriminating assertions."""
@@ -96,6 +108,7 @@ def _suite_isolated(invoke):
     """Run parser, publication, refusal, and preservation vectors against fresh fixtures."""
     try:
         import tomllib
+        from pathlib import PureWindowsPath
         import _opf_check
         import _opf_observe
         import _opf_release
@@ -501,6 +514,443 @@ def _suite_isolated(invoke):
                 check("resolve-store resolves committed store",
                       resolution.status == _opf_store.RESOLVED
                       and resolution.machine_rel == working + "/" + machine_name)
+
+                # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
+                # over a store git HISTORY shows existed. Reproduction: init, commit the store,
+                # raise a counter high-water and commit, `git rm -r .working .opf.toml` and
+                # commit, then init again. The unfixed init passed (rc 0) and re-zeroed every
+                # namespace, so record ids could be reissued; it must refuse (exit 2), NAME the
+                # newest first-parent commit whose tree held the store (the counter-bump commit,
+                # not the deletion commit), and give the remedy (restore, or `opf adopt`).
+                # DISCRIMINATOR: rc 0 against the pre-fix init.
+                ancestry = make_git("ancestry-prior-store")
+                rc, output = run(ancestry)
+                check("ancestry fixture first init succeeds", rc == EXIT_OK)
+                git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                counters_path = ancestry / working / machine_name / _opf_check.COUNTERS_NAME
+                seeded = counters_path.read_text(encoding="utf-8").replace("BI = 0", "BI = 7")
+                if "BI = 7" not in seeded:
+                    raise OSError("ancestry fixture: counters.toml carried no BI = 0 to raise")
+                counters_path.write_text(seeded, encoding="utf-8")
+                git_call(ancestry, ["--literal-pathspecs", "add", "-A"])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "BI high-water 7"])
+                held_commit = git_call(ancestry, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(ancestry, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                git_call(ancestry, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store"])
+                before = _snapshot(ancestry)
+                rc, output = run(ancestry)
+                check("ancestry: re-init over a deleted committed store refused",
+                      rc == EXIT_ERROR and "prior store" in output)
+                check("ancestry: refusal names the newest holding commit", held_commit in output)
+                check("ancestry: refusal gives the adopt remedy", "opf adopt" in output)
+                # QA round 1 MINOR: a DEFINITE prior-store finding is reported as REFUSED in
+                # its own words, never under the generic cannot-evaluate prefix (exit stays 2).
+                check("ancestry: definite finding reported as REFUSED, not cannot-evaluate",
+                      "opf init: REFUSED" in output and "cannot evaluate" not in output)
+                # QA round 2 MAJOR 1: the refusal states the first-parent limit exactly
+                # (merged or not). DISCRIMINATOR: mutant M-refusal-unmerged (the round-1
+                # "only ever lived on an unmerged side branch" refusal wording) fails this.
+                check("ancestry: refusal states the exact first-parent limit",
+                      _states_sideline_limit(output))
+                check("ancestry: refusing init wrote nothing", _snapshot(ancestry) == before)
+
+                # SPEC 8.2 ancestry, fail closed: a SHALLOW clone truncates the first-parent
+                # history, so it cannot prove no prior store existed -- the clipped commits of
+                # THIS fixture do hold one, and the pathspec walk stops silently at the shallow
+                # boundary -- so init is a cannot-evaluate refusal, never a silent pass.
+                # DISCRIMINATOR: rc 0 (the truncation hides the store from an ungated scan)
+                # against a scan without the shallow gate.
+                shallow_prior = base / "ancestry-shallow"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone",
+                                "--depth", "1",
+                                "file://" + str(ancestry), str(shallow_prior)])
+                rc, output = run(shallow_prior)
+                check("ancestry: shallow history refused as cannot-evaluate",
+                      rc == EXIT_ERROR and "SHALLOW" in output and "unshallow" in output)
+
+                # SPEC 8.2 ancestry scope (first-parent line): a store that existed ONLY on a
+                # side branch and was deleted there before the merge never reached a
+                # first-parent tree, so the mainline being initialized never held its counters;
+                # the scan follows the first-parent line (the same line the adoption seed is
+                # proven on, _opf_init_operation decision 6) and init PROCEEDS -- side-line
+                # ancestry is the section 14 adoption investigation concern. (A store that WAS
+                # merged to the mainline is caught: the merge commit tree holds it on the
+                # first-parent line.)
+                sideline = make_git("ancestry-sideline")
+                (sideline / "seed.txt").write_bytes(b"base\n")
+                git_call(sideline, ["--literal-pathspecs", "add", "-A"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "base"])
+                git_call(sideline, ["checkout", "-q", "-b", "feature"])
+                side_machine = sideline / working / machine_name
+                side_machine.mkdir(parents=True)
+                (side_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (sideline / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(sideline, ["--literal-pathspecs", "add", "-A"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store on side"])
+                git_call(sideline, ["rm", "-r", "-q", "--",
+                                    working, _opf_store.POINTER_REL])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store on side"])
+                git_call(sideline, ["checkout", "-q", "main"])
+                git_call(sideline, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "merge", "-q", "--no-ff", "-m",
+                                    "merge feature", "feature"])
+                # The side branch IS merged (the case the round-1 "unmerged" wording missed).
+                check("ancestry-sideline fixture: the store's side branch is merged into HEAD",
+                      _opf_observe._run_git(git, sideline, ["merge-base", "--is-ancestor",
+                                                            "feature", "HEAD"]).rc == 0)
+                rc, output = run(sideline)
+                check("ancestry: side-branch-only store does not block init (first-parent scope)",
+                      rc == EXIT_OK and valid_sources(sideline))
+                # QA round 1: the first-parent limit is disclosed WHERE USERS SEE IT -- the
+                # successful init output -- not only in the docstring. QA round 2 MAJOR 1: in
+                # exact words, since this very fixture's store sat on a MERGED side branch.
+                # DISCRIMINATOR: mutant M-output-unmerged (the round-1 output lines) fails.
+                check("ancestry: success output states the exact first-parent limit",
+                      "first-parent line only" in output and _states_sideline_limit(output))
+                # The quickstart's statement of the same limit (QA round 2 MAJOR 1), read the
+                # way check_opf_homes reads it. DISCRIMINATOR: the round-1 quickstart wording.
+                quickstart = Path(__file__).resolve().parents[1] / "spec" / "OPF-QUICKSTART.md"
+                check("ancestry: OPF-QUICKSTART.md states the exact first-parent limit",
+                      _states_sideline_limit(quickstart.read_text(encoding="utf-8")))
+
+                # SPEC 8.2 ancestry, POINTER-ONLY marker (spec 4.3 relocated store): history
+                # holds ONLY the committed pointer .opf.toml (no .working tree at all), then
+                # deletes it. Only the :(literal) pointer pathspec and tree_holds_store's
+                # pointer arm can find it, so this fixture is the independent discriminator
+                # for both: mutant M-pointer-spec (the :(literal) pathspec dropped) passes
+                # the scan (rc 0), and mutant M-pointer-arm (the pointer arm disabled)
+                # degrades the verdict to refusing-rather-than-guessing without the
+                # prior-store finding; either way the assertions below fail.
+                ptr_only = make_git("ancestry-pointer-only")
+                (ptr_only / "seed.txt").write_bytes(b"base\n")
+                git_call(ptr_only, ["--literal-pathspecs", "add", "-A"])
+                git_call(ptr_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "base"])
+                (ptr_only / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:../elsewhere"\n')
+                git_call(ptr_only, ["--literal-pathspecs", "add", "-A"])
+                git_call(ptr_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "pointer only"])
+                ptr_commit = git_call(ptr_only, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(ptr_only, ["rm", "-q", "--", _opf_store.POINTER_REL])
+                git_call(ptr_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop pointer"])
+                rc, output = run(ptr_only)
+                check("ancestry: pointer-only prior store refused",
+                      rc == EXIT_ERROR and "prior store exists" in output)
+                check("ancestry: pointer-only refusal names the holding commit",
+                      ptr_commit in output)
+
+                # SPEC 8.2 ancestry, MANIFEST-ONLY marker (spec 4.3 default location, pointer
+                # never committed), at the DEFAULT machine subdir: only the :(glob) manifest
+                # pathspec and tree_holds_store's manifest listing can find it. Independent
+                # discriminator for both: mutant M-manifest-spec (the :(glob) pathspec
+                # dropped) passes the scan (rc 0), and mutant M-manifest-arm (the listing
+                # arm disabled) loses the prior-store finding.
+                mf_only = make_git("ancestry-manifest-only")
+                (mf_only / "seed.txt").write_bytes(b"base\n")
+                git_call(mf_only, ["--literal-pathspecs", "add", "-A"])
+                git_call(mf_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "base"])
+                mf_machine = mf_only / working / machine_name
+                mf_machine.mkdir(parents=True)
+                (mf_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                git_call(mf_only, ["--literal-pathspecs", "add", "-A"])
+                git_call(mf_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "manifest only"])
+                mf_commit = git_call(mf_only, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(mf_only, ["rm", "-r", "-q", "--", working])
+                git_call(mf_only, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "drop manifest"])
+                rc, output = run(mf_only)
+                check("ancestry: manifest-only prior store refused",
+                      rc == EXIT_ERROR and "prior store exists" in output)
+                check("ancestry: manifest-only refusal names the holding commit",
+                      mf_commit in output)
+
+                # The same manifest-only shape under a RENAMED machine subdir: spec 4.4/4.5
+                # admit any single-level subdir name, so the glob (and the listing arm) must
+                # match .working/<any>/manifest.toml, not just the default name.
+                mf_renamed = make_git("ancestry-manifest-renamed")
+                (mf_renamed / "seed.txt").write_bytes(b"base\n")
+                git_call(mf_renamed, ["--literal-pathspecs", "add", "-A"])
+                git_call(mf_renamed, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                      "commit", "-m", "base"])
+                ren_machine = mf_renamed / working / "custom-machine"
+                ren_machine.mkdir(parents=True)
+                (ren_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                git_call(mf_renamed, ["--literal-pathspecs", "add", "-A"])
+                git_call(mf_renamed, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                      "commit", "-m", "renamed-machine manifest"])
+                ren_commit = git_call(mf_renamed, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(mf_renamed, ["rm", "-r", "-q", "--", working])
+                git_call(mf_renamed, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                      "commit", "-m", "drop renamed store"])
+                rc, output = run(mf_renamed)
+                check("ancestry: renamed-machine-subdir manifest refused",
+                      rc == EXIT_ERROR and "prior store exists" in output)
+                check("ancestry: renamed-machine refusal names the holding commit",
+                      ren_commit in output)
+
+                # SPEC 8.2 ancestry, GRAFT fail-closed (QA round 1 MAJOR): a legacy
+                # .git/info/grafts line naming the deletion commit WITH NO PARENTS cuts the
+                # parent link inside every rev-list walk (--no-replace-objects neutralizes
+                # replace refs, NOT grafts), so the pre-fix scan saw no store-path commit,
+                # re-init passed (rc 0), and counters restarted at zero over the BI = 7
+                # high-water this history holds. A grafts file that exists is a
+                # cannot-evaluate REFUSAL, never interpreted (the adoption reader's stance);
+                # removing it restores the ordinary prior-store refusal, proving the graft
+                # was the only thing hiding the store. DISCRIMINATOR: rc 0 and a re-zeroed
+                # counters.toml against a scan that lets git resolve grafts.
+                grafted = make_git("ancestry-graft")
+                rc, output = run(grafted)
+                check("ancestry graft fixture first init succeeds", rc == EXIT_OK)
+                git_call(grafted, ["--literal-pathspecs", "add", "-A"])
+                git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "store"])
+                g_counters = grafted / working / machine_name / _opf_check.COUNTERS_NAME
+                g_seeded = g_counters.read_text(encoding="utf-8").replace("BI = 0", "BI = 7")
+                if "BI = 7" not in g_seeded:
+                    raise OSError("graft fixture: counters.toml carried no BI = 0 to raise")
+                g_counters.write_text(g_seeded, encoding="utf-8")
+                git_call(grafted, ["--literal-pathspecs", "add", "-A"])
+                git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "BI high-water 7"])
+                git_call(grafted, ["rm", "-r", "-q", "--",
+                                   working, _opf_store.POINTER_REL])
+                git_call(grafted, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "drop store"])
+                g_drop = git_call(grafted, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                g_file = grafted / ".git" / "info" / "grafts"
+                # init.templateDir= leaves fixtures without .git/info; a real adopter repo has it.
+                g_file.parent.mkdir(exist_ok=True)
+                g_file.write_bytes((g_drop + "\n").encode("ascii"))
+                before = _snapshot(grafted)
+                rc, output = run(grafted)
+                check("ancestry: grafted-away history refused as cannot-evaluate",
+                      rc == EXIT_ERROR and "grafts" in output and "cannot evaluate" in output)
+                check("ancestry: grafted re-init wrote nothing (counters never re-zeroed)",
+                      _snapshot(grafted) == before)
+                # QA round 2 MINOR 3: the grafts refusal states exactly what it found, for
+                # every kind of entry, never that the entry "rewrites parent links" (an empty
+                # file or a dangling link rewrites nothing). DISCRIMINATOR: mutant
+                # M-grafts-found (one fixed description for every kind) fails the kind checks.
+                check("ancestry: grafts refusal names a regular file and its size",
+                      "found a regular file of {} byte(s)".format(len(g_drop) + 1) in output
+                      and "may rewrite parent links" in output)
+                g_file.unlink()
+                g_file.write_bytes(b"")
+                rc, output = run(grafted)
+                check("ancestry: an EMPTY grafts file refuses, named as 0 bytes",
+                      rc == EXIT_ERROR and "found a regular file of 0 byte(s)" in output)
+                g_file.unlink()
+                g_file.symlink_to("absent-grafts-target")
+                rc, output = run(grafted)
+                check("ancestry: a DANGLING grafts link refuses, named with its target",
+                      rc == EXIT_ERROR
+                      and "found a symbolic link to 'absent-grafts-target'" in output)
+                g_file.unlink()
+                g_file.mkdir()
+                rc, output = run(grafted)
+                check("ancestry: a grafts DIRECTORY refuses, named by kind",
+                      rc == EXIT_ERROR and "found an entry of kind directory" in output)
+                g_file.rmdir()
+                rc, output = run(grafted)
+                check("ancestry: grafts file removed, the prior store is found again",
+                      rc == EXIT_ERROR and "prior store exists" in output)
+
+                # QA round 2 MINOR 4: the info/grafts PATH arms, pinned. git prints the
+                # grafts path of a separate git directory as an absolute path, so a git
+                # directory name carrying a non-UTF-8 byte, or a newline, reaches the shape
+                # checks. DISCRIMINATORS: mutant M-undecodable-arm (lenient decode, no
+                # refusal) lstat()s a mangled path, reads it as absent and passes (rc 0);
+                # mutant M-malformed-arm (shape check removed) passes the same way (rc 0).
+                def make_separate(name, gitdir_name):
+                    sep_root = base / name
+                    sep_root.mkdir()
+                    git_call(sep_root, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main",
+                                        "init", "--separate-git-dir",
+                                        str(base / os.fsdecode(gitdir_name))])
+                    (sep_root / "seed.txt").write_bytes(b"base\n")
+                    git_call(sep_root, ["--literal-pathspecs", "add", "-A"])
+                    git_call(sep_root, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                        "commit", "-m", "base"])
+                    return sep_root
+
+                undecodable = make_separate("ancestry-undecodable-gitdir", b"gitdir-\xff")
+                rc, output = run(undecodable)
+                check("ancestry: undecodable info/grafts path refused, never read as absent",
+                      rc == EXIT_ERROR and "cannot evaluate" in output
+                      and "undecodable info/grafts path" in output)
+                newline_dir = make_separate("ancestry-newline-gitdir", b"gitdir-\nx")
+                rc, output = run(newline_dir)
+                check("ancestry: malformed (multi-line) info/grafts path refused",
+                      rc == EXIT_ERROR and "cannot evaluate" in output
+                      and "malformed info/grafts path" in output)
+
+                # The lstat-failure arm: .git/info is a regular FILE, so lstat of info/grafts
+                # fails with NotADirectoryError; the refusal states that exact failure.
+                # DISCRIMINATOR: mutant M-lstat-arm (any OSError read as absent) passes (rc 0).
+                info_file = make_git("ancestry-info-not-a-directory")
+                (info_file / "seed.txt").write_bytes(b"base\n")
+                git_call(info_file, ["--literal-pathspecs", "add", "-A"])
+                git_call(info_file, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                     "commit", "-m", "base"])
+                (info_file / ".git" / "info").write_bytes(b"not a directory\n")
+                rc, output = run(info_file)
+                check("ancestry: an uninspectable grafts path refuses, naming the lstat failure",
+                      rc == EXIT_ERROR and "lstat of the legacy grafts path" in output
+                      and "NotADirectoryError" in output)
+
+                # The POSIX-separator helper, pinned on POSIX hosts: a Windows-flavoured prefix
+                # must still yield "/" pathspecs. DISCRIMINATOR: mutant M-as-posix-to-str
+                # (str(Path) instead of as_posix) yields backslashes and fails.
+                import opf
+                if opf._bootstrap() != EXIT_OK:
+                    raise OSError("opf helper modules could not be imported")
+                check("ancestry: history pathspecs use POSIX separators for a Windows prefix",
+                      opf._init_history_rels(PureWindowsPath("sub", "dir"))
+                      == ("sub/dir/" + _opf_store.POINTER_REL, "sub/dir/" + working))
+
+                # QA round 2 MINOR 2: the REFUSED line escapes path-derived text. A root whose
+                # directory name carries ESC and BEL (a clone from an untrusted source can name
+                # directories this way) and whose history holds a store there: the refusal names
+                # that path several times, and none of it may reach the terminal raw.
+                # DISCRIMINATOR: mutant M-refusal-raw (the refusal formats its paths without
+                # ascii()) prints raw ESC/BEL characters and fails.
+                esc_repo = make_git("ancestry-control-chars")
+                esc_name = "a\x1b[31mred\x07b"
+                esc_root = esc_repo / esc_name
+                esc_root.mkdir()
+                rc, output = run(esc_root)
+                check("ancestry control-character fixture first init succeeds", rc == EXIT_OK)
+                git_call(esc_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "store"])
+                git_call(esc_repo, ["--literal-pathspecs", "rm", "-r", "-q", "--", esc_name])
+                git_call(esc_repo, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-m", "drop store"])
+                esc_root.mkdir(exist_ok=True)
+                rc, output = run(esc_root)
+                refused = [line for line in output.splitlines()
+                           if line.startswith("opf init: REFUSED")]
+                check("ancestry: control-character root with a prior store is refused",
+                      rc == EXIT_ERROR and "prior store exists" in output and len(refused) == 1)
+                check("ancestry: REFUSED line carries no raw control character from the path",
+                      len(refused) == 1 and "\x1b" not in refused[0] and "\x07" not in refused[0]
+                      and refused[0].count("a\\x1b[31mred\\x07b") >= 4)
+
+                # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
+                # commit-tree whose tree IS the storeless side tree (TREESAME to its side
+                # parent) drops the mainline store. On HEAD's first-parent line that merge
+                # is the newest store-path change and its first parent held the store, so
+                # init REFUSES naming the mainline store commit; an UNSCOPED rev-list walk
+                # instead simplifies the merge to its TREESAME side parent, never visits the
+                # mainline store commits, sees no store-path commit at all, and would PASS.
+                # DISCRIMINATOR: rc 0 against mutant M-first-parent (the flag dropped).
+                fp = make_git("ancestry-first-parent")
+                (fp / "seed.txt").write_bytes(b"base\n")
+                git_call(fp, ["--literal-pathspecs", "add", "-A"])
+                git_call(fp, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "base"])
+                fp_base = git_call(fp, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                fp_machine = fp / working / machine_name
+                fp_machine.mkdir(parents=True)
+                (fp_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (fp / _opf_store.POINTER_REL).write_bytes(b'[store]\ntarget = "dir:."\n')
+                git_call(fp, ["--literal-pathspecs", "add", "-A"])
+                git_call(fp, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store on main"])
+                fp_store = git_call(fp, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                git_call(fp, ["checkout", "-q", "-b", "side", fp_base])
+                (fp / "side.txt").write_bytes(b"side\n")
+                git_call(fp, ["--literal-pathspecs", "add", "-A"])
+                git_call(fp, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "side work"])
+                fp_side = git_call(fp, ["rev-parse", "HEAD"]).decode("ascii").strip()
+                fp_tree = git_call(fp, ["rev-parse",
+                                        fp_side + "^{tree}"]).decode("ascii").strip()
+                fp_merge = git_call(fp, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit-tree", fp_tree, "-p", fp_store,
+                                         "-p", fp_side, "-m",
+                                         "merge drops store"]).decode("ascii").strip()
+                git_call(fp, ["checkout", "-q", "main"])
+                git_call(fp, ["reset", "--hard", "-q", fp_merge])
+                rc, output = run(fp)
+                check("ancestry: TREESAME-to-side merge dropping the mainline store refused",
+                      rc == EXIT_ERROR and "prior store exists" in output)
+                check("ancestry: first-parent refusal names the mainline store commit",
+                      fp_store in output)
+
+                # _init_glob_escape is LOAD-BEARING (no false refusal): a store committed at
+                # the sibling prefix weX/ must not block init at the metacharacter-named
+                # root we[X]/ -- the :(glob) manifest pathspec escapes the bracket class, so
+                # the name matches only the literal directory we[X]. DISCRIMINATOR: rc 2
+                # (the unescaped glob we[X]/... matches the weX store history, a false
+                # refusal) against mutant M-glob-escape (an identity _init_glob_escape).
+                near = make_git("ancestry-glob-escape")
+                (near / "seed.txt").write_bytes(b"base\n")
+                git_call(near, ["--literal-pathspecs", "add", "-A"])
+                git_call(near, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "base"])
+                sib_machine = near / "weX" / working / machine_name
+                sib_machine.mkdir(parents=True)
+                (sib_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                git_call(near, ["--literal-pathspecs", "add", "-A"])
+                git_call(near, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                "commit", "-m", "sibling store at weX"])
+                bracket_init = near / "we[X]"
+                bracket_init.mkdir()
+                rc, output = run(bracket_init)
+                check("ancestry: metacharacter-named root unaffected by sibling weX store",
+                      rc == EXIT_OK and valid_sources(bracket_init))
+
+                # The refuse-rather-than-guessing arm is LOAD-BEARING: a committed DIRECTORY
+                # named .opf.toml is a store-path change whose tree holds no store
+                # identifier (the pointer must be a BLOB), and after its deletion neither
+                # the deletion commit's tree nor its first parent's holds one; init refuses
+                # in those words rather than inventing a prior-store finding. DISCRIMINATOR:
+                # mutant M-guess-arm (the arm removed) reports a definite "prior store
+                # exists" instead.
+                guess = make_git("ancestry-guess-arm")
+                (guess / "seed.txt").write_bytes(b"base\n")
+                git_call(guess, ["--literal-pathspecs", "add", "-A"])
+                git_call(guess, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "base"])
+                fake_dir = guess / _opf_store.POINTER_REL
+                fake_dir.mkdir()
+                (fake_dir / "x").write_bytes(b"not a pointer\n")
+                git_call(guess, ["--literal-pathspecs", "add", "-A"])
+                git_call(guess, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "directory named like the pointer"])
+                git_call(guess, ["rm", "-r", "-q", "--", _opf_store.POINTER_REL])
+                git_call(guess, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "drop the directory"])
+                rc, output = run(guess)
+                check("ancestry: non-store change at a store path refuses rather than guessing",
+                      rc == EXIT_ERROR and "refusing rather than guessing" in output
+                      and "prior store exists" not in output)
+
+                # SPEC 8.2 ancestry, no over-refusal: a history of ordinary commits that never
+                # held a store identifier proceeds (the no-hit arm; the empty-git-root vector
+                # above already covers the unborn-HEAD arm, which also proceeds).
+                plain_history = make_git("ancestry-plain-history")
+                (plain_history / "seed.txt").write_bytes(b"s\n")
+                git_call(plain_history, ["--literal-pathspecs", "add", "-A"])
+                git_call(plain_history, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit", "-m", "seed"])
+                rc, output = run(plain_history)
+                check("ancestry: committed history without a store proceeds",
+                      rc == EXIT_OK and valid_sources(plain_history))
 
                 # OPF-D2B round 6: in a PARTIAL clone a skip-worktree .gitignore whose blob is ABSENT locally
                 # reads as no-rule under the no-lazy-fetch probe, but the adopter's own `git add` fetches that

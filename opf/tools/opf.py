@@ -14112,6 +14112,224 @@ def _init_unignored(git, repo, root, paths):
             "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
 
 
+def _init_glob_escape(text):
+    """Escape git wildmatch metacharacters so a repo-relative prefix is matched LITERALLY inside
+    a :(glob) pathspec: a store root whose directory is literally named "[x]" or "*" must not
+    have its name read as a pattern (the ls-files/ls-tree candidates neutralize the same class
+    with --literal-pathspecs, which :(glob) itself does not honour; backslash escaping is the
+    wildmatch-documented neutralization)."""
+    return "".join("\\" + ch if ch in "*?[]\\" else ch for ch in text)
+
+
+class _InitPriorStoreRefusal(RuntimeError):
+    """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
+    _cmd_init reports it under a REFUSED prefix in the finding's own words. The exit code is
+    the same 2 either way; only the reporting wording distinguishes the two verdicts."""
+
+
+def _init_history_rels(prefix):
+    """The repo-relative committed-pointer and .working paths for a root at repo-relative prefix.
+
+    git reports and matches repo-relative paths with "/" on EVERY platform, so the ancestry
+    pathspecs, the ls-tree name comparisons, and the <commit>:<path> form are built with POSIX
+    separators (as_posix), never str(Path), which yields backslashes on Windows and would
+    silently match nothing there. A separate function so check_opf_init can pin the separator
+    choice on POSIX hosts too, by passing a PureWindowsPath prefix."""
+    return ((prefix / _opf_store.POINTER_REL).as_posix(),
+            (prefix / _opf_store.WORKING_DIRNAME).as_posix())
+
+
+def _init_no_prior_store(git, repo, root):
+    """Refuse initialization where the first-parent history of HEAD shows a prior store (spec 8.2).
+
+    counters.toml holds monotonic high-water values that MUST NOT be reset, and only a genuinely
+    first adoption may start its counters at zero (spec 8.2): a fresh init over a line whose
+    history held a store would restart every namespace at zero and let record ids be reissued.
+    The committed paths that identify a store are the committed pointer .opf.toml (spec 4.3) and
+    a store manifest one level below .working/ (.working/<subdir>/manifest.toml, spec 4.4/4.5).
+    Presence of the PATH suffices, deliberately without reading the blob: a legacy [devprocess]
+    manifest proves prior ancestry exactly as a current one does (spec 4.5 refuses it as
+    unsupported-older-store, never reads it as absent), and no blob content could downgrade the
+    refusal. A found ancestor REFUSES, naming the newest first-parent commit whose tree held a
+    store and the remedy (restore that commit's store, or `opf adopt`); it never passes silently.
+
+    SCOPE: the scan follows HEAD's FIRST-PARENT line only, the same line the adoption reader
+    proves an ancestral counters seed on (_opf_init_operation.read_ancestral_counter_seed,
+    decision 6). A store that never reached a tree on HEAD's first-parent line (for example one
+    created and deleted on a side branch, merged or not) is NOT detected: it left no mainline
+    state whose counters this init could restart, and distinguishing first adoption from
+    re-adoption across such side lines is the section 14 adoption investigation's authority, not
+    init's. The refusal text, the successful init output and OPF-QUICKSTART.md state this same
+    limit in the same words.
+
+    FAIL-CLOSED BOUNDARIES: an unborn HEAD (rev-parse --verify --quiet rc 1, the _observe_prior
+    convention) has no history and PROCEEDS; a SHALLOW repository's truncated history cannot
+    prove the absence of a prior store (the clipped commits may hold one, and the pathspec walk
+    stops silently at the shallow boundary) and is a cannot-evaluate REFUSAL; a git read that
+    fails, times out, overflows its output bound, or answers in an unexpected shape refuses the
+    same way, never passes. A legacy info/grafts file can rewrite parent links inside EVERY
+    rev-list walk and, unlike a replacement ref, is NOT neutralized by --no-replace-objects, so
+    a graft could cut the very parent link that reaches a prior store; ANY entry at the grafts
+    path (the refusal names what it found: a regular file and its size, a symbolic link and its
+    target, or another kind), and a grafts path whose lstat fails other than as not-found, is
+    therefore a cannot-evaluate REFUSAL too, the
+    stance the adoption reader already takes (_opf_init_observe.graft_snapshot: preserved,
+    never interpreted). Refusing is chosen over neutralizing (GIT_GRAFT_FILE pointed at an
+    empty file) deliberately: a grafted repository's ancestry has been locally rewritten, so
+    neither the grafted nor the raw parent line is one this check can vouch for; the shared
+    hardened runner takes no per-call environment; and the refusal does not depend on a
+    deprecated variable staying honoured (git deprecates grafts in favour of replace refs,
+    which this scan already neutralizes). Every read goes through _opf_observe._run_git
+    (absolute git binary, explicit -C binding to this repository, allowlist-scrubbed
+    environment with every ambient GIT_* variable dropped, --no-replace-objects, lazy fetch
+    suppressed) over raw commit/tree data; no working-tree or index view is consulted."""
+    pointer_rel, working_rel = _init_history_rels(root.relative_to(repo))
+
+    def read(args, ok=(0,)):
+        result = _opf_observe._run_git(git, repo, args)
+        if not result.completed or result.rc not in ok:
+            raise RuntimeError(
+                "git history preflight: `git {}` could not answer ({}); a prior-store ancestry "
+                "that cannot be read never passes".format(
+                    " ".join(args),
+                    result.err if not result.completed
+                    else "rc {}: {}".format(result.rc, result.err)))
+        return result
+
+    def oid(raw):
+        text = raw.decode("ascii", errors="replace")
+        if len(text) not in (40, 64) or any(c not in "0123456789abcdef" for c in text):
+            raise RuntimeError(
+                "git history preflight: unexpected object id {}; refusing".format(ascii(raw)))
+        return text
+
+    def tree_holds_store(commit):
+        """Whether the commit's raw tree holds the pointer blob or a store-manifest path. Raises
+        on any read it cannot complete: a missing tree object (a filtered partial clone, say) is
+        a refusal, never absence. The two destination paths are passed as --literal-pathspecs,
+        the same neutralization _init_untracked uses, so a metacharacter-named prefix stays a
+        path; ls-tree of an entry that is simply absent still answers rc 0 with no output, which
+        IS a proven absence."""
+        probe = read(["--literal-pathspecs", "ls-tree", "-z", commit, "--",
+                      pointer_rel, working_rel])
+        has_working = False
+        for entry in probe.out.split(b"\0"):
+            if not entry:
+                continue
+            meta, tab, name = entry.partition(b"\t")
+            fields = meta.split(b" ")
+            if tab != b"\t" or len(fields) != 3:
+                raise RuntimeError("git history preflight: unparseable ls-tree entry {}; "
+                                   "refusing".format(ascii(entry)))
+            if name == os.fsencode(pointer_rel) and fields[1] == b"blob":
+                return True
+            if name == os.fsencode(working_rel) and fields[1] == b"tree":
+                has_working = True
+        if not has_working:
+            return False
+        listing = read(["ls-tree", "-r", "-z", "--name-only",
+                        commit + ":" + working_rel])
+        manifest = os.fsencode(_opf_store.MANIFEST_NAME)
+        for name in listing.out.split(b"\0"):
+            parts = name.split(b"/")
+            if len(parts) == 2 and parts[0] and parts[1] == manifest:
+                return True
+        return False
+
+    head = read(["rev-parse", "--verify", "--quiet", "HEAD"], ok=(0, 1))
+    if head.rc == 1:
+        return   # unborn HEAD: no commit exists, so no history can hold a prior store
+    shallow = read(["rev-parse", "--is-shallow-repository"]).out.strip()
+    if shallow == b"true":
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: this repository is SHALLOW, so the "
+            "first-parent history of HEAD is truncated and a prior store, whose counters "
+            "spec 8.2 forbids restarting, cannot be ruled out; unshallow the clone "
+            "(git fetch --unshallow) and retry")
+    if shallow != b"false":
+        raise RuntimeError("git history preflight: unexpected --is-shallow-repository answer "
+                           "{}; refusing".format(ascii(shallow)))
+    grafts_raw = read(["rev-parse", "--git-path", "info/grafts"]).out
+    try:
+        grafts_text = grafts_raw.decode("utf-8", "strict")
+    except UnicodeError:
+        raise RuntimeError("git history preflight: undecodable info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    if not grafts_text.endswith("\n") or "\n" in grafts_text[:-1] or "\0" in grafts_text:
+        raise RuntimeError("git history preflight: malformed info/grafts path {}; "
+                           "refusing".format(ascii(grafts_raw)))
+    grafts_path = grafts_text[:-1]
+    if not os.path.isabs(grafts_path):
+        grafts_path = os.path.join(str(repo), grafts_path)
+    try:
+        grafts_st = os.lstat(grafts_path)
+    except FileNotFoundError:
+        pass   # proven absent: the walk below reads ungrafted parent links
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: lstat of the legacy grafts path {} failed "
+            "({}), which this scan does not take as proof that no grafts file is present; "
+            "grafts that git can read at that path may rewrite parent links in every history "
+            "walk and hide a prior store whose counters spec 8.2 forbids restarting; "
+            "refusing".format(ascii(grafts_path), ascii(exc)))
+    else:
+        # Name exactly what was found; whether git can read it, and whether it rewrites any
+        # parent link, is not interpreted here (an empty file or a dangling link rewrites
+        # nothing today, yet a later write through it would), so every kind refuses alike.
+        kind = _init_kind(grafts_st)
+        if kind == "file":
+            found = "a regular file of {} byte(s)".format(grafts_st.st_size)
+        elif kind == "symlink":
+            found = "a symbolic link to {}".format(ascii(os.readlink(grafts_path)))
+        else:
+            found = "an entry of kind {}".format(kind)
+        raise RuntimeError(
+            "cannot evaluate prior-store ancestry: found {} at the legacy grafts path {}; "
+            "git consults that path in every history walk, where grafts it can read may "
+            "rewrite parent links (--no-replace-objects does not neutralize them), and this "
+            "scan never interprets grafts, so a prior store, whose counters spec 8.2 forbids "
+            "restarting, cannot be ruled out; convert or remove it (git replace "
+            "--convert-graft-file turns a grafts file into replace refs, which this scan "
+            "already ignores) and retry".format(found, ascii(grafts_path)))
+    specs = [":(literal)" + pointer_rel,
+             ":(glob)" + _init_glob_escape(working_rel) + "/*/"
+             + _init_glob_escape(_opf_store.MANIFEST_NAME)]
+    newest_raw = read(["rev-list", "--first-parent", "--max-count=1", "HEAD", "--"]
+                      + specs).out.strip()
+    if not newest_raw:
+        return   # no first-parent commit ever changed a store-identifying path: no prior store
+    newest = oid(newest_raw)
+    if tree_holds_store(newest):
+        ancestor = newest
+    else:
+        # The newest first-parent change to a store path whose own tree holds no store
+        # identifier is a deletion, so its first parent's tree held one (a parentless root
+        # commit can only ADD, so it always holds what it changed).
+        ancestor = oid(read(["rev-parse", "--verify", "--quiet",
+                             newest + "^1"]).out.strip())
+        if not tree_holds_store(ancestor):
+            raise RuntimeError(
+                "git history preflight: commit {} changed a store path yet neither its tree "
+                "nor its first parent's holds a store identifier; refusing rather than "
+                "guessing".format(newest))
+    # Every path-derived value goes through ascii(), the escaping this file uses for paths in
+    # diagnostics, so a control character in a directory name cannot reach the terminal raw
+    # through the REFUSED line; the commit id is already validated hex (oid).
+    raise _InitPriorStoreRefusal(
+        "a prior store exists in this repository's git history: commit {} on HEAD's "
+        "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec 8.2 "
+        "forbids restarting its counters at zero (record ids would be reissued). Remedy: "
+        "restore the store from that commit (git checkout {} -- {} {}) or re-adopt the "
+        "ancestry with `opf adopt`; plain `opf init` refuses whenever this scan of HEAD's "
+        "first-parent line finds a prior store, and a store that never reached a tree on "
+        "HEAD's first-parent line (for example one created and deleted on a side branch, "
+        "merged or not) is not detected (adoption across such side lines is `opf adopt`'s "
+        "authority)".format(
+            ancestor, ascii(pointer_rel),
+            ascii(working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME),
+            ancestor, ascii(pointer_rel), ascii(working_rel)))
+
+
 def _init_same_root(root, root_fd):
     check_fd = _opf_store._open_dir_nofollow(root)
     try:
@@ -14283,6 +14501,8 @@ def _cmd_init(rest):
         # index_paths carries for _init_untracked's prior-state detection is a path init never creates
         # and adopters legitimately gitignore, so it must not make init refuse.
         _init_unignored(git, repo, root, set(directories) | set(payloads))
+        stage = "checking git history for a prior store"
+        _init_no_prior_store(git, repo, root)
         _init_same_root(root, root_fd)
 
         publishing = True
@@ -14331,8 +14551,20 @@ def _cmd_init(rest):
         print("  before creation; a later ignore or config change can still affect staging (git add -f).")
         print("Commit the reviewed init paths, then materialize the Markdown views:")
         print("  opf render --write --root {}".format(shlex.quote(str(root))))
+        print("opf init: prior-store history was checked on HEAD's first-parent line only: a store")
+        print("  that never reached a tree on HEAD's first-parent line (for example one created and")
+        print("  deleted on a side branch, merged or not) is not detected (see `opf adopt`).")
         print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
         return EXIT_OK
+    except _InitPriorStoreRefusal as exc:
+        # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own words.
+        # It is raised only by the read-only ancestry preflight, so publication never started.
+        # Its text is printed unwrapped because _init_no_prior_store already passed every
+        # path-derived value through ascii() (the root here gets the same escaping).
+        print("opf init: REFUSED at {} during {}: {}; exit 2".format(
+            ascii(str(root)), stage, exc), file=sys.stderr)
+        print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
+        return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
         print("opf init: cannot evaluate at {} during {}: {}; exit 2".format(
             ascii(str(root)), stage, ascii(exc)), file=sys.stderr)
@@ -17854,7 +18086,8 @@ def _retained_close_offpath_self_test():
                     os.unlink(str(fresh / name))
             with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
                     mock.patch.object(this, "_init_untracked", lambda *args: None), \
-                    mock.patch.object(this, "_init_unignored", lambda *args: None):
+                    mock.patch.object(this, "_init_unignored", lambda *args: None), \
+                    mock.patch.object(this, "_init_no_prior_store", lambda *args: None):
                 return _cmd_init(["--root", str(fresh)])
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
