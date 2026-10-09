@@ -11,24 +11,24 @@ renderer-id = "agents"
 entrypoint = "tools/gen_agents.py"
 semantics-revision = 1
 targets = ["AGENTS.md"]
-closure = ["tools/gen_agents.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "9435170abe46ba71276e5e3ad754bfde7a93a47077d9f23b77df494041f7da5a"
+closure = ["tools/gen_agents.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
+code-digest = "415540ee2c3e68ba9aa6f526c01f39eacf8ad4386adcc8ac0e92a3191ab4fae3"
 
 [[renderer]]
 renderer-id = "adapters"
 entrypoint = "tools/gen_adapters.py"
 semantics-revision = 1
 targets = ["GEMINI.md", ".github/copilot-instructions.md"]
-closure = ["tools/gen_adapters.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "3ef9e56c2b3d044a973c00d2023b056cee8f0c958bc093cdf4a45a7f960616cc"
+closure = ["tools/gen_adapters.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
+code-digest = "0b4c98ab6e41a97e6e7de32dfa40e8d76acb789d0225049947e8bb9dad3fe29c"
 
 [[renderer]]
 renderer-id = "claude"
 entrypoint = "tools/gen_claude.py"
 semantics-revision = 1
 targets = [".claude/RULES-INDEX.md", "CLAUDE.md"]
-closure = ["tools/gen_claude.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "8204574adbad29ddf187d95b0fea47f24f17b93cc019736a6c4b9d8d5467e436"
+closure = ["tools/gen_claude.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
+code-digest = "76c2e77ff8fd79dd28fbc9f581ad914928baa8d191b7d90b76f8a0c9c9bfa7b2"
 
 [[renderer]]
 renderer-id = "cursor"
@@ -51,8 +51,8 @@ renderer-id = "skill"
 entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip"]
-closure = ["tools/gen_skill.py", "tools/_gen_common.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_agents.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
-code-digest = "2f9b00be0ffc500da7d6b105dd7816515aeddcedb85ba0f9c43d9af5ad032ae6"
+closure = ["tools/gen_skill.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_agents.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
+code-digest = "1e4a4ca185e3fec1d0036a43c95a349e6effc5c446f2010ecfcdba4c596f1f9d"
 
 [[renderer]]
 renderer-id = "worker-pack"

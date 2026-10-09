@@ -2,6 +2,7 @@
 .aiqt/assurance-schema.md text eol=lf
 .aiqt/assurance.toml text eol=lf
 .aiqt/attribution.toml text eol=lf
+.aiqt/core/adapter-blocks.toml text eol=lf
 .aiqt/core/applicability.toml text eol=lf
 .aiqt/core/applies.toml text eol=lf
 .aiqt/core/clauses.toml text eol=lf
@@ -640,6 +641,7 @@ site/styles.css text eol=lf
 site/teams.html text eol=lf
 site/tech-details.html text eol=lf
 site/theme.js text eol=lf
+tools/_adapter_compose.py text eol=lf
 tools/_close_selftest.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_git_fixture_env.py text eol=lf
