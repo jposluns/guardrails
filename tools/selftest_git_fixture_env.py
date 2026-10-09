@@ -2458,7 +2458,14 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # refusal; "closing-control", _closing_refusal_control with a real SIGINT at its _run_bounded
 # entry: the start refused with the SIGINT held and closing set inside, then the SIGINT raised
 # right after the control (nothing after it in the lanes runs), so main() ends in
-# KeyboardInterrupt. It prints one PROBE-REPORT line: the outcome, how many groups are still
+# KeyboardInterrupt; "late-monitor", the monitor's in_communicate observation gated (held) until
+# main()'s teardown releases it right before the post-main worker joins, the member's own 10 s
+# bound ending main() first. The teardown installs a deferring SIGINT/SIGTERM handler across the
+# joins (with a 0.05 s drain for a process-directed signal still in flight) and then reinstalls
+# exactly what main() left, so a worker's signal delivered during a join is absorbed and recorded
+# as the "late <name>" handshake instead of destroying the report; the few statements between
+# main()'s end and that install are the disclosed residual window. It prints one PROBE-REPORT
+# line: the outcome, how many groups are still
 # registered after main(), every recorded process's state (_recorded_states), whether main() ended
 # within 30 s of every signal or injected failure, and the extras: the handlers restored after
 # main() and a real SIGINT raising again, the lock free, the PASS and CANNOT EVALUATE lines, and
@@ -2539,6 +2546,15 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "                return True",
     "            frame = frame.f_back",
     "    return False",
+    "gate = threading.Event()",
+    "real_in_communicate = in_communicate",
+    "def gated_in_communicate():",
+    "    seen = real_in_communicate()",
+    "    if seen:",
+    "        gate.wait(150)",
+    "    return seen",
+    "if scenario == 'late-monitor':",
+    "    in_communicate = gated_in_communicate",
     "def monitor(tags):",
     "    if not ready(tags):",
     "        extra.setdefault('handshake', []).append('members ready')",
@@ -2782,7 +2798,8 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "        workers.append(('monitor', thread))",
     "        thread.start()",
     "        suite._run_bounded(argv('a', 'setsid' if scenario == 'setsid' else 'sleep'), folder,",
-    "                           dict(os.environ), 90, 'probe', 'PROBE ')",
+    "                           dict(os.environ), 10 if scenario == 'late-monitor' else 90,",
+    "                           'probe', 'PROBE ')",
     "real_signal, real_pidfd, real_killpg = signal.signal, signal.pidfd_send_signal, os.killpg",
     "if scenario == 'lock':",
     "    extra['direct'], extra['loop'], extra['held'] = direct(), loop(2), held_elsewhere()",
@@ -2854,11 +2871,18 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    outcome = '{}: {}'.format(type(exc).__name__, exc)",
     "ended = time.monotonic()",
     "del fire[:]",
+    "def absorb(signum, frame):",
+    "    extra.setdefault('handshake', []).append('late ' + signal.Signals(signum).name)",
+    "left = [real_signal(signal.SIGINT, absorb), real_signal(signal.SIGTERM, absorb)]",
     "signal.signal, signal.pidfd_send_signal, os.killpg = real_signal, real_pidfd, real_killpg",
+    "gate.set()",
     "for name, thread in workers:",
     "    thread.join(120)",
     "    if thread.is_alive():",
     "        extra.setdefault('handshake', []).append(name + ' finished')",
+    "time.sleep(0.05)",
+    "real_signal(signal.SIGINT, left[0])",
+    "real_signal(signal.SIGTERM, left[1])",
     "registered = len(suite._MEMBERS['groups'])",
     "if scenario == 'unresolved':",
     "    problems = suite._close_members()",
@@ -3177,8 +3201,11 @@ def _pidfd_group_signal_supported():
 
 
 # The _CLOSE_PROBE_CHILD handshakes whose expiry is the scenario itself: in "failed-handshake"
-# member b never reports running, so member a's 1 s handshake expires and nothing is injected.
-_DELIBERATE_HANDSHAKES = dict([("failed-handshake", ("member b running",))])
+# member b never reports running, so member a's 1 s handshake expires and nothing is injected; in
+# "late-monitor" the monitor deliberately fires only after main() ended, so its SIGINT is absorbed
+# by the teardown's deferring handler and recorded as the "late SIGINT" handshake.
+_DELIBERATE_HANDSHAKES = dict([("failed-handshake", ("member b running",)),
+                               ("late-monitor", ("late SIGINT",))])
 
 
 def _handshake_expired(scenario, extra):
@@ -3191,7 +3218,7 @@ def _handshake_expired(scenario, extra):
     holder or sender thread finished); state only the code under test sets (the failed-member
     branch's kill sweep, a delivered signal's deferral) expires into the "missing" extras instead,
     which no expectation admits, so its absence stays a definite finding and is never folded
-    here."""
+    here (_scenario_timeout_record keeps that observation and records the timeout beside it)."""
     expired = [what for what in extra.get("handshake") or ()
                if what not in _DELIBERATE_HANDSHAKES.get(scenario, ())]
     if not expired:
@@ -3200,7 +3227,24 @@ def _handshake_expired(scenario, extra):
         scenario, ", ".join(expired))
 
 
-def _close_lock_sites():
+def _scenario_timeout_record(scenario, observation, extra, recorded=None):
+    """The got entry for one _CLOSE_PROBE_CHILD observation: the observation itself when every
+    handshake was met; otherwise the _handshake_expired timeout message is recorded (default
+    CANNOT_EVALUATE) and REPLACES the observation, so the scenario's mismatch is attributed to it,
+    cannot-evaluate, only when the extras hold no "missing" entry. A run that records BOTH an
+    expired harness handshake and a missing code-owned event keeps its observation: the missing
+    event is a definite finding no expectation admits, and the harness failure in the same run is
+    reported beside it, never instead of it (the "record-map" entry pins this mapping)."""
+    message = _handshake_expired(scenario, extra)
+    if message is None:
+        return observation
+    (CANNOT_EVALUATE if recorded is None else recorded).append(message)
+    if extra.get("missing"):
+        return observation
+    return message
+
+
+def _close_lock_sites(close=None):
     """Every acquisition of the registry lock in _close_members, read from the source, in source
     order, each as (line offset from its def line, form): form "with" for a with statement
     directly on _MEMBERS_LOCK (the bounded acquire, _RegistryLock.__enter__) and "acquire" for a
@@ -3212,24 +3256,29 @@ def _close_lock_sites():
     acquire call or an unrecognized form fails that pin definitively, and a site that stopped
     taking the lock through the bounded acquire is refused nowhere and fails its scenario. Raises
     LookupError, which the caller records as cannot-evaluate, when the source cannot be read or
-    _close_members' def is not found at its recorded line, never an empty fail-open result.
+    no def NAMED _close_members sits at its recorded line (a def under any other name there, the
+    renamed-def mutant, is never accepted), never an empty fail-open result. close (default
+    _close_members) is the function whose recorded file and line are read: the "close-oracle"
+    control passes probes written to the fixture, so the renamed-def mutant stays pinned.
     Syntactic limit, disclosed: only references that spell the global name _MEMBERS_LOCK inside
     _close_members' own body are seen; an acquisition through another name bound outside the
     function, or inside a helper it calls, is outside this oracle (the helpers' own acquisitions
     have their own refusal scenarios)."""
-    first = _close_members.__code__.co_firstlineno
-    filename = _close_members.__code__.co_filename
+    close = _close_members if close is None else close
+    first = close.__code__.co_firstlineno
+    filename = close.__code__.co_filename
     try:
         with open(filename, encoding="utf-8") as source:
             tree = ast.parse(source.read())
     except (OSError, SyntaxError, ValueError) as exc:
         raise LookupError("the close-lock-site oracle cannot read {}: {}".format(filename, exc))
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.lineno == first:
+        if (isinstance(node, ast.FunctionDef) and node.lineno == first
+                and node.name == "_close_members"):
             break
     else:
-        raise LookupError("the close-lock-site oracle found no def at line {} of {}: it cannot "
-                          "read _close_members".format(first, filename))
+        raise LookupError("the close-lock-site oracle found no def named _close_members at line "
+                          "{} of {}: it cannot read _close_members".format(first, filename))
     parents = {}
     for parent in ast.walk(node):
         for child in ast.iter_child_nodes(parent):
@@ -3297,7 +3346,12 @@ def _member_close_controls(fixture):
     ends in SystemExit(143), "install" in KeyboardInterrupt with SIGINT restored, and "split-T-I",
     "split-T-II", "split-TI-I" and "split-IT-I" (a SIGTERM held inside _closing_refusal_control
     and raised by _reopen_members, SIGINTs held at the entry of main()'s closes) each in
-    SystemExit(143), with the signals each drain held reported;
+    SystemExit(143), with the signals each drain held reported, and "late-monitor" a monitor
+    released only into the post-main teardown (its in_communicate observation gated, the member's
+    own 10 s bound ending main() first, so main() returns 2 with the CANNOT EVALUATE line): its
+    SIGINT lands inside the post-main worker joins, is absorbed by the teardown's deferring
+    handler and is reported as the deliberate "late SIGINT" handshake, so the report survives a
+    signal delivered during the join;
     config/member-close-lock, "lock": no KeyboardInterrupt and the lock free after the direct
     close, no close left blocked in the real-signal loop, with the lock held by another thread a
     member start and the close each give up within the lock bound (the start a recorded timeout,
@@ -3310,7 +3364,10 @@ def _member_close_controls(fixture):
     never the injected failure ("failed-handshake"); any other expired handshake in any scenario
     makes that scenario a harness timeout, cannot-evaluate (_handshake_expired, whose own mapping
     is pinned there too), while a bounded wait on state only the code under test sets (the kill
-    sweep, a signal's deferral) expires into the "missing" extras and stays a definite finding;
+    sweep, a signal's deferral) expires into the "missing" extras and stays a definite finding,
+    even in a run whose harness handshake ALSO expired: _scenario_timeout_record records that
+    timeout beside the kept observation, never in its place (the "record-map" entry pins the
+    combined-failure mapping);
     config/member-close-unresolved-verdict, "unresolved":
     main() returns 2 with
     the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
@@ -3323,7 +3380,10 @@ def _member_close_controls(fixture):
     persist at all five sites; the same check requires _close_lock_sites to see exactly one
     with-form acquisition per refused-site scenario ("close-sites"), so a fourth acquisition of
     the registry lock in _close_members, a direct acquire call or a form the oracle refuses fails
-    it definitively, and an oracle that cannot read _close_members at all is cannot-evaluate.
+    it definitively, and an oracle that cannot read _close_members at all is cannot-evaluate; the
+    same check pins the oracle's own discrimination ("close-oracle"): a probe def named
+    _close_members yields its three with-form sites, and the same body renamed at the same
+    recorded line raises LookupError, never a fail-open site list.
     config/member-closing-refuses-start also requires the "closing-control" scenario:
     a real SIGINT inside the control is held there and raised right after it (KeyboardInterrupt,
     nothing after the control runs). config/member-close-signal-sweep: the _CLOSE_SWEEP_CHILD
@@ -3336,6 +3396,7 @@ def _member_close_controls(fixture):
     (_kill_recorded)."""
     import contextlib
     import io
+    import types
     from unittest.mock import patch
 
     this = sys.modules[__name__]
@@ -3411,7 +3472,7 @@ def _member_close_controls(fixture):
                      "failed", "failed-signal", "failed-handshake", "unresolved",
                      "release-timeout", "start-timeout", "sweep-refused", "close-refused",
                      "close-wait-refused", "close-left-refused", "failed-refused",
-                     "closing-control"):
+                     "closing-control", "late-monitor"):
         folder = fixture / "close-{}".format(scenario)
         folder.mkdir()
         try:
@@ -3429,19 +3490,33 @@ def _member_close_controls(fixture):
             outcome, registered, states, timely, extra = json.loads(report)
             got[scenario] = (scenario, outcome, registered, sorted(set(states.values())),
                              len(states), timely, extra)
-            message = _handshake_expired(scenario, extra)
+            got[scenario] = _scenario_timeout_record(scenario, got[scenario], extra)
         except (TypeError, ValueError, AttributeError) as exc:
             got[scenario] = (scenario, "no report ({}): rc={} err={!r}".format(
                 exc, rc, err[-400:]))
             continue
-        if message is not None:
-            CANNOT_EVALUATE.append(message)
-            got[scenario] = message
     got["handshake-map"] = ("handshake-map", [
         _is_timeout(_handshake_expired("failed", dict(handshake=["member b running"]))),
         _handshake_expired("failed-handshake", dict(handshake=["member b running"])) is None,
         _is_timeout(_handshake_expired("failed-handshake", dict(handshake=["member b arrived"]))),
         _handshake_expired("failed", dict()) is None])
+    recorded = []
+    observation = ("record-probe",)
+    got["record-map"] = ("record-map", [
+        # The combined failure: the harness timeout is recorded, and the observation, whose
+        # "missing" entry is a definite finding, survives beside it, never replaced by it.
+        _scenario_timeout_record("failed-refused", observation,
+                                 dict(missing=["kill sweep"], handshake=["lock held"]),
+                                 recorded) is observation,
+        recorded == ["TIMEOUT: member-close child (failed-refused): handshake not met: "
+                     "lock held (cannot evaluate)"],
+        _is_timeout(_scenario_timeout_record("failed-refused", observation,
+                                             dict(handshake=["lock held"]), recorded)),
+        _scenario_timeout_record("failed-refused", observation, dict(missing=["kill sweep"]),
+                                 recorded) is observation,
+        _scenario_timeout_record("failed-handshake", observation,
+                                 dict(handshake=["member b running"]), recorded) is observation,
+        len(recorded) == 2])
     # One with-form acquisition per refused-site scenario: a fourth acquisition, a direct acquire
     # call or a form the oracle refuses fails the "close-sites" pin definitively; an oracle that
     # cannot read _close_members at all is recorded as cannot-evaluate, never fail-open.
@@ -3456,6 +3531,22 @@ def _member_close_controls(fixture):
         with_sites = []
         for name in ("close-sites", "close-wait-refused", "close-left-refused"):
             got[name] = oracle_down
+    # The oracle's own mutants: a probe def NAMED _close_members read from a fixture file yields
+    # its three with-form sites; the same body under another name at the SAME line must raise
+    # LookupError (cannot-evaluate), so the oracle never accepts a renamed def at _close_members'
+    # recorded line. compile() alone builds the probe function; no fixture code is executed.
+    oracle = []
+    for name in ("_close_members", "unrelated"):
+        source = "def {}():\n".format(name) + 3 * "    with _MEMBERS_LOCK:\n        pass\n"
+        path = fixture / "close-oracle-{}.py".format(name)
+        path.write_text(source, encoding="utf-8")
+        probe_code = next(const for const in compile(source, str(path), "exec").co_consts
+                          if isinstance(const, types.CodeType))
+        try:
+            oracle.append(_close_lock_sites(types.FunctionType(probe_code, {})))
+        except LookupError:
+            oracle.append("LookupError")
+    got["close-oracle"] = ("close-oracle", oracle)
 
     def expect(scenario, outcome, registered, states, records, lines=(False, False), **more):
         return (scenario, outcome, registered, states, records, True,
@@ -3483,7 +3574,9 @@ def _member_close_controls(fixture):
                        closes=[[signal.SIGINT], [signal.SIGINT]]),
                 expect("split-IT-I", "SystemExit 143", 0, [], 0,
                        control=[closing, [signal.SIGINT, signal.SIGTERM], True],
-                       closes=[[signal.SIGINT], [signal.SIGINT]])]),
+                       closes=[[signal.SIGINT], [signal.SIGINT]]),
+                expect("late-monitor", "returned 2", 0, ["dead"], 2, (False, True),
+                       handshake=["late SIGINT"])]),
             ("config/member-close-lock", [
                 expect("lock", "KeyboardInterrupt", 0, ["dead"], 2,
                        direct=[None, True, []], loop=[[], True],
@@ -3495,7 +3588,8 @@ def _member_close_controls(fixture):
                        late=[["b", closing]]),
                 expect("failed-handshake", "HandshakeTimeout: member b running not within 1 s",
                        0, [], 0, late=[["b", closing]], handshake=["member b running"]),
-                ("handshake-map", [True, True, True, True])]),
+                ("handshake-map", [True, True, True, True]),
+                ("record-map", [True, True, True, True, True, True])]),
             ("config/member-close-unresolved-verdict", [
                 expect("unresolved", "returned 2", 1, [], 0, (False, True),
                        released=[[], 0]),
@@ -3511,7 +3605,9 @@ def _member_close_controls(fixture):
                        site=with_sites[2:3] and with_sites[2]),
                 expect("failed-refused", "returned 2", 0, [], 0, (False, True),
                        late=[["b", closing]], caught="injected failed member a", refused=1),
-                ("close-sites", ["with"] * len(refused_site_scenarios))])):
+                ("close-sites", ["with"] * len(refused_site_scenarios)),
+                ("close-oracle",
+                 [[(1, "with"), (3, "with"), (5, "with")], "LookupError"])])):
         observed = [got[want[0]] for want in wants]
         check(check_id, observed, wants, _partial_timeout_cause(observed, wants) or None)
     observed = [refused_start, got["closing-control"]]
