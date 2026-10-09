@@ -20,27 +20,42 @@ Layouts. The registry gives each of the three targets exactly one:
 The AIQT rules are fixed in code (the AIQT-RULES segment), never a registry row, so deleting a row can
 never drop the rules while the drift check stays green.
 
-Write-mode guard. Before anything is written, every target's current bytes are judged (guard): a legacy
-target holding a marker-like line, or a composed target holding text outside a block, a malformed,
+Write-mode guard. Before anything is written, every target whose bytes would change is judged (guard): a
+legacy target holding a marker-like line, or a composed target holding text outside a block, a malformed,
 nested, repeated or unknown marker, an edited header, or a block whose inner text no longer matches the
 digest in its own marker, is refused (exit 2) with nothing written. The deliberate escape hatch is to
 delete the target file, which shows in the diff, and regenerate. --check never consults the guard for
 its verdict: it compares the full desired bytes with the raw bytes on disk (so a CRLF conversion is
 drift), and the guard only adds a diagnosis.
 
+Target paths. A target is never read or written through a symlink: a symlink at the target, or at any
+directory between the root and it, and a target that is not a regular file, are exit 2 in both modes.
+A write goes to a new temporary file in the target's own directory (keeping an existing target's mode)
+and is renamed over the target, so the target holds either its old bytes or its new bytes.
+
+No rule corpus. An absent or unreachable .aiqt/core/rules/ is exit 2 in both modes with nothing written
+or deleted: the generators never delete a target. To retire an adapter, review it and delete it by hand.
+
+Registry fields. Every field is type-checked before it is used, so a wrong type (an array or table where a
+string or integer belongs) is a ComposeError naming the field, never a TypeError.
+
 Exit convention (run): 0 in sync or written; 1 drift (--check); 2 a missing, malformed or unreadable
-registry, block source, corpus or target, or a write-mode refusal.
+registry, block source, corpus or target, a symlinked or non-regular target, or a write-mode refusal.
 
 DISCLOSED RESIDUALS. The digest is not a security boundary: anyone who can edit a block and its digest,
 or the sources, registry and generator together, passes the guard; diff review is the control. Writes
-are neither atomic nor locked: a partial write fails --check and the guard refuses it, so the recovery
-is to delete and regenerate. A legacy target still loses a hand edit on regeneration unless it holds a
-marker-like line; --check still catches the edit in CI. A change to a generator's header is refused for
-a composed target that already carries the old header; delete and regenerate after reviewing it.
+are not locked: the path checks run before the rename, so a concurrent process that swaps a directory
+for a symlink between the check and the rename is not defended against, and the targets of one run are
+renamed one at a time, not as a set. A run killed mid-write can leave its temporary file (a dot-prefixed
+name ending in .tmp) beside the target; the target itself is intact. A legacy target still loses a hand
+edit on regeneration unless it holds a marker-like line; --check still catches the edit in CI. A change
+to a generator's header is refused for a composed target that already carries the old header; delete and
+regenerate after reviewing it.
 """
 import hashlib
 import os
 import re
+import secrets
 import stat
 import sys
 from collections import namedtuple
@@ -95,6 +110,9 @@ STRICT_RE = re.compile(r"<!-- ([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*):(BEGIN \(generated
 LOOSE_RE = re.compile(r"\s*<!--\s*[A-Za-z0-9_-]+\s*:\s*(?:BEGIN|END)\b")
 
 Registry = namedtuple("Registry", "layouts blocks retired")
+# Every target legacy, no block: what an install that predates the registry renders (load_registry with
+# absent_is_legacy, for tools/conformance.py).
+LEGACY_REGISTRY = Registry({rel: "legacy" for rel in TARGETS}, (), frozenset())
 Block = namedtuple("Block", "id owner target position order source text")
 # data: the full desired bytes; rules_start/rules_end: byte offsets of the rule region (the AIQT-RULES
 # inner text when composed); prefix: the header bytes; legacy: the legacy rendering of the same corpus.
@@ -116,16 +134,18 @@ def _check_rel(rel, what):
         raise ComposeError("{} {!r} has an empty, '.' or '..' part".format(what, rel))
 
 
-def _regular_file(root, rel, what):
+def _regular_file(root, rel, what, absent_ok=False):
     """The path of rel under root, which must be a regular file with no symlink anywhere along it.
-    Absent is a ComposeError (every input here is required); any other stat failure propagates as
-    OSError, so an unreadable ancestor fails closed rather than reading as absent."""
+    Absent is a ComposeError (every input here is required), or None when absent_ok; any other stat
+    failure propagates as OSError, so an unreadable ancestor fails closed rather than reading as absent."""
     path, parts, st = Path(root), rel.split("/"), None
     for i, part in enumerate(parts):
         path = path / part
         try:
             st = os.lstat(path)
         except FileNotFoundError:
+            if absent_ok:
+                return None
             raise ComposeError("{} {} does not exist".format(what, rel)) from None
         if stat.S_ISLNK(st.st_mode):
             raise ComposeError("{} {}: {} is a symlink".format(what, rel, "/".join(parts[:i + 1])))
@@ -169,11 +189,25 @@ def _valid_id(value):
     return isinstance(value, str) and ID_RE.fullmatch(value) is not None
 
 
-def load_registry(root):
+def _string(row, key, label):
+    """row[key], which must be a string; any other TOML type (an array, a table, a number, a boolean, a
+    date) is a ComposeError naming the field, so no later membership test or dict lookup sees it."""
+    value = row[key]
+    if not isinstance(value, str):
+        raise ComposeError("{}: {} {} must be a string, got {} {!r}".format(
+            REGISTRY_REL, label, key, type(value).__name__, value))
+    return value
+
+
+def load_registry(root, absent_is_legacy=False):
     """Read and validate REGISTRY_REL under root, then read and validate every declared block source.
-    Raises ComposeError (or OSError) on any failure, before any target is read."""
+    Raises ComposeError (or OSError) on any failure, before any target is read. With absent_is_legacy, an
+    absent registry (no file and no symlink at its path) is LEGACY_REGISTRY instead of an error; a present
+    registry is validated in full either way."""
     root = Path(root)
-    path = _regular_file(root, REGISTRY_REL, "the adapter block registry")
+    path = _regular_file(root, REGISTRY_REL, "the adapter block registry", absent_ok=absent_is_legacy)
+    if path is None:
+        return LEGACY_REGISTRY
     text = _strict_text(path.read_bytes(), REGISTRY_REL)
     try:
         data = tomllib.loads(text)
@@ -196,7 +230,8 @@ def load_registry(root):
         if set(row) != TARGET_KEYS:
             raise ComposeError("{}: a target row must have exactly the keys {}; got {}".format(
                 where, sorted(TARGET_KEYS), sorted(row)))
-        rel, layout = row["path"], row["layout"]
+        rel = _string(row, "path", "a target row")
+        layout = _string(row, "layout", "target {}".format(rel))
         if rel not in TARGETS:
             raise ComposeError("{}: unknown target {!r}".format(where, rel))
         if rel in layouts:
@@ -231,18 +266,21 @@ def load_registry(root):
             raise ComposeError("{}: block id {!r} is not of the form {}".format(where, bid, ID_RE.pattern))
         if bid.startswith(RESERVED_PREFIX):
             raise ComposeError("{}: block id {} uses the reserved prefix {}".format(where, bid, RESERVED_PREFIX))
-        if b["owner"] not in OWNERS:
+        label = "block {}".format(bid)
+        owner = _string(b, "owner", label)
+        tgt = _string(b, "target", label)
+        position = _string(b, "position", label)
+        if owner not in OWNERS:
             raise ComposeError("{}: block {} owner {!r} is refused; only {} blocks are accepted".format(
-                where, bid, b["owner"], list(OWNERS)))
-        tgt = b["target"]
+                where, bid, owner, list(OWNERS)))
         if tgt not in layouts:
             raise ComposeError("{}: block {} names an unknown target {!r}".format(where, bid, tgt))
         if layouts[tgt] != "composed":
             raise ComposeError("{}: block {} is declared for {}, whose layout is {}; a block needs the "
                                "composed layout".format(where, bid, tgt, layouts[tgt]))
-        if b["position"] not in POSITIONS:
+        if position not in POSITIONS:
             raise ComposeError("{}: block {} position {!r} is not one of {}".format(
-                where, bid, b["position"], POSITIONS))
+                where, bid, position, POSITIONS))
         order = b["order"]
         if not _plain_int(order) or order <= 0:
             raise ComposeError("{}: block {} order must be a positive integer, got {!r}".format(
@@ -254,11 +292,11 @@ def load_registry(root):
                 where, bid, src))
         if (tgt, bid) in seen_ids:
             raise ComposeError("{}: block {} is declared twice for {}".format(where, bid, tgt))
-        if (tgt, b["position"], order) in seen_orders:
+        if (tgt, position, order) in seen_orders:
             raise ComposeError("{}: two blocks share order {} at {} of {}".format(
-                where, order, b["position"], tgt))
+                where, order, position, tgt))
         seen_ids.add((tgt, bid))
-        seen_orders.add((tgt, b["position"], order))
+        seen_orders.add((tgt, position, order))
         rows.append(b)
     clash = set(retired) & set(b["id"] for b in rows)
     if clash:
@@ -410,58 +448,103 @@ def guard(current, composed, registry):
     return None
 
 
-def _exists(path):
-    """Fail-closed existence probe: Path.exists() swallows EACCES, so an unreadable parent would mask a
-    present target as absent. Path.stat() raises on EACCES; absent -> False."""
+def _target_lstat(root, rel):
+    """(path, lstat) of target rel under root, judged one component at a time with os.lstat, so nothing
+    is followed: a symlink at the target or at any directory between root and it, a non-directory where a
+    directory belongs, and a target that is not a regular file are each a ComposeError. lstat is None when
+    the target (or a directory above it) is absent; any other stat failure propagates as OSError, so an
+    unreadable ancestor fails closed rather than reading as absent."""
+    _check_rel(rel, "target")
+    parts = rel.split("/")
+    path = Path(root)
+    for i, part in enumerate(parts):
+        path = path / part
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return Path(root).joinpath(*parts), None
+        if stat.S_ISLNK(st.st_mode):
+            raise ComposeError("target {}: {} is a symlink; a target is never read or written through a "
+                               "symlink".format(rel, "/".join(parts[:i + 1])))
+        if i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode):
+            raise ComposeError("target {}: {} is not a directory".format(rel, "/".join(parts[:i + 1])))
+    if not stat.S_ISREG(st.st_mode):
+        raise ComposeError("target {} is not a regular file".format(rel))
+    return path, st
+
+
+def _nofollow(path, flags):
+    """open() opener: never follow a symlink at the final component, and never block on a FIFO swapped
+    in after the lstat."""
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+
+def _read_target(root, rel):
+    """The current bytes of target rel under root, or None when it is absent; never through a symlink."""
+    path, st = _target_lstat(root, rel)
+    if st is None:
+        return None
+    with open(path, "rb", opener=_nofollow) as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ComposeError("target {} is not a regular file".format(rel))
+        return fh.read()
+
+
+def _write_target(root, rel, data):
+    """Write data to target rel under root. Missing directories are made one level at a time, the whole
+    path is judged again by _target_lstat (so a symlink there is refused, never followed), then data goes
+    to a new temporary file (exclusive create) in the target's directory, which takes the existing
+    target's mode, and os.replace renames it over the target; the temporary file is removed on any
+    failure."""
+    parts = rel.split("/")
+    parent = Path(root)
+    for part in parts[:-1]:
+        parent = parent / part
+        try:
+            os.mkdir(parent)
+        except FileExistsError:
+            pass  # judged below: a symlink or a non-directory here is refused
+    path, st = _target_lstat(root, rel)
+    tmp = parent / ".{}.{}.tmp".format(parts[-1], secrets.token_hex(8))
     try:
-        path.stat()
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def _no_corpus(registry, outs, check):
-    """No rule corpus: a legacy target left on disk is drift (--check) or an orphan to remove; a composed
-    target is never deleted (exit 2, the file kept). Every target is judged before any unlink."""
-    kept = [rel for rel, _h, out in outs if registry.layouts[rel] == "composed" and _exists(out)]
-    if kept:
-        for rel in kept:
-            print("error: {} is a composed target and the rule corpus is absent; the file is kept (restore "
-                  "the corpus, or review and delete the file)".format(rel))
-        return 2
-    drift = False
-    for rel, _h, out in outs:
-        if _exists(out):
-            if check:
-                print("drift: {} exists with no sources".format(rel))
-                drift = True
-            else:
-                out.unlink()
-    return 1 if (check and drift) else 0
+        with open(tmp, "xb") as fh:
+            if st is not None:
+                os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def run(root, check, targets, regen, corpus_bodies):
     """The single check/write engine. targets: [(rel, header lines)]; regen: the command named on drift;
-    corpus_bodies(src_dir): the ordered rule bodies. Registry, corpus and every target are read and
-    composed first; --check compares raw bytes (exit 1 on any difference); write mode guards ALL targets
-    before writing any, so one refusal (exit 2) writes nothing."""
+    corpus_bodies(src_dir): the ordered rule bodies. Registry, corpus and every target are read (never
+    through a symlink) and composed first; --check compares raw bytes (exit 1 on any difference); write
+    mode guards ALL targets whose bytes would change before writing any, so one refusal (exit 2) writes
+    nothing. No corpus is exit 2 with nothing written or deleted."""
     root = Path(root)
     try:
         registry = load_registry(root)
-        outs = [(rel, header, root / rel) for rel, header in targets]
-        # dir_present (not is_dir): an unreadable .aiqt/ parent fails closed as exit 2, never as an absent
-        # corpus (which would delete the targets as orphans).
+        # dir_present (not is_dir): an unreadable .aiqt/ parent fails closed as exit 2, like an absent one.
         src_dir = root.joinpath(*RULES_PARTS)
         if not dir_present(src_dir):
-            return _no_corpus(registry, outs, check)
+            print("error: the rule corpus {}/ is absent; nothing was written or deleted (restore the corpus; "
+                  "to retire an adapter, review it and delete it by hand)".format("/".join(RULES_PARTS)))
+            return 2
         bodies = corpus_bodies(src_dir)
         plans = []
-        for rel, header, out in outs:
+        for rel, header in targets:
             composed = compose(rel, header, bodies, registry)
-            plans.append((rel, out, composed, out.read_bytes() if _exists(out) else None))
+            plans.append((rel, composed, _read_target(root, rel)))
         if check:
             drift = False
-            for rel, _out, composed, current in plans:
+            for rel, composed, current in plans:
                 if current != composed.data:
                     print("drift: {}".format(rel))
                     reason = guard(current, composed, registry)
@@ -472,17 +555,17 @@ def run(root, check, targets, regen, corpus_bodies):
                 print("run {} to regenerate".format(regen))
                 return 1
             return 0
-        refusals = [(rel, guard(current, composed, registry)) for rel, _o, composed, current in plans]
+        # A target already in sync is not rewritten, so it is not judged: nothing hand-made can be lost.
+        changes = [(rel, composed, current) for rel, composed, current in plans if current != composed.data]
+        refusals = [(rel, guard(current, composed, registry)) for rel, composed, current in changes]
         refusals = [(rel, reason) for rel, reason in refusals if reason]
         if refusals:
             for rel, reason in refusals:
                 print("error: {}: {}".format(rel, reason))
             print("nothing was written")
             return 2
-        for _rel, out, composed, current in plans:
-            if current != composed.data:
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(composed.data)
+        for rel, composed, _current in changes:
+            _write_target(root, rel, composed.data)
         return 0
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))

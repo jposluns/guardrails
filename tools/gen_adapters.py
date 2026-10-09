@@ -11,7 +11,8 @@ of each file comes from the block registry .aiqt/core/adapter-blocks.toml throug
 tools/_adapter_compose.py, the engine shared with gen_agents.py; both adapters are composed and judged
 in one run, so a refused target means neither is written.
 --check drift-gates both files byte for byte; exit 2 on a malformed source or registry, a read/write
-failure, or a write that would erase a hand edit.
+failure, a symlinked target or parent directory, an absent rule corpus (nothing is deleted), or a write
+that would erase a hand edit.
 """
 import sys
 

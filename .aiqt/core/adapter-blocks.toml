@@ -1,7 +1,8 @@
 # .aiqt/core/adapter-blocks.toml: the ADAPTER BLOCK REGISTRY, a generated-input registry for
 # tools/gen_agents.py and tools/gen_adapters.py (hand-authored; reviewed). tools/_adapter_compose.py
-# validates it and composes each target from it; a missing or malformed registry is exit 2 in the
-# generators and MALFORMED in tools/conformance.py.
+# validates it and composes each target from it; a missing or malformed registry, or a field of the
+# wrong type, is exit 2 in the generators. tools/conformance.py reads a malformed registry as MALFORMED
+# and an absent one as every target legacy (an install that predates this registry).
 #
 # Each [[target]] row names one of the three adapter files and its layout:
 #   legacy    the header and the AIQT-ordered rule bodies, exactly as before this registry existed;

@@ -196,16 +196,19 @@ def _claude_drift(root, corpus):
 
 def _agents_drift(root, corpus):
     """Mirror gen_agents.main()'s composition (_adapter_compose), re-rooted at root, comparing raw bytes.
-    Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface); a present
-    AGENTS.md with a missing or malformed block registry or block source -> MALFORMED."""
+    Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface). An absent block
+    registry reads as every target legacy (an install that predates the registry renders exactly that);
+    a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
+    MALFORMED."""
     out = root / "AGENTS.md"
     if not out.exists():
         return (NA, "no AGENTS.md surface installed")
     try:
-        registry = adapter_compose.load_registry(root)
+        registry = adapter_compose.load_registry(root, absent_is_legacy=True)
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
                                           gen_agents.ordered_bodies(corpus), registry).data
         current = out.read_bytes()
+        current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot render/read AGENTS.md: {}".format(exc))
     if current != content:
@@ -216,7 +219,8 @@ def _agents_drift(root, corpus):
 def _adapter_drift(root, corpus, adapter):
     """Mirror gen_adapters for one adapter (GEMINI.md / .github/copilot-instructions.md), re-rooted at
     root, comparing raw bytes. Absent file -> NOT APPLICABLE (the adopter did not install that assistant's
-    surface); a present file with a missing or malformed block registry or block source -> MALFORMED."""
+    surface). An absent block registry reads as every target legacy; a malformed or unreadable registry or
+    block source, or a file that is not valid UTF-8 -> MALFORMED."""
     out = root.joinpath(*adapter["parts"])
     label = adapter["label"]
     parts = "/".join(adapter["parts"])
@@ -227,12 +231,13 @@ def _adapter_drift(root, corpus, adapter):
     # fail closed), independent of the Python version.
     try:
         current = out.read_bytes()
+        current.decode("utf-8")  # an undecodable adapter is MALFORMED, as before the raw-byte compare
     except FileNotFoundError:
         return (label, NA, "no {} surface installed".format(parts))
-    except OSError as exc:
+    except (ValueError, OSError) as exc:
         return (label, MALFORMED, "cannot read {}: {}".format(parts, exc))
     try:
-        registry = adapter_compose.load_registry(root)
+        registry = adapter_compose.load_registry(root, absent_is_legacy=True)
         content = adapter_compose.compose(parts, adapter["header"], gen_agents.ordered_bodies(corpus),
                                           registry).data
     except (ValueError, OSError) as exc:
@@ -1109,27 +1114,56 @@ def self_test_main():
         # 2b'. The adapter block registry. A composed AGENTS.md (one OPF block before the rules) built by
         #      _adapter_compose is C2 PASS; the same tree with an appended local edit, or with AGENTS.md or
         #      GEMINI.md converted to CRLF line endings (compared as raw bytes, not decoded text), is C2
-        #      FAIL; with its declared block source missing, or with the registry itself missing (also with
-        #      no AGENTS.md, so the adapters alone are judged), it is C2 MALFORMED (exit 2), never a pass and
-        #      never a silent NOT APPLICABLE.
+        #      FAIL; with its declared block source missing, a block target of the wrong TOML type (an array
+        #      or a table), a symlinked registry, or an AGENTS.md or GEMINI.md that is not valid UTF-8, it is
+        #      C2 MALFORMED (exit 2). An absent registry reads as every target legacy (an install that
+        #      predates the registry): the composed AGENTS.md is then C2 FAIL, never a pass; the legacy
+        #      adapters alone, and an AGENTS.md that is exactly the legacy rendering, are C2 PASS.
         block = ("OPF-SELFTEST", "AGENTS.md", "before-rules", 1, "opf/blocks/selftest.md", None)
         composed_reg = adapter_compose.registry_text([("AGENTS.md", "composed")], [block])
+
+        def reg_path(b):
+            return b.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
+
+        def legacy_agents(b, corpus):
+            (b / "AGENTS.md").write_bytes(adapter_compose.compose(
+                "AGENTS.md", gen_agents.HEADER, gen_agents.ordered_bodies(corpus),
+                adapter_compose.LEGACY_REGISTRY).data)
+            reg_path(b).unlink()
+
+        def symlinked_registry(b, _corpus):
+            reg_path(b).rename(b / "registry-elsewhere.toml")
+            os.symlink(b / "registry-elsewhere.toml", reg_path(b))
+
+        def retyped_target(new):
+            def mutate(b, _corpus):
+                reg_path(b).write_text(composed_reg.replace('target = "AGENTS.md"', new, 1), encoding="utf-8")
+            return mutate
+
         for label, mutate, want_code, want in (
                 ("composed", None, 0, PASS),
-                ("composed-local-edit", lambda b: (b / "AGENTS.md").write_bytes(
+                ("composed-local-edit", lambda b, _c: (b / "AGENTS.md").write_bytes(
                     (b / "AGENTS.md").read_bytes() + b"\nlocal edit\n"), 1, FAIL),
-                ("composed-crlf", lambda b: (b / "AGENTS.md").write_bytes(
+                ("composed-crlf", lambda b, _c: (b / "AGENTS.md").write_bytes(
                     (b / "AGENTS.md").read_bytes().replace(b"\n", b"\r\n")), 1, FAIL),
-                ("adapter-crlf", lambda b: (b / "GEMINI.md").write_bytes(
+                ("adapter-crlf", lambda b, _c: (b / "GEMINI.md").write_bytes(
                     (b / "GEMINI.md").read_bytes().replace(b"\n", b"\r\n")), 1, FAIL),
-                ("composed-source-missing", lambda b: (b / "opf" / "blocks" / "selftest.md").unlink(), 2,
+                ("composed-invalid-utf8", lambda b, _c: (b / "AGENTS.md").write_bytes(
+                    (b / "AGENTS.md").read_bytes() + b"\xff"), 2, MALFORMED),
+                ("adapter-invalid-utf8", lambda b, _c: (b / "GEMINI.md").write_bytes(
+                    (b / "GEMINI.md").read_bytes() + b"\xff"), 2, MALFORMED),
+                ("composed-source-missing", lambda b, _c: (b / "opf" / "blocks" / "selftest.md").unlink(), 2,
                  MALFORMED),
-                ("registry-missing", lambda b: b.joinpath(*adapter_compose.REGISTRY_REL.split("/")).unlink(),
-                 2, MALFORMED),
-                # No AGENTS.md (its surface NOT APPLICABLE): the adapters alone must still need the registry.
-                ("registry-missing-adapters-only", lambda b: (
-                    (b / "AGENTS.md").unlink(), b.joinpath(*adapter_compose.REGISTRY_REL.split("/")).unlink()),
-                 2, MALFORMED)):
+                ("registry-block-target-array", retyped_target('target = ["AGENTS.md"]'), 2, MALFORMED),
+                ("registry-block-target-table", retyped_target("target = { p = 1 }"), 2, MALFORMED),
+                ("registry-symlink", symlinked_registry, 2, MALFORMED),
+                # An absent registry is every target legacy: the composed AGENTS.md no longer matches.
+                ("registry-missing", lambda b, _c: reg_path(b).unlink(), 1, FAIL),
+                # No AGENTS.md (its surface NOT APPLICABLE): the legacy adapters alone are judged and pass.
+                ("registry-missing-adapters-only", lambda b, _c: ((b / "AGENTS.md").unlink(), reg_path(b).unlink()),
+                 0, PASS),
+                # An install that predates the registry: AGENTS.md is exactly the legacy rendering.
+                ("registry-missing-legacy-install", legacy_agents, 0, PASS)):
             ctree = tmp / ("adapter-registry-" + label)
             ctree.mkdir()
             corpus = _build_conformant(ctree)
@@ -1139,7 +1173,7 @@ def self_test_main():
             if b"<!-- OPF-SELFTEST:BEGIN (generated sha256=" not in (ctree / "AGENTS.md").read_bytes():
                 failures.append("adapter-registry ({}): fixture AGENTS.md carries no OPF block".format(label))
             if mutate is not None:
-                mutate(ctree)
+                mutate(ctree, corpus)
             code, out = run_capture(ctree)
             if code != want_code or status_of(out, "C2") != want:
                 failures.append("adapter-registry ({}) expected exit {} + C2 {}, got exit {}:\n{}".format(
@@ -1464,7 +1498,9 @@ def self_test_main():
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
           "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
-          "conversion fails, and a missing block source or block registry is MALFORMED; the hooks plugin "
+          "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
+          "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
+          "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "
           "surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
           "orphan, or an orphaned surface with no source; absent input (corpus, "

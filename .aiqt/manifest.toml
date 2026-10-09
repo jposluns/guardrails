@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c32586af63aa5fe6e1c4f33c5aab9c208511918a0eadf5e13ac3de04afb2bab0"
+tree-sha256 = "c4ec668e1f59b2182f7f33774afde8b938a4dd53f3ce869379d0b771802dc0ad"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -21,8 +21,8 @@ sha256 = "52275f88fbcb6c310a13d4e4ec3a9fc18b9959ac9a5e390c4ec1b8d385f3395c"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
-bytes = 1603
-sha256 = "d61d233a23eebdd997d4ba46b55af2d4d236ea4c8e9b6d26a3433796564d5d3e"
+bytes = 1742
+sha256 = "d586f4b462cb65a5abe88e8db05b36fb21eb16a435d671daf75d679980f37af0"
 
 [[sources]]
 path = ".aiqt/core/applicability.toml"
@@ -137,7 +137,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "7b7a580e4e28df6505eb558f156be7ccf3a745a1a6f15e27b6eb2e02eb160d34"
+sha256 = "5d65c56837da4ba152013d9bff46c4519cb2ef240efc98f7da38fdd3f0c55b16"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3196,8 +3196,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "tools/_adapter_compose.py"
-bytes = 25234
-sha256 = "e9cf81b2db986d12c9dd5690766e49fe1967c270e428fecf38d83f0481af7df7"
+bytes = 29853
+sha256 = "4abcf69b4c2f1e65a275c77a0ee6dc7be63fe8f665af865c06f5afc369eb0d09"
 
 [[sources]]
 path = "tools/_close_selftest.py"
@@ -3491,8 +3491,8 @@ sha256 = "a01ad6ac6a98f314356104894c9b03a5868e9cc632e72350b9816cac89642b12"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 72847
-sha256 = "d387328def252999d736d46bc6282cefe2a87ca10a15c7a43769d9c2007c320f"
+bytes = 75328
+sha256 = "7f2b08abad678c2e51a6d4f5c58fd3b07490ec478780defb183ffb5629bcc20a"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -3501,13 +3501,13 @@ sha256 = "1dd131d9a2d8fbd97e4405baacb1744af9bf3a55bb1ec5a946f949d0f26d38df"
 
 [[sources]]
 path = "tools/gen_adapters.py"
-bytes = 4293
-sha256 = "b6b087557053c8846c1ddb9db110e3719fcdebb1eac4ad677e4928da4a2feed0"
+bytes = 4377
+sha256 = "3639dfa49c24746af1bda55b6bb652afd0c75162bb8ad3aca80cc5be4df9b7a7"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 25453
-sha256 = "0cdcbe380e88f83f310a59b8f6779afbf3f12a525d846fe13867c98ebb533d3e"
+bytes = 34898
+sha256 = "92ba1becbc1c07ccba99df2aa35580466e4d4c3fde7ebb1eca061dbf2e4c5dbc"
 
 [[sources]]
 path = "tools/gen_changelog.py"

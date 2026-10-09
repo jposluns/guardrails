@@ -7,7 +7,8 @@ then Progress, Speed, Cost; then the security family in CIA-plus-privacy order),
 to a section heading. The layout (legacy, or composed with reviewed blocks around the rules) comes from the
 block registry .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator
 shares with gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or
-registry, or on a write that would erase a hand edit.
+registry, a symlinked target, an absent rule corpus (nothing is deleted), or a write that would erase a
+hand edit.
 
   gen_agents.py              regenerate AGENTS.md
   gen_agents.py --check      exit 1 if AGENTS.md differs from a fresh composition; write nothing
@@ -107,14 +108,22 @@ def main():
 #   T9  blocks out of registry order, digests intact: --check 1, write 0 and reorders.
 #   T10 a legacy target holding a pasted marker line: --check 1, write 2.
 #   T11 migration: the exact legacy rendering composes (write 0); with extra text, write 2.
-#   T12 each registry error: exit 2 in both modes, nothing written.
+#   T12 each registry error: exit 2 in both modes, nothing written; every field of the wrong TOML type
+#       (an array, a table, a number or a boolean) is a clean refusal naming the field, never an exception.
 #   T13 each block-source error: exit 2, nothing written.
 #   T14 a CRLF-converted legacy AGENTS.md: --check 1.
-#   T15 two targets in one run (the gen_adapters pair) with one refused: the other is not written.
-#   T16 no rule corpus: a composed target exits 2 and is kept; a legacy target is drift (--check 1) and
-#       is deleted (write 0).
+#   T15 two targets in one run (the gen_adapters pair) with either one refused: the other is not written.
+#   T16 no rule corpus: exit 2 in both modes and nothing deleted, whether the target is composed, legacy,
+#       legacy holding a pasted block, the gen_adapters pair, or absent (nothing is created either).
 #   T17 a rule corpus path that exists but cannot be stat'ed (a symlink loop): exit 2, nothing deleted.
 #   T18 a rule body holding a marker-like line, composed target: exit 2.
+#   T19 a target that is a symlink (to a file outside the tree, or dangling), a target under a symlinked
+#       directory, and a target that is a directory: exit 2 in both modes; the outside file and directory
+#       and the sibling target are unchanged, and nothing is created through the link.
+#   T20 a legacy target already in sync is not judged: a rule body holding a marker-like line writes once
+#       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
+#   T21 a write keeps the target's mode and leaves no temporary file; a failed rename is exit 2 with the
+#       target unchanged and the temporary file removed.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -188,8 +197,13 @@ def self_test_main():
 
     def expect(label, root, check, want, targets=None, unchanged=True):
         rels = [rel for rel, _h in (targets or agents_only)]
-        before = [read(root / rel) for rel in rels]
-        code, out = drive(root, check, targets)
+        before = [read(root / rel) for rel in rels] if unchanged else None
+        try:
+            code, out = drive(root, check, targets)
+        except Exception as exc:  # the engine must map every input error to an exit code, never raise
+            failures.append("{}: {} raised {}: {}".format(
+                label, "--check" if check else "write", type(exc).__name__, exc))
+            return ""
         if code != want:
             failures.append("{}: {} expected exit {}, got {}: {}".format(
                 label, "--check" if check else "write", want, code, out.strip()))
@@ -325,6 +339,30 @@ def self_test_main():
             root = tree(composed_reg.replace(old, new, 1), agents=golden)
             expect("T12 " + label, root, True, 2)
             expect("T12 " + label, root, False, 2)
+        # Wrong TOML types: each is exit 2 in both modes, and the refusal names the field.
+        type_cases = (
+            ("block target", 'target = "AGENTS.md"', ('["AGENTS.md"]', "{ p = 1 }", "1", "true")),
+            ("block owner", 'owner = "opf"', ('["opf"]', '{ o = "opf" }', "1")),
+            ("block position", 'position = "after-rules"', ('["after-rules"]', "{ p = 1 }", "2")),
+            ("block order", "order = 1", ("1.0", "[1]", "{ o = 1 }")),
+            ("block source", 'source = "opf/blocks/a.md"', ('["opf/blocks/a.md"]', "{ s = 1 }", "1")),
+            ("block id", 'id = "OPF-A"', ('["OPF-A"]', "{ i = 1 }", "1")),
+            ("target-row path", 'path = "GEMINI.md"', ('["GEMINI.md"]', "{ p = 1 }")),
+            ("target-row layout", 'layout = "composed"', ('["composed"]', "{ l = 1 }")),
+            ("retired-blocks", "retired-blocks = []", ("{}", "[{}]", "[1]")),
+        )
+        for field, old, values in type_cases:
+            if old not in composed_reg:
+                failures.append("T12 {}: fixture mutation did not apply".format(field))
+            key = old.split(" = ", 1)[0]
+            for value in values:
+                label = "T12 {} = {}".format(field, value)
+                root = tree(composed_reg.replace(old, key + " = " + value, 1), agents=golden)
+                for check in (True, False):
+                    out = expect(label, root, check, 2)
+                    if key not in out:
+                        failures.append("{}: the refusal does not name the field {}: {}".format(
+                            label, key, out.strip()))
         root = tree(None, agents=golden)
         expect("T12 registry absent", root, True, 2)
         expect("T12 registry absent", root, False, 2)
@@ -395,18 +433,38 @@ def self_test_main():
         expect("T15 adapters with GEMINI.md refused", root, False, 2, targets=adapter_pair)
         if copilot.exists():
             failures.append("T15: copilot-instructions.md was written although GEMINI.md was refused")
+        # The mirror: the SECOND target (copilot) refused, so the first (GEMINI.md, absent) is not written.
+        pasted_block = b"<!-- NOTE:BEGIN (generated) -->\nhand text\n<!-- NOTE:END -->\n"
+        root = tree(ac.registry_text(), blocks=())
+        expect("T15 mirror first write", root, False, 0, targets=adapter_pair, unchanged=False)
+        gem, copilot = root / "GEMINI.md", root / ".github" / "copilot-instructions.md"
+        copilot.write_bytes(copilot.read_bytes() + pasted_block)
+        gem.unlink()
+        expect("T15 adapters with copilot refused", root, False, 2, targets=adapter_pair)
+        if gem.exists():
+            failures.append("T15: GEMINI.md was written although copilot-instructions.md was refused")
 
-        # T16. No rule corpus: a composed target is kept (exit 2); a legacy target is an orphan.
-        root = tree(composed_reg, agents=golden)
-        shutil.rmtree(root / ".aiqt" / "core" / "rules")
-        expect("T16 composed, no corpus", root, True, 2)
-        expect("T16 composed, no corpus", root, False, 2)
-        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-        shutil.rmtree(root / ".aiqt" / "core" / "rules")
-        expect("T16 legacy, no corpus --check", root, True, 1)
-        expect("T16 legacy, no corpus write", root, False, 0, unchanged=False)
-        if (root / AGENTS_REL).exists():
-            failures.append("T16: a legacy AGENTS.md with no corpus was not removed")
+        # T16. No rule corpus: exit 2 in both modes, nothing deleted and nothing created.
+        no_corpus = (
+            ("composed", composed_reg, (_BLOCK_A, _BLOCK_Z), golden, agents_only),
+            ("legacy", ac.registry_text(), (), legacy_golden, agents_only),
+            ("legacy holding a pasted block", ac.registry_text(), (), pasted_block, agents_only),
+            ("no target", ac.registry_text(), (), None, agents_only),
+            ("the gen_adapters pair", ac.registry_text(), (), None, adapter_pair),
+        )
+        for label, registry, blocks, agents, targets in no_corpus:
+            root = tree(registry, blocks=blocks, agents=agents)
+            if targets is adapter_pair:
+                for rel, _h in adapter_pair:
+                    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (root / rel).write_bytes(legacy_golden)
+            shutil.rmtree(root / ".aiqt" / "core" / "rules")
+            for check in (True, False):
+                out = expect("T16 no corpus, " + label, root, check, 2, targets=targets)
+                if "nothing was written or deleted" not in out:
+                    failures.append("T16 no corpus, {}: no refusal message: {}".format(label, out.strip()))
+            if read(root / AGENTS_REL) != agents:
+                failures.append("T16 no corpus, {}: AGENTS.md was not kept as it was".format(label))
 
         # T17. A corpus path that exists but cannot be stat'ed (a symlink loop) is exit 2, never an absent
         #      corpus that deletes the adapters (Path.is_dir() reads it as absent).
@@ -423,6 +481,85 @@ def self_test_main():
         root = tree(composed_reg, rules=(_APEX, marked), agents=golden)
         expect("T18 marker-like rule body", root, True, 2)
         expect("T18 marker-like rule body", root, False, 2)
+
+        # T19. Symlinked and non-regular targets: exit 2 in both modes, nothing outside the tree touched.
+        outside = tmp / "outside"
+        outside.mkdir()
+        victim = outside / "victim.md"
+        new_rule = _RULE.replace("Rule text.", "New text.")
+        for label, link_dir in (("a symlinked target", False), ("a symlinked parent directory", True)):
+            victim.write_bytes(legacy_golden)
+            root = tree(ac.registry_text(), blocks=())
+            expect("T19 first write", root, False, 0, targets=adapter_pair, unchanged=False)
+            gem, copilot = root / "GEMINI.md", root / ".github" / "copilot-instructions.md"
+            # A rule change makes every target drift, so a write would rewrite each one.
+            (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+            if link_dir:
+                (outside / "gh").mkdir(exist_ok=True)
+                (outside / "gh" / "copilot-instructions.md").write_bytes(copilot.read_bytes())
+                shutil.rmtree(root / ".github")
+                os.symlink(outside / "gh", root / ".github")
+                watched = outside / "gh" / "copilot-instructions.md"
+            else:
+                copilot.unlink()
+                os.symlink(victim, copilot)
+                watched = victim
+            outside_before = sorted(str(p) for p in outside.rglob("*")), read(watched)
+            gem_before = read(gem)
+            for check in (True, False):
+                out = expect("T19 " + label, root, check, 2, targets=adapter_pair)
+                if "symlink" not in out:
+                    failures.append("T19 {}: the refusal does not name the symlink: {}".format(
+                        label, out.strip()))
+            if (sorted(str(p) for p in outside.rglob("*")), read(watched)) != outside_before:
+                failures.append("T19 {}: a file outside the tree was written or created".format(label))
+            if read(gem) != gem_before:
+                failures.append("T19 {}: the sibling target GEMINI.md was written".format(label))
+        root = tree(ac.registry_text(), blocks=())
+        os.symlink(outside / "absent.md", root / AGENTS_REL)
+        expect("T19 a dangling symlinked target", root, True, 2)
+        expect("T19 a dangling symlinked target", root, False, 2)
+        if (outside / "absent.md").exists():
+            failures.append("T19: a dangling symlinked target created a file outside the tree")
+        root = tree(ac.registry_text(), blocks=())
+        (root / AGENTS_REL).mkdir()
+        expect("T19 a directory as target", root, True, 2, unchanged=False)  # read() cannot read a directory
+        expect("T19 a directory as target", root, False, 2, unchanged=False)
+        if not (root / AGENTS_REL).is_dir() or any((root / AGENTS_REL).iterdir()):
+            failures.append("T19: a directory target was replaced or written into")
+
+        # T20. A legacy target in sync is not judged, so a rule body holding a marker-like line rewrites.
+        marked = _RULE.replace("Rule text.", "Rule text.\n\n<!-- EXAMPLE:BEGIN -->")
+        root = tree(ac.registry_text(), blocks=(), rules=(_APEX, marked))
+        expect("T20 legacy marker-like body, first write", root, False, 0, unchanged=False)
+        expect("T20 legacy marker-like body, --check", root, True, 0)
+        expect("T20 legacy marker-like body, rewrite", root, False, 0)
+
+        # T21. A write keeps the mode, leaves no temporary file, and a failed rename changes nothing.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        os.chmod(root / AGENTS_REL, 0o640)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        expect("T21 rewrite", root, False, 0, unchanged=False)
+        if read(root / AGENTS_REL) == legacy_golden:
+            failures.append("T21: the rewrite did not change AGENTS.md")
+        if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o640:
+            failures.append("T21: the rewrite did not keep the target's mode")
+        if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+            failures.append("T21: the write left a stray file: {}".format(sorted(p.name for p in root.iterdir())))
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
+        real_replace = ac.os.replace
+
+        def failing_replace(_src, _dst):
+            raise OSError("injected rename failure")
+
+        ac.os.replace = failing_replace
+        try:
+            expect("T21 failed rename", root, False, 2)
+        finally:
+            ac.os.replace = real_replace
+        if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+            failures.append("T21: a failed rename left a temporary file: {}".format(
+                sorted(p.name for p in root.iterdir())))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -436,9 +573,12 @@ def self_test_main():
           "outside a block, and every broken or malformed marker are drift (exit 1) and refused (exit 2) "
           "with nothing written; an undeclared block is refused and a retired one dropped; registry order "
           "is restored; a marker in a legacy target is refused; only the exact legacy rendering migrates; "
-          "every registry and block-source error is exit 2; CRLF is drift; one refused adapter blocks the "
-          "other's write; a composed target with no corpus is kept and a legacy one removed; an "
-          "unreachable corpus deletes nothing; a marker-like rule body is exit 2.")
+          "every registry and block-source error is exit 2, a wrong-typed registry field included, naming the "
+          "field; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
+          "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
+          "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
+          "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the mode "
+          "and leaves no temporary file, even when the rename fails.")
     return 0
 
 
