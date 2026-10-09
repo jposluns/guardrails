@@ -85,7 +85,12 @@ exception whose class name is neither a builtin exception's nor this module's, o
 a descriptor or an API it does not list; an exception's __cause__ chain holds the original
 exception objects, which this module never prints but a traceback would; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
-the offending keys are deliberately not printed. Not
+the offending keys are deliberately not printed. The canonical Python floor guard that opens this
+file (tools/check_python_floor.py GUARD_TEMPLATE) is the one site outside the closed rule: below the
+floor it writes its fixed refusal formatted with the interpreter's version and sys.executable, and
+exits 2 before anything else runs. closure/closed-sites exempts that one write by its position and
+exact shape (_floor_guard) and, through flips, refutes an exemption that would cover a write in any
+other position or shape. Not
 checked: that the process exits with main()'s return (the last line of this file;
 _check_entry_points calls main() directly), and that run() removes its scratch directory afterwards (a
 run that leaves its copy behind still verifies).
@@ -103,8 +108,9 @@ import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
     sys.stderr.write(
-        "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this interpreter is "
-        "older. Nothing was run (cannot evaluate).\n")
+        "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
 import ast
@@ -138,7 +144,11 @@ from _gen_common import repo_root  # noqa: E402
 # constructor passes each argument as a string or int constant, a module literal registered in
 # _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those.
 # The gates check membership at run time: a token outside its vocabulary is replaced by a fixed
-# marker naming the vocabulary, so no runtime value can ride through them.
+# marker naming the vocabulary, so no runtime value can ride through them. The one site outside the
+# rule is the canonical Python floor guard that opens this file (tools/check_python_floor.py
+# GUARD_TEMPLATE, which that gate requires verbatim): below the floor it writes its fixed refusal
+# with the interpreter's version and sys.executable, before anything else runs. closure/closed-sites
+# exempts that single write by its position and exact shape (_floor_guard), nothing else.
 
 # The names of builtin exception classes, this module's own, and NoneType: the closed vocabulary a
 # diagnostic naming an exception's type draws from, and the class names whose constructor calls
@@ -165,14 +175,15 @@ def _cv(kind, token):
     """`token` when it is a str member of the closed vocabulary `kind`; otherwise the fixed marker
     naming the vocabulary (the token itself is then never returned, so a runtime value cannot ride
     through). The static vocabularies live in _CLOSED_VOCABULARIES; "case", "flip" and the
-    attribution kinds are read from the live tables (_PREFLIGHT_CASES, _CLOSED_FLIPS,
+    attribution kinds are read from the live tables (_PREFLIGHT_CASES, _CLOSED_FLIPS, _FLOOR_GUARD_FLIPS,
     _ATTRIBUTION_PINS, _ATTRIBUTION_EXCLUSIONS, _ATTRIBUTION_INDIRECTIONS), so a stubbed table's
     names are members while it is patched in."""
     if kind == "case":
         allowed = frozenset(part for label, check in _PREFLIGHT_CASES
                             for part in (label, check.__name__) if part is not None)
     elif kind == "flip":
-        allowed = frozenset(flip for flip, _snippet in _CLOSED_FLIPS)
+        allowed = frozenset(flip for flip, _snippet in _CLOSED_FLIPS) | frozenset(
+            row[0] for row in _FLOOR_GUARD_FLIPS)
     elif kind in ("pin-label", "site", "site-key", "indirection-key"):
         rows = _ATTRIBUTION_PINS
         if kind == "pin-label":
@@ -2087,6 +2098,70 @@ def _closed_argument(node):
     return False
 
 
+# The values the canonical floor guard's refusal formats (tools/check_python_floor.py
+# GUARD_TEMPLATE): the interpreter's version and sys.executable, nothing else.
+_FLOOR_GUARD_VALUES = 'tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)'
+
+
+def _floor_guard(tree):
+    """The module-level `if` statement whose refusal write closure/closed-sites exempts as the
+    canonical Python floor guard, or None. It directly follows a plain `import sys` at the end of
+    the preamble (a docstring and `from __future__` imports, as tools/check_python_floor.py reads
+    it), has no else, tests `tuple(sys.version_info[:2]) < (M, N)` with two int constants, and holds
+    exactly two statements: a sys.stderr.write passing one positional argument, a str constant %
+    exactly _FLOOR_GUARD_VALUES, then `raise SystemExit(<int>)`. A guard in any other position or
+    shape (a third statement, another value formatted, a second copy later in the module, one
+    inside a def) is not this one, so its write is not exempted."""
+    body, start = tree.body, 0
+    if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        start = 1
+    while (start < len(body) and isinstance(body[start], ast.ImportFrom)
+           and body[start].module == "__future__" and body[start].level == 0):
+        start += 1
+    if len(body) < start + 2:
+        return None
+    head, guard = body[start], body[start + 1]
+    if not (isinstance(head, ast.Import) and len(head.names) == 1 and head.names[0].name == "sys"
+            and head.names[0].asname is None):
+        return None
+    if not (isinstance(guard, ast.If) and not guard.orelse and len(guard.body) == 2):
+        return None
+    test, write, leave = guard.test, guard.body[0], guard.body[1]
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Lt)
+            and ast.dump(test.left) == ast.dump(ast.parse("tuple(sys.version_info[:2])", mode="eval").body)
+            and isinstance(test.comparators[0], ast.Tuple) and len(test.comparators[0].elts) == 2
+            and all(isinstance(elt, ast.Constant) and type(elt.value) is int
+                    for elt in test.comparators[0].elts)):
+        return None
+    if not (isinstance(leave, ast.Raise) and leave.cause is None and isinstance(leave.exc, ast.Call)
+            and _callee_name(leave.exc.func) == "SystemExit" and not leave.exc.keywords
+            and len(leave.exc.args) == 1 and isinstance(leave.exc.args[0], ast.Constant)
+            and type(leave.exc.args[0].value) is int):
+        return None
+    call = write.value if isinstance(write, ast.Expr) else None
+    if not (isinstance(call, ast.Call) and _callee_name(call.func) == "sys.stderr.write"
+            and not call.keywords and len(call.args) == 1):
+        return None
+    text = call.args[0]
+    if not (isinstance(text, ast.BinOp) and isinstance(text.op, ast.Mod)
+            and isinstance(text.left, ast.Constant) and isinstance(text.left.value, str)
+            and ast.dump(text.right) == ast.dump(ast.parse(_FLOOR_GUARD_VALUES, mode="eval").body)):
+        return None
+    return guard
+
+
+def _unexempted_violations(tree):
+    """_closed_output_violations(tree) less the canonical floor guard's refusal write (_floor_guard),
+    with the number of violations that exemption removed (the guard's write is one sys.stderr.write
+    call at module level, so a count other than 1 means the exemption is stale or too wide)."""
+    guard = _floor_guard(tree)
+    found = _closed_output_violations(tree)
+    kept = [site for site in found
+            if guard is None or site[:3] != ("<module>", "sys.stderr.write", guard.body[0].lineno)]
+    return kept, len(found) - len(kept)
+
+
 def _closed_output_violations(tree):
     """Every output call and exception constructor under `tree` that could carry unclosed text, as
     (qualname, callee, line, why): a print (builtins.print included) whose positional argument, or
@@ -2194,6 +2269,21 @@ _CLOSED_FLIPS = (
     ("aliased-os-write", "import os\nwriter = os.write\n"),
 )
 
+# Flips of the floor-guard exemption, as (name, old, new, module): the module text with "{guard}"
+# replaced by this file's own guard source (the `if` statement) after replacing old with new in it
+# once (no change when old is empty), and "{indented}" by that guard indented one level. Each module
+# must keep an unexempted violation, so the exemption covers the canonical guard's write in its
+# canonical position and shape and nothing else.
+_FLOOR_GUARD_FLIPS = (
+    ("guard-extra-write", "    raise SystemExit(", "    sys.stderr.write(value)\n    raise SystemExit(",
+     "import sys\n{guard}\n"),
+    ("guard-other-values", "sys.executable or", "value or", "import sys\n{guard}\n"),
+    ("guard-not-after-import", "", "", "import sys\nimport os\n{guard}\n"),
+    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n"),
+    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n"),
+    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n"),
+)
+
 # A snippet of every closed form, which _closed_output_violations must pass untouched.
 _CLOSED_CONTROL = (
     "import sys\n"
@@ -2219,13 +2309,22 @@ def _check_closed_sites(_root):
     so removing a recognizer, or widening the closed grammar, fails here. Not seen (residuals,
     stated in the module docstring too): a raise of a bare name, a BUILT exception whose class name
     is not in _EXCEPTION_NAMES, a write through a descriptor or an API the walk does not list, and
-    the interpreter's own traceback on an uncaught exception. A source that cannot be read is
-    cannot-evaluate."""
+    the interpreter's own traceback on an uncaught exception. The canonical Python floor guard
+    that opens this file is the one site exempted outside _CLOSED_SITE_EXCEPTIONS: _floor_guard
+    must find it, the exemption must remove exactly its one refusal write, and the walk with the
+    exemption applied must flag every _FLOOR_GUARD_FLIPS module built from this file's own guard
+    and pass the guard alone, so the exemption cannot widen to another write. A source that cannot
+    be read is cannot-evaluate."""
     try:
         source = Path(_THIS_FILE).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         raise _CannotEvaluate("closure/closed-sites: could not read this file's source")
     tree = ast.parse(source)
+    guard_node = _floor_guard(tree)
+    guard = None if guard_node is None else ast.get_source_segment(source, guard_node)
+    if not guard:
+        raise AssertionError("closure/closed-sites: this file does not open with the canonical Python "
+                             "floor guard in the shape the exemption accepts")
     literal = set()
     for node in tree.body:
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -2244,7 +2343,11 @@ def _check_closed_sites(_root):
                                  "reason: {} {}".format(qualname, name))
         matched[qualname, name] = 0
     unclosed = []
-    for qualname, name, lineno, why in _closed_output_violations(tree):
+    violations, exempted = _unexempted_violations(tree)
+    if exempted != 1:
+        raise AssertionError("closure/closed-sites: the floor-guard exemption removed {} violation(s), "
+                             "not exactly the guard's one refusal write".format(_n(exempted)))
+    for qualname, name, lineno, why in violations:
         if (qualname, name) in matched:
             matched[qualname, name] += 1
         else:
@@ -2262,6 +2365,20 @@ def _check_closed_sites(_root):
                                  "form is no longer recognized".format(_cv("flip", flip)))
     if _closed_output_violations(ast.parse(_CLOSED_CONTROL)):
         raise AssertionError("closure/closed-sites: the walk refused the closed control snippet")
+    indented = "\n".join("    " + line for line in guard.splitlines())
+    for flip, old, new, module in _FLOOR_GUARD_FLIPS:
+        flipped = guard.replace(old, new, 1)
+        if old and flipped == guard:
+            raise AssertionError("closure/closed-sites: the {} flip changed nothing in the guard".format(
+                _cv("flip", flip)))
+        text = module.replace("{guard}", flipped).replace("{indented}", indented)
+        if not _unexempted_violations(ast.parse(text))[0]:
+            raise AssertionError("closure/closed-sites: the floor-guard exemption passed the {} flip, "
+                                 "so it covers more than the canonical guard's write".format(
+                                     _cv("flip", flip)))
+    if _unexempted_violations(ast.parse("import sys\n" + guard + "\n")) != ([], 1):
+        raise AssertionError("closure/closed-sites: the floor-guard exemption did not cover exactly "
+                             "the canonical guard's one write")
 
 
 def _check_entry_points():
