@@ -122,7 +122,8 @@ THREAT MODEL
     at most, so that note comes about 2 seconds late, but the OS can return from a wait late, and nothing here
     bounds how much later. The one exception is an interpreter older than Python 3.14 that can start the hook: the guard
     at the top of this file reads no input, writes one line beginning
-    `error: pattern-self-match.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
+    `error: pattern-self-match.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit
+    does not depend on it) and exits 2, which PreToolUse treats as
     a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
     interpreter that cannot start the hook never reaches the guard and fails with Python's own error first. For
     this hook that is only one that predates the -I option, and it exits 2, which still denies every Bash call:
@@ -198,10 +199,13 @@ Self-test: python3 -I -S -B pattern-self-match.py --self-test
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pattern-self-match.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: pattern-self-match.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 import json

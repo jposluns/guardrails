@@ -51,7 +51,8 @@ Contract: context = hookSpecificOutput {hookEventName, additionalContext} JSON o
 NEVER fails the tool: any error at all exits 0, including an argument, stdin, or JSON error before the
 payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
 hook: the guard at the top of this file reads no input, writes one line beginning
-`error: clock-inject.py requires Python 3.14 or newer` to stderr and exits 2. Under PostToolUse and
+`error: clock-inject.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit does
+not depend on it) and exits 2. Under PostToolUse and
 PostToolUseFailure the tool call has already run, so that exit blocks nothing: the line reaches the assistant
 and no clock line is added. An older interpreter that cannot start the hook never reaches the guard and fails
 with Python's own error first; .preview/README.md (Installing a hook, step 4) describes those cases. The
@@ -90,10 +91,13 @@ sibling that is present but unreadable fails them either way.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: clock-inject.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: clock-inject.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 import datetime

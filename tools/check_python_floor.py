@@ -95,7 +95,11 @@ Legs, in order:
                  argv (a PreToolUse handler, an unknown mode, no mode) refuses with the canonical
                  refusal and exit 2, fixed: exit 1 does not block a PreToolUse call, so a HOOK_SURFACES
                  entry listed in nonblocking-surfaces is cannot-evaluate at the source leg. The hook's
-                 own self-test holds the literal equal to its fail-open handlers.
+                 own self-test holds the literal equal to its fail-open handlers. Both forms
+                 wrap each diagnostic write (the stderr refusal, and the hook form's stdout
+                 warning) in try/except BaseException, so the refusal exit does not depend on
+                 stream availability; the retired unwrapped shape does not match and is a
+                 finding.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
                  versions below the floor, exits with its refusal exit (as for the guard leg) with
@@ -105,6 +109,13 @@ Legs, in order:
                  run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
                  DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
+                 The refusal exit may not depend on the diagnostic write: each entrypoint is
+                 also run (no flag, the first patched version) under each STDERR_VECTORS
+                 condition (sys.stderr set to None, a sys.stderr whose write raises, and file
+                 descriptor 2 closed before the interpreter starts, which leaves sys.stderr
+                 None), and must still exit with its refusal exit with empty stdout and stderr;
+                 a HOOK_SURFACES entry must also still warn (exit 0, the exact warning on
+                 stdout) under each condition with its first FLOOR_FAIL_OPEN_MODES mode.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
@@ -182,10 +193,13 @@ Run this gate isolated: python3 -I -B tools/check_python_floor.py
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 import ast
@@ -322,13 +336,23 @@ CONTINUED = "CONTINUED"
 # hook's exit 2 blocks the stop, and the guard runs before the hook's own block cap).
 REFUSAL_EXIT = 2
 NONBLOCKING_EXIT = 1
+# The diagnostic write is wrapped in try/except BaseException: the refusal exit may not depend on
+# stderr, which can be None (Python leaves it None when file descriptor 2 is invalid at interpreter
+# startup) or raising, and an unwrapped write error escaping the guard turned the refusal exit into
+# exit 1, which a PreToolUse hook event reads as non-blocking (fail open). The exit stays `raise
+# SystemExit`: at the top level of a directly executed file nothing intercepts it (the dynamic leg
+# runs each entrypoint under runpy, which does not catch it), and unlike os._exit it unwinds
+# normally and flushes buffered streams, which the hook form needs for its stdout warning.
 GUARD_TEMPLATE = '''import sys
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
-    sys.stderr.write(
-        "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit({code})
 '''
 # The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
@@ -336,7 +360,9 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 # UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
 # PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
 # exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
-# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces.
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. Both the
+# stderr refusal and the stdout warning are best-effort writes (try/except BaseException): the
+# exits above hold even when a stream is closed, missing or failing.
 HOOK_GUARD_TEMPLATE = '''import sys
 
 FLOOR_FAIL_OPEN_MODES = {modes}
@@ -346,12 +372,18 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
         "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    sys.stderr.write(_floor_refusal)
+    try:
+        sys.stderr.write(_floor_refusal)
+    except BaseException:
+        pass
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
-        sys.stdout.write(json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+        try:
+            import json
+            sys.stdout.write(json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+        except BaseException:
+            pass
         raise SystemExit(0)
     raise SystemExit(2)
 '''
@@ -376,6 +408,36 @@ BOUNDARY_CHILD = (
     "    sys.version_info = tuple(int(part) for part in version.split('.')) + ('final', 0)\n"
     "exec(compile(prefix, '<guard prefix>', 'exec'), {'__name__': '__main__'})\n"
     "print('" + CONTINUED + "')\n")
+# The stderr-unavailable vectors: the refusal exit may not depend on the diagnostic write. none
+# runs the entrypoint with sys.stderr set to None (what Python leaves when file descriptor 2 is
+# invalid at interpreter startup), raises with a sys.stderr whose write raises (its flush works:
+# at exit the interpreter itself flushes the std streams and turns a flush failure into its own
+# exit 120, after the guard has exited), and closed in a fresh interpreter started with file
+# descriptor 2 closed, so Python itself sets sys.stderr to None.
+STDERR_VECTORS = ("none", "raises", "closed")
+STDERR_VECTOR_LABELS = {"none": "sys.stderr set to None",
+                        "raises": "a sys.stderr whose write raises",
+                        "closed": "file descriptor 2 closed at interpreter startup"}
+BROKEN_STDERR_CHILD = (
+    "import runpy, sys\n"
+    "path, vector = sys.argv[1], sys.argv[3]\n"
+    "version = tuple(int(part) for part in sys.argv[2].split('.'))\n"
+    "sys.argv = [path] + sys.argv[4:]\n"
+    "sys.version_info = version + ('final', 0)\n"
+    "class _BrokenStderr:\n"
+    "    def write(self, text):\n"
+    "        raise OSError('stderr unavailable')\n"
+    "    def flush(self):\n"
+    "        pass\n"
+    "sys.stderr = None if vector == 'none' else _BrokenStderr()\n"
+    "runpy.run_path(path, run_name='__main__')\n")
+# Closes file descriptor 2, then replaces the process with a fresh interpreter running the -c
+# program in argv[1] (REFUSAL_CHILD) with the remaining arguments: that interpreter starts with
+# no usable file descriptor 2, so it initializes sys.stderr to None itself.
+CLOSED_FD2_CHILD = (
+    "import os, sys\n"
+    "os.close(2)\n"
+    "os.execv(sys.executable, [sys.executable, '-I', '-B', '-c'] + sys.argv[1:])\n")
 CHILD_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 
 
@@ -1081,6 +1143,24 @@ def boundary_observed(prefix, version, flags):
         raise CannotEvaluate("temporary working directory: {}".format(exc))
 
 
+def stderr_vector_observed(path, version, vector, args=()):
+    """Run one entrypoint at a patched version with stderr unavailable (one of STDERR_VECTORS);
+    return (exit, stdout, stderr, working-dir entries). The guard may be unable to write its
+    refusal, so stderr must stay empty and the exit must still be the refusal exit."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="python-floor-cwd-") as cwd:
+            if vector == "closed":
+                rc, out, err = _child(CLOSED_FD2_CHILD,
+                                      [REFUSAL_CHILD, str(path), "%d.%d.%d" % version, *args],
+                                      (), cwd)
+            else:
+                rc, out, err = _child(BROKEN_STDERR_CHILD,
+                                      [str(path), "%d.%d.%d" % version, vector, *args], (), cwd)
+            return rc, out, err, sorted(os.listdir(cwd))
+    except OSError as exc:
+        raise CannotEvaluate("temporary working directory: {}".format(exc))
+
+
 def guard_prefix(tree, name, floor, modes=None, code=REFUSAL_EXIT):
     """Source of the top-level statements up to and including the canonical guard (with modes, its hook
     form), or None."""
@@ -1130,6 +1210,26 @@ def dynamic_findings(root, surfaces, floor, nonblocking=()):
                     "stderr {!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
                     "and an untouched working directory".format(
                         rel, *version, DENY_PROBE_MODE, MODES_NAME, *got, REFUSAL_EXIT))
+        for vector in STDERR_VECTORS:
+            got = stderr_vector_observed(root / rel, version, vector)
+            if got != (code, "", "", []):
+                findings.append(
+                    "{} at patched {}.{}.{} with {}: got exit {}, stdout {!r}, stderr {!r}, "
+                    "working-dir entries {!r}; want exit {}, empty stdout and stderr and an "
+                    "untouched working directory (the refusal exit may not depend on the "
+                    "diagnostic write)".format(
+                        rel, *version, STDERR_VECTOR_LABELS[vector], *got, code))
+        for mode in modes[:1] if modes else ():
+            warning = expected_warning(name, floor, version, sys.executable, mode)
+            for vector in STDERR_VECTORS:
+                got = stderr_vector_observed(root / rel, version, vector, [mode])
+                if got != (0, warning, "", []):
+                    findings.append(
+                        "{} at patched {}.{}.{} with the fail-open mode {} and {}: got exit {}, "
+                        "stdout {!r}, stderr {!r}, working-dir entries {!r}; want exit 0, the "
+                        "exact warning on stdout, empty stderr and an untouched working "
+                        "directory".format(
+                            rel, *version, mode, STDERR_VECTOR_LABELS[vector], *got))
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -1332,6 +1432,31 @@ def _entry(guard, before="", after="open(\"RAN\", \"w\").close()\n"):
 
 def _has(lines, marker):
     return any(marker in line for line in lines)
+
+
+def _old_guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
+    """The retired pre-fix guard shape, rebuilt from the canonical text by unwrapping each
+    try/except around a diagnostic write: there the write ran bare before `raise SystemExit`, so
+    with stderr unavailable the write raised out of the guard and the process exited 1, a
+    non-blocking error on PreToolUse (fail open). Kept only so the self-test proves the gate
+    refuses the shape and the stderr vectors catch its fail-open."""
+    out, dedent, in_handler = [], None, False
+    for line in guard_text(name, floor, modes, code).split("\n"):
+        stripped = line.strip(" ")
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped == "try:":
+            dedent, in_handler = indent, False
+            continue
+        if dedent is not None and stripped == "except BaseException:" and indent == dedent:
+            in_handler = True
+            continue
+        if in_handler and stripped == "pass" and indent == dedent + 4:
+            dedent, in_handler = None, False
+            continue
+        if dedent is not None and not in_handler and indent > dedent:
+            line = line[4:]
+        out.append(line)
+    return "\n".join(out)
 
 
 def _self_test_cases(base):
@@ -1728,6 +1853,34 @@ def _self_test_cases(base):
     path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
     check("dynamic/nonblocking-refusal-exact", refusal_observed(path, version, ()),
           (1, "", expected_refusal("demo.py", floor, version, sys.executable), []))
+    # The refusal exit may not depend on the diagnostic write: with sys.stderr None (as Python
+    # leaves it when file descriptor 2 is closed at interpreter startup), with a sys.stderr whose
+    # write raises, and with file descriptor 2 closed in the child, the guard still exits with
+    # its refusal exit and nothing on stdout or stderr, and a nonblocking-surfaces entry still
+    # exits 1.
+    vector_path = _fixture(base, files=demo) / "tools" / "demo.py"
+    check("dynamic/stderr-none-refusal-exact",
+          stderr_vector_observed(vector_path, version, "none"), (2, "", "", []))
+    check("dynamic/stderr-raises-refusal-exact",
+          stderr_vector_observed(vector_path, version, "raises"), (2, "", "", []))
+    check("dynamic/closed-fd2-refusal-exact",
+          stderr_vector_observed(vector_path, version, "closed"), (2, "", "", []))
+    vector_path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
+    check("dynamic/nonblocking-stderr-vectors-exit-1",
+          [stderr_vector_observed(vector_path, version, vector) for vector in STDERR_VECTORS],
+          [(1, "", "", [])] * 3)
+    # The retired shape wrote the refusal bare before `raise SystemExit`: with stderr unavailable
+    # the write raised and the process exited 1, so a PreToolUse refusal failed open. The vectors
+    # catch it, and the guard leg refuses the shape.
+    old_shape = {"tools/demo.py": _entry(_old_guard_text("demo.py", floor))}
+    check("dynamic/old-shape-stderr-fails-open",
+          [stderr_vector_observed(_fixture(base, files=old_shape) / "tools" / "demo.py",
+                                  version, vector)[0] for vector in STDERR_VECTORS], [1, 1, 1])
+    code, lines = evaluate(_fixture(base, source=listed, files=old_shape))
+    check("guard/old-shape-unwrapped-write-finding",
+          (code, _has(lines, guard_marker),
+           _has(lines, "the refusal exit may not depend on the diagnostic write")),
+          (1, True, True))
     code, lines = evaluate(_fixture(base, source=listed, files={
         "tools/demo.py": _entry(good, after="return\n")}))
     check("dynamic/compile-failure-finding",
@@ -1779,12 +1932,32 @@ def _self_test_cases(base):
           refusal_observed(hook_path, version, (), [DENY_PROBE_MODE]), (2, "", hook_refusal, []))
     check("dynamic/hook-no-mode-refuses", refusal_observed(hook_path, version, ()),
           (2, "", hook_refusal, []))
+    check("dynamic/hook-stderr-vectors-deny-exact",
+          [stderr_vector_observed(hook_path, version, vector) for vector in STDERR_VECTORS],
+          [(2, "", "", [])] * 3)
+    check("dynamic/hook-stderr-vectors-fail-open-warn",
+          [stderr_vector_observed(hook_path, version, vector, ["mode_b"])
+           for vector in STDERR_VECTORS],
+          [(0, expected_warning("aiqt_hooks.py", floor, version, sys.executable, "mode_b"),
+            "", [])] * 3)
+    old_hook = dict([(hook_rel, _entry(_old_guard_text("aiqt_hooks.py", floor, demo_modes),
+                                       before='"""Fixture hook."""\n'))])
+    check("dynamic/hook-old-shape-stderr-fails-open",
+          [stderr_vector_observed(_fixture(base, files=old_hook) / hook_rel, version, vector,
+                                  [mode])[0] for vector in STDERR_VECTORS
+           for mode in ("mode_b", DENY_PROBE_MODE)], [1] * 6)
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=old_hook))
+    check("guard/hook-old-shape-unwrapped-write-finding",
+          (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
     blocking = dict([(hook_rel, _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))])
     blocked = dynamic_findings(_fixture(base, files=blocking), [hook_rel], floor)
     check("dynamic/hook-blocking-fail-open-finding",
           sorted(set(line.split(": got")[0] for line in blocked if "fail-open mode" in line)),
-          ["{} at patched {}.{}.{} with the fail-open mode {}".format(hook_rel, *version, mode)
-           for mode in demo_modes])
+          sorted(["{} at patched {}.{}.{} with the fail-open mode {}".format(
+                      hook_rel, *version, mode) for mode in demo_modes]
+                 + ["{} at patched {}.{}.{} with the fail-open mode {} and {}".format(
+                        hook_rel, *version, demo_modes[0], STDERR_VECTOR_LABELS[vector])
+                    for vector in STDERR_VECTORS]))
     hook_prefix = guard_prefix(ast.parse(hook[hook_rel]), "aiqt_hooks.py", floor, demo_modes)
     check("dynamic/hook-boundary-continues-at-floor", boundary_observed(hook_prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))

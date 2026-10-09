@@ -15,10 +15,13 @@ drift-gated in CI; the hand-authored governance around the pointer block is huma
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_claude.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: gen_claude.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 from pathlib import Path

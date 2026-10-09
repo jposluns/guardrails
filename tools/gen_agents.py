@@ -9,10 +9,13 @@ to a section heading. --check drift-gates AGENTS.md; exit 2 on a malformed sourc
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_agents.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: gen_agents.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 from pathlib import Path

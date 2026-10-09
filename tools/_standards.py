@@ -23,14 +23,20 @@ except ModuleNotFoundError:
         # entrypoint refuses an older Python that can start it first; one that cannot start
         # it fails with Python's own error before reaching here): the version is the
         # problem, so name it.
-        sys.stderr.write(
-            "error: the standards loader requires Python 3.14 or newer; this is Python %d.%d.%d "
-            "(%s). Nothing was run (cannot evaluate).\n"
-            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        try:
+            sys.stderr.write(
+                "error: the standards loader requires Python 3.14 or newer; this is Python %d.%d.%d "
+                "(%s). Nothing was run (cannot evaluate).\n"
+                % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        except BaseException:
+            pass
     else:  # every Python 3.14 ships tomllib, so this installation is incomplete
-        sys.stderr.write(
-            "error: the standards loader cannot import tomllib, part of the Python standard library; "
-            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        try:
+            sys.stderr.write(
+                "error: the standards loader cannot import tomllib, part of the Python standard library; "
+                "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        except BaseException:
+            pass
     raise SystemExit(2)
 
 # Required top-level fields in every manifest. Attribution (licence, source-url) is intentionally NOT

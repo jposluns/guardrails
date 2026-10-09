@@ -178,16 +178,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `bbb2e0b1996e072a15eac0c740949dceb7205a5643b0dd0460e604f9ac9cb737` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `37aace81ce089a355f30d3225df10a3c29d94deca2e1587021647e771d1fb733` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `c8e5b7533f4237a81e1ca5720e9c845c52542beaeb1eaf88d5e69e3782cf6b75` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `65c10a940249ca0b484253ac7fd2f0948003de39a891c3fb272f0ec48e427ddd` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `68639754dccd7d48bce7fbff2966c8c95f7b59fe34abb1dd2401f6816baa0675` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `e0f87a9dda2dbbfafab1a5fcb7ccba8eaf2a20ec8e24be61956c4bcfd47841be` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `a718d5d6e00a142247f89f17c364d01ffb35e171fca0e984663783784f47ab98` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `4d8454a1aa53cb33de7620890c623c37035d4235cf1cfe208add17ac72a9369e` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `bea75225528d1116af670756885c8bbbf2e1122b63d659b86019002765dadbe6` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `6e6cded9cd93223742a0593b21ae2f14c87541d62f6346b201b7477d5aea49df` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `7af4e1af9c748113306cd045c582d797379c3b7dac2a4f8f436d6e4c8e9888a2` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -272,7 +272,9 @@ fails and report it; do not work around a failed check.
      Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
      `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
      start the hook, each hook reads no input, writes one line beginning
-     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits. The write is
+     best-effort: the exit status does not depend on it, so the refusal holds even when standard
+     error is unavailable.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the six `PreToolUse` hooks the exit is 2 and every matching

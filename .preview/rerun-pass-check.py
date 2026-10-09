@@ -186,7 +186,8 @@ FAILURE DIRECTION
     Any error, an unreadable payload, or an unrecognized event exits 0 with no output. The one exception to
     exit 0 is an interpreter older than Python 3.14 that can start the hook: the guard at the top of this file
     reads no input, writes one line beginning `error: rerun-pass-check.py requires Python 3.14 or newer` to
-    stderr and exits 1, which every event this hook uses treats as a non-blocking error: after a tool call
+    stderr (a best-effort write: the exit does not depend on it) and exits 1, which every event this hook
+    uses treats as a non-blocking error: after a tool call
     (PostToolUse, PostToolUseFailure) the call has already run, no note is added and no run is recorded, on
     UserPromptSubmit the prompt goes ahead and the count is not reset, and at Stop the stop goes ahead
     unchecked. It does not exit 2: on a Stop exit 2 blocks the stop, and the guard runs before BLOCK_CAP is
@@ -281,10 +282,13 @@ Self-test: python3 -I -S -B rerun-pass-check.py --self-test
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: rerun-pass-check.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: rerun-pass-check.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(1)
 
 import functools

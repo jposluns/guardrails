@@ -491,7 +491,8 @@ the top of this file is the gate's canonical CLI form with refusal exit 2, not i
 form and not the aiqt_hooks.py hook form: this hook serves PreToolUse only, where exit 1 is a non-blocking
 error that lets the tool call proceed, while exit 2 blocks it and feeds standard error back to Claude. So
 an interpreter older than Python 3.14 that can start the hook reads no input, writes one line beginning
-`error: pretooluse_deny.py requires Python 3.14 or newer` to standard error and exits 2: the tool call is
+`error: pretooluse_deny.py requires Python 3.14 or newer` to standard error (a best-effort write: the
+exit does not depend on it) and exits 2: the tool call is
 blocked (cannot evaluate), never waved through. An older interpreter that cannot start the hook (one that
 cannot compile this file, or a launch that fails before the guard runs) never reaches the guard and fails
 with its own error first; that exit status is not set by this hook, and an exit other than 2 lets the
@@ -501,10 +502,13 @@ names python3; point it at a 3.14 or newer interpreter where python3 is older).
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pretooluse_deny.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: pretooluse_deny.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 import errno

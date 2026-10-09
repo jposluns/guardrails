@@ -119,7 +119,8 @@ FAILURE DIRECTION
     well-formed state. Any error in the hook itself, an unreadable payload, or an unrecognized
     event exits 0 with no output (fail open). The one exception to exit 0 is an interpreter older than
     Python 3.14 that can start the hook: the guard at the top of this file reads no input, writes one line beginning
-    `error: constraint-reread.py requires Python 3.14 or newer` to stderr and exits 1, which every event this
+    `error: constraint-reread.py requires Python 3.14 or newer` to stderr (a best-effort write: the exit
+    does not depend on it) and exits 1, which every event this
     hook uses treats as a non-blocking error: no reminder is added at SessionStart or UserPromptSubmit, no
     compaction time is recorded at SessionStart or PreCompact, and the stop goes ahead unchecked. It does not
     exit 2: on a Stop exit 2 blocks the stop, and the guard runs before the loop cap, so this hook's own loop
@@ -173,10 +174,13 @@ Self-test: python3 -I -S -B constraint-reread.py --self-test
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: constraint-reread.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: constraint-reread.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(1)
 
 import datetime

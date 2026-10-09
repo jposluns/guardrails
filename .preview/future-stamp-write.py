@@ -320,7 +320,8 @@ on stdout, exit 0. Fail-OPEN (allow) on unparseable input or any internal error,
 stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a security boundary. The one
 exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top of this file
 reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or newer` to
-stderr and exits 2, which PreToolUse treats as a deny, so every matching Write, Edit, MultiEdit and Bash call
+stderr (a best-effort write: the exit does not depend on it) and exits 2, which PreToolUse treats as a
+deny, so every matching Write, Edit, MultiEdit and Bash call
 is denied until Python is upgraded or the hook's entry is removed. An older interpreter that cannot start the
 hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
 2, which still denies every matching call, and one that accepts -I but cannot compile this file (Python 3.4
@@ -470,10 +471,13 @@ sibling that is present but unreadable fails them either way.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: future-stamp-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    try:
+        sys.stderr.write(
+            "error: future-stamp-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    except BaseException:
+        pass
     raise SystemExit(2)
 
 import bisect
