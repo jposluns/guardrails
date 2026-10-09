@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2aca931dd87022cb9806ea70db6a03105f78b59dbdedd9d156f2fc420e35759f"
+tree-sha256 = "db6b8537d64a5170224b485c06f8e4b8f9f1818e2018fe7b7bdd3c6f0ef48fae"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 267795
-sha256 = "3f267407a49d2cb08a30f8c72abb1984600f9dd1b07eb606a82a82e19432a516"
+bytes = 268750
+sha256 = "b3e99949f4c539deeaeed9b8e37eacb2648702eec2c1d937d5832096e13593df"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2466,23 +2466,23 @@ sha256 = "46c4b26a69defd748961e5b5057d380e06335f25077dd131412ceda9074694f0"
 
 [[sources]]
 path = "opf/enforcement/codex/AGENTS.opf.md"
-bytes = 3559
-sha256 = "f9a9c1ca39d16553ceab2292c3980c882d8def875de8ce839b88a6b198e9632a"
+bytes = 4260
+sha256 = "a1284c6b0868a4a5011274148b9fcfd1df0163972263bd681e300abcadd801e5"
 
 [[sources]]
 path = "opf/enforcement/cursor/opf.mdc"
-bytes = 3566
-sha256 = "c9d34f0b61f8b0ae055123b351d2d7219d8d2d6678fb27242b60fdde8f31053e"
+bytes = 3987
+sha256 = "e0d829e99d096f47d065b3bc42ec6ec4d5199e278046ba3e42a538146c24199f"
 
 [[sources]]
 path = "opf/enforcement/gemini-cli/GEMINI.opf.md"
-bytes = 3606
-sha256 = "e27e78b28d6ba6f3313651c952a8e34382d8f343b9562afc7466624dcc58ee4b"
+bytes = 4312
+sha256 = "cb222e5de50a624c262536d293e35d476b2d08a4cc3df3b015114fef08c48a20"
 
 [[sources]]
 path = "opf/enforcement/platforms.toml"
-bytes = 4947
-sha256 = "cad856ca1f9f2e2aeef44563f6010c6c1f829ea344419c92e3825045a61e034c"
+bytes = 6161
+sha256 = "9c50bae959066c8e48147c21a73fd294eb2882583168c22b9afcf9e962f39ab0"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -3381,8 +3381,8 @@ sha256 = "0c23ea9cd00329da48218efbd341828c372dde0de2b27cc2ccd7e0fca28e654d"
 
 [[sources]]
 path = "tools/check_opf_enforce_platforms.py"
-bytes = 34331
-sha256 = "573c3f75003e4ec782b4853303711797b2ecc2763e5f65ce87511754e88f56a6"
+bytes = 56176
+sha256 = "82d8cf7a454e7b9c2d74606dcd46086675ff60dc8f49a3228a8dcc2ed3fb796c"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"

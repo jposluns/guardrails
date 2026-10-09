@@ -8,8 +8,12 @@ setting in this pack stops a write to a listed path, because this repository doc
 Codex mechanism that would. A Codex session can still edit every path below; following these rules is
 up to the assistant.
 
-AGENTS.md is the file the AIQT pack's Codex adapter (tools/gen_agents.py) writes. Where the product
-root already has one, add these contents to it as a planned instruction-surface edit.
+AGENTS.md is the file the AIQT pack's Codex adapter (tools/gen_agents.py) writes, and that generator
+rewrites the whole file: its output opens with a GENERATED, do-not-hand-edit header, and its --check
+mode reports a hand edit as drift. In a product that runs that generator, a hand edit to AGENTS.md does
+not survive the next regeneration, so the adoption plan must either extend the generator so that its
+output carries these contents, or install them at another location Codex reads. Only in a product that
+does not generate AGENTS.md, add these contents to it directly as a planned instruction-surface edit.
 
 ## Working rules
 
@@ -34,6 +38,8 @@ Code, rendered from that hook. On Codex it is advisory.
 - `opf/tools/**` (R8): the opf writer and its tools, at their installed location.
 - `.claude/settings.json` (R8): the Claude Code hook registration of the product root.
 - `.claude/settings.local.json` (R8): the Claude Code hook registration of the product root.
+
+On Claude Code the deny hook refuses a direct write to each path on this list, and tools/check_opf_enforce_platforms.py probes that refusal against the loaded hook at a throwaway fixture root; on every other platform nothing refuses such a write, and this list is advisory.
 
 Not on the list until the import writer ships: a leaf directly inside the machine store directory `.working/<machine>/` whose name matches `\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.imported\.index\.toml)\Z`.
 
