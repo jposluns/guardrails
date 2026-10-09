@@ -33,12 +33,20 @@ lifted from the archived preimage. There is therefore no section 8.6 residual to
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import itertools
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,8 +54,11 @@ from _gen_common import repo_root, reconcile  # noqa: E402
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_crosswalk.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 
@@ -633,10 +644,12 @@ def _fdopen_vectors(base):
     exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
     os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
     Returns (failures, runs)."""
+    import errno
     import importlib.util
     import inspect
+    import _close_selftest
     base.mkdir()
-    real_open, real_fdopen = os.open, os.fdopen
+    real_open, real_fdopen, real_fstat = os.open, os.fdopen, os.fstat
     sent = MemoryError("injected fdopen failure")
 
     def early(fd, *args, **kwargs):
@@ -668,8 +681,11 @@ def _fdopen_vectors(base):
             for fd in opened:
                 try:
                     os.fstat(fd)
-                except OSError:
-                    continue
+                except OSError as exc:
+                    if exc.errno == errno.EBADF:          # only EBADF reads as closed; any other error raises
+                        continue
+                    raise _close_selftest._StCensusError(
+                        "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
             if any(name.endswith(".tmp") for name in os.listdir(dfd)):
@@ -730,6 +746,36 @@ def _fdopen_vectors(base):
                 if problems != expected:
                     failures.append("fdopen flip {} {} under {}: expected {}, got {}".format(
                         label, mode, fault_label, expected or "green", problems or "green"))
+    # CENSUS: a recorded descriptor left open whose census fstat fails EIO must raise naming it (read as
+    # closed, the leak would pass). An independent fstat must still see it open, else the vector proves nothing.
+    kept = []
+
+    def leave_open(dfd):
+        kept.append(os.open(os.devnull, os.O_RDONLY))
+        raise sent
+
+    def unreadable(fd, *args, **kwargs):
+        if fd in kept:
+            raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(fd, *args, **kwargs)
+    os.fstat = unreadable
+    try:
+        run(leave_open, early)
+        got = "returned (the unreadable descriptor read as closed)"
+    except _close_selftest._StCensusError as exc:
+        got = "named" if kept and "descriptor {}:".format(kept[0]) in str(exc) else repr(exc)
+    finally:
+        os.fstat = real_fstat
+    runs += 1
+    for fd in kept:
+        try:
+            real_fstat(fd)
+        except OSError:
+            got = "the injected descriptor {} was not open".format(fd)
+        else:
+            os.close(fd)
+    if got != "named":
+        failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
     return failures, runs
 
 
@@ -826,27 +872,40 @@ def self_test():
         # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
         # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
         # the default 4300 (test-hermeticity) and restored in finally.
-        # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the same
-        # way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        # A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same way,
+        # with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         prev_digits = sys.get_int_max_str_digits()
-        prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_inv = tmp / "bigint-inventory.toml"
                 big_inv.write_text("over-long = " + big_value + "\n", encoding="utf-8")
                 try:
                     _load_successor_inventory(big_inv)
                     failures.append("{} in the successor inventory must be refused (exit 2)".format(big_label))
-                except AdoptError:
-                    pass
+                except AdoptError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("{} was refused without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("{} let a bare {} escape the successor-inventory loader (exit 2 "
                                     "expected)".format(big_label, type(exc).__name__))
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
@@ -1038,12 +1097,17 @@ def self_test():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
-        # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or closed
-        # twice, each green and red under its flip.
-        fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
-        failures.extend(fdopen_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+            # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or
+            # closed twice, each green and red under its flip.
+            fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
+            failures.extend(fdopen_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)
+            return 2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

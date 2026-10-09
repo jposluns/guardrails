@@ -29,25 +29,41 @@ reverse swap (10.3/10.6), with NO 9.3 journal and NO lock. The corrupt-state car
 DEFERRED at this release (they refuse fail-closed); a migration cutover journal is DETECTED (it blocks a pin)
 but is reconciled by the deferred migration tool, never here.
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything runs. One
+that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a compile
+failure, which reads as a finding, or 2 for an interpreter predating -I when run with it.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
-import sys
 import time
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
+    if exc.name != "tomllib":
+        raise  # a dependency missing while tomllib loads keeps its own diagnostic
+    sys.stderr.write(
+        "error: pin.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
 import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: pin.py requires Python 3.11+ (tomllib).")
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -1321,6 +1337,7 @@ def self_test():
     """Adversarial synthetic-tree flow invariants (B10 root-cause fix: the r1 suite was too shallow and hid
     B1-B9). Each scenario asserts the FAIL/refuse path first, so the guard is proven to bite, then the clean
     path. Real subprocess crash-injection (the engine KILL hook) exercises the recovery command."""
+    import importlib.util
     import io
     import shutil
     import subprocess
@@ -1366,27 +1383,102 @@ def self_test():
                 "corruption-finding": "", "chain": chain}
 
     try:
+        # ---- TNOTOML: a 3.14 interpreter that cannot import tomllib is an incomplete install, not an old
+        # one; the module refuses at exit 2 with one error line naming tomllib (never a traceback, never the
+        # version refusal). It is loaded afresh from this file with tomllib blocked (None in sys.modules makes
+        # the import fail). ----
+        nt_err = io.StringIO()
+        nt_saved = sys.modules.get("tomllib"), list(sys.path)
+        sys.modules["tomllib"] = None
+        try:
+            nt_spec = importlib.util.spec_from_file_location("_pin_no_tomllib", os.path.abspath(__file__))
+            with redirect_stderr(nt_err):
+                nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))
+            nt_outcome = "loaded"
+        except SystemExit as exc:
+            nt_outcome = exc.code
+        except ModuleNotFoundError as exc:
+            nt_outcome = "escaped " + type(exc).__name__
+        finally:
+            sys.modules["tomllib"] = nt_saved[0]
+            sys.path[:] = nt_saved[1]
+        nt_lines = nt_err.getvalue().splitlines()
+        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line, got "
+              "{} with {!r}".format(nt_outcome, nt_lines),
+              nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith("error: pin.py cannot import "
+              "tomllib, part of the Python standard library") and "requires Python" not in nt_lines[0])
+
+        # ---- TNESTED: a ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported
+        # (a missing dependency of tomllib), is not a missing tomllib: it propagates unchanged (the same
+        # exception object, no error line, no exit). tomllib is taken out of sys.modules and a finder placed
+        # first on sys.meta_path fails its load with that error; both are put back afterwards. ----
+        nd_exc = ModuleNotFoundError("No module named '_aiqt_absent_dependency'", name="_aiqt_absent_dependency")
+
+        class _NestedMissingFinder:
+            def find_spec(self, name, path=None, target=None):
+                return importlib.util.spec_from_loader(name, self) if name == "tomllib" else None
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise nd_exc
+
+        nd_err = io.StringIO()
+        nd_finder = _NestedMissingFinder()
+        nd_saved = sys.modules.pop("tomllib", None), list(sys.path)
+        sys.meta_path.insert(0, nd_finder)
+        try:
+            nd_spec = importlib.util.spec_from_file_location("_pin_nested_missing", os.path.abspath(__file__))
+            with redirect_stderr(nd_err):
+                nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))
+            nd_outcome = "loaded"
+        except SystemExit as exc:
+            nd_outcome = "exit {}".format(exc.code)
+        except ModuleNotFoundError as exc:
+            nd_outcome = exc
+        finally:
+            sys.meta_path.remove(nd_finder)
+            sys.modules.pop("tomllib", None)
+            if nd_saved[0] is not None:
+                sys.modules["tomllib"] = nd_saved[0]
+            sys.path[:] = nd_saved[1]
+        check("TNESTED: a missing dependency raised while tomllib loads propagates unchanged, got {!r} with "
+              "{!r}".format(nd_outcome, nd_err.getvalue()),
+              nd_outcome is nd_exc and nd_exc.name == "_aiqt_absent_dependency" and nd_err.getvalue() == "")
+
         # ---- TBIG (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit int-string
         # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
         # still refuse with PinError (exit 2), never let the ValueError escape (do_un_adopt catches only
         # PinError/OSError). The digit limit is pinned to the default 4300 (test-hermeticity). ----
-        # A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way, both by the
-        # contained reader and by do_pin's staged release.toml reader (_read_release); the recursion limit
-        # is pinned to the CPython default 1000 for the same reason. ----
+        # A parser overflow (RecursionError, not a ValueError) is refused the same way, both by the contained
+        # reader and by do_pin's staged release.toml reader (_read_release), with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         for bi_label, bi_value in (("an over-long integer literal", "9" * 4400),
-                                   ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+                                   ("a parser overflow", "1  # injected-overflow")):
             bi = Path(tempfile.mkdtemp(prefix="bigint-", dir=str(tmp))) / "root"
             (bi / PIN_REL).parent.mkdir(parents=True)
             (bi / PIN_REL).write_text("over-long = " + bi_value + "\n", encoding="utf-8")
             (bi / "release.toml").write_text("over-long = " + bi_value + "\n", encoding="utf-8")
             bi_fd = _open_root_fd(bi)
+            bi_overflow = "injected-overflow" in bi_value
             prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
             sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
                 bi_readers = [("pin record", lambda: read_pin(bi_fd))]
-                if bi_value.startswith("["):
+                if bi_overflow:
                     # _read_release leaves the ValueError family to do_pin's handler by design, so only the
                     # RecursionError member is asserted at that locus.
                     bi_readers.append(("staged release.toml", lambda: _read_release(bi)))
@@ -1394,14 +1486,15 @@ def self_test():
                     try:
                         bi_call()
                         bi_outcome = "parsed"
-                    except PinError:
-                        bi_outcome = "refused"
+                    except PinError as exc:
+                        bi_outcome = ("refused" if not bi_overflow or "injected parser overflow" in str(exc)
+                                      else "refused without the finding")
                     except (ValueError, RecursionError):
                         bi_outcome = "escaped"
                     check("TBIG: {} in the {} is a PinError, never an escaped ValueError or "
                           "RecursionError".format(bi_label, bi_reader), bi_outcome == "refused")
             finally:
-                sys.setrecursionlimit(prev_reclimit)
+                tomllib.loads, tomllib.load = real_loads, real_load
                 sys.set_int_max_str_digits(prev_digits)
                 os.close(bi_fd)
 

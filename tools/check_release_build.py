@@ -26,6 +26,15 @@ Exit: 0 clean or printed NOT APPLICABLE; 1 a content finding (drift, a failed ve
 mismatch, chronology violation, a lightweight tag, a genesis violation, an ordering gap); 2 an
 unreachable store, an unresolvable tag or SHA, unreadable records, or a git failure.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_release_build.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import io
 import json
@@ -33,15 +42,17 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_release_build.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_release_build.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
@@ -869,6 +880,8 @@ FIRST_PIN_EVIDENCE_KEYS = frozenset({"candidate-sha", "observed-measurement", "c
 FIRST_PIN_DEMO_KEYS = frozenset({"agents-sha256", "delivered-prefix-obligations",
                                  "floor-profile-obligations"})
 CAP_BYTES = 32768  # the documented Codex default project_doc_max_bytes cap (VER-CORE-SPEC.md:1019)
+# The ONLY demonstration path pre-tag accepts: the file tools/gen_first_pin_demo.py derives and CI drift-gates.
+FIRST_PIN_DEMO_REL = ".aiqt/release/first-pin-demonstration.toml"
 
 
 def _show_bytes(root, ref, path):
@@ -922,12 +935,16 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     and its digest and byte count RECOMPUTED: agents-sha256 must equal the recomputed digest;
     observed-measurement must equal the recomputed byte count; cap-bytes must be the documented default
     (CAP_BYTES); the recomputed size must exceed the cap; prefix-superset must be a real boolean true; and
-    the demonstration reference must resolve in the candidate tree and its superset be RECOMPUTED via
-    _demo_superset_findings. An unreadable/unparseable evidence artifact, an AGENTS.md not retrievable from
-    the candidate, or a demonstration that resolves but is not offline-evaluable (does not parse) is exit 2.
-    DISCLOSED RESIDUAL (disclose-guard-residuals): the obligation lists inside a well-formed demonstration
-    are taken as authored (the pack does not itself re-derive the default-cap prefix from AGENTS.md bytes);
-    URL reachability is not tested offline."""
+    the demonstration reference must be EXACTLY FIRST_PIN_DEMO_REL (any other path is a finding), resolve
+    in the candidate tree, and have its superset RECOMPUTED via _demo_superset_findings. An
+    unreadable/unparseable evidence artifact, an AGENTS.md not retrievable from the candidate, or a
+    demonstration that resolves but is not offline-evaluable (does not parse) is exit 2.
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the obligation lists in FIRST_PIN_DEMO_REL are DERIVED by
+    tools/gen_first_pin_demo.py from the AGENTS.md bytes and rule corpus of the tree it runs on, and its
+    --check drift gate fails when the committed file differs from a fresh derivation. Pre-tag itself does
+    not re-run that derivation on the candidate: it checks the path, the key set, the digest binding and the
+    superset, and takes the obligation lists inside the committed file as authored. URL reachability is not
+    tested offline."""
     if evidence is None:
         return ["first-pin: --evidence is REQUIRED in --first-pin mode (the first-pin precondition is owed "
                 "delivered evidence, not asserted; L1034)"]
@@ -996,6 +1013,11 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     if not isinstance(demo_ref, str) or not demo_ref:
         findings.append("first-pin: demonstration must be a non-empty reference")
     else:
+        if demo_ref != FIRST_PIN_DEMO_REL:
+            # Fail closed: only the generated, drift-gated file is a derived demonstration. The referenced
+            # file is still evaluated below so every defect is reported in one run.
+            findings.append("first-pin: demonstration must be the generated {} (tools/gen_first_pin_demo.py), "
+                            "not {!r}".format(FIRST_PIN_DEMO_REL, demo_ref))
         demo_bytes = _show_bytes(root, candidate_sha, demo_ref)
         if demo_bytes is None:
             findings.append("first-pin: the demonstration reference {} does not resolve in the candidate "
@@ -1703,17 +1725,20 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             (fp / "AGENTS.md").write_bytes(agents_bytes)
             a_sha = hashlib.sha256(agents_bytes).hexdigest()
             a_len = len(agents_bytes)
-            (fp / "qa" / "demo.toml").write_text(
-                'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2"]\n'
-                'floor-profile-obligations = ["ob1", "ob2", "ob3"]\n'.format(a_sha), encoding="utf-8")
+            good_demo = ('agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2"]\n'
+                         'floor-profile-obligations = ["ob1", "ob2", "ob3"]\n'.format(a_sha))
+            (fp / FIRST_PIN_DEMO_REL).parent.mkdir(parents=True, exist_ok=True)
+            (fp / FIRST_PIN_DEMO_REL).write_text(good_demo, encoding="utf-8")
+            # The same well-formed content at a path other than the generated one (MINOR-1 of PR #454 QA).
+            (fp / "qa" / "demo.toml").write_text(good_demo, encoding="utf-8")
             (fp / "qa" / "badsuperset.toml").write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2", "obX"]\n'
                 'floor-profile-obligations = ["ob1", "ob2"]\n'.format(a_sha), encoding="utf-8")
             # An integer literal past CPython's 4300-digit int-string limit (F-TOML-BARE-VALUEERROR-CLASS).
             big_text = "over-long = " + "9" * 4400 + "\n"
             (fp / "qa" / "bigint.toml").write_text(big_text, encoding="utf-8")
-            # A 1200-deep nested array: tomllib raises RecursionError (a RuntimeError, not a ValueError).
-            deep_text = "deep = " + "[" * 1200 + "]" * 1200 + "\n"
+            # A marked, otherwise valid TOML: the self-test's injected tomllib raises RecursionError on it.
+            deep_text = "deep = 1  # injected-overflow\n"
             (fp / "qa" / "deep.toml").write_text(deep_text, encoding="utf-8")
             _write_records(fp, "format-version = 1\n")
             _commit(fp, "candidate with AGENTS.md + demonstration")
@@ -1723,7 +1748,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             def _ev(**over):
                 body = {"candidate-sha": '"{}"'.format(fp_commit), "observed-measurement": str(a_len),
                         "cap-bytes": "32768", "prefix-superset": "true",
-                        "demonstration": '"qa/demo.toml"', "agents-sha256": '"{}"'.format(a_sha)}
+                        "demonstration": '"{}"'.format(FIRST_PIN_DEMO_REL),
+                        "agents-sha256": '"{}"'.format(a_sha)}
                 body.update(over)
                 p = fp / "ev-{}.toml".format(len(list(fp.glob("ev-*.toml"))))
                 p.write_text("".join("{} = {}\n".format(k, v) for k, v in body.items()), encoding="utf-8")
@@ -1747,6 +1773,12 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             if not any("documented default cap" in f for f in _first_pin_evidence_findings(
                     fp, fp_commit, _ev(**{"cap-bytes": "1"}))):
                 failures.append("first-pin evidence: cap-bytes must equal the documented default (finding 5)")
+            # A well-formed demonstration at any path other than the generated one is a finding: pre-tag
+            # accepts only the derived, drift-gated FIRST_PIN_DEMO_REL.
+            if not any("must be the generated" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"demonstration": '"qa/demo.toml"'}))):
+                failures.append("first-pin evidence: a demonstration path other than {} must be caught (fail "
+                                "closed)".format(FIRST_PIN_DEMO_REL))
             if not any("does not resolve" in f for f in _first_pin_evidence_findings(
                     fp, fp_commit, _ev(**{"demonstration": '"qa/nonexistent.toml"'}))):
                 failures.append("first-pin evidence: a nonexistent demonstration reference must be caught "
@@ -1769,38 +1801,51 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             # must still fail closed as GateError (exit 2); narrowing any one back to (UnicodeDecodeError,
             # TOMLDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
             # (test-hermeticity) and restored in finally.
-            # The same four sites must fail closed on the class's RecursionError member (a 1200-deep nested
-            # array); the recursion limit is pinned to the CPython default 1000 for the same reason.
+            # The same four sites must fail closed on the class's RecursionError member (a parser overflow), and the
+            # refusal must come from that site's parse handler (its message, or the overflow it interpolates).
+            # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+            # otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+            # overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+            # (or trips an unrelated refusal) under another.
             big_cases = []
             for kind, text, rel in (("over-long integer", big_text, "qa/bigint.toml"),
-                                    ("deep nesting", deep_text, "qa/deep.toml")):
+                                    ("parser overflow", deep_text, "qa/deep.toml")):
                 ev_path = fp / "{}-evidence.toml".format(rel[3:-5])
                 ev_path.write_text(text, encoding="utf-8")
                 ev_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                needle = "injected parser overflow" if text is deep_text else ""
                 big_cases += [
-                    (kind + " evidence artifact",
+                    (kind + " evidence artifact", needle,
                      lambda ev_path=ev_path: _first_pin_evidence_findings(fp, fp_commit, str(ev_path))),
-                    (kind + " demonstration", lambda rel=rel: _first_pin_evidence_findings(
-                        fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
-                    (kind + " QA attestation",
+                    (kind + " demonstration", needle and "is not offline-evaluable (does not parse)",
+                     lambda rel=rel: _first_pin_evidence_findings(fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
+                    (kind + " QA attestation", needle,
                      lambda ev_path=ev_path, ev_sha=ev_sha: qa_layers(str(ev_path), ev_sha, fp_commit)),
-                    (kind + " git-shown TOML", lambda rel=rel: _show_toml(fp, fp_commit, rel))]
+                    (kind + " git-shown TOML", needle, lambda rel=rel: _show_toml(fp, fp_commit, rel))]
             prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
             sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
-                for big_label, big_call in big_cases:
+                for big_label, big_needle, big_call in big_cases:
                     try:
                         big_call()
                         failures.append("{}: expected GateError (exit 2), got a result".format(big_label))
-                    except GateError:
-                        pass
+                    except GateError as exc:
+                        if big_needle not in str(exc):
+                            failures.append("{}: GateError without the parse handler's finding ({})".format(big_label, exc))
                     except (ValueError, RecursionError) as exc:
                         failures.append("{}: a bare {} escaped the parse (exit 2 expected)".format(
                             big_label, type(exc).__name__))
             finally:
-                sys.setrecursionlimit(prev_reclimit)
+                tomllib.loads, tomllib.load = real_loads, real_load
                 sys.set_int_max_str_digits(prev_digits)
 
             # (round-4 finding 7) _show_bytes distinguishes a genuinely ABSENT path (None) from a git
@@ -1886,7 +1931,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             ce_agents = ("A" * 40000).encode("utf-8")
             (ce / "AGENTS.md").write_bytes(ce_agents)
             ce_sha = hashlib.sha256(ce_agents).hexdigest()
-            (ce / "qa" / "demo.toml").write_text(
+            (ce / FIRST_PIN_DEMO_REL).parent.mkdir(parents=True, exist_ok=True)
+            (ce / FIRST_PIN_DEMO_REL).write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1"]\n'
                 'floor-profile-obligations = ["ob1"]\n'.format(ce_sha), encoding="utf-8")
             (ce / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
@@ -1899,8 +1945,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             ce_ev = ce / "ev.toml"
             ce_ev.write_text(
                 'candidate-sha = "{}"\nobserved-measurement = 40000\ncap-bytes = 32768\n'
-                'prefix-superset = true\ndemonstration = "qa/demo.toml"\nagents-sha256 = "{}"\n'.format(
-                    ce_commit, ce_sha), encoding="utf-8")
+                'prefix-superset = true\ndemonstration = "{}"\nagents-sha256 = "{}"\n'.format(
+                    ce_commit, FIRST_PIN_DEMO_REL, ce_sha), encoding="utf-8")
             try:
                 _first_pin_findings(ce, ce_commit, str(ce_ev))
                 failures.append("first-pin: a check_clauses cannot-evaluate (child exit 2) must raise "

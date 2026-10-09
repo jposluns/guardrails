@@ -47,6 +47,15 @@ not transactionally; concurrent writers must be excluded by the caller.
 Usage: python3 -I -B tools/check_release_cut.py [--root DIR] [--protected REF] [--base OID]
        python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_release_cut.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import datetime
 import hashlib
@@ -55,7 +64,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -1161,6 +1169,80 @@ import sys
 '''
 
 
+def _close_census_eio(harness, seam="fstat", code=None):
+    """The copy's descriptor census fails closed: a held /dev/null descriptor is listed by
+    harness._st_fd_table; with its census read failing errno `code` (EIO by default; os.<seam>: its fstat, or
+    the readlink of its /proc/self/fd link) the table must raise harness._StCensusError naming it, never omit
+    it as closed. The one exception is ENOENT on the link read (the number has no entry), where the table must
+    list the descriptor with no kind (None). An independent fstat must still see it open afterwards, else the
+    check proves nothing."""
+    import errno
+    code = errno.EIO if code is None else code
+    fd = os.open(os.devnull, os.O_RDONLY)
+    real_fstat, real_readlink = os.fstat, os.readlink
+    real_seam = real_readlink if seam == "readlink" else real_fstat
+
+    def failing(number, *args, **kwargs):
+        if number in (fd, "/proc/self/fd/{}".format(fd)):
+            raise OSError(code, "injected census read failure")
+        return real_seam(number, *args, **kwargs)
+    try:
+        listed = fd in harness._st_fd_table()
+        if seam == "readlink":
+            os.readlink = failing
+        else:
+            os.fstat = failing
+        try:
+            table = harness._st_fd_table()
+            got = "omitted" if fd not in table else "no-kind" if table[fd][2] is None else "kind"
+        except harness._StCensusError as exc:
+            got = "raised" if "descriptor {}:".format(fd) in str(exc) else "unnamed"
+        finally:
+            os.fstat, os.readlink = real_fstat, real_readlink
+        try:
+            real_fstat(fd)
+            still_open = True
+        except OSError:
+            still_open = False
+    finally:
+        os.close(fd)
+    want = "no-kind" if (seam, code) == ("readlink", errno.ENOENT) else "raised"
+    return listed and still_open and got == want
+
+
+def _close_anon_reuse_close_fault(harness):
+    """The copy's harness._st_anon_reuse leaves no descriptor open when its epoll's close raises. select.epoll
+    is wrapped so close() closes the real epoll and then raises OSError(EIO); the call must raise that error,
+    and harness._st_fd_table must read as it did before the call. None where there is no epoll or eventfd."""
+    import errno
+    import select
+    if not hasattr(select, "epoll") or not hasattr(os, "eventfd"):
+        return None
+    real_epoll = select.epoll
+
+    class RaisingEpoll:
+        def __init__(self):
+            self.real = real_epoll()
+
+        def fileno(self):
+            return self.real.fileno()
+
+        def close(self):
+            self.real.close()
+            raise OSError(errno.EIO, "injected epoll close failure")
+
+    before = harness._st_fd_table()
+    select.epoll = RaisingEpoll
+    try:
+        harness._st_anon_reuse(harness._st_fd_table)
+        raised = False
+    except OSError as exc:
+        raised = exc.errno == errno.EIO
+    finally:
+        select.epoll = real_epoll
+    return raised and harness._st_fd_table() == before
+
+
 def _close_harness_in_step(journal, copy):
     """#378: tools/_close_selftest.py is a copy of the close-vector harness at the end of
     opf/tools/_journal.py; from class _StSentinel through _st_watch_drop_check (where the copy ends and
@@ -2199,6 +2281,168 @@ def _close_sweep_check(root):
     return failures
 
 
+# A census read error injected through a tool's own self-test: a held /dev/null descriptor whose fstat fails
+# EIO when the descriptor census (_st_fd_table) reads it, and only when the census runs under the function
+# named by the second argument ("*": any census). The real self-test runs as __main__; the held number is
+# printed first so the report can be matched to it.
+CENSUS_DRIVER = """
+import errno, os, runpy, sys
+path, target = sys.argv[1], sys.argv[2]
+held = os.open(os.devnull, os.O_RDONLY)
+real_fstat = os.fstat
+def failing(number, *args, **kwargs):
+    frame = sys._getframe(1)
+    if number == held and frame.f_code.co_name == "_st_fd_table":
+        while frame is not None and target not in ("*", frame.f_code.co_name):
+            frame = frame.f_back
+        if frame is not None:
+            raise OSError(errno.EIO, "injected census read failure")
+    return real_fstat(number, *args, **kwargs)
+print("census-held " + str(held), file=sys.stderr, flush=True)
+os.fstat = failing
+sys.argv = [path] + sys.argv[3:]
+sys.path.insert(0, os.path.dirname(path))
+runpy.run_path(path, run_name="__main__")
+"""
+
+# Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
+# caller that reaches its clause: (path, census caller, self-test arguments).
+_CENSUS_MAPPINGS = (
+    ("tools/check_footer.py", "*", ("--self-test",)),
+    ("tools/check_overclaim.py", "*", ("--self-test",)),
+    ("tools/check_gensrc_failclose.py", "*", ("--self-test",)),
+    ("tools/gen_crosswalk.py", "*", ("--self-test",)),
+    ("tools/import_cwe.py", "*", ("--self-test",)),
+    ("opf/tools/_journal.py", "*", ("--self-test",)),                     # the close-vector clause
+    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",)),      # the descriptor-helper clause
+)
+
+
+def _census_mapping_check(root):
+    """Each self-test in _CENSUS_MAPPINGS, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
+    report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
+    never a traceback (exit 1) or a pass. Returns (failures, runs)."""
+    failures = []
+    for rel, target, argv in _CENSUS_MAPPINGS:
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
+                                capture_output=True, timeout=TIMEOUT * 4)
+        err = result.stderr.decode("utf-8", "replace")
+        held = re.match(r"census-held (\d+)\n", err)
+        want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
+                         + ": OSError(5, 'injected census read failure')")
+        if result.returncode != 2 or not want or want not in err or "Traceback" in err:
+            failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit %d: %s"
+                            % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
+    return failures, len(_CENSUS_MAPPINGS)
+
+
+def _close_harness_checks(parent, script):
+    """The close-vector, close-harness and close-sweep checks of the self-test (run through _close_stage)."""
+    import _close_selftest
+    close_failures, close_runs = _close_vectors(parent / "close")
+    for failure in close_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-vectors", not close_failures)
+    print("PASS close-vectors runs=" + str(close_runs))
+    journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
+    copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
+    check("close-harness-in-step", _close_harness_in_step(journal, copy))
+    check("close-harness-census-eio", _close_census_eio(_close_selftest))
+    check("close-harness-census-readlink-eio", _close_census_eio(_close_selftest, "readlink"))
+    # Every other read error fails closed too (each seam's one tolerated errno included for the other seam), and
+    # ENOENT on the link read alone lists the descriptor with no kind.
+    import errno
+    for seam, codes in (("fstat", (errno.EACCES, errno.EPERM, errno.ENOENT)),
+                        ("readlink", (errno.EACCES, errno.EPERM, errno.EBADF, errno.ENOENT))):
+        for code in codes:
+            check("close-harness-census-{}-{}".format(seam, errno.errorcode[code].lower()),
+                  _close_census_eio(_close_selftest, seam, code))
+    # An eventfd put at an epoll descriptor's number reads as a change by its anonymous-inode kind; the flip, a
+    # table of (st_dev, st_ino) alone, reads it as unchanged wherever the two share an inode.
+    anon = _close_selftest._st_anon_reuse(_close_selftest._st_fd_table)
+    if anon is not None:
+        check("close-harness-anon-reuse", anon[0])
+        stat_only = _close_selftest._st_anon_reuse(
+            lambda: dict((fd, ident[:2]) for fd, ident in _close_selftest._st_fd_table().items()))
+        check("close-harness-anon-reuse-flip-red", not anon[1] or not stat_only[0])
+        check("close-harness-anon-reuse-close-fault", _close_anon_reuse_close_fault(_close_selftest))
+    require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
+    check("close-harness-drift-red",
+          not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
+    require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
+    check("close-harness-preamble-red", not _close_harness_in_step(
+        journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
+    drop_failures, drop_runs = _close_selftest._st_watch_drop_check()
+    for failure in drop_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-harness-watch-drop-red", not drop_failures)
+    print("PASS close-harness-in-step watch-drop-runs=" + str(drop_runs))
+    sweep_failures = _close_sweep_check(script.parents[1])
+    for failure in sweep_failures:
+        print("FAIL " + failure, file=sys.stderr)
+    check("close-sweep", not sweep_failures)
+    print("PASS close-sweep shapes={} corpus={} recorded={}".format(
+        len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_CORPUS), len(_CLOSE_SWEEP_DISPOSITIONS)))
+
+
+def _close_stage(parent, script):
+    """The close-harness checks, with a descriptor census that cannot read a descriptor anywhere in them (the
+    close vectors, the census EIO case's own unpatched read, the watch-drop check) mapped to CannotEvaluate,
+    which main() reports as exit 2."""
+    import _close_selftest
+    try:
+        _close_harness_checks(parent, script)
+    except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+        raise CannotEvaluate(str(exc)) from exc
+
+
+def _close_stage_leg(parent, script, target):
+    """One leg of _close_stage_mapping_check: the census read of a held descriptor fails EIO only while the
+    census runs under `target`. Returns the failure, or None."""
+    import errno
+    import io
+    this = sys.modules[__name__]
+    stage = parent / ("census-" + target)
+    stage.mkdir()
+    held = os.open(os.devnull, os.O_RDONLY)
+    real_fstat, real_self_test, real_stdout = os.fstat, this.self_test, sys.stdout
+
+    def failing(number, *args, **kwargs):
+        frame = sys._getframe(1)
+        if number == held and frame.f_code.co_name == "_st_fd_table":
+            while frame is not None and frame.f_code.co_name != target:
+                frame = frame.f_back
+            if frame is not None:
+                raise OSError(errno.EIO, "injected census read failure")
+        return real_fstat(number, *args, **kwargs)
+    captured = io.StringIO()
+    try:
+        os.fstat, sys.stdout = failing, captured
+        this.self_test = lambda red_on_revert: _close_stage(stage, script)
+        code = main(["--self-test"])
+        got = json.loads(captured.getvalue().splitlines()[-1])   # the report follows the stage's PASS lines
+    except Exception as exc:  # noqa: BLE001 - the verdict channel
+        code, got = None, dict(detail="escaped: " + repr(exc))
+    finally:
+        os.fstat, this.self_test, sys.stdout = real_fstat, real_self_test, real_stdout
+        os.close(held)
+    named = "descriptor census cannot evaluate descriptor %d:" % held
+    if code != 2 or got.get("code") != 2 or named not in got.get("detail", ""):
+        return ("census error under %s: expected exit 2 with the cannot-evaluate report, got %r %r"
+                % (target, code, got))
+    return None
+
+
+def _close_stage_mapping_check(parent, script):
+    """This tool's own mapping, in process: with the census read of a held descriptor failing EIO under each
+    of _close_vectors, _close_census_eio (its first, unpatched read) and _st_watch_drop_check, main() run over
+    _close_stage must return 2 with the cannot-evaluate report naming that descriptor; an escaping exception
+    (a census error read past the mapping) is a failure. Returns the failures."""
+    legs = [_close_stage_leg(parent, script, target)
+            for target in ("_close_vectors", "_close_census_eio", "_st_watch_drop_check")]
+    return [failure for failure in legs if failure]
+
+
 def self_test(red_on_revert):
     """Isolate fixture git calls, including in-process production helpers."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2268,32 +2512,16 @@ def _self_test_isolated(red_on_revert):
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
             print("PASS " + case_id)
-        close_failures, close_runs = _close_vectors(parent / "close")
-        for failure in close_failures:
+        _close_stage(parent, script)
+        stage_failures = _close_stage_mapping_check(parent, script)
+        for failure in stage_failures:
             print("FAIL " + failure, file=sys.stderr)
-        check("close-vectors", not close_failures)
-        print("PASS close-vectors runs=" + str(close_runs))
-        journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
-        copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
-        check("close-harness-in-step", _close_harness_in_step(journal, copy))
-        require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
-        check("close-harness-drift-red",
-              not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
-        require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
-        check("close-harness-preamble-red", not _close_harness_in_step(
-            journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
-        import _close_selftest
-        drop_failures, drop_runs = _close_selftest._st_watch_drop_check()
-        for failure in drop_failures:
+        check("close-stage-census-mapping", not stage_failures)
+        mapping_failures, mapping_runs = _census_mapping_check(script.parents[1])
+        for failure in mapping_failures:
             print("FAIL " + failure, file=sys.stderr)
-        check("close-harness-watch-drop-red", not drop_failures)
-        print("PASS close-harness-in-step watch-drop-runs=" + str(drop_runs))
-        sweep_failures = _close_sweep_check(script.parents[1])
-        for failure in sweep_failures:
-            print("FAIL " + failure, file=sys.stderr)
-        check("close-sweep", not sweep_failures)
-        print("PASS close-sweep shapes={} corpus={} recorded={}".format(
-            len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_CORPUS), len(_CLOSE_SWEEP_DISPOSITIONS)))
+        check("census-mapping", not mapping_failures)
+        print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."

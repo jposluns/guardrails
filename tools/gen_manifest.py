@@ -36,18 +36,29 @@ Exit convention (matches the repo's gates): 0 clean; 1 drift; 2 malformed or unr
 unclassified/stray/overlapping selector outcome, an exclusion swallowing a gensrc or portability
 surface, a tracked concern-2 path, an unusable git repository, or any other cannot-evaluate.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_manifest.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import subprocess
-import sys
 import unicodedata
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_manifest.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: gen_manifest.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
@@ -114,11 +125,14 @@ NAMESPACE_CLASSES = ("adopter-state", "archive")
 # (.aiqt/core/hooks/scripts/aiqt_hooks.py), un-lowerable by the per-slice scope declaration. This is the ONE
 # place the manifest-class -> frozen mapping is bound, recorded, and reviewed; the hook never reimplements
 # or guesses it. derived + manifest-self are generated outputs (generated-artefact-source-only: edit the
-# source, never the output); archive is frozen rotation data. EXCLUDED by the binding: pack-immutable
-# (rule/doc SOURCES are legitimately edited), managed-block (hand-authored regions are legitimately edited),
-# adopter-state (working state is legitimately edited). Changing this set is itself a guardrail-config change
-# needing explicit authorization (SECI-guardrail-config-integrity).
+# source, never the output); archive is frozen rotation data. EXCLUDED by the binding, recorded as
+# UNFROZEN_CLASSES: pack-immutable (rule/doc SOURCES are legitimately edited), managed-block (hand-authored
+# regions are legitimately edited), adopter-state (working state is legitimately edited). _frozen_text fails
+# closed unless the two sets partition RELEASE_CLASSES + NAMESPACE_CLASSES exactly, so a class added to the
+# vocabulary forces a recorded frozen-or-not decision instead of silently missing the floor. Changing either
+# set is itself a guardrail-config change needing explicit authorization (SECI-guardrail-config-integrity).
 FROZEN_CLASSES = ("derived", "manifest-self", "archive")
+UNFROZEN_CLASSES = ("pack-immutable", "managed-block", "adopter-state")
 BLOCK_BEGIN = "<!-- RULES-INDEX:BEGIN (generated) -->"
 BLOCK_END = "<!-- RULES-INDEX:END -->"
 # gitattributes hazard characters: a path carrying any of these would need git-side quoting or would
@@ -534,7 +548,17 @@ def _frozen_text(release, namespace):
     selector zero-tracked, so a frozen release selector (derived, manifest-self) maps to at least one tracked
     generated output and the archive namespace maps to a reserved (untracked) rotation tree, both correctly
     frozen against a guarded-tool write. The floor lists .aiqt/frozen.json itself (it is class derived), so
-    the floor's own committed copy is deny-protected from the guarded tools."""
+    the floor's own committed copy is deny-protected from the guarded tools. Fail-closed (GateError) unless
+    FROZEN_CLASSES and UNFROZEN_CLASSES are disjoint and together equal the class vocabulary: regenerating
+    the floor proves it current, never that every class was decided."""
+    vocabulary = set(RELEASE_CLASSES + NAMESPACE_CLASSES)
+    frozen, unfrozen = set(FROZEN_CLASSES), set(UNFROZEN_CLASSES)
+    if frozen & unfrozen or frozen | unfrozen != vocabulary:
+        raise GateError("frozen-class partition broken: undecided {}, both frozen and unfrozen {}, outside "
+                        "the vocabulary {}; record each class in exactly one of FROZEN_CLASSES and "
+                        "UNFROZEN_CLASSES".format(sorted(vocabulary - frozen - unfrozen),
+                                                  sorted(frozen & unfrozen),
+                                                  sorted((frozen | unfrozen) - vocabulary)))
     entries = set()
     for sel, cls in list(release) + list(namespace):
         if cls in FROZEN_CLASSES:
@@ -701,7 +725,9 @@ def main():
 #   (e) a non-UTF-8 tracked file absent from [checkout].binary exits 2; declared binary passes;
 #   (f) a git-less root exits 2 (never a filesystem-walk fallback);
 #   (g) raw-byte hashing: a CRLF file's recorded sha256 equals the sha256 of its exact raw bytes;
-#   (h) a missing CLAUDE.md marker pair exits 2.
+#   (h) a missing CLAUDE.md marker pair exits 2;
+#   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
+#       and a class outside the vocabulary each fail closed.
 
 _OWN_BASE = '''format-version = 1
 
@@ -828,6 +854,35 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
         _git(base, "add", "-A").check_returncode()
         _git(base, "commit", "-q", "-m", "fixture", "--no-verify").check_returncode()
     return base
+
+
+def _frozen_partition_vector():
+    """F-FROZEN-PARTITION: the shipped class sets partition the vocabulary (the floor renders), and each
+    broken partition makes the floor raise GateError: a class appended to RELEASE_CLASSES but recorded in
+    neither FROZEN_CLASSES nor UNFROZEN_CLASSES (undecided); an UNFROZEN_CLASSES class also appended to
+    FROZEN_CLASSES, so the union still equals the vocabulary (overlap); and a class outside the vocabulary
+    appended to FROZEN_CLASSES (extraneous). Every patched global is restored on every path. Returns a
+    failure string or None."""
+    global RELEASE_CLASSES, FROZEN_CLASSES
+    try:
+        _frozen_text([], [])
+    except GateError as exc:
+        return ("F-FROZEN-PARTITION: the shipped class sets expected to partition the vocabulary ({})"
+                .format(exc))
+    saved_release, saved_frozen = RELEASE_CLASSES, FROZEN_CLASSES
+    for label, release, frozen in (
+            ("an undecided vocabulary class", saved_release + ("zz-undecided",), saved_frozen),
+            ("a class both frozen and unfrozen", saved_release, saved_frozen + UNFROZEN_CLASSES[:1]),
+            ("a frozen class outside the vocabulary", saved_release, saved_frozen + ("zz-extraneous",))):
+        RELEASE_CLASSES, FROZEN_CLASSES = release, frozen
+        try:
+            _frozen_text([], [])
+        except GateError:
+            continue
+        finally:
+            RELEASE_CLASSES, FROZEN_CLASSES = saved_release, saved_frozen
+        return "F-FROZEN-PARTITION: {} expected GateError from the frozen floor".format(label)
+    return None
 
 
 def self_test_main():
@@ -1065,6 +1120,10 @@ def _self_test_main_isolated():
                 failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option expected a loud exit 2")
             if any((unk / rel).exists() for rel in GENERATED_OUTPUTS_REL):
                 failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option must not write any output")
+
+        partition_failure = _frozen_partition_vector()
+        if partition_failure is not None:
+            failures.append(partition_failure)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1084,7 +1143,9 @@ def _self_test_main_isolated():
           "it silently (F-235); an output at git index mode 100755 fails closed (exit 2) while a clean "
           "100644 set passes (F-236); and a releases row with an unknown key or a missing mandatory field "
           "each fail closed (exit 2) under the minimal Step-2 row guard (F-237); and an unrecognized option "
-          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT)")
+          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); and a vocabulary class "
+          "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
+          "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
     return 0
 
 

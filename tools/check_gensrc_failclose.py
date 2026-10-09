@@ -113,6 +113,13 @@ tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 """
 import sys
 
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_gensrc_failclose.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 # Set BEFORE importing gen_gensrc (below): importing the loader must write no .pyc into the real tools/
 # tree. The subprocess env also carries PYTHONDONTWRITEBYTECODE=1 for the generators it runs.
 sys.dont_write_bytecode = True
@@ -1289,6 +1296,7 @@ def _self_test_main_isolated():
     saved_now = _now
     saved_mkdtemp = _mkdtemp
     cleanup_error = None
+    census_error = None
     close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
@@ -1554,8 +1562,12 @@ def _self_test_main_isolated():
 
         # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
         # its flip.
-        close_failures, close_runs = _close_vectors(tmp / "close")
-        failures.extend(close_failures)
+        import _close_selftest
+        try:
+            close_failures, close_runs = _close_vectors(tmp / "close")
+            failures.extend(close_failures)
+        except _close_selftest._StCensusError as exc:  # the descriptor census cannot read one: cannot-evaluate
+            census_error = exc
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1568,6 +1580,9 @@ def _self_test_main_isolated():
     if cleanup_error is not None:
         print("SELF-TEST ERROR: could not remove the self-test tempdir ({}); fail-closed"
               .format(cleanup_error), file=sys.stderr)
+        return 2
+    if census_error is not None:
+        print("SELF-TEST ERROR: {}".format(census_error), file=sys.stderr)
         return 2
     if failures:
         print("SELF-TEST FAIL:")

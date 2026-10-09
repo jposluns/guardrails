@@ -174,8 +174,9 @@ The imported files are registered managed leaves beside the clean-series files, 
 enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.toml` instead of an
 imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0
 `opf init` and the section 9.2 upgrade MUST create the imported leaves for every enabled type
-except `legacy_fragment`, create-only and empty; enabling a further type or module other than
-`legacy_fragment` later MUST create its imported leaf in the same act as its clean index.
+except `legacy_fragment`, create-only and empty; in a store that declares `spec_version` 1.3.0 or
+later, enabling a further type or module other than `legacy_fragment` later MUST create its imported
+leaf in the same act as its clean index.
 `legacy_fragment` has no imported leaf and no imported counter row, since the imported series
 refuses the `LF` namespace (section 8.2). A 1.3.0 `opf init` MUST write at zero the imported
 counter row of each type that has an imported leaf (section 8.2). In a store that declares
@@ -912,7 +913,10 @@ therefore never exempt, since the worklog schema requires it (section 6.2). `unr
 exactly one row for each omitted field that is not exempt, and no row that repeats a field or
 claims a supplied field absent. Supplied
 fields MUST retain their declared value types and vocabularies; unknown keys still fail.
-`field` MUST name a field in that type's schema. The closed reasons are `not_recorded_in_source`,
+`field` MUST name a field in that type's schema. A missingness row whose `field` names an omitted
+exempt envelope field, one of the optional envelope fields `proposed_from`, `summary`, `links`,
+`refs` and registered `x-<vendor>` tables where the type's own schema does not require it, MUST be
+refused. The closed reasons are `not_recorded_in_source`,
 `unparsed`, `ambiguous`, `conflicting`, and `not_applicable`. The first means "never recorded
 historically in the supplied source", not a claim about all history. The required imported
 envelope and provenance fields MUST NOT be waived through missingness. Strict current resolution
@@ -1204,8 +1208,12 @@ guarantees:
 
 1. Resolve the store, then any interrupted authoring transaction MUST be reconciled first.
    Reconciliation writes the store, so it MUST run only under the single-writer lease that
-   publication uses: a held lease MUST refuse before any recovery write and MUST NOT be seized. An
-   operand changed since the interruption, to bytes that are neither its journaled prestate nor its
+   publication uses: a lease held by a live or possibly-live holder MUST refuse before any recovery
+   write and MUST NOT be seized, and a leftover lease from a confirmed-dead run of the same verb
+   MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants.
+   Any other present lease, a confirmed-dead leftover of another verb included, MUST refuse before
+   any recovery write and MUST NOT be released by this reconciliation. An operand changed since the
+   interruption, to bytes that are neither its journaled prestate nor its
    planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
    never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
    inspects it before anything new is written. A fresh-only implementation (section 16.1) performs
@@ -1534,6 +1542,8 @@ For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, re
 create-only initialization of missing imported managed leaves for enabled types other than
 `legacy_fragment`, and addition of missing imported counter rows at zero only where no imported
 ancestry exists, never an `"imported:LF"` row.
+Where imported ancestry exists in a namespace, the imported counter row added for it MUST hold the
+highest imported ID number in that namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
 a populated collision, missing ancestral counter or unprovable prestate refuses.
 The upgrade MUST refuse before any write a store whose `[unmanaged]` entry equals or contains a
@@ -2120,8 +2130,9 @@ it emits, its release identity, its class, and its supported `spec_version`, hom
 worklog storage generation. An implementation whose declaration lacks only its class MUST be
 treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
 contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A
-missing declaration is malformed, since it states none of the release identity, class,
-`spec_version`, and generations required above, so it yields cannot-evaluate.
+declaration that is absent, or that omits its release identity, its `spec_version`, its homes
+generation, or its worklog storage generation, is malformed rather than one that declares no class:
+it MUST yield cannot-evaluate and MUST NOT authorize any store operation.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2419,6 +2430,17 @@ The gates in this standard are strong where they are strong and say so where the
   observable at the sync target, two systems can both begin. The consistency contract's divergence
   check is the overlapping control that catches that collision after the fact; the two layers
   together, not the lease alone, are the guarantee (section 5.7).
+- The dead-run lease release of sections 5.7 and 8.8 proves holder death by a process probe on the
+  probing host, serialized by a lock on the lease's directory so concurrent recoveries whose locks
+  one kernel arbitrates never race it: a live holder in another PID namespace that shares the store
+  and this hostname can read as dead there and lose its lease, and a dead holder whose pid a live
+  process reused reads as possibly-live and keeps refusing until the operator reconciles. The probe
+  errs toward refusal, and the journal-lock owner model shares the same residual where no process
+  start time is recorded. That serialization holds only within one kernel: where the store sits on
+  NFS or another filesystem whose flock is local to each client kernel, two hosts that share the
+  store under one hostname can both take the lock and race the release, and where flock is
+  unsupported or fails, every dead-run release refuses, naming the lock failure, and stays the
+  operator's reconciliation step.
 - A host provider's create and auth conveniences call the external API of the host the target
   names. The egress bound is that named host and nothing else; the standard cannot vouch for the
   host's own behaviour beyond that bound.

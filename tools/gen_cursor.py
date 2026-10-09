@@ -14,8 +14,16 @@ https://cursor.com/docs/rules (retrieved 2026-08-17).
   gen_cursor.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target fails closed (exit 2)
 """
-import os
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_cursor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

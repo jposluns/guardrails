@@ -19,7 +19,13 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
   check_selftest_execution.py --suite <id>   run the registered suite and reconcile its execution set
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
 
-The child is launched [sys.executable, -I, -B, <runner>, --execution-report, <private abs path>] with
+The child is launched [sys.executable, -I, -B, -c, <shim>, <runner's directory>, <runner>, <private
+abs path>]: the shim imports tools/_selftest_exit_report.py from beside the runner and hands it
+control, so that module's observation hooks (its audit hook, threading.excepthook wrapper, and
+threading._shutdown wrapper) are installed BEFORE any runner statement, import-time included, and the
+runner then executes as __main__ (the real sys.modules["__main__"] for the whole run, exit handlers
+included) with [<runner>, --execution-report, <private abs path>] as its argv.
+The child runs with
 cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
 pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
 empty for EVERY descendant git call, including one made after a descendant scrubs the GIT_*
@@ -46,8 +52,51 @@ sibling branch-root gate carries. Third, the environment drop neutralizes the PY
 family only: a loader-level injection control such as LD_PRELOAD, and the interpreter binary
 sys.executable itself, sit at the same trusted-toolchain tier, outside this gate's threat model.
 The child's full stdout and stderr are forwarded UNFILTERED to this
-gate's own streams (no grep, no truncation), and its verdict is judged by its real return code plus
-the strict report reconcile, never by its prose. A report that is missing, truncated, malformed,
+gate's own streams (no grep, no truncation), and its verdict is judged by its real return code, its
+error stream, and the strict report reconcile, never by its prose. The fail-closed child contract
+(.aiqt/core/rules/security-seci-fail-closed.md): a pass needs a zero exit, the report FINALIZED at the
+child's exit, and a WHOLE error stream byte-identical to the suite's declared bytes (DECLARED_STDERR;
+a suite with no entry must leave it empty, and no registered suite declares any). The child arms
+tools/_selftest_exit_report.py as its first atexit registration, so the report is written only after
+every non-daemon thread is joined, every later atexit callback has run, and a bounded garbage
+collection; a refusing child ends with os._exit(2), while the reporting path returns, so the process
+ends with the interpreter's own exit status; the report carries format_version 2, finalized
+true, and the exit_code that must equal the child's real exit status. A fault the child survived (an
+atexit callback, a destructor, a thread) therefore refuses the verdict when it reaches the error
+stream, which a destructor fault at late interpreter teardown can fail to do (disclosed below); a
+thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
+_thread directly at any moment from process start (whose SystemExit _thread ignores silently), an
+installed trace, profile or monitoring callback (the audit events sys.settrace, sys.setprofile and
+sys.monitoring.register_callback; such a callback runs in a thread's frames after run(), where a
+SystemExit it raises is dropped silently by _thread), a
+delivered interpreter-creation audit event (cpython.PyInterpreterState_New; measured on CPython
+3.14.4 as never delivered to an in-process hook), a call of an _interpreters function that creates,
+runs code in, or destroys an interpreter (the bootstrap imports _interpreters first and replaces
+those functions with refusals, so the import itself, which CPython 3.14's concurrent.futures and so
+asyncio make at module level, is no fault), and a fresh load of an interpreter-creating extension
+module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi), identified by the
+extension FILE it loads from, by identity or content, under any module name, or by its exact plain
+name (every in-process hook is per-interpreter, so code in another interpreter is unobservable and
+creating or driving one is itself the fault; an interpreter created through any other C extension or
+ctypes is the disclosed C-extension tier), a thread started or an atexit callback
+registered after the exit-time thread join (neither is ever joined or run), and a status recorded
+through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
+process left by another path, or an earlier exit_with outlived it), each,
+when it occurs before the finalizer runs, make the child write no report and exit 2 (one that occurs
+at interpreter teardown, after the report is written, refuses nothing; and the finalizer detects a
+late atexit registration by comparing callback counts, so an atexit.unregister made after the join
+can mask one; both disclosed below); a run that arms the finalizer without the bootstrap's
+hooks (a launch that bypassed this gate) exits 2 the same way; and an in-band (format 1) report is
+refused. The finalizer's reporting path defers to the interpreter's own exit status rather than
+overriding it, so the exit_code reconcile above is against the status the child REALLY exited with:
+a confirmation forged by a C callable reading the caught exception's code with no Python frame on
+the stack (for example a weakref callback) cannot make a failure exit pass, because either the real
+exit status contradicts the report (refused here) or the process really exited with the recorded
+status (nothing was hidden). The
+child-side teardown residual (a daemon thread is killed, post-report teardown destructor effects and
+faults, a late atexit registration masked by an atexit.unregister under the finalizer's count
+comparison, an execution context created or an asynchronous exception injected below the audited
+Python surface by a C extension or ctypes) is disclosed in that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -58,8 +107,9 @@ cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch; an unconfirmable repo
-root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; or an invalid
-report).
+root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
+stream that differs by any byte from the suite's declared bytes; or an invalid, unfinalized, or
+exit-status-mismatched report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
@@ -96,30 +146,67 @@ reconcile still proves the executed set independently. Repo-root confirmation is
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
-actually ran). The child runs un-timed
+actually ran). The fail-closed child contract has two permitted residuals. First, a destructor fault
+at late interpreter teardown can pass silently. The residual is a CLASS, not a list of placements: a
+destructor of an object whose last reference is held by interpreter-level state that CPython clears
+after it has dropped sys.stderr (for example the codec search registry (codecs.register), audit
+hooks (sys.addaudithook), and a cycle anchored on a sys attribute) runs and raises after the report
+is written with an empty error stream, and this gate passes the run; such a fault is silent under
+the gate exactly as under a direct launch. The examples are not exhaustive and no further placement
+is enumerated; no in-process fix is known, and the self-test pins the three named examples as a
+residual witness.
+Second, loaded code replacing the reporting machinery: code running inside the child can write a complete finalized-shape report itself
+(for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
+sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap
+or the private per-thread run machinery it calls (a threading.Thread subclass overriding
+_bootstrap_inner, a replaced _invoke_excepthook), os._exit, the atexit registrations, or the finalizer's state; this gate sees the child only from outside and no in-process secret is hidden from that code,
+so the channel is closed only by the suite's own source being reviewed and pinned. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_selftest_execution.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import contextlib
+import dis
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
+import types
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_selftest_execution.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_selftest_execution.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
-REPORT_KEYS = {"format_version", "suite", "check_ids"}
+REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
+REPORT_FORMAT_VERSION = 2
+# Per suite id, the exact bytes (a bytes value) the child's WHOLE error stream must equal on a run that
+# is a verdict; a suite with no entry must leave the stream empty, and any other byte is a fault, never
+# a pass. Measured through this gate on a passing run: orch-behaviour-selftest,
+# ci-status-behaviour-selftest, instruction-budget-selftest, python-floor-selftest and
+# entry-guard-selftest each write 0 stderr bytes, and git-fixture-env-selftest, run to completion
+# through this gate at revision 585b70dac112e24d252b1e3b4b9e966a171a6b82 with the empty allowance
+# (gate exit 0), wrote 0 stderr bytes too, so all six suites were measured at 0 stderr bytes.
+DECLARED_STDERR = {}
 
 
 def _cannot(msg):
@@ -157,6 +244,13 @@ def _manifest_suites(manifest_path):
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         _cannot("expectation manifest {} is not valid TOML: {}".format(manifest_path, exc))
         return None
+    return _manifest_rows(data, manifest_path)
+
+
+def _manifest_rows(data, manifest_path):
+    """The strictly validated [[suite]] rows of an already-parsed expectation manifest, or None after
+    printing the violation (the caller exits 2). Shared with the entry-guard gate, so both gates hold the
+    registry to one schema."""
     if set(data) != MANIFEST_TOP_KEYS:
         _cannot("{}: top-level keys must be exactly {} (got {})".format(
             manifest_path, sorted(MANIFEST_TOP_KEYS), sorted(data)))
@@ -377,10 +471,12 @@ def _reject_dup_keys(pairs):
     return obj
 
 
-def _read_report(report_path, suite_id):
+def _read_report(report_path, suite_id, returncode):
     """The report's check-id list, strictly validated, or None after printing (the caller exits 2). A
     child exit 0 never overrides an invalid report; a run that did not deliver its agreed structured
-    verdict evidence is no verdict."""
+    verdict evidence is no verdict. Only the FINALIZED report (tools/_selftest_exit_report.py, written
+    at interpreter exit after the child's cleanup, its exit_code the status the child then exited
+    with) is accepted; an in-band format-1 report is refused."""
     try:
         st = os.lstat(report_path)
     except OSError:
@@ -401,8 +497,16 @@ def _read_report(report_path, suite_id):
     if not isinstance(data, dict) or set(data) != REPORT_KEYS:
         _cannot("execution report {}: keys must be exactly {}".format(report_path, sorted(REPORT_KEYS)))
         return None
-    if type(data["format_version"]) is not int or data["format_version"] != 1:
-        _cannot("execution report {}: format_version must be exactly the integer 1".format(report_path))
+    if type(data["format_version"]) is not int or data["format_version"] != REPORT_FORMAT_VERSION:
+        _cannot("execution report {}: format_version must be exactly the integer {} (the report "
+                "finalized at exit)".format(report_path, REPORT_FORMAT_VERSION))
+        return None
+    if data["finalized"] is not True:
+        _cannot("execution report {}: finalized must be exactly true".format(report_path))
+        return None
+    if type(data["exit_code"]) is not int or data["exit_code"] != returncode:
+        _cannot("execution report {}: exit_code {!r} is not the child's exit status {}".format(
+            report_path, data["exit_code"], returncode))
         return None
     if data["suite"] != suite_id:
         _cannot("execution report {}: suite {!r} is not the requested suite {!r}".format(
@@ -419,10 +523,30 @@ def _read_report(report_path, suite_id):
     return ids
 
 
+def _stderr_fault(blob, suite_id):
+    """The child's WHOLE error stream compared byte for byte with the suite's declared bytes (empty when
+    the suite declares none): None on equality, else a description of the first differing byte. No
+    decoding, line splitting, repetition, or reordering is applied, and a declaration that is not a
+    bytes value is itself a fault. A fault the child survived (an atexit callback, a destructor, a
+    thread) that writes to the error stream reaches only this stream, so it is never a pass; a fault
+    that writes nothing (the disclosed late-teardown residual class) is invisible here."""
+    allowed = DECLARED_STDERR.get(suite_id, b"")
+    if type(allowed) is not bytes:
+        return "the declared stderr for suite {!r} is not a bytes value".format(suite_id)
+    if blob == allowed:
+        return None
+    at = next((i for i, (got, want) in enumerate(zip(blob, allowed)) if got != want),
+              min(len(blob), len(allowed)))
+    return "stderr differs from the {} declared bytes at byte {}: {!r}".format(
+        len(allowed), at, blob[at:at + 200])
+
+
 def run_suite(root, suite_id):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
     any launch, then launch the registered runner with a private report path, forward its full
-    output, and reconcile the executed set. Returns the gate exit code."""
+    output, require an error stream byte-identical to the suite's declared bytes (empty unless
+    declared), and reconcile the executed set from the report finalized at the child's exit. Returns
+    the gate exit code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
@@ -467,7 +591,15 @@ def run_suite(root, suite_id):
         except OSError as exc:
             _cannot("cannot create the neutral child home directory: {}".format(exc))
             return 2
-        command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
+        # The bootstrap shim: the helper module beside the runner installs the observation hooks
+        # BEFORE any runner statement (import-time included), then runs the runner as __main__ with
+        # the [<runner>, --execution-report, <path>] argv it expects (_bootstrap_main documents the
+        # shim's own argv contract). A raw launch of the runner would leave its import-time and
+        # pre-arm code outside the hooks, the round-2 pre-arm thread gap.
+        bootstrap = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                     "import _selftest_exit_report; _selftest_exit_report._bootstrap_main()")
+        command = [sys.executable, "-I", "-B", "-c", bootstrap,
+                   str(runner.parent), str(runner), report_path]
         # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
         # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
@@ -520,7 +652,12 @@ def run_suite(root, suite_id):
         if child.returncode not in (0, 1):
             _cannot("child exited {} (a harness error or signal is no verdict)".format(child.returncode))
             return 2
-        observed = _read_report(report_path, suite_id)
+        fault = _stderr_fault(child.stderr, suite_id)
+        if fault is not None:
+            _cannot("suite {}: the child's error stream carries a fault ({}); a run that faulted, "
+                    "even after its last check, is no verdict".format(suite_id, fault))
+            return 2
+        observed = _read_report(report_path, suite_id, child.returncode)
         if observed is None:
             return 2
         missing = sorted(expected - set(observed))
@@ -555,13 +692,114 @@ def _manifest_text(ids=None, runner="tools/fake_runner.py", header="format-versi
             + '"\nexpected-check-ids = [' + rendered + ']\n')
 
 
-def _report_body(ids, rc, suite="demo"):
-    return ("json.dump({{'format_version': 1, 'suite': {suite!r}, 'check_ids': {ids!r}}}, "
-            "open(report, 'w'))\nsys.exit({rc})\n".format(suite=suite, ids=ids, rc=rc))
+def _report_body(ids, rc, suite="demo", before_exit=""):
+    """A fake runner tail on the real child contract: arm the exit finalizer, run before_exit (a fault
+    vector), then exit through exit_with, so the report is finalized at interpreter exit."""
+    return ("_selftest_exit_report.arm(report, {suite!r}, {ids!r})\n{before}"
+            "_selftest_exit_report.exit_with({rc})\n".format(
+                suite=suite, ids=ids, before=before_exit, rc=rc))
 
 
-def _raw_body(raw, rc=0):
-    return "open(report, 'w').write({raw!r})\nsys.exit({rc})\n".format(raw=raw, rc=rc)
+def _raw_body(raw, rc=0, before_exit=""):
+    """A fake runner tail that writes raw report bytes IN BAND (never through the finalizer)."""
+    return "open(report, 'w').write({raw!r})\n{before}sys.exit({rc})\n".format(
+        raw=raw, before=before_exit, rc=rc)
+
+
+def _report_json(**overrides):
+    """A finalized-shape report document, with keys replaced (or, given None, dropped)."""
+    data = {"format_version": REPORT_FORMAT_VERSION, "suite": "demo", "check_ids": GOOD_IDS,
+            "exit_code": 0, "finalized": True}
+    for key, value in overrides.items():
+        if value is None:
+            data.pop(key)
+        else:
+            data[key] = value
+    return json.dumps(data)
+
+
+# The three fault vectors the child survives AFTER its last check: each leaves exit 0 and a complete
+# report, and only its error stream carries the fault.
+FAULT_ATEXIT = ("import atexit\n"
+                "def _shutdown_fault():\n    raise RuntimeError('ST_ATEXIT_FAULT')\n"
+                "atexit.register(_shutdown_fault)\n")
+FAULT_DESTRUCTOR = ("class _Faulty:\n    def __del__(self):\n"
+                    "        raise RuntimeError('ST_DESTRUCTOR_FAULT')\n"
+                    "_cycle = _Faulty()\n_cycle.self = _cycle\ndel _cycle\n")
+FAULT_THREAD = ("import threading, time\n"
+                "def _thread_fault():\n    time.sleep(0.2)\n"
+                "    raise RuntimeError('ST_THREAD_FAULT')\n"
+                "threading.Thread(target=_thread_fault).start()\n")
+# Each vector's fault-free twin: the same machinery, no fault.
+TWIN_ATEXIT = "import atexit\natexit.register(int)\n"
+TWIN_DESTRUCTOR = ("class _Quiet:\n    def __del__(self):\n        pass\n"
+                   "_cycle = _Quiet()\n_cycle.self = _cycle\ndel _cycle\n")
+TWIN_THREAD = "import threading\nthreading.Thread(target=int).start()\n"
+# A destructor of an object the runner's module still holds runs at interpreter TEARDOWN, after the
+# report is written and after module globals are cleared, while the audit hook is still installed;
+# each binds what it uses, so only the helper's own hooks could fault there. A clean one that opens
+# a file (the open audit event) or calls a captured sys.audit must pass; its faulting twin must not.
+TEARDOWN_OPEN = ("class _LateOpen:\n    def __del__(self, op=open, dn=os.devnull):\n"
+                 "        with op(dn, 'w') as f:\n            f.write('ok')\n"
+                 "_late = _LateOpen()\n")
+TEARDOWN_AUDIT = ("class _LateAudit:\n    def __del__(self, au=sys.audit):\n"
+                  "        au('qa.clean')\n_late = _LateAudit()\n")
+TEARDOWN_FAULT = ("class _LateFault:\n"
+                  "    def __del__(self, op=open, dn=os.devnull, err=RuntimeError):\n"
+                  "        with op(dn, 'w') as f:\n            f.write('ok')\n"
+                  "        raise err('ST_TEARDOWN_FAULT')\n_late = _LateFault()\n")
+# The DISCLOSED late-teardown residual class: a faulting destructor of an object whose last reference
+# is held by interpreter-level state that CPython clears after it has dropped sys.stderr, so its fault
+# is reported nowhere. It records that it ran in a marker file beside the runner before raising; the
+# three witnessed examples are an object held by the codec search registry, one held by an audit hook,
+# and a cycle anchored on a sys attribute (TEARDOWN_FAULT, held by a module global, is the refused
+# control). The examples are not an exhaustive list of the class.
+RESIDUAL_LATE_FAULT = ("class _LateMarked:\n"
+                       "    def __init__(self, path):\n        self.path = path\n"
+                       "    def __del__(self, op=open, err=RuntimeError):\n"
+                       "        with op(self.path, 'w') as f:\n            f.write('ran')\n"
+                       "        raise err('ST_RESIDUAL_LATE_FAULT')\n"
+                       "_marker = os.path.join(here, 'late.marker')\n")
+RESIDUAL_CODEC_REGISTRY = ("class _Search:\n    def __init__(self, held):\n        self.held = held\n"
+                           "    def __call__(self, name):\n        return None\n"
+                           "import codecs\ncodecs.register(_Search(_LateMarked(_marker)))\n")
+RESIDUAL_AUDIT_HOOK = ("class _Audit:\n    def __init__(self, held):\n        self.held = held\n"
+                       "    def __call__(self, *args):\n        return None\n"
+                       "sys.addaudithook(_Audit(_LateMarked(_marker)))\n")
+RESIDUAL_SYS_CYCLE = ("_cycle = _LateMarked(_marker)\n_cycle.me = _cycle\n"
+                      "sys._st_residual = [_cycle]\ndel _cycle\n")
+# Not residual: a faulting cycle anchored on a module global or a class attribute. It was silent
+# while the finalizer kept the exit exception, whose traceback held the runner's module globals past
+# module teardown; it must be refused.
+TEARDOWN_CYCLE_GLOBAL = "_cycle = _LateMarked(_marker)\n_cycle.me = _cycle\n"
+TEARDOWN_CYCLE_CLASS = ("class _Holder:\n    pass\n_Holder.held = _LateMarked(_marker)\n"
+                        "_Holder.held.me = _Holder.held\n")
+# The opcodes that read (or write) a name through the module globals or the builtins at call time,
+# and the import opcodes (an import at teardown fails once sys.meta_path is cleared).
+_GLOBAL_NAME_OPS = frozenset(("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS",
+                              "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME",
+                              "IMPORT_NAME", "IMPORT_FROM"))
+
+
+def _global_name_reads(function):
+    """The names a function's code (nested code objects included) reads or writes through the
+    module globals or the builtins, or imports, at call time, as sorted (code name, opcode, name)
+    triples."""
+    found, stack = set(), [function.__code__]
+    while stack:
+        code = stack.pop()
+        for instruction in dis.get_instructions(code):
+            if instruction.opname in _GLOBAL_NAME_OPS:
+                found.add((code.co_name, instruction.opname, str(instruction.argval)))
+        stack.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+    return sorted(found)
+
+
+def _thread_exit(arg):
+    """A non-daemon thread that ends through sys.exit(arg), joined before the suite exits: the default
+    threading.excepthook ignores SystemExit, so it writes nothing to stderr."""
+    return ("import threading\n_t = threading.Thread(target=sys.exit, args=({!r},))\n"
+            "_t.start()\n_t.join()\n".format(arg))
 
 
 def self_test():
@@ -580,6 +818,9 @@ def self_test():
         _cannot("self-test temp storage unavailable: {}".format(exc))
         return 2
     counter = [0]
+    # The REAL child-side finalizer, copied into every synthetic root beside its fake runner.
+    finalizer_source = (Path(__file__).resolve().parent / "_selftest_exit_report.py").read_text(
+        encoding="utf-8")
 
     def dead_checks(ids):
         """A statically present but never-executed check() block: the fake runner writes its report
@@ -593,10 +834,14 @@ def self_test():
         (root / "tools").mkdir(parents=True)
         (root / "tools" / "selftest_checks.toml").write_text(manifest_text, encoding="utf-8")
         if runner_body is not None:
+            (root / "tools" / "_selftest_exit_report.py").write_text(
+                finalizer_source, encoding="utf-8")
             (root / "tools" / "fake_runner.py").write_text(
                 "#!/usr/bin/env python3\n"
                 "import json, os, sys\n"
                 "here = os.path.dirname(os.path.abspath(__file__))\n"
+                "sys.path.insert(0, here)\n"
+                "import _selftest_exit_report\n"
                 "open(os.path.join(here, 'launched.marker'), 'w').close()\n"
                 "report = sys.argv[2]\n"
                 + (dead_checks(GOOD_IDS) if source_block is None else source_block)
@@ -665,24 +910,40 @@ def self_test():
         #     ValueError (not TOMLDecodeError); the manifest is still refused 2 BEFORE any launch
         #     (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
         #     (test-hermeticity) and restored in finally.
-        #     A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way; the
-        #     recursion limit is pinned to the CPython default 1000 too.
-        for label, value in (("over-long-int", "9" * 4400), ("deep-nesting", "[" * 1200 + "]" * 1200)):
-            prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
-            sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
-            try:
-                root = build(_manifest_text(header="format-version = " + value), _report_body(GOOD_IDS, 0))
+        #     A parser overflow (RecursionError, not a ValueError) is refused the same way, with the
+        #     overflow in the refusal.
+        #     The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+        #     otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+        #     overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+        #     (or trips an unrelated refusal) under another.
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+        try:
+            for label, value in (("over-long-int", "9" * 4400), ("parser-overflow", "1  # injected-overflow")):
+                prev_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(4300)
+                err = ""
                 try:
-                    code, _out, _err = run(root)
-                except (ValueError, RecursionError) as exc:
-                    code = "a bare {} escaped".format(type(exc).__name__)
-            finally:
-                sys.setrecursionlimit(prev_reclimit)
-                sys.set_int_max_str_digits(prev_digits)
-            expect("st/manifest-{}-2".format(label), code, 2)
-            expect("st/manifest-{}-no-launch".format(label), launched(root), False)
+                    root = build(_manifest_text(header="format-version = " + value), _report_body(GOOD_IDS, 0))
+                    try:
+                        code, _out, err = run(root)
+                    except (ValueError, RecursionError) as exc:
+                        code = "a bare {} escaped".format(type(exc).__name__)
+                finally:
+                    sys.set_int_max_str_digits(prev_digits)
+                expect("st/manifest-{}-2".format(label), code, 2)
+                expect("st/manifest-{}-no-launch".format(label), launched(root), False)
+                if label == "parser-overflow":
+                    expect("st/manifest-parser-overflow-finding", "injected parser overflow" in err, True)
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
 
         # 8: child exits 0 but writes no report -> 2, never a pass
         code, _out, _err = run(build(_manifest_text(), "sys.exit(0)\n"))
@@ -690,16 +951,20 @@ def self_test():
 
         # 9: malformed reports -> 2, whatever the child's exit code
         for label, raw in (
-                ("truncated-json", '{"format_version": 1, "suite": "demo", "check_ids": ["a/one"'),
-                ("missing-key", json.dumps({"format_version": 1, "check_ids": GOOD_IDS})),
-                ("extra-key", json.dumps(
-                    {"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS, "count": 3})),
-                ("ids-not-list", json.dumps(
-                    {"format_version": 1, "suite": "demo", "check_ids": "a/one"})),
-                ("bool-format-version", json.dumps(
-                    {"format_version": True, "suite": "demo", "check_ids": GOOD_IDS})),
-                ("dup-member", '{"format_version": 1, "suite": "demo", "check_ids": ["a/wrong"], '
-                 '"check_ids": ["a/one", "a/two", "a/three"]}')):
+                ("truncated-json", '{"format_version": 2, "suite": "demo", "check_ids": ["a/one"'),
+                ("missing-key", _report_json(suite=None)),
+                ("extra-key", _report_json(count=3)),
+                ("ids-not-list", _report_json(check_ids="a/one")),
+                ("bool-format-version", _report_json(format_version=True)),
+                ("dup-member", _report_json(check_ids=["a/wrong"])[:-1]
+                 + ', "check_ids": ["a/one", "a/two", "a/three"]}'),
+                # an in-band report, even complete and well formed, was never finalized at exit
+                ("in-band-format-1", json.dumps(
+                    {"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS})),
+                ("finalized-false", _report_json(finalized=False)),
+                ("finalized-missing", _report_json(finalized=None)),
+                ("exit-code-mismatch", _report_json(exit_code=1)),
+                ("exit-code-bool", _report_json(exit_code=False))):
             code, _out, _err = run(build(_manifest_text(), _raw_body(raw)))
             expect("st/report-{}-2".format(label), code, 2)
 
@@ -711,9 +976,8 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), "os.mkdir(report)\nsys.exit(0)\n"))
         expect("st/report-dir-2", code, 2)
         code, _out, _err = run(build(_manifest_text(), (
-            "open(report + '.real', 'w').write(json.dumps({'format_version': 1, 'suite': 'demo', "
-            "'check_ids': ['a/one', 'a/two', 'a/three']}))\n"
-            "os.symlink(report + '.real', report)\nsys.exit(0)\n")))
+            "open(report + '.real', 'w').write({!r})\n"
+            "os.symlink(report + '.real', report)\nsys.exit(0)\n".format(_report_json()))))
         expect("st/report-symlink-2", code, 2)
 
         # 12: child rc 1 with a complete report -> 1, never masked to 0
@@ -933,6 +1197,492 @@ def self_test():
         expect("st/static-empty-loop-named", "unresolvable check id at" in err, True)
         expect("st/static-empty-loop-no-launch", launched(root), False)
 
+        # 24 (fail-closed child contract): a fault the child survives AFTER its last check (an atexit
+        # callback, a destructor of collectable garbage, a thread joined at shutdown) leaves exit 0
+        # and a complete set, and is refused 2 through the error stream, under both the finalized
+        # report and the in-band report the gate formerly accepted (an armed child also records the
+        # thread fault itself and exits 2); each vector's own fault-free twin passes
+        stream_refusal = "error stream carries a fault"
+        for label, vector, token, twin, refusal in (
+                ("atexit", FAULT_ATEXIT, "ST_ATEXIT_FAULT", TWIN_ATEXIT, stream_refusal),
+                ("destructor", FAULT_DESTRUCTOR, "ST_DESTRUCTOR_FAULT", TWIN_DESTRUCTOR,
+                 stream_refusal),
+                ("thread", FAULT_THREAD, "ST_THREAD_FAULT", TWIN_THREAD, "child exited 2")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=twin)))
+            expect("st/fault-{}-twin-passes".format(label), (code, err), (0, ""))
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=vector)))
+            expect("st/fault-{}-finalized-2".format(label), code, 2)
+            expect("st/fault-{}-finalized-named".format(label),
+                   (token in err, refusal in err), (True, True))
+            code, _out, err = run(build(_manifest_text(), _raw_body(
+                json.dumps({"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS}),
+                before_exit=vector)))
+            expect("st/fault-{}-in-band-2".format(label), code, 2)
+            expect("st/fault-{}-in-band-named".format(label), token in err, True)
+        code, _out, _err = run(build(_manifest_text(), _report_body(
+            GOOD_IDS, 0, before_exit="import atexit, threading\natexit.register(int)\n"
+            "threading.Thread(target=int).start()\n")))
+        expect("st/fault-free-twin-passes", code, 0)
+        # a non-daemon thread's FAILURE exit (SystemExit with a nonzero or non-int code) writes
+        # nothing to stderr, and is still refused 2: the armed child records it and writes no report;
+        # its clean twin (SystemExit(0)) passes
+        for label, arg in (("one", 1), ("message", "thread failed")):
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=_thread_exit(arg))))
+            expect("st/fault-thread-exit-{}-2".format(label), code, 2)
+            expect("st/fault-thread-exit-{}-named".format(label),
+                   "ended with SystemExit({!r})".format(arg) in err, True)
+        code, _out, err = run(build(_manifest_text(),
+                                    _report_body(GOOD_IDS, 0, before_exit=_thread_exit(0))))
+        expect("st/fault-thread-exit-zero-twin-passes", (code, err), (0, ""))
+
+        # 25: the finalizer contract itself: an armed child whose exit status bypassed exit_with
+        # writes no report (no verdict), one that wrote its report in band before the finalizer
+        # (exclusive creation) is refused, and an arm after any other atexit registration is a
+        # harness error; the child's exit status, not its report, is decisive in each
+        root = build(_manifest_text(),
+                     "_selftest_exit_report.arm(report, 'demo', {!r})\nsys.exit(0)\n".format(GOOD_IDS))
+        code, _out, err = run(root)
+        expect("st/finalizer-unrecorded-status-2", code, 2)
+        expect("st/finalizer-unrecorded-status-named", "no exit status was recorded" in err, True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "open(report, 'w').write({!r})\n".format(_report_json())
+                                    + _report_body(GOOD_IDS, 0)))
+        expect("st/finalizer-preexisting-report-2", code, 2)
+        expect("st/finalizer-preexisting-report-named", "cannot finalize execution report" in err,
+               True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "import atexit\natexit.register(int)\n"
+                                    + _report_body(GOOD_IDS, 0)))
+        expect("st/finalizer-not-first-2", code, 2)
+        expect("st/finalizer-not-first-named", "must be the first atexit registration" in err, True)
+        # a recorded status stands only if its own exit ends the process: a caught exit_with followed
+        # by a failure exit, by a fall-through, or by a code read and a different exit is refused 2,
+        # and so is exit_with from a non-main thread; an exit_with that unwinds through a finally or
+        # is re-raised by a handler still ends the process, and passes
+        arm_line = "_selftest_exit_report.arm(report, 'demo', {!r})\n".format(GOOD_IDS)
+        for label, tail in (
+                ("then-exit-1", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                                "except SystemExit:\n    pass\nsys.exit(1)\n"),
+                ("then-fall-through", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                                      "except SystemExit:\n    pass\n"),
+                ("code-read-then-exit-0", "try:\n    _selftest_exit_report.exit_with(1)\n"
+                                          "except SystemExit as exc:\n    exc.code\nsys.exit(0)\n")):
+            code, _out, err = run(build(_manifest_text(), arm_line + tail))
+            expect("st/finalizer-caught-{}-2".format(label), code, 2)
+            expect("st/finalizer-caught-{}-named".format(label),
+                   "is not the one the process exited with" in err, True)
+        code, _out, err = run(build(_manifest_text(), arm_line + (
+            "import threading\n"
+            "_t = threading.Thread(target=_selftest_exit_report.exit_with, args=(0,))\n"
+            "_t.start()\n_t.join()\n_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-thread-exit-with-2", code, 2)
+        expect("st/finalizer-thread-exit-with-named", "outside the main thread" in err, True)
+        for label, tail in (
+                ("finally", "def _leave():\n    try:\n        _selftest_exit_report.exit_with(0)\n"
+                            "    finally:\n        int()\n_leave()\n"),
+                ("reraise", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                            "except SystemExit:\n    raise\n")):
+            code, _out, err = run(build(_manifest_text(), arm_line + tail))
+            expect("st/finalizer-unwound-{}-passes".format(label), (code, err), (0, ""))
+        # 25b: a thread whose exit cannot be observed, and a status confirmed by anything but the
+        # interpreter's own exit, are refused 2: a thread started through _thread directly (a Python
+        # target ending in SystemExit(1), a C-callable target through an alias bound before arm, and
+        # the joinable entry point where it exists), an earlier exit_with whose exception outlives a
+        # later caught one, a caught exit_with whose code a C callable reads as an atexit callback or
+        # as a _thread target before another exit or a fall-through, a thread started from an atexit
+        # callback, and an atexit callback registered from one; a thread that a non-daemon thread
+        # starts while the exit-time join waits on it still passes
+        raw_wait = "import _thread, time\nwhile _thread._count():\n    time.sleep(0.001)\n"
+        caught_zero = ("import atexit, operator\ntry:\n    _selftest_exit_report.exit_with(0)\n"
+                       "except SystemExit as _e:\n    ")
+        unobserved, unconfirmed = "outside threading", "is not the one the process exited with"
+        late = "after the exit-time thread join"
+        for label, head, tail, named in (
+                ("raw-thread-exit-1", "", "import _thread, threading\n_ready = threading.Event()\n"
+                 "def _worker():\n    _ready.set()\n    sys.exit(1)\n"
+                 "_thread.start_new_thread(_worker, ())\n_ready.wait(5)\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("raw-thread-alias-c-target", "from _thread import start_new_thread as _snt\n",
+                 "_snt(sys.exit, (1,))\n" + raw_wait + "_selftest_exit_report.exit_with(0)\n",
+                 unobserved),
+                ("raw-thread-joinable", "", "import _thread, functools\n"
+                 "_start = getattr(_thread, 'start_joinable_thread', None)\n"
+                 "if _start is None:\n    _thread.start_new_thread(sys.exit, (1,))\n"
+                 "else:\n    _start(functools.partial(sys.exit, 1)).join()\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("earlier-exit-outlives-caught", "", "try:\n    _selftest_exit_report.exit_with(1)\n"
+                 "finally:\n    try:\n        _selftest_exit_report.exit_with(0)\n"
+                 "    except SystemExit:\n        pass\n", unconfirmed),
+                ("atexit-code-read-then-exit-1", "", caught_zero
+                 + "atexit.register(operator.attrgetter('code'), _e)\nsys.exit(1)\n", unconfirmed),
+                ("atexit-code-read-fall-through", "", caught_zero
+                 + "atexit.register(operator.attrgetter('code'), _e)\n", unconfirmed),
+                ("raw-thread-code-read-then-exit-1", "", caught_zero
+                 + "import _thread\n    _thread.start_new_thread(operator.attrgetter('code'), (_e,))\n"
+                 + raw_wait + "sys.exit(1)\n", unobserved),
+                ("thread-from-atexit", "", "import atexit, threading, time\n"
+                 "def _late():\n    time.sleep(0.3)\n    raise RuntimeError('ST_LATE_THREAD')\n"
+                 "atexit.register(lambda: threading.Thread(target=_late).start())\n"
+                 "_selftest_exit_report.exit_with(0)\n", late),
+                ("atexit-from-atexit", "", "import atexit\n"
+                 "def _late_fault():\n    raise RuntimeError('ST_LATE_ATEXIT')\n"
+                 "atexit.register(lambda: atexit.register(_late_fault))\n"
+                 "_selftest_exit_report.exit_with(0)\n", late)):
+            code, _out, err = run(build(_manifest_text(), head + arm_line + tail))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        code, _out, err = run(build(_manifest_text(), arm_line + (
+            "import threading, time\n"
+            "def _parent():\n    time.sleep(0.2)\n"
+            "    threading.Thread(target=time.sleep, args=(0.1,)).start()\n"
+            "threading.Thread(target=_parent).start()\n_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-thread-during-join-twin-passes", (code, err), (0, ""))
+        # 25c (round 3): the observation hooks the gate's bootstrap installs BEFORE any suite code
+        # close the remaining thread-class routes through the one mechanism: a raw thread started
+        # before arm is recorded at its start, whenever that is; a failing threading.Thread joined
+        # before arm is recorded by the already-installed excepthook wrapper; a fresh import of
+        # subinterpreter machinery is itself the fault (code in another interpreter is invisible to
+        # every per-interpreter hook); and a caught exit_with whose code a C weakref callback
+        # re-reads with no frame on the stack no longer decides anything, because the finalizer
+        # defers to the interpreter's real exit status, which must equal the report's exit_code
+        # (on an interpreter where the callback fires differently the child refuses with 2 itself,
+        # so the vector asserts the refusal, not the route). A clean pre-arm threading.Thread still
+        # passes, and arming in a child launched WITHOUT the bootstrap (a raw direct launch) is
+        # refused with no report.
+        pre_arm_raw = ("import _thread, threading, time\n"
+                       "_go = threading.Event()\n_done = threading.Event()\n"
+                       "def _worker():\n    _go.wait()\n"
+                       "    try:\n        sys.exit(1)\n    finally:\n        _done.set()\n"
+                       "_thread.start_new_thread(_worker, ())\n"
+                       + arm_line
+                       + "_go.set()\nassert _done.wait(5)\n" + raw_wait
+                       + "_selftest_exit_report.exit_with(0)\n")
+        pre_arm_thread_exit = ("import threading\n"
+                               "_t = threading.Thread(target=sys.exit, args=(1,))\n"
+                               "_t.start()\n_t.join()\n"
+                               + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        subinterp_import = ("import _interpreters\ndel sys.modules['_interpreters']\n"
+                            "import _interpreters\n"
+                            + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        weakref_confirm = (arm_line
+                           + "import functools, weakref\n"
+                           "try:\n    _selftest_exit_report.exit_with(0)\n"
+                           "except SystemExit as _e:\n    _saved = _e\n"
+                           "class _Holder:\n    pass\n"
+                           "def _fail():\n    global _ref\n    _holder = _Holder()\n"
+                           "    _ref = weakref.ref(_holder, functools.partial(getattr, _saved, 'code'))\n"
+                           "    sys.exit(1)\n"
+                           "_fail()\n")
+        for label, body, named in (
+                ("pre-arm-raw-thread-exit-1", pre_arm_raw, unobserved),
+                ("pre-arm-thread-exit-1", pre_arm_thread_exit, "ended with SystemExit(1)"),
+                ("subinterp-fresh-import", subinterp_import, "cannot be observed from this one")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        # 25c1 (round 10): importing _interpreters is no fault (CPython 3.14's concurrent.futures, and
+        # so asyncio, imports it at module level); the bootstrap imports it first and replaces its
+        # interpreter-creating and code-running functions with refusals, so a clean
+        # concurrent.futures pool and a clean asyncio.run pass, while creating an interpreter, through
+        # _interpreters (the refusal's RuntimeError caught, so only the recorded fault refuses) or
+        # through concurrent.interpreters, and a reload that tries to restore the functions, are
+        # refused
+        create_named = "_interpreters.create was called"
+        for label, body, named in (
+                ("subinterp-create", "import _interpreters\ntry:\n    _interpreters.create()\n"
+                 "except RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named),
+                ("subinterp-concurrent-interpreters-create", "import concurrent.interpreters\n"
+                 "try:\n    concurrent.interpreters.create()\nexcept RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named),
+                ("subinterp-reload-create", "import importlib, _interpreters\n"
+                 "importlib.reload(_interpreters)\n"
+                 "try:\n    _interpreters.create()\nexcept RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named)):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        for label, body in (
+                ("concurrent-futures-pool", "from concurrent.futures import ThreadPoolExecutor\n"
+                 "with ThreadPoolExecutor(max_workers=2) as _pool:\n"
+                 "    _got = list(_pool.map(abs, (-1, -2, -3)))\n"
+                 "assert _got == [1, 2, 3], _got\n"),
+                ("asyncio-run", "import asyncio\nasync def _main():\n"
+                 "    await asyncio.sleep(0)\n    return 7\n"
+                 "assert asyncio.run(_main()) == 7\n")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                      before_exit=body)))
+            expect("st/finalizer-{}-twin-passes".format(label), (code, err), (0, ""))
+        # 25c3 (round 10): a trace, profile or sys.monitoring callback runs in a thread's frames after
+        # run(), and a SystemExit(1) it raises there (in Thread._delete, or at the return of
+        # _bootstrap_inner) escapes to _thread, which drops it silently, so threading.excepthook
+        # never sees it; each passed the gate before installing such a callback was itself refused
+        installed = "callback was installed"
+        for label, vector in (
+                ("settrace-delete", "import threading\n"
+                 "def _tracer(frame, event, arg):\n"
+                 "    if event == 'call' and frame.f_code.co_name == '_delete':\n"
+                 "        raise SystemExit(1)\n"
+                 "    return None\n"
+                 "def _worker():\n    sys.settrace(_tracer)\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"),
+                ("setprofile-bootstrap-return", "import threading\n"
+                 "def _prof(frame, event, arg):\n"
+                 "    if event == 'return' and frame.f_code.co_name == '_bootstrap_inner':\n"
+                 "        raise SystemExit(1)\n"
+                 "threading.setprofile(_prof)\n"
+                 "_t = threading.Thread(target=int)\n_t.start()\n_t.join()\n"
+                 "threading.setprofile(None)\n"),
+                ("monitoring-delete", "import threading\n_mon = sys.monitoring\n"
+                 "_mon.use_tool_id(3, 'st')\n"
+                 "def _start(code, offset):\n"
+                 "    if code.co_name == '_delete':\n        raise SystemExit(1)\n"
+                 "_mon.register_callback(3, _mon.events.PY_START, _start)\n"
+                 "_mon.set_events(3, _mon.events.PY_START)\n"
+                 "_t = threading.Thread(target=int)\n_t.start()\n_t.join()\n"
+                 "_mon.set_events(3, 0)\n")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                      before_exit=vector)))
+            expect("st/finalizer-thread-end-{}-2".format(label), code, 2)
+            expect("st/finalizer-thread-end-{}-named".format(label), installed in err, True)
+        # 25c2 (round 9): the interpreter-creating machinery is identified by its extension FILE, not
+        # by the name it is loaded under: the _interpreters extension loaded as qa._interpreters
+        # (a qualified alias through spec_from_file_location) creates a subinterpreter whose fault no
+        # hook here can see, and so does a byte copy of the file loaded from another path; both are
+        # refused like the plain import above. A delivered interpreter-creation audit event is
+        # refused too (sys.audit raises it here, since CPython 3.14.4 delivers it to no in-process
+        # hook when it creates an interpreter). The twin, another extension file loaded under a
+        # qualified alias, passes.
+        alias_load = ("import importlib.util\n"
+                      "_spec = importlib.util.find_spec('_interpreters')\n"
+                      "_origin = _spec.origin\n")
+        alias_tail = ("_alias = importlib.util.spec_from_file_location('qa._interpreters', _origin)\n"
+                      "_mod = importlib.util.module_from_spec(_alias)\n"
+                      "_alias.loader.exec_module(_mod)\n"
+                      "_interp = _mod.create()\n"
+                      "try:\n"
+                      "    print('ST fault observed:', _mod.run_string(\n"
+                      "        _interp, \"raise RuntimeError('ST_SUBINTERP_FAULT')\"), flush=True)\n"
+                      "finally:\n    _mod.destroy(_interp)\n"
+                      + arm_line + "_selftest_exit_report.exit_with(0)\n")
+        copy_load = ("import shutil\n"
+                     "_origin = shutil.copyfile(_origin, os.path.join(here, 'copied_interp.so'))\n")
+        for label, body, named in (
+                ("subinterp-qualified-alias", alias_load + alias_tail,
+                 "was loaded as qa._interpreters"),
+                ("subinterp-copied-file", alias_load + copy_load + alias_tail,
+                 "was loaded as qa._interpreters"),
+                ("subinterp-creation-event", "sys.audit('cpython.PyInterpreterState_New')\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n",
+                 "another interpreter was created")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        code, _out, err = run(build(_manifest_text(), (
+            "import importlib.util\n"
+            "_spec = importlib.util.find_spec('_queue')\n"
+            "if _spec.has_location:\n"
+            "    _alias = importlib.util.spec_from_file_location('qa._queue', _spec.origin)\n"
+            "    _alias.loader.exec_module(importlib.util.module_from_spec(_alias))\n"
+            "else:\n    import _queue\n"
+            + arm_line + "_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-unrelated-extension-alias-twin-passes", (code, err), (0, ""))
+        code, _out, err = run(build(_manifest_text(), weakref_confirm))
+        expect("st/finalizer-weakref-forged-confirm-2", code, 2)
+        expect("st/finalizer-weakref-forged-confirm-named",
+               ("is not the child's exit status" in err) or ("child exited 2" in err), True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "import threading\n_t = threading.Thread(target=int)\n"
+                                    "_t.start()\n_t.join()\n"
+                                    + arm_line + "_selftest_exit_report.exit_with(0)\n"))
+        expect("st/pre-arm-clean-thread-twin-passes", (code, err), (0, ""))
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0))
+        direct_report = root / "tools" / "direct-report.json"
+        direct = subprocess.run(
+            [sys.executable, "-I", "-B", str(root / "tools" / "fake_runner.py"),
+             "--execution-report", str(direct_report)],
+            cwd=str(root), capture_output=True)
+        expect("st/arm-without-bootstrap-2", direct.returncode, 2)
+        expect("st/arm-without-bootstrap-named",
+               "observation hooks were not installed"
+               in direct.stderr.decode("utf-8", errors="replace"), True)
+        expect("st/arm-without-bootstrap-no-report", direct_report.exists(), False)
+        # 25d (round 4): no hook trusts code the suite controls before its fault is recorded. A thread
+        # exception whose __repr__ raises SystemExit(0), and a SystemExit subclass with a nonzero code
+        # whose code property raises SystemExit(0), are still recorded (the end is classified by real
+        # type and SystemExit's own code slot, and the fixed fault precedes any description); a raw
+        # _thread target that supplies its own __func__, and a genuine Thread._bootstrap bound to an
+        # object that is not a threading.Thread, are raw starts; a str-subclass module name whose own
+        # hashing hides it from the membership test is still the subinterpreter import; a finalizer
+        # failure whose exception's repr raises is still named; and an exit handler that imports
+        # __main__ sees the runner's module, as under a direct launch
+        evil_repr = ("class _Fault(RuntimeError):\n    def __repr__(self):\n"
+                     "        raise SystemExit(0)\n")
+        unclean = "other than a clean SystemExit"
+        for label, body, named in (
+                ("thread-repr-raises", arm_line + "import threading\n" + evil_repr
+                 + "def _worker():\n    raise _Fault('ST_REPR_FAULT')\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"
+                 "_selftest_exit_report.exit_with(0)\n", unclean),
+                ("thread-code-property-raises", arm_line + "import threading\n"
+                 "class _Exit(SystemExit):\n    @property\n    def code(self):\n"
+                 "        raise SystemExit(0)\n"
+                 "def _worker():\n    raise _Exit(1)\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"
+                 "_selftest_exit_report.exit_with(0)\n", unclean),
+                ("raw-thread-forged-func", arm_line + "import _thread, threading\n"
+                 "class _Worker:\n    __func__ = staticmethod(threading.Thread._bootstrap)\n"
+                 "    def __call__(self):\n        sys.exit(1)\n"
+                 "_thread.start_new_thread(_Worker(), ())\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("raw-thread-bootstrap-non-thread", arm_line + "import _thread, threading, types\n"
+                 "class _NotThread:\n    _daemonic = False\n"
+                 "    def _bootstrap_inner(self):\n        sys.exit(1)\n"
+                 "_thread.start_new_thread(types.MethodType(threading.Thread._bootstrap, "
+                 "_NotThread()), ())\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("subinterp-import-str-subclass", "class _Name(str):\n"
+                 "    def __hash__(self):\n        return 1\n"
+                 "    def __eq__(self, other):\n        return False\n"
+                 "try:\n    __import__(_Name('_interpreters'))\nexcept ImportError:\n"
+                 "    __import__(_Name('_xxsubinterpreters'))\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n",
+                 "cannot be observed from this one"),
+                ("finalize-repr-raises", evil_repr
+                 + "class _Ids:\n    def __iter__(self):\n        raise _Fault('ST_FINALIZE')\n"
+                 "_selftest_exit_report.arm(report, 'demo', _Ids())\n"
+                 "_selftest_exit_report.exit_with(0)\n", "cannot finalize execution report")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        expect("st/finalizer-finalize-repr-raises-guarded",
+               "the finalizer's failure could not be described" in err, True)
+        code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=(
+            "import atexit\nMARKER = 42\n"
+            "def _late():\n    import __main__\n"
+            "    if getattr(__main__, 'MARKER', None) != 42 or __main__.__file__ != __file__:\n"
+            "        raise RuntimeError('ST_MAIN_LOST')\n"
+            "atexit.register(_late)\n"))))
+        expect("st/main-module-at-exit-passes", (code, err), (0, ""))
+        # 25e (round 5): every hook and the finalizer keep, through interpreter teardown, what they
+        # read: teardown clears module globals while the audit hook is still installed, so a hook
+        # that read a global then faulted and refused a clean run. A retained clean destructor that
+        # opens a file, and one that calls a captured sys.audit, run at teardown and pass; their
+        # faulting twin is still refused through the error stream; and
+        # no hook or finalizer looks up a global or builtin name at call time (a static witness
+        # over every one, including those no teardown vector reaches)
+        for label, vector in (("open", TEARDOWN_OPEN), ("captured-audit", TEARDOWN_AUDIT)):
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=vector)))
+            expect("st/teardown-clean-{}-passes".format(label), (code, err), (0, ""))
+        code, _out, err = run(build(_manifest_text(),
+                                    _report_body(GOOD_IDS, 0, before_exit=TEARDOWN_FAULT)))
+        expect("st/teardown-fault-2", code, 2)
+        expect("st/teardown-fault-named",
+               ("ST_TEARDOWN_FAULT" in err, "error stream carries a fault" in err), (True, True))
+        spec = importlib.util.spec_from_file_location(
+            "_selftest_exit_report_probe",
+            str(Path(__file__).resolve().parent / "_selftest_exit_report.py"))
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        for label, function in (
+                ("audit", probe._audit), ("file-digest", probe._file_digest),
+                ("genuine-bootstrap", probe._genuine_bootstrap),
+                ("thread-hook", probe._thread_hook), ("clean-status", probe._clean_status),
+                ("suite-exit-code", probe._SuiteExit.code.fget),
+                ("shutdown-wrapper", probe._wrap_shutdown(int)),
+                ("interpreters-refusal", probe._refuse_interp_entry("create")),
+                ("harness-error", probe._harness_error), ("finalize", probe._finalize)):
+            expect("st/teardown-bound-{}".format(label), _global_name_reads(function), [])
+        # 25f (round 7): the static witness names an import at call time (IMPORT_NAME, and
+        # IMPORT_FROM for a from-import), which fails at teardown once sys.meta_path is cleared
+
+        def _imports_name(event, args):
+            import json
+            return json
+
+        def _imports_from(event, args):
+            from os import path
+            return path
+        expect("st/teardown-bound-import-name-named", _global_name_reads(_imports_name),
+               [("_imports_name", "IMPORT_NAME", "json")])
+        expect("st/teardown-bound-import-from-named", _global_name_reads(_imports_from),
+               [("_imports_from", "IMPORT_FROM", "path"), ("_imports_from", "IMPORT_NAME", "os")])
+        # 25g (round 7), a RESIDUAL WITNESS, not a guarantee: a faulting destructor that CPython runs
+        # at late teardown, after it has dropped sys.stderr, raises with an empty error stream, so
+        # the gate PASSES the run while the marker shows the destructor ran; the three named
+        # examples of the disclosed class (the codec search registry, an audit hook (round 8), a
+        # cycle anchored on a sys attribute) are pinned, so if the interpreter ever reports such a
+        # fault this leg fails and the disclosure must change; the class is not enumerated further
+        for label, placement in (("codec-registry", RESIDUAL_CODEC_REGISTRY),
+                                 ("audit-hook", RESIDUAL_AUDIT_HOOK),
+                                 ("sys-attribute-cycle", RESIDUAL_SYS_CYCLE)):
+            root = build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=RESIDUAL_LATE_FAULT + placement))
+            code, _out, err = run(root)
+            marker = root / "tools" / "late.marker"
+            ran = marker.read_text(encoding="utf-8") if marker.exists() else None
+            expect("st/residual-witness-late-teardown-{}-passes".format(label), (code, err, ran),
+                   (0, "", "ran"))
+        # 25h (round 7): a faulting cycle anchored on a module global or a class attribute is freed
+        # while sys.stderr exists, because the finalizer drops the exit exception (whose traceback
+        # held the runner's globals) after writing the report; each is refused, its destructor ran
+        for label, placement in (("module-global", TEARDOWN_CYCLE_GLOBAL),
+                                 ("class-attribute", TEARDOWN_CYCLE_CLASS)):
+            root = build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=RESIDUAL_LATE_FAULT + placement))
+            code, _out, err = run(root)
+            marker = root / "tools" / "late.marker"
+            ran = marker.read_text(encoding="utf-8") if marker.exists() else None
+            expect("st/teardown-cycle-{}-refused".format(label),
+                   (code, "ST_RESIDUAL_LATE_FAULT" in err, ran), (2, True, "ran"))
+
+        # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
+        # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
+        # missing trailing newline, a prefix, an empty stream where bytes are declared, invalid UTF-8
+        # against its replacement character, and a declaration that is not bytes (a str whose
+        # substrings, or a tuple whose lines, would otherwise match) are each a fault; the pinned
+        # allowance is restored after
+        noisy = "sys.stderr.write('declared framing\\n')\n"
+        framing = b"declared framing\n"
+        real_declared = dict(DECLARED_STDERR)
+        DECLARED_STDERR["demo"] = framing
+        try:
+            code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                        before_exit=noisy)))
+            expect("st/stderr-declared-passes", code, 0)
+            code, _out, _err = run(build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=noisy + "sys.stderr.write('declared\\n')\n")))
+            expect("st/stderr-undeclared-2", code, 2)
+            code, _out, _err = run(build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=noisy + noisy)))
+            expect("st/stderr-declared-repeated-2", code, 2)
+            for label, blob in (("repeated", framing * 3),
+                                ("crlf", b"declared framing\r\n"),
+                                ("no-newline", b"declared framing"),
+                                ("vertical-tab", b"declared framing\x0b"),
+                                ("file-separator", b"declared framing\x1c" + framing),
+                                ("prefix", b"declared\n"),
+                                ("empty", b"")):
+                expect("st/stderr-exact-{}".format(label), _stderr_fault(blob, "demo") is None, False)
+            expect("st/stderr-exact-match", _stderr_fault(framing, "demo"), None)
+            DECLARED_STDERR["demo"] = "\ufffd\n".encode("utf-8")
+            expect("st/stderr-exact-invalid-utf8", _stderr_fault(b"\xff\n", "demo") is None, False)
+            for label, declared in (("str", "declared framing\n"), ("tuple", ("declared framing",))):
+                DECLARED_STDERR["demo"] = declared
+                expect("st/stderr-declared-{}-refused".format(label),
+                       (_stderr_fault(framing, "demo") is None, _stderr_fault(b"\n", "demo") is None),
+                       (False, False))
+        finally:
+            DECLARED_STDERR.clear()
+            DECLARED_STDERR.update(real_declared)
+        code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=noisy)))
+        expect("st/stderr-undeclared-suite-2", code, 2)
+        expect("st/stderr-undeclared-newline", _stderr_fault(b"\n", "demo") is None, False)
+        expect("st/stderr-undeclared-empty", _stderr_fault(b"", "demo"), None)
+
         # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
         # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
@@ -951,7 +1701,24 @@ def self_test():
     print("SELF-TEST PASS: the execution-set gate passes an exact or reordered set, names a missing and "
           "an extra id, refuses duplicate observed and expected ids (the latter with no launch), refuses "
           "a malformed expectation manifest before any launch, treats a missing, malformed, wrong-suite, "
-          "duplicate-member, or non-regular report as no verdict, never masks a failing child behind a "
+          "duplicate-member, non-regular, in-band, unfinalized, or exit-status-mismatched report as no "
+          "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
+          "differing by any byte from the declared bytes) while each fault-free twin passes, refuses a "
+          "silent failure SystemExit in a non-daemon thread, a thread fault whose repr or code "
+          "property raises, a thread started through _thread directly at any moment from process "
+          "start (a forged or non-Thread bootstrap target included), a thread or atexit callback "
+          "added after the exit-time join, a trace, profile or monitoring callback (each "
+          "raising SystemExit(1) in a thread after run()), an interpreter created through "
+          "_interpreters (after a reload too) or concurrent.interpreters, a fresh load of "
+          "subinterpreter machinery (a str-subclass name, a qualified alias of its extension file, "
+          "and a copy of that file included), a delivered interpreter-creation audit event, a "
+          "finalizer failure whose repr raises, while a clean concurrent.futures pool and a clean "
+          "asyncio.run pass, "
+          "and an armed child whose "
+          "observation hooks were not installed at process start, refuses an armed "
+          "child whose status or report bypassed the exit finalizer, whose recorded status the "
+          "interpreter's own exit did not confirm, or whose report's exit_code differs from the "
+          "real exit status the finalizer defers to, never masks a failing child behind a "
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
@@ -966,7 +1733,14 @@ def self_test():
           "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
-          "twin passes")
+          "twin passes, keeps the runner's module as __main__ for its exit handlers, and passes a "
+          "clean destructor run at interpreter teardown (a file open or a captured sys.audit) while "
+          "refusing its faulting twin, every hook and the finalizer reading no module global or "
+          "builtin and importing nothing at call time (an import named by the static witness), and "
+          "witnesses the disclosed late-teardown residual class (a faulting destructor held by the "
+          "codec search registry, by an audit hook, or in a cycle anchored on a sys attribute, "
+          "passes while its marker shows it ran) while refusing a faulting cycle anchored on a "
+          "module global or a class attribute")
     return 0
 
 

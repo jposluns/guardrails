@@ -3463,13 +3463,105 @@ def self_test():
         ]) + "\n")
         check("resolution-cycle-cannot-eval", render_write(cyroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
+        # --- F-07: a tomllib parse overflow (RecursionError) is mapped to cannot-evaluate, not a crash. The
+        # overflow is INJECTED on an otherwise valid finding index rather than provoked by a deeply nested body:
+        # the depth at which tomllib overflows is an interpreter limit, so a fixed body overflows under one
+        # recursion limit and, under another, parses and is refused for an unrelated reason (its unknown key),
+        # which would hide a dropped RecursionError mapping. The refusal must carry the injected overflow ---
         rroot = new_root()
         write_toml(rroot, "manifest.toml", manifest)
         empty_indexes(rroot)
-        deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
-        write_toml(rroot, "finding.index.toml", deep)
-        check("deep-toml-recursion-cannot-eval", render_write(rroot) == EXIT_CANNOT_EVALUATE)
+        write_toml(rroot, "finding.index.toml", "schema = 1\n# injected-overflow\n")
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+        import contextlib
+        import io
+        deep_err = io.StringIO()
+        deep_reader = None
+        try:
+            with contextlib.redirect_stderr(deep_err):
+                deep_rc = render_write(rroot)
+            # The render backstop (_render_resolved_store) also maps RecursionError and prints the same
+            # injected text, so the exit code alone cannot tell which handler fired: pin the PARSE locus's own
+            # diagnostic (it names the file it could not parse), and call the reader directly, requiring its
+            # ViewsError. Dropping RecursionError from _read_raw_and_parsed alone turns both red.
+            deep_fd = os.open(str(rroot / WORKING_DIRNAME / "toml"), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_raw_and_parsed(deep_fd, "finding.index.toml")
+                deep_reader = "ACCEPTED"
+            except ViewsError as exc:
+                deep_reader = str(exc)
+            except RecursionError:
+                deep_reader = "escaped RecursionError"
+            finally:
+                os.close(deep_fd)
+        except RecursionError:
+            deep_rc = "escaped RecursionError"
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
+        check("deep-toml-recursion-cannot-eval", deep_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate: cannot parse " in deep_err.getvalue()
+              and "finding.index.toml (injected parser overflow)" in deep_err.getvalue())
+        check("deep-toml-recursion-parse-locus-viewserror",
+              deep_reader == "cannot parse finding.index.toml (injected parser overflow)")
+
+        # --- the parse locus's OWN decode mapping: an undecodable index (UnicodeDecodeError) and a malformed
+        # one (TOMLDecodeError) are each refused AT _read_raw_and_parsed as "cannot parse <file> (<error>)".
+        # Both are ValueError subclasses, so the render backstop's ValueError catch also exits 2 and prints the
+        # bare error, which would hide a dropped mapping: pin the parse locus's diagnostic (it names the file)
+        # and call the reader directly, requiring its ViewsError. The expected error text is taken from the
+        # same decode step, so the pin holds across interpreter message wording. Dropping the matching decode
+        # class (with the ValueError that subsumes it) from _read_raw_and_parsed alone turns each pair red ---
+        def parse_locus_refusal(body):
+            proot = new_root()
+            write_toml(proot, "manifest.toml", manifest)
+            empty_indexes(proot)
+            (proot / WORKING_DIRNAME / "toml" / "finding.index.toml").write_bytes(body)
+            perr = io.StringIO()
+            with contextlib.redirect_stderr(perr):
+                prc = render_write(proot)
+            pfd = os.open(str(proot / WORKING_DIRNAME / "toml"), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_raw_and_parsed(pfd, "finding.index.toml")
+                preader = "ACCEPTED"
+            except ViewsError as exc:
+                preader = str(exc)
+            except ValueError as exc:
+                preader = "escaped " + type(exc).__name__
+            finally:
+                os.close(pfd)
+            return prc, perr.getvalue(), preader
+
+        undecodable = b"schema = 1\n# \xff\n"
+        try:
+            undecodable.decode("utf-8")
+            undecodable_why = None
+        except UnicodeDecodeError as exc:
+            undecodable_why = "finding.index.toml ({})".format(exc)
+        ud_rc, ud_err, ud_reader = parse_locus_refusal(undecodable)
+        check("undecodable-toml-cannot-eval", undecodable_why is not None and ud_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate: cannot parse " in ud_err and undecodable_why in ud_err)
+        check("undecodable-toml-parse-locus-viewserror",
+              undecodable_why is not None and ud_reader == "cannot parse " + undecodable_why)
+
+        malformed = b"schema = 1\n[unterminated\n"
+        try:
+            tomllib.loads(malformed.decode("utf-8"))
+            malformed_why = None
+        except tomllib.TOMLDecodeError as exc:
+            malformed_why = "finding.index.toml ({})".format(exc)
+        mf_rc, mf_err, mf_reader = parse_locus_refusal(malformed)
+        check("malformed-toml-cannot-eval", malformed_why is not None and mf_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate: cannot parse " in mf_err and malformed_why in mf_err)
+        check("malformed-toml-parse-locus-viewserror",
+              malformed_why is not None and mf_reader == "cannot parse " + malformed_why)
 
         # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
         # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered

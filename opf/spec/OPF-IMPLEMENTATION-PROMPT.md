@@ -1043,21 +1043,24 @@ Build the primitives every later step relies on.
   generation, and worklog storage generation. An implementation whose declaration lacks only its
   class MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
   malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
-  store operation. A missing declaration is malformed, since it states none of the release
-  identity, class, `spec_version`, and generations required above, so it yields cannot-evaluate."
-  The specification defines no format for the declaration and does not define the three failing
-  cases beyond a missing declaration, so the cases below other than no class and an absent file
-  are this prompt's reading, yours to confirm with the maintainer. Every command of yours that
-  reads, grades or writes a store, `opf
-  init` and the step 13 and step 14 checks included, runs this check before it resolves, reads or
-  writes any store, and on cannot-evaluate it stops with exit 2 and performs no store operation.
+  store operation. A declaration that is absent, or that omits its release identity, its
+  `spec_version`, its homes generation, or its worklog storage generation, is malformed rather than
+  one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store
+  operation." The specification defines no format for the declaration and does not define the
+  three failing cases beyond an absent declaration and one that omits a required field, so the
+  cases below other than no class, an absent file and a file that lacks the release identity, the
+  `spec_version` or a generation are this prompt's reading, yours to confirm with the maintainer.
+  Every command of yours that reads, grades or writes a store, `opf init` and the step 13 and step
+  14 checks included, runs this check before it resolves, reads or writes any store, and on
+  cannot-evaluate it stops with exit 2 and performs no store operation.
   The check gives each declaration one of these outcomes:
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed, as section 16.1 rules: "A missing declaration is malformed, since it states none of
-    the release identity, class, `spec_version`, and generations required above". Cannot-evaluate.
+    malformed, as section 16.1 states: "A declaration that is absent, or that omits its release
+    identity, its `spec_version`, its homes generation, or its worklog storage generation, is
+    malformed rather than one that declares no class". Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
@@ -1070,8 +1073,8 @@ Build the primitives every later step relies on.
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
-    absent file: section 16.1 limits it to a declaration that lacks only its class, and rules a
-    missing declaration malformed.
+    absent file: section 16.1 limits it to a declaration that lacks only its class, and rules an
+    absent declaration malformed.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 

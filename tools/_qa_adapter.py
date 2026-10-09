@@ -29,21 +29,32 @@ Two invariants the contract enforces, so a false green is unreachable:
 A REQUIRED surface that is disabled in config is a configuration fault (UNVERIFIABLE, malformed), kept
 distinct from an OPTIONAL-disabled SKIP.
 
-stdlib only (tomllib is stdlib on 3.11+). `--self-test` proves the discriminating property: the adapter
+stdlib only (Python 3.14 or newer). `--self-test` proves the discriminating property: the adapter
 returns UNVERIFIABLE (never PASS) on a missing REQUIRED surface, so deleting that guard fails the test.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _qa_adapter.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import shutil
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: _qa_adapter.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: _qa_adapter.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 # --- the shared result contract ---------------------------------------------------------------------
 PASS = "PASS"
@@ -1089,26 +1100,39 @@ def _self_test_isolated():
         #      still refuse with a ConfigError. Narrowing the parse handler back to (TOMLDecodeError,
         #      UnicodeDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
         #      (test-hermeticity) and restored in finally.
-        #      A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the
-        #      same way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        #      A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same
+        #      way, with the overflow in the refusal.
+        #      The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+        #      otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+        #      overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+        #      (or trips an unrelated refusal) under another.
         _prev_digits = sys.get_int_max_str_digits()
-        _prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_cfg = tmp / "bad-literal.toml"
                 big_cfg.write_text("schema-version = " + big_value + "\n", encoding="utf-8")
                 try:
                     load_config(big_cfg)
                     failures.append("load_config accepted {}".format(big_label))
-                except ConfigError:
-                    pass
+                except ConfigError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("load_config refused {} without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("load_config let a bare {} escape on {}".format(type(exc).__name__, big_label))
         finally:
-            sys.setrecursionlimit(_prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(_prev_digits)
 
         # 22. DISCRIMINATING (--config operand parsing): an empty operand, the =-joined empty form, a

@@ -4720,31 +4720,41 @@ def _t_c6_diffinode(d, env):
 
 
 def _t_toml_class_read_control(d, env):
-    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record carrying a 1200-deep nested
-    array makes tomllib raise RecursionError (a RuntimeError, not a ValueError), and one carrying
-    an over-long integer literal a bare ValueError; _read_control_record must refuse both with
-    OpLockError, never let either escape. The recursion and digit limits are pinned to the
-    CPython defaults (test-hermeticity) and restored in finally."""
+    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record whose parse overflows (tomllib
+    raises RecursionError, a RuntimeError, not a ValueError), and one carrying an over-long integer
+    literal (a bare ValueError); _read_control_record must refuse both with OpLockError, never let
+    either escape. The overflow is INJECTED (tomllib.loads raises RecursionError on a marked, otherwise
+    valid record) rather than provoked by a deeply nested body: the depth at which tomllib overflows
+    is an interpreter limit, so a fixed body overflows under one recursion limit and parses under
+    another. The digit limit is pinned to the CPython default (test-hermeticity) and restored."""
     dirp = os.path.join(d, "ctl-toml-class")
     os.mkdir(dirp)
     dfd = os.open(dirp, os.O_RDONLY | os.O_DIRECTORY)
-    prev_rec, prev_dig = sys.getrecursionlimit(), sys.get_int_max_str_digits()
-    sys.setrecursionlimit(1000)
+    prev_dig = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        for name, body in (("deep.toml", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
-                           ("bigint.toml", "big = " + "9" * 4400 + "\n")):
+        for name, body, needle in (("deep.toml", "deep = 1  # injected-overflow\n", "injected parser overflow"),
+                                   ("bigint.toml", "big = " + "9" * 4400 + "\n", "")):
             with open(os.path.join(dirp, name), "w", encoding="utf-8") as fh:
                 fh.write(body)
             try:
                 _read_control_record(dfd, name, name)
             except OpLockError as exc:
-                assert "not decodable UTF-8 TOML" in str(exc), str(exc)
+                assert "not decodable UTF-8 TOML" in str(exc) and needle in str(exc), str(exc)
                 continue
             raise AssertionError("{} was not refused".format(name))
     finally:
+        tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(prev_dig)
-        sys.setrecursionlimit(prev_rec)
         os.close(dfd)
 
 
@@ -5684,13 +5694,150 @@ def _st_staging_leftovers(dir_path, name):
 
 
 def _st_open_fds():
-    """The number of descriptors this process holds open (Linux /proc/self/fd, else /dev/fd). The
-    listing's own transient descriptor is present in every measurement alike, so a difference of
-    two readings is exactly the descriptors leaked in between."""
+    """The descriptors this process holds open (Linux /proc/self/fd, else /dev/fd) as a frozenset of
+    (number, identity) pairs, identity being (st_dev, st_ino, the file type bits of st_mode, access
+    mode). Each part stays fixed while a descriptor stays open: the permission bits are left out
+    because a chmod (_chmod_bound repairs modes through a descriptor) changes them under a kept
+    descriptor, and the access-mode bits are the F_GETFL bits F_SETFL cannot change. A number closed
+    and reopened on another file, or on the same file with another access mode, changes its pair; a
+    count sees neither.
+
+    Coverage boundary: two descriptors with the same identity at the same number read as one pair. So
+    an anonymous-inode descriptor (eventfd, signalfd, timerfd, epoll and the like share one inode)
+    closed and re-created at the same number reads as unchanged; so does the same file closed and
+    reopened at the same number with the same access mode; and so does a deleted file closed at a
+    number and a new file of the same type opened there with the same access mode after taking the
+    deleted file's freed inode number on the same device (st_ino names a file only while it exists,
+    and a filesystem may give a freed number to the next file it creates). The census looks no
+    further: the offset (os.lseek(fd, 0, SEEK_CUR)) and the /proc/self/fdinfo pos and flags lines
+    change under a kept descriptor that is read, written or given F_SETFL, so comparing them would
+    report a kept descriptor as a leak. A descriptor gained at a number that was free before is
+    always seen.
+
+    Only EBADF reads as closed (the listing's own transient descriptor is gone when it is read); any
+    other listing, fstat or flag failure fails the check naming the listing or the descriptor, never
+    a census that passes."""
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(fd_dir):
-            return len(os.listdir(fd_dir))
-    raise AssertionError("no descriptor listing (/proc/self/fd or /dev/fd) to count leaks with")
+            break
+    else:
+        raise AssertionError("no descriptor listing (/proc/self/fd or /dev/fd) to count leaks with")
+    try:
+        names = os.listdir(fd_dir)
+    except OSError as exc:
+        raise AssertionError("descriptor census: cannot list {}: {}".format(fd_dir, exc)) from exc
+    access = os.O_ACCMODE | getattr(os, "O_PATH", 0)
+    pairs = set()
+    for name in names:
+        fd = int(name)
+        try:
+            st = os.fstat(fd)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise AssertionError("descriptor census: cannot read descriptor {}: {}".format(
+                fd, exc)) from exc
+        pairs.add((fd, (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), flags & access)))
+    return frozenset(pairs)
+
+
+def _st_fds_gained(baseline):
+    """How many descriptors are open now that were not in `baseline` (a _st_open_fds census), or None
+    when a baseline pair is gone: a baseline number closed and reopened on another file, or with
+    another access mode, does not balance a count. Within the coverage boundary _st_open_fds states
+    (an anonymous-inode descriptor re-created, the same file reopened with the same access mode, or
+    a new file that took a deleted file's freed inode number opened with the same access mode, at
+    the same number) the pair reads as kept, so such a reuse is not seen."""
+    now = _st_open_fds()
+    if not baseline <= now:
+        return None
+    return len(now - baseline)
+
+
+def _t_fd_census_pairs(d, env):
+    """T-fd-census: the leak census compares (number, identity) pairs of fixed identities and fails
+    closed. A number closed and reopened on a different file, or on the same file with another
+    access mode, between two censuses differs (a count does not) and is not a balanced gain; a chmod
+    of a kept descriptor changes nothing; an injected EIO on the listing, on one descriptor's fstat
+    or on its F_GETFL fails the census naming the listing or the descriptor; EBADF alone reads as
+    closed."""
+    path_a = os.path.join(d, "a")
+    path_b = os.path.join(d, "b")
+    for path in (path_a, path_b):
+        with open(path, "wb") as fh:
+            fh.write(b"x")
+    for second, mode in ((path_b, os.O_RDONLY), (path_a, os.O_RDWR)):
+        fd = os.open(path_a, os.O_RDONLY)
+        held = [fd]
+        try:
+            baseline = _st_open_fds()
+            os.close(held.pop())
+            held.append(os.open(second, mode))
+            assert held[0] == fd, "the reopen must take the number just closed ({} != {})".format(
+                held[0], fd)
+            assert _st_open_fds() != baseline, \
+                "a number reused for {} must change the census".format(
+                    "another file" if second == path_b else "another access mode")
+            assert _st_fds_gained(baseline) is None, "a reused number must not balance a count"
+        finally:
+            for value in held:
+                os.close(value)
+    kept = os.open(path_a, os.O_RDONLY)
+    try:
+        os.fchmod(kept, 0o644)   # an explicit starting mode: the chmod below then changes the
+                                 # permission bits whatever umask created the file
+        baseline = _st_open_fds()
+        os.fchmod(kept, 0o600)
+        assert stat.S_IMODE(os.fstat(kept).st_mode) == 0o600, \
+            "the chmod of a kept descriptor must change its mode from 0644 to 0600"
+        assert _st_open_fds() == baseline, "a chmod of a kept descriptor must not change the census"
+    finally:
+        os.close(kept)
+    saved_listdir, saved_fstat, saved_fcntl = os.listdir, os.fstat, fcntl.fcntl
+    probe = os.open(path_a, os.O_RDONLY)
+    try:
+        def eio_listdir(path=".", *args):
+            if str(path) in ("/proc/self/fd", "/dev/fd"):
+                raise OSError(errno.EIO, "EIO (self-test injected on the descriptor listing)")
+            return saved_listdir(path, *args)
+
+        def errno_fstat(code):
+            def fake(fd, *args):
+                if fd == probe:
+                    raise OSError(code, "self-test injected on descriptor {}".format(fd))
+                return saved_fstat(fd, *args)
+            return fake
+
+        def eio_fcntl(fd, cmd, *args):
+            if fd == probe and cmd == fcntl.F_GETFL:
+                raise OSError(errno.EIO, "self-test injected on the F_GETFL of descriptor {}".format(fd))
+            return saved_fcntl(fd, cmd, *args)
+
+        for target, attr, fake, needle in (
+                (os, "listdir", eio_listdir, "cannot list"),
+                (os, "fstat", errno_fstat(errno.EIO), "cannot read descriptor {}:".format(probe)),
+                (fcntl, "fcntl", eio_fcntl, "cannot read descriptor {}:".format(probe))):
+            setattr(target, attr, fake)
+            try:
+                try:
+                    _st_open_fds()
+                except AssertionError as exc:
+                    assert needle in str(exc), "the census refusal must name {!r}: {}".format(
+                        needle, exc)
+                else:
+                    raise AssertionError("an unreadable census ({} {}) must fail, never pass".format(
+                        attr, needle))
+            finally:
+                os.listdir, os.fstat, fcntl.fcntl = saved_listdir, saved_fstat, saved_fcntl
+        os.fstat = errno_fstat(errno.EBADF)
+        try:
+            census = _st_open_fds()
+        finally:
+            os.fstat = saved_fstat
+        assert probe not in {number for number, _ in census}, "EBADF reads as closed"
+    finally:
+        os.close(probe)
 
 
 def _st_crash_acquire(root):
@@ -7742,7 +7889,7 @@ def _st_f7_4_case(root, case):
     notes = " ".join(getattr(caught, "__notes__", ()))
     records = (os.path.exists(active), os.path.exists(lease))
     if case == "exit-entry":
-        assert _st_open_fds() - baseline == 5 and not _st_anchor_free(root), \
+        assert _st_fds_gained(baseline) == 5 and not _st_anchor_free(root), \
             "the interrupted exit retains the five descriptors and the lock (observed)"
         assert records == (False, False), records
         assert "released only in part: its records removed, the release of its hold on the lock " \
@@ -7758,7 +7905,7 @@ def _st_f7_4_case(root, case):
     elif case == "close-interrupted":
         assert held, "the record descriptor's close must have been interrupted"
         os.fstat(held[0])                 # observed OPEN: its close never ran
-        assert _st_open_fds() - baseline == 1 and records == (False, False), records
+        assert _st_fds_gained(baseline) == 1 and records == (False, False), records
         assert _st_anchor_free(root), "the anchor descriptor itself was closed"
         assert "released only in part" in notes and "UNCONFIRMED" in notes, notes
         assert "and its descriptors closed" not in notes, notes
@@ -8238,7 +8385,7 @@ def _st_f8_4_body(d):
             _FdOwner.transfer = saved
         notes = " ".join(getattr(caught, "__notes__", ()))
         os.fstat(seen["fd"])              # observed open: no close ran
-        assert _st_open_fds() - baseline == 1, "the hand-over descriptor is the one left open"
+        assert _st_fds_gained(baseline) == 1, "the hand-over descriptor is the one left open"
         assert "descriptor closed" not in notes and "was not closed and stays open" in notes, notes
         os.close(seen["fd"])
         # (B) a forked child of the publisher.
@@ -8905,7 +9052,7 @@ def _st_f8_4_interrupted_close(dir_fd):
     notes = " ".join(getattr(caught, "__notes__", ()))
     assert armed.get("fired"), "the cleanup's close must have been interrupted"
     os.fstat(armed["fd"])                 # observed OPEN: the close never ran
-    assert _st_open_fds() - baseline == 1, "the interrupted close leaves that one descriptor open"
+    assert _st_fds_gained(baseline) == 1, "the interrupted close leaves that one descriptor open"
     assert "descriptor closed" not in notes and "UNCONFIRMED" in notes, notes
     os.close(armed["fd"])
 
@@ -9716,6 +9863,8 @@ def self_test_isolated():
          _t_i4_crash_and_recovery),
         ("T-i5 the init holder is bound to its acquirer; a foreign lease is never adopted",
          _t_i5_holder_identity_bound),
+        ("T-fd-census the leak census sees a reused number and fails closed on a read error",
+         _t_fd_census_pairs),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))

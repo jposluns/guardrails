@@ -49,14 +49,25 @@ Exit convention (matches the repo's gates):
      or unreadable or non-UTF-8 declared surface), fail-closed: an input the gate cannot read never reads
      as clean.
 """
-import re
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_derived_command_parameters.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import re
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_derived_command_parameters.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_derived_command_parameters.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
@@ -671,24 +682,45 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             #      ValueError (not TOMLDecodeError); it must still fail closed exit 2, never escape as a
             #      traceback (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
             #      (test-hermeticity) and restored in finally.
-            #      A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must fail
-            #      closed the same way; the recursion limit is pinned to the CPython default 1000.
-            for big_tag, big_value in (("over-long-int", "9" * 4400), ("deep-nesting", "[" * 1200 + "]" * 1200)):
-                r = _fresh(big_tag, good_cfg.replace("format-version = 1", "format-version = " + big_value),
-                           {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
-                _prev_digits = sys.get_int_max_str_digits()
-                _prev_reclimit = sys.getrecursionlimit()
-                sys.set_int_max_str_digits(4300)
-                sys.setrecursionlimit(1000)
-                try:
-                    rc_big = _run_quiet(r)
-                except (ValueError, RecursionError) as exc:
-                    rc_big = "a bare {} escaped".format(type(exc).__name__)
-                finally:
-                    sys.setrecursionlimit(_prev_reclimit)
-                    sys.set_int_max_str_digits(_prev_digits)
-                if rc_big != 2:
-                    failures.append("e2e: {} expected fail-closed exit 2, got {}".format(big_tag, rc_big))
+            #      A parser overflow (tomllib raises RecursionError, not a ValueError) must fail closed the same
+            #      way, and the refusal must carry the injected overflow (the parse handler mapped it).
+            #      The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+            #      otherwise valid input) rather than provoked by a deeply nested body: the depth at which
+            #      tomllib overflows is an interpreter limit, so a fixed body overflows under one recursion
+            #      limit and parses (or trips an unrelated refusal) under another.
+            import io
+            from contextlib import redirect_stderr, redirect_stdout
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+            try:
+                for big_tag, big_value in (("over-long-int", "9" * 4400),
+                                           ("parser-overflow", "1  # injected-overflow")):
+                    r = _fresh(big_tag, good_cfg.replace("format-version = 1", "format-version = " + big_value),
+                               {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+                    _prev_digits = sys.get_int_max_str_digits()
+                    sys.set_int_max_str_digits(4300)
+                    big_err = io.StringIO()
+                    try:
+                        with redirect_stdout(io.StringIO()), redirect_stderr(big_err):
+                            rc_big = run(r)
+                    except (ValueError, RecursionError) as exc:
+                        rc_big = "a bare {} escaped".format(type(exc).__name__)
+                    finally:
+                        sys.set_int_max_str_digits(_prev_digits)
+                    if rc_big != 2:
+                        failures.append("e2e: {} expected fail-closed exit 2, got {}".format(big_tag, rc_big))
+                    elif big_tag == "parser-overflow" and "injected parser overflow" not in big_err.getvalue():
+                        failures.append("e2e: parser-overflow refused without the parse handler's finding: {!r}"
+                                        .format(big_err.getvalue()))
+            finally:
+                tomllib.loads, tomllib.load = real_loads, real_load
 
             # (f) a duplicate binding id fails closed exit 2.
             dup_cfg = good_cfg + ('\n[[binding]]\nid = "repository-target"\npaths = ["cmd/resume.md"]\n'
