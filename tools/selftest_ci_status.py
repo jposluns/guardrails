@@ -748,16 +748,77 @@ def _run_checks():
                 ([{"filtered": [page([success_a])],
                    "scan": [page(old_tail, 300), page(old_commits, 300)]}], "unfiltered"),
                 ([{"filtered": [page([success_a, success_a], 1)], "scan": [page([success_a])]}],
-                 "head_sha-filtered"),
-                # Round 3: a run created between the two page reads, on the first read and on the
-                # re-read alike, repeats runs[99] on page 2. Disclosed availability cost: exit 2.
-                ([{"filtered": [page([success_a])],
-                   "scan": [page(busy[:100], 150), page(busy[99:], 151)]}], "unfiltered")):
+                 "head_sha-filtered")):
             rc, output, calls = fixture.invoke(polls)
             duplicates.append(
                 (rc, calls, "duplicate run id within the {} listing".format(source) in output,
                  "no workflow run registered" in output))
-        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 5)
+        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 4)
+
+        # TOOL-CI-STATUS-DUP-RUN-ID (A): runs created between two page reads push the previous page's
+        # trailing rows onto the next page. Repeated rows that are the next page's leading rows, identical
+        # in every field, and no more than the rise in total_count are merged on the FIRST read: on a
+        # short last page, on full pages ended by the age bound, and when the repeated rows are this
+        # commit's own runs (one failed, two green), each reported once.
+        recent = [workflow_run(8200 + index, "completed", "success", "Recent run {}".format(index),
+                               "e" * 40) for index in range(200)]
+        failed_row = "Repository quality checks: completed / failure"
+        merged = []
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(busy[:100], 150), page(busy[99:], 151)]}])
+        merged.append((rc, calls, "duplicate run id" in output, "re-reading once" in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(recent[:100], 400), page(recent[99:199], 401), page(old_commits, 401)]}])
+        merged.append((rc, calls, fixture.scan_pages, "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a, failed_b])],
+            "scan": [page(busy[:99] + [failed_b], 150), page([failed_b] + busy[99:149], 151)]}])
+        merged.append((rc, calls, output.count(failed_row), "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([])],
+            "scan": [page(busy[:98] + [success_a, success_b], 150),
+                     page([success_a, success_b] + busy[98:148], 152)]}])
+        merged.append((rc, calls, output.count("Web generator health: completed / success"),
+                       output.count("Repository quality checks: completed / success"),
+                       "duplicate run id" in output))
+        check("ci/scan-identical-shift-repeat-merged", merged,
+              [(0, 1, False, False), (0, 1, [1, 2, 3], False), (1, 1, 1, False), (0, 1, 1, 1, False)])
+
+        # (B): a repeated row that differs from the row it repeats (status, conclusion, or head SHA of
+        # another commit's run, or this commit's run turning from success to failure) stays an API error,
+        # re-read once in one-shot mode, then exit 2.
+        conflicting = []
+        for first_row, message in (
+                (dict(busy[99], status="in_progress", conclusion=None),
+                 "duplicate run id within the unfiltered listing"),
+                (dict(busy[99], conclusion="failure"), "duplicate run id within the unfiltered listing"),
+                (dict(busy[99], head_sha="d" * 40), "conflicting duplicate workflow-run records")):
+            rc, output, calls = fixture.invoke([{
+                "filtered": [page([success_a])],
+                "scan": [page(busy[:100], 150), page([first_row] + busy[100:], 151)]}])
+            conflicting.append((rc, calls, message in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(busy[:99] + [success_b], 150), page([failed_b] + busy[99:149], 151)]}])
+        conflicting.append((rc, calls, "conflicting duplicate workflow-run records" in output))
+        check("ci/scan-conflicting-shift-repeat-fail-closed", conflicting, [(2, 2, True)] * 4)
+
+        # (C): offset pagination drops a run when one moves from below a page boundary to above it, and
+        # the only trace is a repeat that the rise in total_count does not cover. Such a repeat stays an
+        # API error, on a short last page whose row count matches total_count and on full pages ended by
+        # the age bound; so does a repeat that is not the later page's leading rows, or whose rows come
+        # in another order than the earlier page's trailing rows.
+        unexplained = []
+        for scan in ([page(busy[:100], 151), page(busy[99:], 151)],
+                     [page(recent[:100], 400), page(recent[99:199], 400), page(old_commits, 400)],
+                     [page(busy[:100], 150), page([busy[100], busy[99]] + busy[101:], 151)],
+                     [page(busy[:100], 150), page([busy[99], busy[98]] + busy[100:], 152)]):
+            rc, output, calls = fixture.invoke([{"filtered": [page([success_a])], "scan": scan}])
+            unexplained.append(
+                (rc, calls, "duplicate run id within the unfiltered listing" in output))
+        check("ci/scan-unexplained-shift-repeat-fail-closed", unexplained, [(2, 2, True)] * 4)
 
         # A scan that reached the end of the listing reconciles unique run IDs against total_count even
         # when every page's own count is in range.

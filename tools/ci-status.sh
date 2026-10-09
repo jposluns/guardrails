@@ -89,18 +89,28 @@ SCAN_FROM="$COMMIT_TIME"
 [ "$NOW" -lt "$SCAN_FROM" ] && SCAN_FROM="$NOW"
 LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
 # One-shot mode re-reads once, after RETRY_SECONDS, when the sources disagree about a run, the
-# listing shrank between pages, or one source listed a run ID twice (each is the signature of a run
-# changing state, being deleted, or being created between requests); a disagreement that persists is
-# reported as an API error (exit 2).
-# AVAILABILITY COST (disclosed, accepted): a run created between two page reads of the unfiltered
-# listing pushes every older run down one position, so the next page repeats the previous page's last
-# run (page 1 holds runs[0:100] with total_count 150, page 2 holds runs[99:150] with total_count 151).
-# The duplicate-ID check rejects that repeat rather than reasoning about which shifts are safe, so when
-# a run is created between page reads on both the first read and the one re-read, one-shot mode exits 2
-# (API error) even if every run of this commit was read. On a repository that creates runs that often,
-# report-once can fail this way repeatedly; --wait keeps polling through it until the deadline.
-# (That short-page example is also rejected by the end-of-listing count check; the cost that belongs to
-# the duplicate-ID check alone is the shape where the scan ends at the age bound.)
+# listing shrank between pages, or one source listed a run ID twice in any shape other than the page
+# shift merged below (each is the signature of a run changing state, being deleted, being created, or
+# moving between requests); a disagreement that persists is reported as an API error (exit 2).
+# PAGE SHIFT (merged): a run created between two page reads of the unfiltered listing pushes every older
+# run down one position, so the next page repeats the previous page's last run (page 1 holds runs[0:100]
+# with total_count 150, page 2 holds runs[99:150] with total_count 151). That repeat is merged as one run
+# when the repeated rows are the LEADING rows of the later page, identical in every field to the TRAILING
+# rows of the page before it, and no more in number than the rise in total_count between those two
+# reads. WHY THE RISE BOUNDS IT: under the ordering ASSUMPTION at SCAN_MARGIN_SECONDS (a new run enters at
+# the head), between two reads the rows shift down by the runs created, minus the runs deleted above the
+# page boundary, plus the runs moved from below the boundary to above it; total_count rises by the runs
+# created minus every run deleted. The repeat count is at most the rise only when no run moved across
+# the boundary and none was deleted below it, and a run that moves up across the boundary is exactly the
+# run the scan would otherwise lose, so a merged repeat never hides a run that existed at the first
+# read. A run created after the earlier page was read sits on a page already read and is not seen, as
+# it would not be had it been created just after the scan. A repeat larger than the rise, a repeat in
+# any other shape (within one page, or not leading and trailing), or a repeated row that differs in any
+# field (status, conclusion, head SHA, name, URL, or creation time) stays an API error.
+# AVAILABILITY COST (disclosed, accepted): a run deleted below the boundary while another is created
+# also makes the repeat exceed the rise, and is rejected although nothing was lost; the shift check
+# trusts each page's total_count as the count at that read, the assumption stated at DELETION DURING
+# THE SCAN below. The head_sha-filtered source is not merged: a repeat there stays an API error.
 RETRY_SECONDS=5
 
 POLL_SECONDS=15
@@ -142,11 +152,13 @@ SETTLE_OBSERVATIONS=5
 # page is full or short and whatever ended the scan; the listing's total_count fell between two pages;
 # the sources, or two pages, disagree about a run ID's head_sha (checked across ALL records, BEFORE
 # selecting this commit's runs); two records of this commit's run disagree about status, conclusion,
-# name, or URL; one source lists a run ID twice (offset pagination shifted between page reads, so some
-# other run may have gone unseen; it equally rejects the repeat that a newly created run causes, at the
-# availability cost disclosed at RETRY_SECONDS); a scan that reached the end of the listing (a short
-# last page) holds a number of unique run IDs other than that page's total_count; or the filtered
-# source's unique count differs from its total_count.
+# name, or URL; the head_sha-filtered source lists a run ID twice; the unfiltered listing repeats a run
+# ID in any shape other than the page shift merged at RETRY_SECONDS (offset pagination shifted between
+# page reads in a way the rise in total_count does not explain, so some run may have gone unseen); a
+# scan that reached the end of the listing (a short last page) read a number of rows, merged repeats
+# included, other than that page's total_count (each merged repeat stands for one run created at the
+# head after the earlier page was read); or the filtered source's unique count differs from its
+# total_count.
 #
 # DELETION DURING THE SCAN. Offset pagination skips a run only when the runs ahead of the page boundary
 # shift up, which needs more deletions ahead of the boundary than insertions; new runs enter at the
@@ -191,6 +203,13 @@ def terminal_page:
   ((.workflow_runs | length) < 100)
   or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
 def unique_id_count: map(.id) | unique | length;
+def shift_repeat_count($previous):
+  [.workflow_runs[] | .id as $id | select(any($previous.workflow_runs[]; .id == $id))] | length;
+def explained_shift($previous):
+  shift_repeat_count($previous) as $repeats
+  | ($repeats == 0)
+    or (($repeats <= (.total_count - $previous.total_count))
+        and (.workflow_runs[:$repeats] == $previous.workflow_runs[-$repeats:]));
 def scan_page_overrun($index):
   .total_count < (100 * $index + (.workflow_runs | length));
 def projection: [.head_sha, .status, .conclusion, .name, .html_url];
@@ -235,7 +254,12 @@ else
             $scan_pages[.].total_count < $scan_pages[. - 1].total_count) then
           error("workflow-runs listing shrank during the scan")
         else
-          (($filtered_all + $scan_all) | sort_by(.id) | group_by(.id)) as $by_id
+          ([$scan_pages[0].workflow_runs[]]
+           + [range(1; $page_count) as $index
+              | $scan_pages[$index]
+              | shift_repeat_count($scan_pages[$index - 1]) as $repeats
+              | .workflow_runs[$repeats:][]]) as $scan_kept
+          | (($filtered_all + $scan_all) | sort_by(.id) | group_by(.id)) as $by_id
           | if any($by_id[]; (([.[].head_sha] | unique | length) > 1)) then
               error("conflicting duplicate workflow-run records")
             else
@@ -245,10 +269,12 @@ else
                   error("conflicting duplicate workflow-run records")
                 elif ($filtered_all | unique_id_count) != ($filtered_all | length) then
                   error("duplicate run id within the head_sha-filtered listing")
-                elif ($scan_all | unique_id_count) != ($scan_all | length) then
+                elif any(range(1; $page_count);
+                    . as $index | $scan_pages[$index] | explained_shift($scan_pages[$index - 1]) | not)
+                  or (($scan_kept | unique_id_count) != ($scan_kept | length)) then
                   error("duplicate run id within the unfiltered listing")
                 elif (($last.workflow_runs | length) < 100)
-                  and ($last.total_count != ($scan_all | unique_id_count)) then
+                  and ($last.total_count != ($scan_all | length)) then
                   error("incomplete unfiltered workflow-runs listing")
                 elif (($totals | length) != 1)
                   or (($filtered_all | unique_id_count) != $totals[0]) then
