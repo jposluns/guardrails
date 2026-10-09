@@ -995,6 +995,12 @@ an isolated-context worker or sub-agent is available and its use is authorized, 
 delegates that work, stays live to collect and integrate the result, and continues rather than
 ending the run; where no such authorized mechanism exists, it continues within its own context.
 
+A floor on activity, such as a target count of concurrent units of work, stays within the resource
+share that the operator or host grants the actor, the work it spawns included, read from that
+authority rather than estimated: the effective floor is the lesser of the floor and what the share
+supports and falls as soon as the share is lowered, and work the share cannot run at once is queued,
+which is continuation, not a stop.
+
 ## Express authorization before execution
 
 A planning discussion is not authorization. Execution of a plan-initiating unit of work begins only on an
