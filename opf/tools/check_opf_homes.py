@@ -29,31 +29,50 @@ any level, is red where its title or its body carries an uppercase requirement k
 SHALL, REQUIRED, SHOULD, MAY, RECOMMENDED, OPTIONAL) outside the one exempt quotation form, a
 code span holding exactly the keyword preceded by "the keyword" or "the term"; a keyword in any
 other form there, a bare code span or a fenced block included, is a finding (the guard fails
-closed). A keyword is read wherever no letter or digit adjoins it (an underscore does not count,
-so _MUST_ and __MUST__ are read), and again with character references decoded and inline markup
-removed (inline HTML tags and comments, link and image destinations and labels, emphasis,
-code-span, bracket and backslash characters, and invisible format characters), so MU**ST**,
-[MU](/u)ST, &#77;UST and M&shy;UST are read too. Headings are read by CommonMark's block
-algorithm over block quotes and list items; lines end at LF, CR LF or CR only, and a tab
-advances to the next multiple of 4 columns. A block quote takes 0 to 3 columns, ">" and one
-space after it. A list item's content column is its marker's end plus the 1 to 4 columns after
-it (plus one where 5 or more follow or the item opens blank), and a list item interrupts a
-paragraph only where it holds content and, when ordered, starts at 1, so any other list-shaped
-line continues the paragraph, into a setext heading included. An ATX heading takes 0 to 3
-columns of indentation and a space or tab after its hashes; a setext heading underlines a
+closed). A keyword is read where no letter, digit or underscore adjoins it, or where an
+underscore run adjoins it with no letter or digit beyond the run, as CommonMark requires before
+an underscore can open or close emphasis: _MUST_ and __MUST__ are read, MUST_DO and x_MUST_y
+(rendered as written) are not, and an unpaired run (_MUST alone) is read, an over-fire. It is
+read again with character references decoded, and again joined: with plain link and image
+targets removed (below), each underscore run CommonMark could read as emphasis removed, each
+emphasis, strikethrough, code-span, bracket and backslash character removed, character
+references decoded, invisible characters dropped (format, nonspacing and enclosing marks,
+unassigned, private-use, surrogate, control characters other than whitespace, and the Hangul
+fillers) and compatibility forms folded (NFKC). So MU**ST**, [MU](/u)ST, [MU][r]ST, &#77;UST,
+M&shy;UST, MU with a combining grapheme joiner before ST, and fullwidth or mathematical MUST
+are read too; a removed character that renders visibly (MU!ST) over-fires. An informative
+section also fails closed, with a finding that names the form and asks for plain text or a
+move out of the section, on inline syntax it does not read: a "](" or "][" that opens no plain
+target (a destination with no space, parenthesis, quote, angle bracket or backslash, optionally
+a title in double or single quotes holding none of those; or a reference label with no bracket
+or backslash), so nested or escaped parentheses and quoted parentheses are findings; and a "<"
+followed by a letter, "/", "!" or "?" other than a URI autolink, since inline HTML can hide or
+reorder text, in a code span or fenced block too. Residual: a keyword spelt with look-alike
+letters of another script (Cyrillic or Greek) is not read; review catches that.
+
+Headings are read by CommonMark's block algorithm over block quotes and list items; lines end
+at LF, CR LF or CR only, and a tab advances to the next multiple of 4 columns. A block quote
+takes 0 to 3 columns, ">" and one space after it. A list item's marker is "-", "+", "*", or 1
+to 9 ASCII digits 0-9 then "." or ")"; its content column is the marker's end plus the 1 to 4
+columns after it (plus one where 5 or more follow or the item opens blank), and a list item
+interrupts a paragraph only where it holds content and, when ordered, starts at 1, so any other
+list-shaped line continues the paragraph, into a setext heading included. An ATX heading takes
+0 to 3 columns of indentation and a space or tab after its hashes; a setext heading underlines a
 paragraph in its own container, never a lazy line; a line of 4 or more columns past its
 container is indented code or a paragraph continuation, never a heading. A fenced line, in any
 container, never bounds a section: a fence opens on 0 to 3 columns and three or more tildes, or
 three or more backticks whose info string holds no backtick, and closes on 0 to 3 columns, a
 run of the opening character at least as long, and nothing after it but spaces or tabs, or
 where its container ends. A heading in no container bounds a section; one inside a list item or
-block quote bounds nothing but marks one informative where its title says so. The guard fails
-closed, with a finding, where it reads no further or where CommonMark renderers differ: a raw
-HTML block (read broadly: any line whose content opens with "<" and a letter, "/", "!" or "?",
-outside fenced and indented code), a paragraph that opens like a link reference definition, a
-lazy continuation line at 4 or more columns that would otherwise open a block, and a ">" at 4
-or more columns where a block quote is open. The gate is red where Appendix E loses that
-marking.
+block quote bounds nothing but marks one informative where its title says so. Anywhere in the
+document the guard fails closed, with a finding that names the line and the form, where it reads
+no further or where Markdown renderers differ: a raw HTML block (read broadly: any line whose
+content opens with "<" and a letter, "/", "!" or "?", outside fenced and indented code), a
+paragraph that opens like a link reference definition, a lazy continuation line at 4 or more
+columns that would otherwise open a block, a ">" at 4 or more columns where a block quote is
+open, a list marker with a decimal digit other than ASCII 0-9, and a non-blank line inside or
+opening a block quote or list item with a tab before its content (fenced lines included, an
+over-fire). The gate is red where Appendix E loses that marking.
 """
 import sys
 
@@ -1066,10 +1085,13 @@ def keyword_findings(contract=None):
     return findings
 
 
-# Whole-word where a letter or digit bounds it: "_" counts as no word character here, so a
-# keyword in underscore emphasis (_MUST_, __MUST__) is read, as CommonMark renders it.
+# Whole-word where a letter, digit or underscore bounds it, read through an underscore run
+# only where no letter or digit lies beyond the run, as CommonMark requires before an
+# underscore can open or close emphasis: _MUST_ and __MUST__ are read, while MUST_DO and
+# x_MUST_y, which CommonMark renders as written, are not. A run with no partner (_MUST alone)
+# is read too, an over-fire.
 _INFORMATIVE_KEYWORD = re.compile(
-    r"(?<![^\W_])(?:MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)(?![^\W_])")
+    r"(?<!\w)_*(MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)_*(?!\w)")
 _INFORMATIVE_MARK = re.compile(r"\bThis (?:appendix|section|subsection) is informative\b")
 # The one exempt quotation form: a code span holding exactly one keyword, preceded by
 # "the keyword" or "the term" (sentence case allowed). Every other uppercase occurrence in an
@@ -1077,24 +1099,57 @@ _INFORMATIVE_MARK = re.compile(r"\bThis (?:appendix|section|subsection) is infor
 _INFORMATIVE_QUOTED = re.compile(
     r"\b[Tt]he (?:keyword|term) `(?:MUST(?: NOT)?|SHALL(?: NOT)?|SHOULD(?: NOT)?|MAY"
     r"|REQUIRED|RECOMMENDED|NOT RECOMMENDED|OPTIONAL)`")
-# Inline markup that can split a keyword's letters while CommonMark renders them as one word:
-# raw inline HTML and comments (a quoted attribute may hold ">"), link and image destinations
-# and reference labels, then each emphasis, code-span, bracket and backslash character.
-_INLINE_TAG = re.compile(r"<!--.*?-->|<[A-Za-z/!?](?:\"[^\"]*\"|'[^']*'|[^<>\"'])*>", re.DOTALL)
-_INLINE_TARGET = re.compile(r"\]\((?:[^()]|\([^()]*\))*\)|\]\[[^\]]*\]")
-_INLINE_MARKUP = re.compile(r"[*_`\[\]!\\]")
+# Inline markup that can split a keyword's letters while it renders as one word: an underscore
+# run CommonMark could read as emphasis (no letter or digit on one side of it), a link or image
+# target in its plain form, then each emphasis, strikethrough, code-span, bracket and
+# backslash character. A plain target is "](", a destination with no space, parenthesis,
+# quote, angle bracket or backslash, optionally a title in double or single quotes holding
+# none of those, then ")"; or "][", a reference label with no bracket or backslash, then "]".
+# Every other "](" or "][" in an informative section is a finding (_LINK_SYNTAX), as is inline
+# HTML other than a URI autolink (_AUTOLINK), since a tag can hide or reorder text.
+_INLINE_TARGET = re.compile(
+    r"\]\(\s*[^\s()<>\"'\\]*(?:\s+(?:\"[^\"'()\\]*\"|'[^\"'()\\]*'))?\s*\)|\]\[[^\[\]\\]*\]")
+_LINK_SYNTAX = re.compile(r"\][(\[]")
+_AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*>")
+_INLINE_UNDERSCORE = re.compile(r"(?<!\w)_+|_+(?!\w)")
+_INLINE_MARKUP = re.compile(r"[*~`\[\]!\\]")
+# Characters that render invisibly or only modify the character before them: format,
+# nonspacing and enclosing marks, unassigned, private-use and surrogate code points, control
+# characters other than whitespace, and the Hangul fillers.
+_INVISIBLE_CATEGORIES = frozenset(("Cf", "Mn", "Me", "Cn", "Co", "Cs"))
+_INVISIBLE_FILLERS = "\u115f\u1160\u3164\uffa0"
+
+
+def _visible(text):
+    return "".join(ch for ch in text if not (
+        unicodedata.category(ch) in _INVISIBLE_CATEGORIES or ch in _INVISIBLE_FILLERS
+        or (unicodedata.category(ch) == "Cc" and ch not in "\t\n\r\x0b\x0c")))
 
 
 def _informative_keywords(text):
     # The keywords the text carries as written, with its character references decoded, and
-    # with its inline markup removed (_INLINE_TAG, _INLINE_TARGET, _INLINE_MARKUP, then each
-    # invisible format character), so markup inside or around a keyword cannot hide it.
-    # Reading more forms only adds findings.
-    joined = html.unescape(_INLINE_MARKUP.sub("", _INLINE_TARGET.sub("", _INLINE_TAG.sub(
-        "", text))))
-    joined = "".join(ch for ch in joined if unicodedata.category(ch) != "Cf")
+    # joined: with its plain link targets and inline markup removed (_INLINE_UNDERSCORE judged
+    # on the text as written, then _INLINE_TARGET and _INLINE_MARKUP), its character
+    # references decoded, its invisible characters dropped and compatibility forms folded
+    # (NFKC). Reading more forms only adds findings; the forms the guard cannot read are
+    # findings of their own (informative_findings).
+    joined = _INLINE_MARKUP.sub("", _INLINE_TARGET.sub("", _INLINE_UNDERSCORE.sub("", text)))
+    joined = _visible(unicodedata.normalize("NFKC", _visible(html.unescape(joined))))
     return {word for form in (text, html.unescape(text), joined)
             for word in _INFORMATIVE_KEYWORD.findall(form)}
+
+
+def _inline_unread(text):
+    # The inline syntax in text that the guard does not read: each "](" or "][" that opens no
+    # plain link target, and each "<" opening inline HTML (a letter, "/", "!" or "?" after it)
+    # other than a URI autolink, even in a code span or fenced block.
+    def shown(at):
+        return repr(text[at:].split("\n", 1)[0][:40])
+    out = ["a link or image target " + shown(m.start()) for m in _LINK_SYNTAX.finditer(text)
+           if not _INLINE_TARGET.match(text, m.start())]
+    out.extend("inline HTML " + shown(m.start()) for m in _HTML_START.finditer(text)
+               if not _AUTOLINK.match(text, m.start()))
+    return out
 
 
 # Block structure as CommonMark reads it, for the informative guard alone. Lines end at LF,
@@ -1103,7 +1158,18 @@ _ATX = re.compile(r"(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*\Z")
 _SETEXT = re.compile(r"(=+|-+)[ \t]*\Z")
 _THEMATIC = re.compile(r"(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})\Z")
 _FENCE_OPEN = re.compile(r"(`{3,})[^`]*\Z|(~{3,})")
-_LIST_MARK = re.compile(r"(?:[-+*]|(\d{1,9})[.)])(?=[ \t]|\Z)")
+_LIST_MARK = re.compile(r"(?:[-+*]|([0-9]{1,9})[.)])(?=[ \t]|\Z)")
+# A list marker numbered with at least one decimal digit other than ASCII 0-9 (\d is Unicode
+# here on purpose): CommonMark reads it as text, a renderer that reads \d as a digit opens a
+# list.
+_OTHER_DIGIT_MARK = re.compile(r"\d*(?![0-9])\d\d*[.)](?=[ \t]|\Z)")
+# Why a line is not read (_heading_bounds); each finding names the form and its fix.
+_UNREAD_QUOTE = 'a ">" at 4 or more columns inside a block quote; indent it 0 to 3 columns'
+_UNREAD_LAZY = ("a lazy continuation at 4 or more columns shaped like a block; indent it under"
+                " its container or put a blank line before it")
+_UNREAD_REFERENCE = "a paragraph that opens like a link reference definition; reword its start"
+_UNREAD_DIGIT = "a list marker with digits other than ASCII 0-9; number it with 0-9 or reword it"
+_UNREAD_TAB = "a tab before the content of a block quote or list item line; indent with spaces"
 # A line that may open a link reference definition: a label (escapes allowed) closed by "]:",
 # or left open at the line end, since a label may run onto the next line.
 _REFERENCE_DEF = re.compile(r"\[(?:[^\]\\]|\\.)*(?:\]:|\\?\Z)")
@@ -1129,6 +1195,16 @@ def _indent(line, pos):
     return len(line) - pos - len(line[pos:].lstrip(" "))
 
 
+def _tab_before(raw, col):
+    # Whether the unexpanded line holds a tab that starts before expanded column col.
+    for at, ch in enumerate(raw):
+        if at >= col:
+            return False
+        if ch == "\t":
+            return True
+    return False
+
+
 def _atx_title(m):
     return (m.group(2) or "").strip()
 
@@ -1138,27 +1214,35 @@ def _heading_bounds(text):
     # block, by CommonMark's block algorithm over block quotes and list items. A line first
     # continues the open containers in order: a block quote takes 0 to 3 columns, ">" and one
     # space after it; a list item takes its content column, or a blank line unless it opened
-    # blank and holds nothing yet. A fully continued fenced or indented code block takes the
-    # line (a fence closes on 0 to 3 columns, a run of its character at least as long, then
-    # spaces or tabs alone); a fence or code block in an unmatched container closes with it.
+    # blank and holds nothing yet. A fully continued fenced code block takes the line (it
+    # closes on 0 to 3 columns, a run of its character at least as long, then spaces or tabs
+    # alone); a fence in an unmatched container closes with it.
     # Block starts are then read in the innermost continued container: block quote, ATX
     # heading, fence (three or more tildes, or backticks with no backtick in the info string),
     # setext underline (under that container's own paragraph alone, never a lazy line),
-    # thematic break, list item (interrupting a paragraph only where it holds content and,
-    # when ordered, starts at 1), then indented code (4 or more columns, never inside a
-    # paragraph). A list item's content column is its marker's end plus the 1 to 4 columns
+    # thematic break, list item (ASCII digits 0-9 alone when ordered, interrupting a paragraph
+    # only where it holds content and, when ordered, starts at 1), then indented code (4 or more
+    # columns, never inside a paragraph; each such line opens or continues it, so no state is
+    # kept). A list item's content column is its marker's end plus the 1 to 4 columns
     # after it, or plus one where 5 or more follow or the item opens blank. A line that starts
     # no block continues the open paragraph (lazily where containers stay unmatched) or opens
     # one. A heading in no container bounds a section; one inside a list item or block quote,
     # or a setext heading under a paragraph that opens like a reference definition, bounds
-    # nothing and is kept only where its title says "(informative)".
+    # nothing and is kept only where its title says "(informative)". A line Markdown renderers
+    # read differently is not read: a ">" at 4 or more columns inside a block quote, a lazy
+    # block-shaped line at 4 or more columns, a paragraph opening like a reference definition,
+    # a list marker with digits other than ASCII 0-9, and a non-blank line inside or opening a
+    # block quote or list item with a tab before its content.
     headings = []
     html_lines = []
-    unread = []  # lines that CommonMark renderers read differently
+    unread = []  # (line, reason) for each line that Markdown renderers read differently
     containers = []  # open block quotes (None) and list items ([content column, holds a block])
     para = None  # [start, texts] of the innermost container's open paragraph
     fence = None  # (delimiter character, opening run length) of the innermost open fence
-    code = False  # an indented code block is the innermost container's open block
+
+    def not_read(number, reason):
+        if (number, reason) not in unread:
+            unread.append((number, reason))
 
     def marked(end, level, title, start):
         if "(informative)" in title.lower():
@@ -1189,7 +1273,7 @@ def _heading_bounds(text):
                 if indent > 3 or not line.startswith(">", pos + indent):
                     if line.startswith(">", pos + indent):
                         # CommonMark ends the quote here; some renderers continue it.
-                        unread.append(number)
+                        not_read(number, _UNREAD_QUOTE)
                     break
                 pos += indent + 1
                 pos += line.startswith(" ", pos)
@@ -1202,18 +1286,17 @@ def _heading_bounds(text):
             else:
                 break
             matched += 1
+        if containers and raw.strip(" \t") and _tab_before(raw, pos + _indent(line, pos)):
+            # Renderers place a tab inside container indentation differently.
+            not_read(number, _UNREAD_TAB)
         if matched < len(containers):
-            fence, code = None, False
+            fence = None
         elif fence is not None:
             indent = _indent(line, pos)
             if indent <= 3 and re.fullmatch(
                     re.escape(fence[0]) + "{%d,} *" % fence[1], line[pos + indent:]):
                 fence = None
             continue
-        elif code:
-            if pos + _indent(line, pos) == len(line) or _indent(line, pos) >= 4:
-                continue
-            code = False
         # The line meets the open paragraph in that paragraph's own container.
         interrupts = para is not None and matched == len(containers)
         consumed = False
@@ -1225,13 +1308,13 @@ def _heading_bounds(text):
             if indent >= 4:
                 if para is None:
                     holds(matched)
-                    code = consumed = True
+                    consumed = True
                 elif matched < len(containers) and (rest.startswith(">") or any(
                         p.match(rest) for p in (_ATX, _FENCE_OPEN, _HTML_START, _THEMATIC,
                                                 _LIST_MARK))):
                     # CommonMark continues the paragraph lazily here; some renderers close
                     # the container and open the block instead, so the line is not read.
-                    unread.append(number)
+                    not_read(number, _UNREAD_LAZY)
                 break
             if rest.startswith(">"):
                 holds(matched)
@@ -1240,6 +1323,8 @@ def _heading_bounds(text):
                 para, interrupts = None, False
                 pos += indent + 1
                 pos += line.startswith(" ", pos)
+                if _tab_before(raw, pos + _indent(line, pos)):
+                    not_read(number, _UNREAD_TAB)
                 continue
             m = _ATX.match(rest)
             if m:
@@ -1275,6 +1360,8 @@ def _heading_bounds(text):
                 break
             m = _LIST_MARK.match(rest)
             if m is None:
+                if _OTHER_DIGIT_MARK.match(rest):
+                    not_read(number, _UNREAD_DIGIT)
                 break
             after = rest[m.end():]
             gap = _indent(after, 0)
@@ -1287,6 +1374,8 @@ def _heading_bounds(text):
             matched = len(containers)
             para, interrupts = None, False
             pos += indent + m.end() + (gap if empty else width)
+            if _tab_before(raw, pos + _indent(line, pos)):
+                not_read(number, _UNREAD_TAB)
         if consumed:
             continue
         rest = line[pos:].lstrip(" ")
@@ -1300,7 +1389,7 @@ def _heading_bounds(text):
             para = [start, [rest]]
             if _REFERENCE_DEF.match(rest):
                 # Renderers differ on the lines after a reference definition, so it is not read.
-                unread.append(number)
+                not_read(number, _UNREAD_REFERENCE)
     return headings, html_lines, unread
 
 
@@ -1338,17 +1427,23 @@ def informative_findings(text):
     # green; review catches that.
     # A raw HTML block is a finding wherever it opens outside fenced or indented code: the guard
     # reads no HTML (a heading there, or a section boundary it hides, stays unseen), so it fails
-    # closed; so is each line that CommonMark renderers read differently (_heading_bounds).
+    # closed; so is each line that Markdown renderers read differently (_heading_bounds), and,
+    # in an informative section, each link target or inline HTML it does not read
+    # (_inline_unread).
     _headings, html_lines, unread = _heading_bounds(text)
     findings = ["spec informative guard: raw HTML block at line {} is not read".format(n)
                 for n in html_lines]
-    findings.extend("spec informative guard: line {} is read differently by CommonMark "
-                    "renderers and is not read".format(n) for n in unread)
+    findings.extend("spec informative guard: line {} is read differently by Markdown "
+                    "renderers and is not read: {}".format(n, why) for n, why in unread)
     sections = _informative_sections(text)
     if not any(title.startswith("Appendix E") for title, _ in sections):
         findings.append("spec informative guard: Appendix E not marked informative")
     for title, body in sections:
         scanned = _INFORMATIVE_QUOTED.sub(" ", title + "\n" + body)
+        for form in _inline_unread(scanned):
+            findings.append("spec informative section {} carries {}, which the guard does not"
+                            " read; write the text and any keyword plainly or move it out of"
+                            " the informative section".format(title, form))
         for word in sorted(_informative_keywords(scanned)):
             findings.append("spec informative section {} carries requirement keyword {}".format(
                 title, word))
@@ -3727,6 +3822,10 @@ def _self_test_vectors():
             ("quote-continued-space-then-3", normative
              + "> a\n>    ## Z (informative)\n> A checker MUST obey.\n"),
             ("indented-code-then-underline", informative + "    Coda\n---" + stays),
+            ("setext-arabic-indic-digit-continues", normative + "Z (informative)\n\u0661. item\n---"
+             + plant),
+            ("setext-fullwidth-digit-continues", normative + "Z (informative)\n\uff11) item\n==="
+             + plant),
     ):
         check("spec-informative-container-red-" + name, lambda m=planted: any(
             "carries requirement keyword MUST" in f for f in informative_findings(m)))
@@ -3748,13 +3847,32 @@ def _self_test_vectors():
     ):
         check("spec-informative-container-green-" + name,
               lambda m=planted: not informative_findings(m))
+    # Inline vectors. A keyword is read through an underscore run CommonMark could read as
+    # emphasis and never through an intraword one; split by markup the guard removes, written
+    # with character references, invisible or combining characters, or compatibility forms;
+    # and an informative section fails closed on a link target or inline HTML the guard does
+    # not read. Each red vector is green without the behaviour it names; each green vector is
+    # red under the over-broad form of it (an intraword underscore read as a boundary, every
+    # link or autolink refused, whitespace or a line break dropped, case folded).
     for name, plant_kw in (("underscore", "_MUST_"), ("double-underscore", "__MUST__"),
-                           ("underscore-intraword", "x_MUST_y"),
+                           ("underscore-in-emphasis", "*_MUST_*"),
+                           ("underscore-in-parentheses", "(_MUST_)"),
+                           ("underscore-after-markup", "a*_MUST_"),
                            ("split-strong", "MU**ST**"), ("split-code-span", "MU`ST`"),
-                           ("split-link", "[MU](/u)ST"), ("split-tag", 'MU<span title=">">ST'),
-                           ("split-comment", "MU<!-- x -->ST"), ("decimal-reference", "&#77;UST"),
-                           ("hex-reference", "&#x4D;UST"), ("soft-hyphen", "M&shy;UST"),
-                           ("zero-width-space", "MU\u200bST")):
+                           ("split-strong-then-underscore", "**MU**_ST_"),
+                           ("split-strikethrough", "MU~~ST~~"),
+                           ("split-link", "[MU](/u)ST"), ("split-link-title", '[MU](/u "t")ST'),
+                           ("split-reference", "[MU][r]ST"), ("split-collapsed", "[MU][]ST"),
+                           ("decimal-reference", "&#77;UST"), ("hex-reference", "&#x4D;UST"),
+                           ("reference-then-markup", "&#77;UST*s"),
+                           ("reference-unterminated", "MUST&#65 x"),
+                           ("soft-hyphen", "M&shy;UST"), ("zero-width-space", "MU\u200bST"),
+                           ("grapheme-joiner", "MU\u034fST"),
+                           ("variation-selector", "MU\ufe0fST"),
+                           ("grapheme-joiner-reference", "MU&#x34F;ST"),
+                           ("hangul-filler", "MU\u3164ST"), ("control-character", "MU\x01ST"),
+                           ("fullwidth", "\uff2d\uff35\uff33\uff34"),
+                           ("mathematical-bold", "\U0001d40c\U0001d414\U0001d412\U0001d413")):
         planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
                                + " share each record.", 1)
         check("spec-informative-inline-red-" + name, lambda m=planted: any(
@@ -3762,10 +3880,41 @@ def _self_test_vectors():
             for f in informative_findings(m)))
     for name, plant_kw in (("underscore-lowercase", "_must_"),
                            ("underscore-longer-word", "_MUSTER_"),
-                           ("reference-lowercase", "&#109;ust")):
+                           ("reference-lowercase", "&#109;ust"),
+                           ("underscore-identifier", "MUST_DO"),
+                           ("underscore-intraword", "x_MUST_y"),
+                           ("underscore-suffix", "DO_MUST"),
+                           ("underscore-leading-identifier", "_MUST_DO"),
+                           ("underscore-inside-word", "MU_ST"),
+                           ("no-break-space", "MU\u00a0ST"), ("line-break", "MU\nST"),
+                           ("fullwidth-lowercase", "\uff4d\uff55\uff53\uff54"),
+                           ("plain-link", '[a guide](/a_b-c.d "Guide")'),
+                           ("plain-link-single-quoted", "[a guide](/u 'Guide')"),
+                           ("plain-reference", "[a guide][ref]"),
+                           ("autolink", "<https://example.org/a_b>"),
+                           ("less-than", "a < b and c <= d")):
         check("spec-informative-inline-green-" + name, lambda m=text.replace(
             informative_anchor, informative_anchor + " A checker " + plant_kw + " share.", 1):
               not informative_findings(m))
+    for name, plant_kw, form in (
+            ("link-nested-parentheses", "[MU](/a(b(c)))ST", "a link or image target"),
+            ("link-title-nested-parentheses", '[MU](/a "a(b(c))")ST', "a link or image target"),
+            ("link-title-close-parenthesis", 'MU[](/u "a)b")ST', "a link or image target"),
+            ("link-escaped-parenthesis", "MU[](a\\)b)ST", "a link or image target"),
+            ("link-parenthesized-title", "MU[](/u (a\\)b))ST", "a link or image target"),
+            ("link-angle-destination", "[MU](<a b>)ST", "a link or image target"),
+            ("reference-escaped-label", "[MU][a\\]b]ST", "a link or image target"),
+            ("html-split-tag", 'MU<span title=">">ST', "inline HTML"),
+            ("html-split-comment", "MU<!-- x -->ST", "inline HTML"),
+            ("html-comment-holding-gt", "MU<!-- a > b -->ST", "inline HTML"),
+            ("html-empty-comment", "MU<!-->ST", "inline HTML"),
+            ("html-hidden-text", "MU<span hidden>x</span>ST", "inline HTML"),
+            ("html-in-code-span", "`<b>`", "inline HTML")):
+        planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
+                               + " share each record.", 1)
+        check("spec-informative-inline-unread-red-" + name, lambda m=planted, w=form: any(
+            ("carries " + w) in f and "Appendix E" in f and "guard does not read" in f
+            for f in informative_findings(m)))
     for name, planted in (("quoted-attribute", '<a title=">">\n## Z\n'),
                           ("single-quoted-attribute", "<a title='>'>\n## Z\n")):
         check("spec-informative-commonmark-html-red-" + name, lambda m=normative + planted: any(
@@ -3780,13 +3929,24 @@ def _self_test_vectors():
                           ("quote-continued-at-4-after-heading", "> # H\n    > b\n"),
                           ("reference-definition", "[r]: /u\n"),
                           ("reference-escaped-label", "[a\\]b]: /u\n"),
-                          ("reference-open-label", "[a\nb]: /u\n")):
+                          ("reference-open-label", "[a\nb]: /u\n"),
+                          ("digit-arabic-indic", "\u0661. item\n"),
+                          ("digit-fullwidth", "\uff11) item\n"),
+                          ("digit-mixed", "1\u0661. item\n"),
+                          ("tab-after-quote", ">\tb\n"), ("tab-after-list-marker", "-\tb\n"),
+                          ("tab-in-continuation", "- a\n\tb\n"),
+                          ("tab-nested-containers",
+                           "> > -  \tb\nZ (informative)\n-\n\nA checker MUST share records.\n")):
         check("spec-informative-unread-red-" + name, lambda m=normative + planted: any(
             f.startswith("spec informative guard: line ") and "read differently" in f
             for f in informative_findings(m)))
     for name, planted in (("lazy-plain-text", "1.   item\n    lazy text\n"),
                           ("quote-continued-at-3", "> a\n   > b\n"),
-                          ("link-paragraph", "[text](/u) and more\n")):
+                          ("link-paragraph", "[text](/u) and more\n"),
+                          ("digit-ascii", "1. item\n"), ("digit-ascii-ten", "1234567890. item\n"),
+                          ("digits-without-marker", "\u0661\u0662 items\n"),
+                          ("tab-after-content", "> a\tb\n- c\td\n"),
+                          ("tab-blank-in-list", "- a\n\t\n  b\n")):
         check("spec-informative-unread-green-" + name,
               lambda m=normative + planted: not informative_findings(m))
     # The default entry runs the informative guard: over a spec with a planted violation,
