@@ -310,6 +310,121 @@ def _stage1_no_committed_state(repo, launch=()):
     return _stage1_git(repo, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
 
 
+def _stage1_read_capture(path):
+    """Read back a stage-2 capture (the structured result, the error-stream file) from stage 1's
+    fresh private directory as raw bytes, or None when it cannot be read back as a regular file:
+    ONE descriptor opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat-required S_ISREG before any
+    read, so a special file the committed child code swapped in at the capture path is refused at
+    once, never a blocking open (the fail-closed rule, security-seci-fail-closed: the committed
+    copy ran with access to that directory). Stdlib only: stage 1 may import nothing from the
+    checkout, so this is a local twin of the shared non-blocking readers."""
+    import stat
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _stage2_arm_result():
+    """The stage-2 child half of the fail-closed contract (security-seci-fail-closed; the
+    same child contract the merge-train unit runners follow, inlined here): when stage 1
+    named a result path (AIQT_RELEASE_DELTA_STAGE2_RESULT), register the result writer with atexit
+    FIRST, before any checkout import below runs or registers cleanup, so atexit's LIFO order runs
+    it LAST, after every later-registered cleanup of this child (another exit handler registered
+    before it is itself a fault). The result is ONE line, `release-delta-stage2 <code> <pid>`,
+    written only once the stage-2 dispatch SETTLED a verdict code; a committed copy that exits
+    without settling one (a bare SystemExit(0) in loaded code, a replaced dispatch) or whose
+    shutdown ends the process first writes NO complete result, and stage 1 refuses the pass. The
+    pid is this writer's own, so a stale or foreign record never matches.
+
+    The writer makes the result TRULY LAST (merge train 3 QA round 2, codex and claude MAJORs: a
+    builtin cleanup hook that raises prints a frameless 'Exception ignored' report with no
+    traceback header, and a finalizer ran in interpreter finalization AFTER the record): it
+    collects the cyclic garbage until a pass frees nothing (bounded, past which it fails closed),
+    so pending finalizers run before the result; flushes the streams; writes the boundary line
+    `release-delta-stage2-boundary <pid>` to the error stream as its LAST byte; writes the result;
+    and ends the process ITSELF with os._exit, so no interpreter finalization runs after it. An
+    audit hook armed here sees every `sys.unraisablehook` and `sys.excepthook` event (CPython
+    raises them before it calls whatever hook is installed, so a silenced hook or a replaced
+    stream cannot hide the fault), and threading.excepthook is wrapped (a thread fault raises no
+    audit event); any such fault, a reporting hook replaced, or a stream that cannot be flushed
+    makes the result and the exit 2, with a named line on the error stream. Stage 1 requires the
+    error stream to hold EXACTLY the boundary line on a pass: the gate's own diagnostics go to a
+    separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other byte is a fault.
+    Returns the mutable state the dispatch settles, or None when no result path is named (a
+    hand-run stage 2, every other mode)."""
+    path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_RESULT")
+    if not path:
+        return None
+    import atexit
+    import gc
+    import threading
+    state = {"code": None}
+    faults = []
+    reporting = (sys.excepthook, sys.unraisablehook)
+    thread_hook = threading.excepthook
+
+    def _audit(event, _args):
+        if event in ("sys.unraisablehook", "sys.excepthook"):
+            faults.append(event)
+
+    def _thread_fault(args):
+        faults.append("threading.excepthook")
+        thread_hook(args)
+
+    def _write_result():
+        if state["code"] is None:
+            return
+        code = state["code"]
+        for _pass in range(100):
+            if gc.collect() == 0:
+                break
+        else:
+            faults.append("garbage collection still freed objects after 100 passes")
+        if (threading.excepthook is not _thread_fault or sys.excepthook is not reporting[0]
+                or sys.unraisablehook is not reporting[1]):
+            faults.append("a fault-reporting hook was replaced")
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception as exc:  # any flush failure is a fault, named below
+            faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
+        if faults:
+            code = 2
+        try:
+            if faults:
+                os.write(2, "error: stage-2 cleanup fault ({}); fail-closed "
+                         "(security-seci-fail-closed)\n".format(
+                             ", ".join(sorted(set(faults)))).encode("utf-8", "replace"))
+            os.write(2, "release-delta-stage2-boundary {}\n".format(os.getpid()).encode("ascii"))
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("release-delta-stage2 {} {}\n".format(code, os.getpid()))
+        except OSError:
+            code = 2
+        os._exit(code)
+    atexit.register(_write_result)
+    if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
+        faults.append("an exit handler was registered before the result writer")
+    sys.addaudithook(_audit)
+    threading.excepthook = _thread_fault
+    return state
+
+
 # The physical gate root stage 1 established when it hands off to the single-stage checkout gate
 # (QA round-10 claude F2): main() judges THIS root, never _gen_common.repo_root(), whose fallback is
 # the cwd, a directory stage 1 never inspected. None until stage 1 positively hands off.
@@ -386,14 +501,72 @@ def _stage1_main():
                   "tools/check_release_delta.py; the committed revision must carry the gate that "
                   "judges it; fail-closed", file=sys.stderr)
             return 2
+        # The fail-closed child contract (security-seci-fail-closed; the completion record
+        # built here for the stage-2 launch): a zero exit alone is never a
+        # pass. The child must ALSO write the complete structured result its exit handler
+        # (registered first, run last, after its cleanup) binds to its own exit code and pid,
+        # and its captured error stream must be EMPTY apart from the closing boundary line its
+        # result writer prints (_stage2_arm_result; merge train 3 QA, codex MAJOR: a
+        # committed gate whose shutdown faults -- an atexit handler that raises -- exits 0 with
+        # only a stderr traceback, and one that is a bare SystemExit(0) exits 0 having judged
+        # nothing). The captures live in stage 1's fresh private directory and are read back
+        # through the non-blocking fstat-checked reader, so the committed child code cannot
+        # park stage 1 on a swapped special file.
+        result_path = os.path.join(tmp, "stage2-result")
+        err_path = os.path.join(tmp, "stage2-stderr")
+        diag_path = os.path.join(tmp, "stage2-diagnostics")
+        child_env = dict(os.environ)
+        child_env["AIQT_RELEASE_DELTA_STAGE2_RESULT"] = result_path
+        child_env["AIQT_RELEASE_DELTA_STAGE2_DIAG"] = diag_path
         try:
-            child = subprocess.run([sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pyc_dir,
-                                    gate, "--stage2-repo", repo, "--stage2-tree", tree_dir])
+            with open(diag_path, "wb"):
+                pass
+            with open(err_path, "wb") as err_file:
+                child = subprocess.Popen([sys.executable, "-I", "-B", "-X",
+                                          "pycache_prefix=" + pyc_dir, gate, "--stage2-repo",
+                                          repo, "--stage2-tree", tree_dir],
+                                         stderr=err_file, env=child_env)
+                child_rc = child.wait()
         except OSError as exc:
             print("error: stage-1 re-execution: cannot launch the committed gate ({}); "
                   "fail-closed".format(exc), file=sys.stderr)
             return 2
-        return child.returncode
+        boundary = "release-delta-stage2-boundary {}\n".format(child.pid).encode("ascii")
+        diag_bytes = _stage1_read_capture(diag_path)
+        err_bytes = _stage1_read_capture(err_path)
+        # Relay the gate's diagnostics, then its error stream without its own boundary line.
+        for piece in (diag_bytes, err_bytes[:-len(boundary)]
+                      if err_bytes and err_bytes.endswith(boundary) else err_bytes):
+            if piece:
+                sys.stderr.buffer.write(piece)
+        sys.stderr.buffer.flush()
+        if child_rc != 0:
+            return child_rc
+        record = _stage1_read_capture(result_path)
+        if record != "release-delta-stage2 0 {}\n".format(child.pid).encode("ascii"):
+            print("error: stage-1 re-execution: the committed gate exited 0 but wrote no "
+                  "complete stage-2 result bound to its own exit code and pid ({}); a zero "
+                  "exit alone is never a pass (security-seci-fail-closed: a silent exit, a "
+                  "replaced dispatch or an unreadable result judges nothing); "
+                  "fail-closed".format("the capture is unreadable or not a regular file"
+                                       if record is None else repr(record[:120])),
+                  file=sys.stderr)
+            return 2
+        if err_bytes is None or diag_bytes is None:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error-stream or diagnostics capture cannot be read back as a regular file; a "
+                  "passing verdict requires readable, complete captures; fail-closed",
+                  file=sys.stderr)
+            return 2
+        if err_bytes != boundary:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error stream holds more than its closing boundary line ({} byte(s)); the "
+                  "gate's own diagnostics have their own capture, so any byte there (a "
+                  "traceback, a frameless 'Exception ignored' report, a thread fault) or a "
+                  "missing boundary is a fault, never a pass (security-seci-fail-closed; merge "
+                  "train 3 QA round 2); fail-closed".format(len(err_bytes)), file=sys.stderr)
+            return 2
+        return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -402,6 +575,11 @@ if __name__ == "__main__" and sys.argv[1:] == []:
     _stage1_rc = _stage1_main()
     if _stage1_rc is not None:
         sys.exit(_stage1_rc)
+
+# The stage-2 child half of the fail-closed contract is armed HERE, before any checkout import
+# below runs or registers cleanup, so the atexit result writer is registered FIRST and runs LAST
+# (_stage2_arm_result; security-seci-fail-closed).
+_STAGE2_RESULT = _stage2_arm_result() if __name__ == "__main__" else None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
@@ -998,19 +1176,23 @@ def _renderer_freshness(root, label):
     """Run gen_renderers.py --check against the tree at `root` (its own repo, resolved by the copied
     gen_renderers via repo_root). Drift or an incomplete closure is exit 2."""
     try:
-        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; only
-        # the returncode is interpreted, and stderr is decoded with replacement for a diagnostic message.
+        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; the
+        # verdict reads the returncode, the result record and whether stderr is empty, never its text.
         # -B: never write bytecode into the target tree (round-6 finding 1). gen_renderers imports the
         # tree's own renderer modules; a .pyc left in `root`/tools/__pycache__ could be captured by a
         # later index build and perturb a manifest SOURCES comparison.
-        proc = subprocess.run([sys.executable, "-I", "-B", "-X", _child_pycache_x(),
-                               str(root / "tools" / "gen_renderers.py"), "--check", "--root",
-                               str(root)], capture_output=True)
+        # The child runs under the record stub (_run_recorded_child; merge train 3 QA round 2): a
+        # zero exit passes only with its complete result and an empty error stream.
+        rc, _out, _err, fault = _run_recorded_child(root / "tools" / "gen_renderers.py",
+                                                    ["--check", "--root", str(root)])
     except OSError as exc:
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
-    if proc.returncode != 0:
+    if rc != 0:
         raise GateError("{} renderer declaration is stale or a closure is incomplete "
-                        "(gen_renderers.py --check rc={})".format(label, proc.returncode))
+                        "(gen_renderers.py --check rc={})".format(label, rc))
+    if fault is not None:
+        raise GateError("{} renderer freshness (gen_renderers.py --check) {} "
+                        "(security-seci-fail-closed); fail-closed".format(label, fault))
 
 
 def _index_materialized_tree(dest, label):
@@ -1848,6 +2030,97 @@ def _child_pycache_x():
     return "pycache_prefix=" + _CHILD_PYCACHE[0]
 
 
+# The record stub every nested validator child runs under (security-seci-fail-closed; the stage-2
+# contract of _stage2_arm_result applied to the validators this gate launches; merge train 3 QA round
+# 2, codex and claude MAJORs: _renderer_freshness and _validate_via_tool judged only the exit code, so
+# a validator whose cleanup faulted after a zero exit passed). argv: the script, the result path,
+# then the script's own arguments. It registers its result writer FIRST (so it runs LAST), arms the
+# fault audit hook and the thread-fault wrapper, runs the script as __main__, and the writer collects
+# the cyclic garbage, flushes, writes `release-delta-child <code> <pid>` and ends the child with
+# os._exit, so nothing of interpreter finalization runs after the result.
+_CHILD_RECORD_STUB = (
+    "import atexit, gc, os, runpy, sys, threading\n"
+    "script, result = sys.argv[1], sys.argv[2]\n"
+    "sys.argv = [script] + sys.argv[3:]\n"
+    "state, faults = [], []\n"
+    "reporting = (sys.excepthook, sys.unraisablehook)\n"
+    "thread_hook = threading.excepthook\n"
+    "def thread_fault(args):\n"
+    "    faults.append('threading.excepthook')\n"
+    "    thread_hook(args)\n"
+    "def record():\n"
+    "    if not state:\n"
+    "        return\n"
+    "    code = state[0]\n"
+    "    for _ in range(100):\n"
+    "        if gc.collect() == 0:\n"
+    "            break\n"
+    "    else:\n"
+    "        faults.append('garbage collection never settled')\n"
+    "    if (threading.excepthook is not thread_fault or sys.excepthook is not reporting[0]\n"
+    "            or sys.unraisablehook is not reporting[1]):\n"
+    "        faults.append('a fault-reporting hook was replaced')\n"
+    "    try:\n"
+    "        sys.stdout.flush()\n"
+    "        sys.stderr.flush()\n"
+    "    except Exception:\n"
+    "        faults.append('the streams could not be flushed')\n"
+    "    if faults:\n"
+    "        code = 2\n"
+    "        os.write(2, ('release-delta child fault: ' + ', '.join(sorted(set(faults)))\n"
+    "                     + chr(10)).encode())\n"
+    "    with open(result, 'w', encoding='utf-8') as handle:\n"
+    "        handle.write('release-delta-child ' + str(code) + ' ' + str(os.getpid()) + chr(10))\n"
+    "    os._exit(code)\n"
+    "atexit.register(record)\n"
+    "if getattr(atexit, '_ncallbacks', lambda: 1)() != 1:\n"
+    "    faults.append('an exit handler was registered before the result writer')\n"
+    "sys.addaudithook(lambda event, _args: event in ('sys.unraisablehook', 'sys.excepthook')\n"
+    "                 and faults.append(event))\n"
+    "threading.excepthook = thread_fault\n"
+    "try:\n"
+    "    runpy.run_path(script, run_name='__main__')\n"
+    "    code = 0\n"
+    "except SystemExit as exc:\n"
+    "    code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)\n"
+    "    if not isinstance(exc.code, (int, type(None))):\n"
+    "        print(exc.code, file=sys.stderr)\n"
+    "state.append(code)\n"
+    "sys.exit(code)\n")
+
+
+def _run_recorded_child(script_path, args):
+    """Run one validator child under _CHILD_RECORD_STUB and return (returncode, stdout, stderr,
+    fault): `fault` is None, or names why a ZERO exit is still no pass (security-seci-fail-closed):
+    no complete result bound to the child's own exit code and pid (an early os._exit, a cleanup that
+    ended the process first), or any byte on its error stream (a traceback, a frameless 'Exception
+    ignored' report, a thread fault; the validators print nothing there on a pass). The result
+    lives in a fresh private directory and is read back through the non-blocking fstat-checked
+    reader. A launch failure raises OSError for the caller to name."""
+    import shutil
+    import tempfile
+    private = tempfile.mkdtemp(prefix="aiqt-release-delta-child-")
+    try:
+        result = os.path.join(private, "result")
+        with subprocess.Popen([sys.executable, "-I", "-B", "-X", _child_pycache_x(), "-c",
+                               _CHILD_RECORD_STUB, str(script_path), result, *args],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            out, err = child.communicate()
+        record = _stage1_read_capture(result)
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+    fault = None
+    if child.returncode == 0:
+        if record != "release-delta-child 0 {}\n".format(child.pid).encode("ascii"):
+            fault = ("exited 0 but wrote no complete result bound to its own exit code and pid "
+                     "({}); a zero exit alone is never a pass".format(
+                         "unreadable" if record is None else repr(record[:80])))
+        elif err:
+            fault = ("exited 0 but its error stream is not empty ({!r}); a fault there, cleanup "
+                     "included, is never a pass".format(err[:200].decode("utf-8", "replace")))
+    return child.returncode, out, err, fault
+
+
 def _validate_via_tool(root, script, args, what, tools_root=None):
     """Run a single-home validator as a subprocess and raise GateError (exit 2) on any nonzero exit
     OR a launch failure, so a structural violation OR a cannot-evaluate fails this gate closed rather than
@@ -1867,15 +2140,20 @@ def _validate_via_tool(root, script, args, what, tools_root=None):
         script_path = Path(__file__).resolve().parent / script
     try:
         # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must not crash the gate; the
-        # returncode is interpreted, and the diagnostic tail is decoded with replacement. -B keeps the child
+        # verdict reads the returncode, the result record and whether stderr is empty, and the
+        # diagnostic tail is decoded with replacement. -B keeps the child
         # from writing bytecode (round-6 finding 1 hermeticity), so no generated .pyc can enter a tree index.
-        proc = subprocess.run([sys.executable, "-I", "-B", "-X", _child_pycache_x(),
-                               str(script_path), *args], capture_output=True)
+        # The child runs under the record stub (_run_recorded_child; merge train 3 QA round 2): a
+        # zero exit passes only with its complete result and an empty error stream.
+        rc, out, err, fault = _run_recorded_child(script_path, args)
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
-    if proc.returncode != 0:
-        diag = (proc.stderr or proc.stdout).decode("utf-8", "replace").strip()[:400]
-        raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode, diag))
+    if rc != 0:
+        diag = (err or out).decode("utf-8", "replace").strip()[:400]
+        raise GateError("{}: {} rc={} ({})".format(what, script, rc, diag))
+    if fault is not None:
+        raise GateError("{}: {} {} (security-seci-fail-closed); fail-closed".format(
+            what, script, fault))
 
 
 def _head_manifest_integrity(root):
@@ -3225,7 +3503,9 @@ def _post_release_e2e(tmp, failures, only=None):
         return False
 
     def _sel(label):
-        return only is None or any(s in label for s in only)
+        # Either direction: a full case label also opens the block gated on its prefix (`(R7 `),
+        # so a selection by full label never silently skips its case (merge train 3 QA round 2).
+        return only is None or any(s in label or label in s for s in only)
 
     def _extract_to(name):
         repo_ = tmp / name
@@ -4398,8 +4678,21 @@ def _post_release_e2e(tmp, failures, only=None):
                             want9 = (2, "no probe positively established")
                         else:
                             (anc9 / "tools").mkdir()
+                            # The committed stub honours the stage-2 fail-closed contract (the
+                            # result record a zero exit must carry, and an error stream holding
+                            # only the closing boundary line), so this case still proves the
+                            # PHYSICAL root ran the COMMITTED copy and exits 0.
                             (anc9 / "tools" / "check_release_delta.py").write_text(
-                                "print(" + repr(stub9) + ")\n", encoding="utf-8")
+                                "import os\n"
+                                "print(" + repr(stub9) + ")\n"
+                                "_p9 = os.environ.get('AIQT_RELEASE_DELTA_STAGE2_RESULT')\n"
+                                "if _p9:\n"
+                                "    os.write(2, ('release-delta-stage2-boundary '\n"
+                                "                 + str(os.getpid()) + chr(10)).encode())\n"
+                                "    with open(_p9, 'w', encoding='utf-8') as _h9:\n"
+                                "        _h9.write('release-delta-stage2 0 '\n"
+                                "                  + str(os.getpid()) + chr(10))\n",
+                                encoding="utf-8")
                             _git_init_commit(anc9, "r9 healthy ancestor")
                             want9 = (0, stub9)
                         rel9 = os.path.join("alias", "..", "project", "tools",
@@ -4629,6 +4922,124 @@ def _post_release_e2e(tmp, failures, only=None):
                                             "pins are not effective".format(label7f))
                     finally:
                         _g(gfx7, "config", "--unset-all", "core.fsmonitor")
+
+        # ---- merge train 3 QA (codex MAJOR): the fail-closed child contract of the stage-2
+        # launch (security-seci-fail-closed). A COMMITTED gate copy that faults in shutdown (an
+        # atexit handler that raises leaves exit 0 behind with only a stderr traceback) or that
+        # exits 0 without running the dispatch (a bare SystemExit(0)) writes no complete stage-2
+        # result, so stage 1 must exit 2 by name, never pass the zero exit through. The committed
+        # copy is the malicious file; the WORKING-TREE copy is this pinned gate, which launches.
+        label7s = ("(R7 stage2 fault) a committed gate whose shutdown faults or that exits "
+                   "silently never passes the stage-2 contract")
+        if _sel(label7s):
+            import inspect as _inspect7s
+            import shutil as _shutil7s
+            # merge train 3 QA round 2 (codex and claude MAJORs): committed copies that DO arm
+            # this gate's own result writer (_stage2_arm_result, its source copied verbatim) and
+            # settle 0, so the result record is complete and only the error-stream contract and
+            # the writer's fault detection can refuse them; a clean one must still pass.
+            armed7s = ("import os\nimport sys\n" + _inspect7s.getsource(_stage2_arm_result)
+                       + "\n_state7s = _stage2_arm_result()\n")
+            settle7s = "_state7s['code'] = 0\n"
+            for tag7s, body7s, want7s in (
+                    ("shutdown-fault", "import atexit\n"
+                     "def _fault():\n"
+                     "    raise RuntimeError('QA stage2 cleanup fault')\n"
+                     "atexit.register(_fault)\n", 2),
+                    ("silent-exit", "raise SystemExit(0)\n", 2),
+                    ("armed clean control", armed7s + settle7s, 0),
+                    ("armed frameless builtin cleanup fault", armed7s + "import atexit\n"
+                     "atexit.register(int, 'QA frameless cleanup fault')\n" + settle7s, 2),
+                    ("armed stray error-stream byte", armed7s
+                     + "os.write(2, b'QA stray byte' + bytes([10]))\n" + settle7s, 2),
+                    ("armed cyclic finalizer fault", armed7s + "class _QA7s:\n"
+                     "    __del__ = os.remove\n"
+                     "_qa7s = _QA7s()\n_qa7s.self = _qa7s\ndel _qa7s\n" + settle7s, 2),
+                    ("armed thread fault under redirected diagnostics", armed7s
+                     + "import contextlib, io, threading\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _t7s = threading.Thread(target=lambda: 1 / 0)\n"
+                     "    _t7s.start()\n"
+                     "    _t7s.join()\n" + settle7s, 2)):
+                mal7 = tmp / ("r7-stage2-" + tag7s.replace(" ", "-"))
+                (mal7 / "tools").mkdir(parents=True)
+                gate7 = mal7 / "tools" / "check_release_delta.py"
+                gate7.write_text(body7s, encoding="utf-8")
+                try:
+                    _git_init_commit(mal7, "r7 stage2 " + tag7s + " fixture")
+                except subprocess.CalledProcessError as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not commit ({})".format(
+                        label7s, tag7s, exc7s))
+                    continue
+                _shutil7s.copyfile(str(Path(__file__).resolve()), str(gate7))
+                try:
+                    proc7s = subprocess.run([sys.executable, "-I", "-B", str(gate7)],
+                                            cwd=str(mal7), capture_output=True, env=env,
+                                            timeout=600)
+                except (OSError, subprocess.TimeoutExpired) as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not run the gate CLI "
+                                    "({})".format(label7s, tag7s, exc7s))
+                    continue
+                out7s = (proc7s.stdout + proc7s.stderr).decode("utf-8", "replace")
+                if want7s == 0:
+                    if proc7s.returncode != 0:
+                        failures.append("{} [{}]: a committed copy that arms the result writer "
+                                        "and settles 0 with an empty error stream must pass "
+                                        "(no over-rejection), got rc={}: {}".format(
+                                            label7s, tag7s, proc7s.returncode,
+                                            out7s.strip()[-300:]))
+                    continue
+                if proc7s.returncode != 2 or "stage-2" not in out7s:
+                    failures.append("{} [{}]: expected exit 2 naming the stage-2 contract (a "
+                                    "zero child exit with no complete result or a faulted "
+                                    "error stream is never a pass), got rc={}: {}".format(
+                                        label7s, tag7s, proc7s.returncode,
+                                        out7s.strip()[-300:]))
+
+        # ---- merge train 3 QA round 2 (codex and claude MAJORs): the nested validator children
+        # (_renderer_freshness, _validate_via_tool) judged only the exit code, so a validator
+        # whose cleanup faulted after a zero exit passed. Each now runs under the record stub
+        # (_run_recorded_child): every fault below must be a GateError, the clean control none.
+        label7n = ("(R7 nested child) a validator child that faults in cleanup or ends early "
+                   "never passes on its zero exit")
+        if _sel(label7n):
+            nest7 = tmp / "r7-nested-child"
+            (nest7 / "tools").mkdir(parents=True, exist_ok=True)
+            for tag7n, body7n, want7n in (
+                    ("clean control", "print('validator ok')\n", False),
+                    ("python cleanup fault", "import atexit\n"
+                     "def _fault():\n"
+                     "    raise RuntimeError('QA nested cleanup fault')\n"
+                     "atexit.register(_fault)\n", True),
+                    ("frameless builtin cleanup fault", "import atexit\n"
+                     "atexit.register(int, 'QA nested frameless fault')\n", True),
+                    ("thread fault", "import threading\n"
+                     "_t = threading.Thread(target=lambda: 1 / 0)\n_t.start()\n_t.join()\n",
+                     True),
+                    ("early silent exit", "import os\nos._exit(0)\n", True),
+                    ("stray error-stream byte", "import os\n"
+                     "os.write(2, b'QA stray byte' + bytes([10]))\n", True)):
+                script7n = "qa-nested-{}.py".format(tag7n.replace(" ", "-"))
+                (nest7 / "tools" / script7n).write_text(body7n, encoding="utf-8")
+                (nest7 / "tools" / "gen_renderers.py").write_text(body7n, encoding="utf-8")
+                for leg7n, call7n in (
+                        ("_validate_via_tool", lambda: _validate_via_tool(
+                            nest7, script7n, [], "nested-child probe", tools_root=nest7)),
+                        ("_renderer_freshness", lambda: _renderer_freshness(
+                            nest7, "nested-child probe"))):
+                    try:
+                        call7n()
+                        raised7n = None
+                    except GateError as exc7n:
+                        raised7n = str(exc7n)
+                    if want7n and raised7n is None:
+                        failures.append("{} [{} via {}]: the zero exit passed; a fault or a "
+                                        "missing result must be a GateError".format(
+                                            label7n, tag7n, leg7n))
+                    elif not want7n and raised7n is not None:
+                        failures.append("{} [{} via {}]: a clean validator must pass (no "
+                                        "over-rejection), got: {}".format(
+                                            label7n, tag7n, leg7n, raised7n[:300]))
 
 
     # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
@@ -6195,7 +6606,22 @@ def main():
             print("error: --stage2-tree does not contain the running gate file; the stage-2 copy "
                   "must run from the materialized committed tree; fail-closed", file=sys.stderr)
             return 2
-        return run(Path(opts["stage2_repo"]).resolve())
+        diag_path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_DIAG") if _STAGE2_RESULT else None
+        if diag_path:
+            # The gate's own diagnostics go to their own capture, which stage 1 relays, so the
+            # error stream stays empty apart from the result writer's boundary line and any
+            # fault Python reports there (_stage2_arm_result; security-seci-fail-closed).
+            with open(diag_path, "w", encoding="utf-8", errors="backslashreplace") as diag, \
+                    redirect_stderr(diag):
+                stage2_rc = run(Path(opts["stage2_repo"]).resolve())
+        else:
+            stage2_rc = run(Path(opts["stage2_repo"]).resolve())
+        if _STAGE2_RESULT is not None:
+            # The settled verdict the atexit result writer (registered first, run last) binds to
+            # this child's exit code and pid; stage 1 requires it beside exit 0 and an error
+            # stream holding only the writer's boundary line (security-seci-fail-closed).
+            _STAGE2_RESULT["code"] = stage2_rc
+        return stage2_rc
     if mode == "self-test":
         return self_test_main()
     if mode == "repin":
