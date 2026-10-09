@@ -51,23 +51,41 @@ directory's contents, the environment, the stream mode); through the real run() 
 over recording children, what is launched and what each child saw (_check_member_boundary,
 _check_launches), and that run() exits 1 listing as FAILED a member that exits 1 and one killed
 by SIGKILL. Those runs set GIT_ and PYTHON variables in os.environ (_ambient_sentinels), so
-the environment checks do not depend on the host; every diagnostic this module raises or
-prints is formatted through ONE scrubber (_scrub), which replaces any substring equal to the value
-of a variable now in os.environ (length at least 4) with a placeholder naming the variable, keeping
-only paths under the host's temporary directory (TMPDIR) and the paths of the repository and of
-the interpreter, which a variable such as HOME or PATH can share; a whole path token of the text
-that is, or lies under, one of those paths is kept even where a SHORTER value (a user name whose
-value appears in TMPDIR's path) is a substring of it, and every self-test comparison of expected
-text against a diagnostic scrubs the expected side, so no comparison depends on the host's
-environment values (closure/host-independence re-runs the affected cases in a child whose USER,
-LOGNAME and HOME value appears in its TMPDIR path, and requires that value never disclosed
-outside such a path); closure/scrub-sites pins the scrubbing
-rule in this file's AST, so a new raise or print cannot bypass _scrub, and _check_env_canaries
-drives the refusal, wrong-report and launch paths with a canary, scanning each sub-check's
-diagnostics and every captured stream on the return and the exception path alike; a captured
-child stream is parsed and scanned raw and is scrubbed wherever a diagnostic embeds it; a
-recorded launch passing a keyword that could hand a child a descriptor, missing a required
-keyword, or redirecting a stream is refused before the child runs (_launch_recorder). Not
+the environment checks do not depend on the host; diagnostics are CLOSED (ruling
+D-428-CLOSED-DIAGNOSTICS): every refutation, cannot-evaluate, harness failure, print and stream
+write of this module emits only fixed literal text and identifiers drawn from closed vocabularies
+this module defines (case ids and labels, member and script names from the declared roster,
+report field names, fixed reason codes, integer counts and return codes; the _cv/_cvs/_n gates
+check membership at run time and emit a fixed marker for any other token), so a runtime value is
+never formatted into output: where a diagnostic must say which value was wrong, it names the
+field and the check that failed, never the value, and a path is named by its role (the
+repository, the given root, the scratch directory), never printed, so no comparison of expected
+text against a diagnostic can depend on the host's environment values. closure/closed-sites pins
+the rule in this file's AST (every output call and exception constructor, keyword arguments
+included, passes only closed text; each recognized writer form carries a flip that fails when its
+recognizer is removed); _check_env_canaries drives the refusal, wrong-report and launch paths
+with a canary, scanning each sub-check's diagnostics and every captured stream on the return, the
+exception and the termination path alike; closure/host-independence re-runs the affected cases in
+a child whose USER, LOGNAME and HOME value appears in its TMPDIR path, requires PASS with no
+environment value of length 4 or more anywhere in either stream, and requires that the same scan
+FAILS a copy of this module in which one diagnostic is reverted to interpolate a value. A
+captured child stream is parsed as data and never echoed into a diagnostic: where a refutation
+must cite child output, it cites the parsed field name and the check that failed, or a byte
+count. A recorded launch passing a keyword that could hand a child a descriptor, missing a
+required keyword, or redirecting a stream is refused before the child runs (_launch_recorder).
+RESIDUALS the closed design does not cover: the interpreter's own traceback on an uncaught
+exception (a defect of this module, or a BaseException such as KeyboardInterrupt, which
+_preflight_exit re-raises on purpose) is outside the module's control and carries source paths
+and raw exception text; the entry point (main through sys.exit at the last line) does NOT catch
+it. _self_test_exit relays text that reaches it only as str() of exceptions this module raised
+and of leg messages built at closed construction sites (the walk checks every construction site;
+the relay and the other permitted sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its
+reason). The walk does not see a raise of a bare name (re-raising formats nothing), a BUILT
+exception whose class name is neither a builtin exception's nor this module's, or a write through
+a descriptor or an API it does not list; an exception's __cause__ chain holds the original
+exception objects, which this module never prints but a traceback would; and where a diagnostic
+reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
+the offending keys are deliberately not printed. Not
 checked: that the process exits with main()'s return (the last line of this file;
 _check_entry_points calls main() directly), and that run() removes its scratch directory afterwards (a
 run that leaves its copy behind still verifies).
@@ -85,12 +103,12 @@ import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
     sys.stderr.write(
-        "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        "error: check_opf_standalone_closure.py requires Python 3.14 or newer; this interpreter is "
+        "older. Nothing was run (cannot evaluate).\n")
     raise SystemExit(2)
 
 import ast
+import builtins
 import contextlib
 import fcntl
 import functools
@@ -98,7 +116,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -110,91 +127,81 @@ from tempfile import gettempdir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 
-# Diagnostic scrubbing (see _scrub). Every raise and print of this module that formats a
-# non-literal value passes through _scrub (closure/scrub-sites pins that in this file's AST).
-# Captured child and callback streams are parsed and scanned RAW (scrubbing a report or an
-# evidence line whose text an environment value happens to share would corrupt what is judged)
-# and are scrubbed wherever a diagnostic embeds them, because every diagnostic is formatted
-# through _scrub. Where the self-test compares expected text against a scrubbed diagnostic or
-# stream, the expected side goes through _scrub at the comparison, so both sides carry the same
-# replacements on any host. The shortest value _scrub replaces:
-_SCRUB_MIN_LEN = 4
+# CLOSED DIAGNOSTICS (ruling D-428). Every refutation, cannot-evaluate, harness failure, print
+# and stream write of this module emits only fixed literal text and identifiers drawn from closed
+# vocabularies this module defines: case ids and labels, member and script names from the declared
+# roster, report field names, fixed reason codes, integer counts and return codes. A runtime value
+# that is not from such a vocabulary is never formatted into output: where a diagnostic needs to
+# say which value was wrong, it names the field and the check that failed, never the value; a path
+# is named by its role (the repository, the given root, the scratch directory), never printed.
+# closure/closed-sites pins the rule in this file's AST: every output call and every exception
+# constructor passes each argument as a string or int constant, a module literal registered in
+# _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those.
+# The gates check membership at run time: a token outside its vocabulary is replaced by a fixed
+# marker naming the vocabulary, so no runtime value can ride through them.
 
-# The paths diagnostics may carry even where an environment variable shares them: the host's
-# temporary directory (TMPDIR), the repository root and the interpreter (sys.executable), each
-# raw and resolved. A value equal to one of them, under one of them, or an ancestor of one (as
-# PATH can share the interpreter's directory) is exempt. Frozen at import, so a case that
-# rebinds repo_root cannot widen the exemptions mid-run.
-_SCRUB_EXEMPT_PATHS = tuple(Path(part) for part in dict.fromkeys(
-    str(path) for path in (gettempdir(), Path(gettempdir()).resolve(), repo_root(),
-                           Path(repo_root()).resolve(), sys.executable or "") if str(path)))
+# The names of builtin exception classes, this module's own, and NoneType: the closed vocabulary a
+# diagnostic naming an exception's type draws from, and the class names whose constructor calls
+# closure/closed-sites checks. Computed from builtins at import, so no runtime value is a member.
+_EXCEPTION_NAMES = frozenset(
+    name for name in dir(builtins)
+    if isinstance(getattr(builtins, name), type) and issubclass(getattr(builtins, name), BaseException)
+) | frozenset(("_CannotEvaluate", "_HarnessFailure", "TimeoutExpired", "NoneType"))
 
-# The rest of one path token, after an anchor already matched: whole /-separated components of the
-# characters mkdtemp, this repository and the interpreter use in path names, with no backtracking
-# ambiguity (the separator is not in the component class). The lookahead rejects an anchor glued to
-# another path character (<anchor>x is a sibling path, not a path under the anchor).
-_SCRUB_PATH_TOKEN = r"(?:/[A-Za-z0-9._+-]+)*/?(?![A-Za-z0-9._+-])"
+# Module-level string literals an output call or an exception constructor may pass by name
+# (closure/closed-sites): each must be bound at module level to one string literal.
+_CLOSED_TEXT_NAMES = ("_PIN_MARKER", "_INJECT_MARKER", "_STUB_SCRATCH", "_FLIP_EVIDENCE",
+                      "_NEG_SCRATCH_ERROR", "_NEG_COPY_ERROR", "_NEG_DECODE_ERROR")
 
+# The message of every OSError _failing_harness injects: a fixed literal, relayed into a
+# diagnostic only as this registered name where a catching site saw it in the caught text.
+_INJECT_MARKER = "injected harness failure (stubbed)"
 
-def _path_spans_pattern(anchors):
-    """A compiled pattern matching every whole path token of a text that is, or lies under, one of
-    `anchors` (each an absolute path; at least one must be non-empty). Longer anchors are tried
-    first, so a nested anchor never truncates an outer anchor's match. A token is the anchor
-    followed by whole /-separated components of [A-Za-z0-9._+-]; a component holding any other
-    character ends the token there (the remainder is matched on its own where it lies under the
-    anchor, and is scrubbed like any other text where it does not)."""
-    parts = sorted(set(str(anchor) for anchor in anchors if str(anchor)), key=len, reverse=True)
-    return re.compile("|".join(re.escape(part) + _SCRUB_PATH_TOKEN for part in parts))
+# The message of the OSError _no_scratch raises: relayed like _INJECT_MARKER.
+_STUB_SCRATCH = "no scratch directory (stubbed)"
 
 
-# The spans _scrub never rewrites: every whole path token that is, or lies under, one of
-# _SCRUB_EXEMPT_PATHS. Frozen at import beside _SCRUB_EXEMPT_PATHS.
-_SCRUB_EXEMPT_SPANS = _path_spans_pattern(_SCRUB_EXEMPT_PATHS)
+def _cv(kind, token):
+    """`token` when it is a str member of the closed vocabulary `kind`; otherwise the fixed marker
+    naming the vocabulary (the token itself is then never returned, so a runtime value cannot ride
+    through). The static vocabularies live in _CLOSED_VOCABULARIES; "case", "flip" and the
+    attribution kinds are read from the live tables (_PREFLIGHT_CASES, _CLOSED_FLIPS,
+    _ATTRIBUTION_PINS, _ATTRIBUTION_EXCLUSIONS, _ATTRIBUTION_INDIRECTIONS), so a stubbed table's
+    names are members while it is patched in."""
+    if kind == "case":
+        allowed = frozenset(part for label, check in _PREFLIGHT_CASES
+                            for part in (label, check.__name__) if part is not None)
+    elif kind == "flip":
+        allowed = frozenset(flip for flip, _snippet in _CLOSED_FLIPS)
+    elif kind in ("pin-label", "site", "site-key", "indirection-key"):
+        rows = _ATTRIBUTION_PINS
+        if kind == "pin-label":
+            allowed = frozenset(row[1] for row in rows)
+        elif kind == "site":
+            allowed = frozenset("{} {}{}#{} {}".format(row[1], row[4], "." + row[5] if row[5] else "",
+                                                       row[6], row[7]) for row in rows)
+        elif kind == "site-key":
+            allowed = frozenset(row[0] for row in rows) | frozenset(
+                site for site, _reason in _ATTRIBUTION_EXCLUSIONS)
+        else:
+            allowed = frozenset(key for key, _line, _reason in _ATTRIBUTION_INDIRECTIONS)
+    else:
+        allowed = _CLOSED_VOCABULARIES[kind]
+    if isinstance(token, str) and token in allowed:
+        return token
+    return "<no {} token>".format(kind)
 
 
-def _scrub(text):
-    """`text` with every substring equal to the value of a variable now in os.environ replaced by
-    the fixed placeholder "<value of NAME>" naming the variable (the alphabetically first name,
-    where several variables share the value). Replaced in one pass over `text` (a placeholder is
-    never rescanned). Exempt, and so kept: a value shorter than _SCRUB_MIN_LEN characters; a
-    value that is one of _SCRUB_EXEMPT_PATHS, lies under one, or is an ancestor of one; and every
-    whole path token of `text` that is, or lies under, one of _SCRUB_EXEMPT_PATHS
-    (_SCRUB_EXEMPT_SPANS), so a shorter value that is a substring of such a path (a user name
-    inside the host's temporary directory's path) never rewrites it: the stated exception covers
-    the whole token, never part of it. Outside those spans a value is replaced wherever it
-    appears, inside a longer word included: replacing only at token boundaries would keep such a
-    word readable, but would keep a value embedded in a token a diagnostic carries (a file or
-    host name built from the value), so the substring match stays and what it can rewrite is
-    confined to text that is not an exempt path.
-    Diagnostics may name variables, keys and checks; this is how they avoid carrying a value.
-    Residuals: a value no longer in os.environ when a diagnostic is formatted is not recognized
-    (every canary diagnostic is formatted while its variable is still set); a value that is a
-    substring of fixed diagnostic text is replaced there too (the placeholder then stands where
-    that text read, on both sides of a comparison whose expected text is scrubbed); and a value
-    that is a substring of an exempt path token is kept there even where that value is also
-    something else of the environment (the whole token is, by the stated exception,
-    disclosable)."""
-    values = {}
-    for key in sorted(os.environ):
-        value = os.environ[key]
-        if len(value) < _SCRUB_MIN_LEN or value in values:
-            continue
-        try:
-            candidate = Path(value)
-        except ValueError:
-            candidate = None
-        if candidate is not None and any(
-                candidate == anchor or candidate.is_relative_to(anchor) or anchor.is_relative_to(candidate)
-                for anchor in _SCRUB_EXEMPT_PATHS):
-            continue
-        values[value] = key
-    if not values:
-        return text
-    pattern = re.compile("(?:{})|({})".format(
-        _SCRUB_EXEMPT_SPANS.pattern,
-        "|".join(re.escape(value) for value in sorted(values, key=len, reverse=True))))
-    return pattern.sub(lambda match: match.group(0) if match.group(1) is None
-                       else "<value of {}>".format(values[match.group(1)]), text)
+def _cvs(kind, tokens):
+    """Each of `tokens` through _cv(kind, ...), joined with ", "."""
+    return ", ".join(_cv(kind, token) for token in tokens)
+
+
+def _n(value):
+    """`value` as decimal text when it is exactly an int (bool is not); otherwise a fixed marker."""
+    if type(value) is int:
+        return str(value)
+    return "<not an integer>"
 
 # The OPF gate subset, relative to the copied opf/tools/ directory. Each entry is (name, [args...]); the
 # self-test legs are deterministic and git-independent (they build their own throwaway fixtures), so they
@@ -321,10 +328,10 @@ def _check_member_timeout_rows(subset, table):
     names = set(row[0] for row in subset)
     stale = sorted(set(table) - names)
     if stale:
-        raise AssertionError(_scrub("closure/member-timeout-rows: " + ", ".join(stale)))
+        raise AssertionError("closure/member-timeout-rows: " + _n(len(stale)) + " stale row(s)")
     for name, bound in table.items():
         if type(bound) is not int or bound <= 0:
-            raise AssertionError(_scrub("closure/member-timeout-rows: " + name))
+            raise AssertionError("closure/member-timeout-rows: " + _cv("member", name))
 
 
 def _member_timeout_rows_self_test():
@@ -336,13 +343,13 @@ def _member_timeout_rows_self_test():
     try:
         _attributed("closure/member-timeout-rows", lambda: _check_member_timeout_rows(_SUBSET, changed))
     except AssertionError as exc:
-        if str(exc) != "closure/member-timeout-rows: no-such-member":
+        if str(exc) != "closure/member-timeout-rows: 1 stale row(s)":
             raise
     else:
         raise AssertionError("closure/member-timeout-rows-not-red")
     print("RED closure-registration -> closure/member-timeout-rows")
     # A bound that is not a positive int (bool is refused even though it subclasses int) must go red.
-    for bad in (0, -60, 1800.0, True, "1800"):
+    for index, bad in enumerate((0, -60, 1800.0, True, "1800")):
         changed = dict(_MEMBER_TIMEOUT_S)
         changed["opf-tooling-selftest"] = bad
         try:
@@ -351,8 +358,8 @@ def _member_timeout_rows_self_test():
             if str(exc) != "closure/member-timeout-rows: opf-tooling-selftest":
                 raise
         else:
-            raise AssertionError(_scrub("closure/member-timeout-rows-bad-bound-not-red: {!r}".format(bad)))
-        print(_scrub("RED closure-registration -> closure/member-timeout-rows bound {!r}".format(bad)))
+            raise AssertionError("closure/member-timeout-rows-bad-bound-not-red: case " + _n(index))
+        print("RED closure-registration -> closure/member-timeout-rows bound case " + _n(index))
 
 
 def _isolated_env():
@@ -431,7 +438,7 @@ def run(root):
     left closure unevaluated), fail-closed."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
-        print(_scrub("error: opf/ subtree not found under {} (cannot evaluate closure)".format(root)),
+        print("error: opf/ subtree not found under the given root (cannot evaluate closure)",
               file=sys.stderr)
         return 2
     tmp = None
@@ -439,30 +446,32 @@ def run(root):
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-"))
         except OSError as exc:
-            print(_scrub("error: could not allocate a scratch directory for the isolated opf/ copy: {} "
-                  "(cannot evaluate closure)".format(exc)), file=sys.stderr)
+            print("error: could not allocate a scratch directory for the isolated opf/ copy "
+                  "(cannot evaluate closure)", file=sys.stderr)
             return 2
         try:
             opf_root = _materialize(opf_src, tmp)
         except OSError as exc:
-            print(_scrub("error: could not materialize the isolated opf/ copy: {}".format(exc)), file=sys.stderr)
+            print("error: could not materialize the isolated opf/ copy (cannot evaluate closure)",
+                  file=sys.stderr)
             return 2
         try:
             results = _run_subset(opf_root, tmp)
         except AssertionError as exc:
-            print(_scrub("STANDALONE CLOSURE: FAILED: {}".format(exc)), file=sys.stderr)
+            print("STANDALONE CLOSURE: FAILED (a registration check was refuted)", file=sys.stderr)
             return 1
         cannot = [(name, why, tail) for name, rc, tail, why in results if why is not None]
         failed = [(name, rc, tail) for name, rc, tail, why in results if rc != 0 and why is None]
         for name, rc, tail, why in results:
-            verdict = "{} (cannot evaluate)".format(why) if why is not None else (
-                "OK" if rc == 0 else "FAILED rc={}".format(rc))
-            print(_scrub("  {:32s} {}".format(name, verdict)))
+            print("  {:32s} {}".format(_cv("member", name),
+                                       "{} (cannot evaluate)".format(_cv("reason", why))
+                                       if why is not None
+                                       else ("OK" if rc == 0 else "FAILED rc=" + _n(rc))))
         if failed:
             print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
                   file=sys.stderr)
             for name, rc, tail in failed:
-                print(_scrub("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | "))), file=sys.stderr)
+                print("  {} (rc={})".format(_cv("member", name), _n(rc)), file=sys.stderr)
         if cannot:
             # A member killed at its bound, missing from the copy, or not launchable is
             # CANNOT-EVALUATE (exit 2), never a closure finding: the member did not run to
@@ -470,7 +479,7 @@ def run(root):
             print("STANDALONE CLOSURE: CANNOT EVALUATE (a subset member did not run to completion):",
                   file=sys.stderr)
             for name, why, tail in cannot:
-                print(_scrub("  {} [{}]: {}".format(name, why, tail.replace("\n", " | "))), file=sys.stderr)
+                print("  {} [{}]".format(_cv("member", name), _cv("reason", why)), file=sys.stderr)
         # Failure-first: a member that ran and failed is a definite closure break whatever else could
         # not be evaluated, so it decides the exit; cannot-evaluate (2) only when nothing failed.
         if failed:
@@ -489,9 +498,9 @@ def run(root):
 _FLIP_EVIDENCE = "opf: cannot bootstrap: check_versions (cannot evaluate)"
 
 # The negative leg's cannot-evaluate messages for a broken copy it could not build.
-_NEG_SCRATCH_ERROR = "negative: could not allocate a scratch directory for the broken copy: "
-_NEG_COPY_ERROR = "negative: harness error building the broken copy: "
-_NEG_DECODE_ERROR = "negative: the copied opf/tools/_opf_store.py is not UTF-8 text, so the flip cannot be made: "
+_NEG_SCRATCH_ERROR = "negative: could not allocate a scratch directory for the broken copy"
+_NEG_COPY_ERROR = "negative: harness error building the broken copy"
+_NEG_DECODE_ERROR = "negative: the copied opf/tools/_opf_store.py is not UTF-8 text, so the flip cannot be made"
 
 
 def _positive_leg_verdict(rc):
@@ -522,15 +531,14 @@ def _negative_leg_verdict(rc, output, cannot):
     printed, not that opf.py's bootstrap refusal printed it."""
     streams = (output,) if isinstance(output, str) else tuple(output)
     if cannot is not None:
-        return "cannot", "negative: the flipped copy did not run to completion ({}): {}".format(
-            cannot, " | ".join(streams).replace("\n", " | "))
+        return "cannot", "negative: the flipped copy did not run to completion ({})".format(
+            _cv("reason", cannot))
     if rc == 0:
         return "fail", ("negative: a re-introduced upward edge (import check_versions) was NOT "
                         "caught in isolation (the gate would give no coverage)")
     if not any(_FLIP_EVIDENCE in _output_lines(stream) for stream in streams):
-        return "fail", ("negative: the flipped copy exited rc={} without the import refusal ({!r}); a "
-                        "failure for another reason is no evidence the edge is caught".format(
-                            rc, _FLIP_EVIDENCE))
+        return "fail", ("negative: the flipped copy exited rc={} without the import refusal line; a "
+                        "failure for another reason is no evidence the edge is caught".format(_n(rc)))
     return "caught", None
 
 
@@ -562,7 +570,7 @@ def _closure_legs(root):
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-neg-"))
         except OSError as exc:
-            cannot.append(_NEG_SCRATCH_ERROR + str(exc))
+            cannot.append(_NEG_SCRATCH_ERROR)
             return failures, cannot
         opf_root = _materialize(opf_src, tmp)
         store = opf_root / "tools" / "_opf_store.py"
@@ -573,7 +581,7 @@ def _closure_legs(root):
             # all, so nothing was observed. A UTF-8 store without the _semver import is well-formed input
             # the flip no longer matches: that is fixture drift, a failure below, because the negative leg
             # has lost the edge it exists to re-introduce and must be updated.
-            cannot.append(_NEG_DECODE_ERROR + str(exc))
+            cannot.append(_NEG_DECODE_ERROR)
             return failures, cannot
         flipped = text.replace("from _semver import _parse",
                                "from check_versions import _parse", 1)
@@ -592,7 +600,7 @@ def _closure_legs(root):
             elif kind == "cannot":
                 cannot.append(msg)
     except OSError as exc:
-        cannot.append(_NEG_COPY_ERROR + str(exc))
+        cannot.append(_NEG_COPY_ERROR)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -602,9 +610,9 @@ def _closure_legs(root):
 def _self_test_exit(failures, cannot):
     """The self-test verdict: 1 when a leg was refuted, else 2 when a leg could not be evaluated, else 0."""
     for f in failures:
-        print(_scrub("SELF-TEST FAIL: {}".format(f)), file=sys.stderr)
+        print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
     for c in cannot:
-        print(_scrub("SELF-TEST CANNOT EVALUATE: {}".format(c)), file=sys.stderr)
+        print("SELF-TEST CANNOT EVALUATE: {}".format(c), file=sys.stderr)
     if failures:
         return 1
     if cannot:
@@ -695,8 +703,8 @@ def _check_declared_roster():
     for index in range(max(len(got), len(_DECLARED_ROSTER))):
         have, want = got[index:index + 1], list(_DECLARED_ROSTER[index:index + 1])
         if have != want:
-            raise AssertionError(_scrub("closure/declared-roster: row {} of _SUBSET is {!r}, declared {!r}".format(
-                index + 1, have, want)))
+            raise AssertionError("closure/declared-roster: row {} of _SUBSET is not the declared "
+                                 "row".format(_n(index + 1)))
 
 
 # Ambient variables the isolated environment must drop. _ambient_sentinels sets them in os.environ
@@ -732,11 +740,11 @@ def _ambient_sentinels(pairs=_AMBIENT_SENTINELS):
 
 def _env_fault(env):
     """None when `env` is a dict with no GIT_-prefixed variable, no PYTHONPATH or PYTHONHOME, and
-    PYTHONDONTWRITEBYTECODE equal to "1"; otherwise a description of what differs. The description
-    never carries a value of the environment: it names the type of an environment that is not a dict
-    and the names of the leaked variables only (see _env_names_fault)."""
+    PYTHONDONTWRITEBYTECODE equal to "1"; otherwise one of the fixed fault texts of the "fault"
+    vocabulary. The description never carries a value, a name or a type of the environment (see
+    _env_names_fault)."""
     if not isinstance(env, dict):
-        return "an environment of type {} (not a dict)".format(type(env).__name__)
+        return "an environment that is not a dict"
     return _env_names_fault(_env_leaked(env), env.get("PYTHONDONTWRITEBYTECODE") == "1")
 
 
@@ -747,12 +755,12 @@ def _env_leaked(env):
 
 def _env_names_fault(leaked, no_bytecode):
     """_env_fault's verdict from what it needs and no more: the leaked variables' names and whether
-    PYTHONDONTWRITEBYTECODE equals "1". None when nothing leaked and it does; otherwise a description
-    naming the leaked variables (names only) and that Boolean."""
+    PYTHONDONTWRITEBYTECODE equals "1". None when nothing leaked and it does; otherwise one of the
+    fixed fault texts of the "fault" vocabulary, never a variable's name or value."""
     if type(leaked) is not list or not all(type(key) is str for key in leaked) or type(no_bytecode) is not bool:
         return "an environment report that is not a list of names and a Boolean"
     if leaked or not no_bytecode:
-        return "leaked {!r}, PYTHONDONTWRITEBYTECODE equal to 1: {}".format(leaked, no_bytecode)
+        return "a leaked variable, or PYTHONDONTWRITEBYTECODE not equal to 1"
     return None
 
 
@@ -812,20 +820,21 @@ def _check_copy(label, made, source, root):
     outside it can then be observed, so the case says so instead of refuting run() (a residual: such
     a host cannot evaluate this check)."""
     if len(made) != 1:
-        raise AssertionError(_scrub("{}-copy: the run made {} copies of opf/, expected one".format(label, len(made))))
+        raise AssertionError("{}-copy: the run made {} copies of opf/, expected one".format(
+            _cv("label", label), _n(len(made))))
     repo = Path(root).resolve()
     src, dest, copy = (Path(part).resolve() for part in made[0])
     want = Path(source).resolve() / "opf"
     if src != want or copy != dest / "opf":
-        raise AssertionError(_scrub("{}-copy: the run copied {} into {}, expected {} into {}".format(
-            label, src, copy, want, dest / "opf")))
+        raise AssertionError("{}-copy: the run copied another source, or into another destination "
+                             "(no path is printed)".format(_cv("label", label)))
     host_tmp = Path(gettempdir()).resolve()
     if host_tmp.is_relative_to(repo):
-        raise _CannotEvaluate(_scrub("{}-scratch: the host's temporary directory {} is inside the repository {} "
+        raise _CannotEvaluate("{}-scratch: the host's temporary directory is inside the repository "
                               "(TMPDIR), so no scratch directory outside it can be observed".format(
-                                  label, host_tmp, repo)))
+                                  _cv("label", label)))
     if copy.is_relative_to(repo):
-        raise AssertionError(_scrub("{}-scratch: the copy {} is inside the repository {}".format(label, copy, repo)))
+        raise AssertionError("{}-scratch: the copy is inside the repository".format(_cv("label", label)))
     return copy
 
 
@@ -850,29 +859,33 @@ def _check_member_calls(label, calls, made, root, separate_streams, roster):
     for index in range(max(len(got), len(roster))):
         have, want = got[index:index + 1], list(roster[index:index + 1])
         if have != want:
-            raise AssertionError(_scrub("{}-roster: call {} was {!r}, expected {!r} ({} calls, {} expected)".format(
-                label, index + 1, have, want, len(got), len(roster))))
+            raise AssertionError("{}-roster: call {} is not the declared row ({} calls, {} expected; "
+                                 "no call value is printed)".format(
+                                     _cv("label", label), _n(index + 1), _n(len(got)), _n(len(roster))))
     copy = _check_copy(label, made, root, root)
     tools = Path(root).resolve() / "opf" / "tools"
     for call in calls:
         name = call["name"]
         where = Path(call["opf_root"]).resolve()
         if where != copy:
-            raise AssertionError(_scrub("{}-root: {} ran over {}, not the copy {}".format(label, name, where, copy)))
+            raise AssertionError("{}-root: {} ran over a directory that is not the copy".format(
+                _cv("label", label), _cv("member", name)))
         run_dir = Path(call["run_dir"]).resolve()
         if run_dir != copy.parent or call["entries"] != ["opf"]:
-            raise AssertionError(_scrub("{}-run-dir: {} ran in {} holding {!r}, not {} holding only the copy".format(
-                label, name, run_dir, call["entries"], copy.parent)))
+            raise AssertionError("{}-run-dir: {} ran in a directory that is not the one holding only "
+                                 "the copy".format(_cv("label", label), _cv("member", name)))
         for part, digest in call["payload"]:
             if digest is None or digest != _digest(tools / part):
-                raise AssertionError(_scrub("{}-payload: {} ran over a copy whose tools/{} is {}".format(
-                    label, name, part, "missing" if digest is None else "not the source's")))
+                raise AssertionError("{}-payload: {} ran over a copy whose tools/{} is {}".format(
+                    _cv("label", label), _cv("member", name), _cv("script", part),
+                    "missing" if digest is None else "not the source's"))
         fault = _env_fault(call["env"])
         if fault is not None:
-            raise AssertionError(_scrub("{}-env: {} ran with {}".format(label, name, fault)))
+            raise AssertionError("{}-env: {} ran with {}".format(
+                _cv("label", label), _cv("member", name), _cv("fault", fault)))
         if call["separate_streams"] is not separate_streams:
-            raise AssertionError(_scrub("{}-streams: {} ran with separate_streams={!r}".format(
-                label, name, call["separate_streams"])))
+            raise AssertionError("{}-streams: {} ran with the wrong separate_streams".format(
+                _cv("label", label), _cv("member", name)))
 
 
 # The recording child of _check_member_boundary, written as every member's script in a scratch copy:
@@ -894,6 +907,75 @@ _REPORT_FIELDS = ("argv", "isolated", "no_bytecode", "cwd", "entries", "env_leak
 
 # The only keyword arguments a launch through _launch_recorder may pass (_run_one's), sorted.
 _LAUNCH_KEYWORDS = ("cwd", "env", "stderr", "stdout", "timeout")
+
+# The static closed vocabularies _cv and _cvs draw identifiers from (see the CLOSED DIAGNOSTICS
+# comment at the top). Only fixed literals and names this file declares are members, so no
+# runtime value can enter one; "case", "flip" and the attribution kinds are read from the live
+# tables inside _cv instead.
+_CLOSED_LABELS = (
+    "closure/absent-subtree", "closure/absent-subtree-cannot-evaluate", "closure/absent-subtree-scratch",
+    "closure/adopt-observe-registration", "closure/adopt-observe-registration-not-red",
+    "closure/attribution-first-call", "closure/attribution-indirection", "closure/attribution-inventory",
+    "closure/attribution-pin", "closure/attribution-positions", "closure/attribution-stale-exclusion",
+    "closure/attribution-stale-indirection", "closure/attribution-stale-pin",
+    "closure/attribution-unpinned", "closure/attribution-walk", "closure/boundary-failed",
+    "closure/boundary-negative", "closure/boundary-run", "closure/boundary-run-env",
+    "closure/boundary-scratch", "closure/closed-sites", "closure/copy-before-members", "closure/copy-run",
+    "closure/declared-roster", "closure/entry-main", "closure/entry-points", "closure/entry-self-test",
+    "closure/env-canaries", "closure/env-canary", "closure/env-canary-descriptors",
+    "closure/env-canary-descriptors-kwargs", "closure/env-canary-kwargs", "closure/env-canary-launch",
+    "closure/env-canary-launch-argv", "closure/env-canary-launch-cwd", "closure/env-canary-m17",
+    "closure/env-canary-noise", "closure/env-canary-report", "closure/env-canary-report-child",
+    "closure/env-canary-scratch", "closure/env-canary-streams", "closure/evidence-streams",
+    "closure/failure-first", "closure/failure-first-listing", "closure/harness-cannot-evaluate",
+    "closure/harness-exit", "closure/harness-launch", "closure/harness-line",
+    "closure/harness-missing-script", "closure/harness-scratch", "closure/holds-code",
+    "closure/host-independence", "closure/host-independence-disclosure", "closure/host-independence-drift",
+    "closure/host-independence-red", "closure/host-independence-scratch", "closure/member",
+    "closure/member-bound-lookup", "closure/member-boundary", "closure/member-calls",
+    "closure/member-roster", "closure/member-timeout-rows",
+    "closure/member-timeout-rows-bad-bound-not-red", "closure/member-timeout-rows-not-red",
+    "closure/members-never-copied", "closure/members-never-ran", "closure/missing-input",
+    "closure/missing-input-empty", "closure/missing-input-no-opf-py", "closure/missing-input-nonexistent",
+    "closure/missing-input-scratch", "closure/negative-bound-lookup", "closure/negative-copy",
+    "closure/negative-copy-cannot-evaluate", "closure/negative-harness", "closure/negative-run",
+    "closure/negative-verdict", "closure/no-subtree", "closure/pack-manifest-registration",
+    "closure/pack-manifest-registration-not-red", "closure/pin-probe", "closure/pin-rules",
+    "closure/positive-root", "closure/positive-verdict", "closure/preflight-absent-scratch",
+    "closure/preflight-absent-subtree", "closure/preflight-collection", "closure/preflight-error",
+    "closure/preflight-failure-first", "closure/preflight-stop", "closure/red-bound-lookup",
+    "closure/run-one-timeout", "closure/scratch-and-copy-cannot-evaluate", "closure/scratch-harness",
+    "closure/scratch-run", "closure/self-test-exit", "closure/self-test-leg-verdicts",
+    "closure/self-test-leg-wiring", "closure/stubbed-label", "closure/stubbed-refutation",
+    "closure/stubbed-run", "closure/stubbed-sentinel", "closure/timeout-attribution",
+    "closure/timeout-cannot-evaluate", "closure/timeout-exit", "closure/timeout-line",
+    "closure/undecodable-attribution", "closure/undecodable-fixture",
+    "closure/undecodable-fixture-cannot-evaluate", "closure/undecodable-scratch",
+    "closure/undecodable-wiring",
+)
+_CLOSED_VOCABULARIES = dict((
+    ("label", frozenset(_CLOSED_LABELS)),
+    ("member", frozenset(row[0] for row in _DECLARED_ROSTER)),
+    ("script", frozenset(row[1] for row in _DECLARED_ROSTER) | frozenset(("opf.py",))),
+    ("probe", frozenset(("split.py", "carriage.py", "evidence.py", "evidence-zero.py", "sleeper.py",
+                         "no_such_member.py"))),
+    ("reason", frozenset((_TIMEOUT, _HARNESS))),
+    ("verdict", frozenset(("ok", "fail", "cannot", "caught"))),
+    ("fault", frozenset(("an environment that is not a dict",
+                         "an environment report that is not a list of names and a Boolean",
+                         "a leaked variable, or PYTHONDONTWRITEBYTECODE not equal to 1"))),
+    ("mismatch", frozenset(("argv (not the script path and its args)", "isolated (not 1)",
+                            "no_bytecode (not 1)", "cwd (not the directory holding the copy)",
+                            "entries (not exactly the copy)", "env_leaked (not an empty list of names)",
+                            "env_no_bytecode (not true)"))),
+    ("stream-fault", frozenset(("stdout (not the pipe mode)",
+                                "stderr (neither the pipe nor the merge mode)"))),
+    ("keyword", frozenset(_LAUNCH_KEYWORDS) | frozenset(("pass_fds", "close_fds", "stdin", "preexec_fn"))),
+    ("exception", _EXCEPTION_NAMES),
+    ("primitive", frozenset(("scratch allocation", "copy", "fixture write", "copied store read",
+                             "flip write", "store read", "child process"))),
+    ("text-name", frozenset(_CLOSED_TEXT_NAMES)),
+))
 
 
 def _report_mismatches(report, argv, where):
@@ -936,15 +1018,18 @@ def _launch_recorder(launches, label):
 
     def launch(cmd, **kwargs):
         if sorted(kwargs) != list(_LAUNCH_KEYWORDS):
-            raise AssertionError(_scrub("{}-kwargs: a launch with the keywords {!r} was refused before the child ran "
-                                 "(only {!r} are permitted)".format(label, sorted(kwargs), list(_LAUNCH_KEYWORDS))))
+            raise AssertionError("{}-kwargs: a launch with the keywords {} was refused before the child "
+                                 "ran (only the recorded launch keywords are permitted; a keyword "
+                                 "outside the closed vocabulary is not printed)".format(
+                                     _cv("label", label), _cvs("keyword", sorted(kwargs))))
         wrong = [field for field, held in (
             ("stdout (not the pipe mode)", kwargs["stdout"] == subprocess.PIPE),
             ("stderr (neither the pipe nor the merge mode)",
              kwargs["stderr"] in (subprocess.PIPE, subprocess.STDOUT))) if not held]
         if wrong:
-            raise AssertionError(_scrub("{}-streams: a launch whose {} was refused before the child ran; no "
-                                        "rejected stream value is printed".format(label, " and ".join(wrong))))
+            raise AssertionError("{}-streams: a launch whose {} was refused before the child ran; no "
+                                 "rejected stream value is printed".format(
+                                     _cv("label", label), _cvs("stream-fault", wrong)))
         proc = inner(cmd, stdin=subprocess.DEVNULL, **kwargs)
         launches.append((list(cmd), dict(kwargs), (proc.stdout or b"").decode("utf-8", "replace")))
         return proc
@@ -962,34 +1047,38 @@ def _check_launches(label, launches, made, source, root, roster, stderr):
     its argv as the script path and args, sys.flags.isolated and dont_write_bytecode set, a working
     directory that is the directory holding the copy and holds only "opf", and an environment that
     passes _env_fault (judged from the report's names and Boolean; the report carries no value).
-    Every refutation is formatted through _scrub, so an argument list, cwd, stream mode or timeout
-    the code under test passed is printed only with every current environment value replaced by a
-    placeholder; paths under the host's temporary directory (TMPDIR) and the paths of the
-    repository and of the interpreter (sys.executable) survive the scrubbing. Nothing a child
+    Every refutation emits only closed text: an argument list, cwd, path, stream mode or timeout
+    the code under test passed is never printed; the refutation names the member, the field and
+    the check that failed, and fixed counts only. Nothing a child
     supplied is printed: a child that gave no report is named with the byte count of its output,
     and a wrong report with that byte count and the fixed identifiers of the fields that failed
     and of the checks they failed (_report_mismatches), never a field's value."""
     copy = _check_copy(label, made, source, root)
     if len(launches) != len(roster):
-        raise AssertionError(_scrub("{}-launches: {} launches, expected {}".format(label, len(launches), len(roster))))
+        raise AssertionError("{}-launches: {} launches, expected {}".format(
+            _cv("label", label), _n(len(launches)), _n(len(roster))))
     for (cmd, kwargs, out), (name, script, args, bound) in zip(launches, roster):
         target = copy / "tools" / script
         if (cmd[:3] != [sys.executable, "-I", "-B"] or len(cmd) < 4 or Path(cmd[3]).resolve() != target
                 or cmd[4:] != list(args)):
-            raise AssertionError(_scrub("{}-argv: {} launched {!r}".format(label, name, cmd)))
+            raise AssertionError("{}-argv: {} launched a wrong argument list (no argument value is "
+                                 "printed)".format(_cv("label", label), _cv("member", name)))
         if sorted(kwargs) != ["cwd", "env", "stderr", "stdout", "timeout"]:
-            raise AssertionError(_scrub("{}-kwargs: {} launched with {!r}".format(label, name, sorted(kwargs))))
+            raise AssertionError("{}-kwargs: {} launched with wrong keyword names".format(
+                _cv("label", label), _cv("member", name)))
         if kwargs["cwd"] is None or Path(kwargs["cwd"]).resolve() != copy.parent:
-            raise AssertionError(_scrub("{}-cwd: {} launched in {!r}, not {}".format(label, name, kwargs["cwd"], copy.parent)))
+            raise AssertionError("{}-cwd: {} launched in a directory that is not the one holding the "
+                                 "copy".format(_cv("label", label), _cv("member", name)))
         fault = _env_fault(kwargs["env"])
         if fault is not None:
-            raise AssertionError(_scrub("{}-env: {} launched with {}".format(label, name, fault)))
+            raise AssertionError("{}-env: {} launched with {}".format(
+                _cv("label", label), _cv("member", name), _cv("fault", fault)))
         if kwargs["stdout"] != subprocess.PIPE or kwargs["stderr"] != stderr:
-            raise AssertionError(_scrub("{}-streams: {} launched with stdout={!r}, stderr={!r}".format(
-                label, name, kwargs["stdout"], kwargs["stderr"])))
+            raise AssertionError("{}-streams: {} launched with a wrong stdout or stderr mode".format(
+                _cv("label", label), _cv("member", name)))
         if kwargs["timeout"] != bound:
-            raise AssertionError(_scrub("{}-timeout: {} launched with timeout={!r}, not {}".format(
-                label, name, kwargs["timeout"], bound)))
+            raise AssertionError("{}-timeout: {} launched with a wrong timeout, not {}".format(
+                _cv("label", label), _cv("member", name), _n(bound)))
         lines = out.strip().splitlines()
         size = len(out.encode("utf-8", "replace"))
         try:
@@ -997,11 +1086,13 @@ def _check_launches(label, launches, made, source, root, roster, stderr):
         except (IndexError, ValueError):
             report = None
         if not isinstance(report, dict):
-            raise AssertionError(_scrub("{}-child: {} gave no report ({} bytes of output)".format(label, name, size)))
+            raise AssertionError("{}-child: {} gave no report ({} bytes of output)".format(
+                _cv("label", label), _cv("member", name), _n(size)))
         wrong = _report_mismatches(report, [cmd[3], *args], copy.parent)
         if wrong:
-            raise AssertionError(_scrub("{}-child: {} reported a wrong {} ({} bytes of output; no field value is "
-                                 "printed)".format(label, name, "; ".join(wrong), size)))
+            raise AssertionError("{}-child: {} reported a wrong {} ({} bytes of output; no field value "
+                                 "is printed)".format(_cv("label", label), _cv("member", name),
+                                                      _cvs("mismatch", wrong), _n(size)))
 
 
 class _CannotEvaluate(Exception):
@@ -1062,7 +1153,7 @@ def _harness_watch(broke):
             try:
                 return inner(*args, **kwargs)
             except refused as exc:
-                broke.append("{} failed: {}".format(what, exc))
+                broke.append((what, str(exc)))
                 raise
         return call
     return dict(
@@ -1096,12 +1187,17 @@ def _observed(label, call, injected=None):
             except (AssertionError, _CannotEvaluate) as exc:
                 outcome = None, exc
             except Exception as exc:
-                crash = AssertionError(_scrub("{}: the code under test raised {}: {}".format(
-                    label, type(exc).__name__, exc)))
+                crash = AssertionError("{}: the code under test raised {}{}".format(
+                    _cv("label", label), _cv("exception", type(exc).__name__),
+                    ": " + _PIN_MARKER if str(exc) == _PIN_MARKER else ""))
                 crash.__cause__ = exc
                 outcome = None, crash
     if broke:
-        raise _HarnessFailure(_scrub("{}: harness failure: {}".format(label, " | ".join(broke)))) from outcome[1]
+        raise _HarnessFailure("{}: harness failure: {} failed{}{}".format(
+            _cv("label", label), _cvs("primitive", sorted(set(what for what, _text in broke))),
+            " " + _PIN_MARKER if any(_PIN_MARKER in text for _what, text in broke) else "",
+            " " + _INJECT_MARKER if any(_INJECT_MARKER in text for _what, text in broke) else "")
+        ) from outcome[1]
     return outcome
 
 
@@ -1136,13 +1232,15 @@ def _stubbed_run(root, outcomes):
     except _HarnessFailure as exc:
         if not seen:
             raise
-        raise _HarnessFailure(_scrub("{}: run() exited {}: {}".format(
-            exc, seen[0][0], seen[0][2].strip().replace("\n", " | ")))) from exc
+        raise _HarnessFailure("closure/stubbed-run: run() exited {} after the watch saw {} fail".format(
+            _n(seen[0][0]),
+            _cvs("primitive", sorted(what for what in _CLOSED_VOCABULARIES["primitive"]
+                                      if what in str(exc))))) from exc
     rc, out, err = seen[0]
     if not calls:
-        raise AssertionError(_scrub("closure/stubbed-run: run() exited {} before any subset member ran, {}: {}".format(
-            rc, "with its copy built" if made else "without building its copy",
-            err.strip().replace("\n", " | "))))
+        raise AssertionError("closure/stubbed-run: run() exited {} before any subset member ran, "
+                             "{}".format(_n(rc),
+                                         "with its copy built" if made else "without building its copy"))
     _attributed("closure/member-calls", lambda: _check_member_calls(
         "closure/member", calls, made, root, False, _DECLARED_ROSTER))
     return rc, out, err, calls
@@ -1156,13 +1254,13 @@ def _check_timeout_mapping(root):
     rc, out, err, calls = _stubbed_run(root, outcomes)
     bounds = {call["name"]: call["timeout"] for call in calls}
     if bounds.get("opf-tooling-selftest") != 1800 or bounds.get("opf-homes-selftest") != 600:
-        raise AssertionError(_scrub("closure/member-bound-lookup: {!r}".format(bounds)))
+        raise AssertionError("closure/member-bound-lookup: a wrong bound was passed to a member")
     if rc != 2:
-        raise AssertionError(_scrub("closure/timeout-exit: run() returned {} for a timed-out member".format(rc)))
+        raise AssertionError("closure/timeout-exit: run() returned {} for a timed-out member".format(_n(rc)))
     lines = out.splitlines()
-    if _scrub("  {:32s} {}".format("opf-tooling-selftest", "TIMEOUT (cannot evaluate)")) not in lines:
+    if "  {:32s} {}".format("opf-tooling-selftest", "TIMEOUT (cannot evaluate)") not in lines:
         raise AssertionError("closure/timeout-line: no TIMEOUT (cannot evaluate) line")
-    if _scrub("CANNOT EVALUATE") not in err or _scrub("BROKEN") in err:
+    if "CANNOT EVALUATE" not in err or "BROKEN" in err:
         raise AssertionError("closure/timeout-attribution: a timeout was not reported as cannot-evaluate")
 
 
@@ -1192,12 +1290,15 @@ def _check_harness_mapping(root):
                 ("tools/" + name, "import sys\nE = {!r}\n{}sys.exit({})\n".format(
                     _FLIP_EVIDENCE, body, code).encode("utf-8")) for name, body, _want, code in children])
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/harness-scratch: could not build the harness fixture: {}".format(exc)))
+            raise _CannotEvaluate("closure/harness-scratch: could not build the harness fixture"
+                                  + (": " + _STUB_SCRATCH if _STUB_SCRATCH in str(exc) else "")
+                                  + (": " + _INJECT_MARKER if _INJECT_MARKER in str(exc) else ""))
 
         def missing_script():
             rc, _text, why = _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env())
             if (rc, why) != (2, _HARNESS):
-                raise AssertionError(_scrub("closure/harness-missing-script: {!r}".format((rc, why))))
+                raise AssertionError("closure/harness-missing-script: rc {} with cannot label {}".format(
+                    _n(rc), _cv("reason", why)))
         _attributed("closure/harness-missing-script", missing_script)
 
         bounds = []
@@ -1216,37 +1317,40 @@ def _check_harness_mapping(root):
         def killed():
             rc, _text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env(), timeout_s=1)
             if (rc, why) != (2, _TIMEOUT) or bounds != [1]:
-                raise AssertionError(_scrub("closure/run-one-timeout: {!r}".format((rc, why, bounds))))
+                raise AssertionError("closure/run-one-timeout: rc {} with cannot label {} and {} recorded "
+                                     "bound(s)".format(_n(rc), _cv("reason", why), _n(len(bounds))))
         _attributed("closure/run-one-timeout", killed, injected=stubbed(expire))
 
         def no_launch():
             rc, text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env())
             if (rc, why) != (2, _HARNESS) or "could not launch the interpreter" not in text:
-                raise AssertionError(_scrub("closure/harness-launch: {!r}".format((rc, why, text))))
+                raise AssertionError("closure/harness-launch: rc {} with cannot label {}".format(
+                    _n(rc), _cv("reason", why)))
         _attributed("closure/harness-launch", no_launch, injected=stubbed(refuse))
         for name, _body, want, code in children:
             def judge(name=name, want=want, code=code):
                 rc, text, why = _run_one(tmp, name, [], tmp, _isolated_env(), timeout_s=120,
                                          separate_streams=True)
                 if why is not None:
-                    raise AssertionError(_scrub("closure/evidence-streams: {} did not run to completion ({}) "
-                                         "with no host failure observed: {}".format(name, why, text)))
+                    raise AssertionError("closure/evidence-streams: {} did not run to completion ({}) "
+                                         "with no host failure observed".format(
+                                             _cv("probe", name), _cv("reason", why)))
                 if rc != code:
-                    raise AssertionError(_scrub("closure/evidence-streams: {} exited {}, _run_one gave {}".format(
-                        name, code, rc)))
+                    raise AssertionError("closure/evidence-streams: {} exited {}, _run_one gave {}".format(
+                        _cv("probe", name), _n(code), _n(rc)))
                 got = _negative_leg_verdict(rc, text, why)[0]
                 if got != want:
-                    raise AssertionError(_scrub("closure/evidence-streams: {} gave {}, expected {}".format(
-                        name, got, want)))
+                    raise AssertionError("closure/evidence-streams: {} gave {}, expected {}".format(
+                        _cv("probe", name), _cv("verdict", got), _cv("verdict", want)))
             _attributed("closure/evidence-streams", judge)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     outcomes = {"opf-drift-selftest": (2, "could not launch the interpreter: stubbed", _HARNESS)}
     rc, out, err, _calls = _stubbed_run(root, outcomes)
-    if rc != 2 or _scrub("BROKEN") in err:
-        raise AssertionError(_scrub("closure/harness-exit: run() returned {} for a harness error".format(rc)))
-    if _scrub("  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)")) not in out.splitlines():
+    if rc != 2 or "BROKEN" in err:
+        raise AssertionError("closure/harness-exit: run() returned {} for a harness error".format(_n(rc)))
+    if "  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)") not in out.splitlines():
         raise AssertionError("closure/harness-line: no HARNESS ERROR (cannot evaluate) line")
 
 
@@ -1257,13 +1361,13 @@ def _check_failure_first(root):
                 "opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
     rc, _out, err, _calls = _stubbed_run(root, outcomes)
     if rc != 1:
-        raise AssertionError(_scrub("closure/failure-first: run() returned {} for a failed member beside a "
-                             "timed-out one".format(rc)))
+        raise AssertionError("closure/failure-first: run() returned {} for a failed member beside a "
+                             "timed-out one".format(_n(rc)))
     lines = err.splitlines()
-    if (_scrub("  opf-drift-selftest (rc=1): ImportError: check_versions") not in lines
-            or _scrub("  opf-tooling-selftest [TIMEOUT]: timed out after 1800s") not in lines
-            or not any(line.startswith(_scrub("STANDALONE CLOSURE: BROKEN")) for line in lines)
-            or not any(line.startswith(_scrub("STANDALONE CLOSURE: CANNOT EVALUATE")) for line in lines)):
+    if ("  opf-drift-selftest (rc=1)" not in lines
+            or "  opf-tooling-selftest [TIMEOUT]" not in lines
+            or not any(line.startswith("STANDALONE CLOSURE: BROKEN") for line in lines)
+            or not any(line.startswith("STANDALONE CLOSURE: CANNOT EVALUATE") for line in lines)):
         raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
 
 
@@ -1311,17 +1415,19 @@ def _check_verdict_tables():
         ((1, (_FLIP_EVIDENCE[:20] + "\n", _FLIP_EVIDENCE[20:]), None), "fail"),
         ((2, ("timed out after 1800s", ""), _TIMEOUT), "cannot"),
     ]
-    for args, want in cases:
-        def judge(args=args, want=want):
+    for index, (args, want) in enumerate(cases):
+        def judge(index=index, args=args, want=want):
             got = _negative_leg_verdict(*args)[0]
             if got != want:
-                raise AssertionError(_scrub("closure/negative-verdict: {!r} gave {}, expected {}".format(args, got, want)))
+                raise AssertionError("closure/negative-verdict: case {} gave {}, expected {}".format(
+                    _n(index), _cv("verdict", got), _cv("verdict", want)))
         _attributed("closure/negative-verdict", judge)
     for rc, want in ((0, "ok"), (1, "fail"), (2, "cannot")):
         def judge(rc=rc, want=want):
             got = _positive_leg_verdict(rc)[0]
             if got != want:
-                raise AssertionError(_scrub("closure/positive-verdict: rc {} gave {}, expected {}".format(rc, got, want)))
+                raise AssertionError("closure/positive-verdict: rc {} gave {}, expected {}".format(
+                    _n(rc), _cv("verdict", got), _cv("verdict", want)))
         _attributed("closure/positive-verdict", judge)
 
 
@@ -1359,21 +1465,25 @@ def _check_leg_wiring(root):
             # leg's message) is malformed input: the flip cannot be made, so the case is
             # cannot-evaluate, naming the leg's own message.
             if not calls and _not_utf8(Path(root) / "opf" / "tools" / "_opf_store.py"):
-                raise _CannotEvaluate(_scrub("closure/self-test-exit: the flipped copy could not be built: {}".format(
-                    " | ".join(cannot))))
+                raise _CannotEvaluate("closure/self-test-exit: the flipped copy could not be built"
+                                      + (": " + _NEG_DECODE_ERROR
+                                         if any(text.startswith(_NEG_DECODE_ERROR) for text in cannot)
+                                         else ""))
             # The negative leg's own bound lookup: the flipped opf.py --self-test runs under its row.
             bounds = [(call["name"], call["timeout"]) for call in calls]
             if bounds != [("opf-tooling-selftest", 1800)]:
-                raise AssertionError(_scrub("closure/negative-bound-lookup: {!r}".format(bounds)))
+                raise AssertionError("closure/negative-bound-lookup: the flipped copy's one member call "
+                                     "or bound is wrong")
             # What the flipped copy's run executes: opf.py --self-test over the negative leg's own
             # copy, in its scratch directory, isolated, with the two streams captured apart.
             _check_member_calls("closure/negative-run", calls, made, root, True, _DECLARED_NEGATIVE)
             if [Path(where).resolve() for where in roots] != [Path(root).resolve()]:
-                raise AssertionError(_scrub("closure/positive-root: run() was given {!r}, expected {}".format(roots, root)))
+                raise AssertionError("closure/positive-root: run() was not given the root itself "
+                                     "exactly once")
             got = _captured(_self_test_exit, failures, cannot)[0]
             if got != want:
-                raise AssertionError(_scrub("closure/self-test-exit: run()={} flipped={!r} gave {}, expected {}".format(
-                    run_rc, neg, got, want)))
+                raise AssertionError("closure/self-test-exit: a wiring row gave {}, expected {}".format(
+                    _n(got), _n(want)))
         stub_run = (lambda rc, roots: (lambda where: roots.append(where) or rc))(run_rc, roots)
         with _ambient_sentinels():
             _attributed("closure/self-test-exit", wired, injected=(
@@ -1396,17 +1506,20 @@ def _expect_negative_cannot(label, legs, calls, prefix):
     cannot-evaluate message, starting with `prefix`, no member run, and a self-test exit of 2 over
     it. Anything else, a malformed `legs` included, refutes `label`."""
     failures, cannot = legs
-    if failures or calls or len(cannot) != 1 or not cannot[0].startswith(_scrub(prefix)):
-        raise AssertionError(_scrub("{}: {!r} with {} member call(s)".format(label, (failures, cannot), len(calls))))
+    if failures or calls or len(cannot) != 1 or not cannot[0].startswith(prefix):
+        raise AssertionError("{}: {} failure(s) and {} cannot-evaluate message(s) with {} member "
+                             "call(s), or a wrong prefix".format(
+                                 _cv("label", label), _n(len(failures)), _n(len(cannot)),
+                                 _n(len(calls))))
     if _captured(_self_test_exit, failures, cannot)[0] != 2:
-        raise AssertionError(_scrub("{}-exit: {!r}".format(label, cannot)))
+        raise AssertionError("{}-exit: not exit 2".format(_cv("label", label)))
 
 
 def _require_subtree(root):
     """Raise _CannotEvaluate unless root carries the opf/ subtree run() needs: a case built on the real
     subtree observes nothing without it, so its absence never reads as a refuted case."""
     if not (Path(root) / "opf" / "tools" / "opf.py").is_file():
-        raise _CannotEvaluate(_scrub("closure/no-subtree: opf/ subtree not found under {}".format(root)))
+        raise _CannotEvaluate("closure/no-subtree: opf/ subtree not found under the given root")
 
 
 def _no_scratch(*_args, **_kwargs):
@@ -1430,7 +1543,7 @@ def _check_scratch_and_copy_errors(root):
     subtree, so it is its own case (_check_negative_copy_error)."""
     no_scratch = types.SimpleNamespace(mkdtemp=_no_scratch)
     _expect_cannot(_check_harness_mapping, root,
-                   "closure/harness-scratch: could not build the harness fixture: no scratch directory (stubbed)",
+                   "closure/harness-scratch: could not build the harness fixture: " + _STUB_SCRATCH,
                    "closure/scratch-harness", injected=dict(tempfile=no_scratch))
 
     calls = []
@@ -1446,8 +1559,9 @@ def _check_scratch_and_copy_errors(root):
 
         def refused(label=label, cause=cause, calls=calls):
             rc, _out, err = _captured(run, root)
-            if rc != 2 or calls or _scrub(cause) not in err:
-                raise AssertionError(_scrub("{}: run() gave {} with {} member call(s)".format(label, rc, len(calls))))
+            if rc != 2 or calls or cause not in err:
+                raise AssertionError("{}: run() gave {} with {} member call(s)".format(
+                    _cv("label", label), _n(rc), _n(len(calls))))
         _attributed(label, refused, injected=dict(refusal, _run_one=_stub_member_runner(calls, {})))
 
 
@@ -1466,17 +1580,19 @@ def _expect_cannot(check, root, cause, label, injected=None):
     """check(root), through _observed with `injected` patched over the watch, must raise
     _CannotEvaluate naming `cause`: not pass, not refute a leg, not crash. A host failure that this
     call's own watch saw is cannot-evaluate (_HarnessFailure passes through); a _CannotEvaluate that
-    check(root) raised, a nested watch's included, is judged by its cause."""
+    check(root) raised, a nested watch's included, is judged by its cause. A check that refuted a
+    leg instead raises its own AssertionError as is (its text is closed by construction and the
+    attribution pins match on it)."""
     _result, got = _observed(label, lambda: check(root), injected)
     if got is None:
-        raise AssertionError(_scrub("{}: {} passed with nothing to evaluate".format(label, check.__name__)))
+        raise AssertionError("{}: {} passed with nothing to evaluate".format(
+            _cv("label", label), _cv("case", check.__name__)))
     if isinstance(got, _CannotEvaluate):
-        if _scrub(cause) not in str(got):
-            raise AssertionError(_scrub("{}: {} did not name the cause {!r}: {}".format(
-                label, check.__name__, cause, got)))
+        if cause not in str(got):
+            raise AssertionError("{}: {} did not name the expected cause".format(
+                _cv("label", label), _cv("case", check.__name__)))
         return
-    raise AssertionError(_scrub("{}: {} refuted a leg instead of cannot-evaluate: {}".format(
-        label, check.__name__, got)))
+    raise got
 
 
 def _check_absent_subtree(root):
@@ -1492,13 +1608,14 @@ def _check_absent_subtree(root):
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-absent-"))
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/absent-subtree-scratch: {}".format(exc)))
+            raise _CannotEvaluate("closure/absent-subtree-scratch: no scratch directory")
         absent = tmp / "no-opf-root"
-        _expect_cannot(_check_timeout_mapping, absent, str(absent), "closure/absent-subtree")
-        _expect_cannot(_check_harness_mapping, absent, str(absent), "closure/absent-subtree")
-        _expect_cannot(_check_failure_first, absent, str(absent), "closure/absent-subtree")
-        _expect_cannot(_check_leg_wiring, absent, str(absent), "closure/absent-subtree")
-        _expect_cannot(_check_scratch_and_copy_errors, absent, str(absent), "closure/absent-subtree")
+        _expect_cannot(_check_timeout_mapping, absent, "closure/no-subtree", "closure/absent-subtree")
+        _expect_cannot(_check_harness_mapping, absent, "closure/no-subtree", "closure/absent-subtree")
+        _expect_cannot(_check_failure_first, absent, "closure/no-subtree", "closure/absent-subtree")
+        _expect_cannot(_check_leg_wiring, absent, "closure/no-subtree", "closure/absent-subtree")
+        _expect_cannot(_check_scratch_and_copy_errors, absent, "closure/no-subtree",
+                       "closure/absent-subtree")
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1506,7 +1623,7 @@ def _check_absent_subtree(root):
     _require_subtree(root)
     # The refused copy sits OVER this call's watch and UNDER _stubbed_run's, so for _stubbed_run it
     # is a host failure.
-    _expect_cannot(_check_timeout_mapping, root, "could not materialize", "closure/copy-before-members",
+    _expect_cannot(_check_timeout_mapping, root, "the watch saw copy fail", "closure/copy-before-members",
                    injected=dict(_materialize=_broken_copy))
 
     def refused_rows(_subset, _table):
@@ -1517,9 +1634,11 @@ def _check_absent_subtree(root):
             ("closure/members-never-copied", dict(run=lambda _root: 0),
              "closure/stubbed-run: run() exited 0 before any subset member ran, without building its copy")):
         _result, got = _observed(label, lambda: _check_timeout_mapping(root), stub)
-        if type(got) is not AssertionError or not str(got).startswith(_scrub(want)):
-            raise AssertionError(_scrub("{}: a run() that ran no member gave {!r}, expected a refutation "
-                                 "starting {!r}".format(label, got, want)))
+        if type(got) is not AssertionError or not str(got).startswith(want):
+            if isinstance(got, AssertionError):
+                raise got
+            raise AssertionError("{}: a run() that ran no member gave the wrong outcome".format(
+                _cv("label", label)))
 
 
 def _check_missing_input(_root):
@@ -1534,7 +1653,7 @@ def _check_missing_input(_root):
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-missing-"))
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/missing-input-scratch: {}".format(exc)))
+            raise _CannotEvaluate("closure/missing-input-scratch: no scratch directory")
         for label, where, files in (
                 ("closure/missing-input-nonexistent", tmp / "no-such-root", None),
                 ("closure/missing-input-empty", tmp, None),
@@ -1544,13 +1663,14 @@ def _check_missing_input(_root):
                 try:
                     _write_fixture(where, files)
                 except OSError as exc:
-                    raise _CannotEvaluate(_scrub("{}: could not build the root: {}".format(label, exc)))
+                    raise _CannotEvaluate("{}: could not build the root".format(_cv("label", label)))
             calls = []
 
             def refused(label=label, where=where, calls=calls):
                 rc, _out, _err = _captured(run, where)
                 if rc != 2 or calls:
-                    raise AssertionError(_scrub("{}: run() gave {} with {} member call(s)".format(label, rc, len(calls))))
+                    raise AssertionError("{}: run() gave {} with {} member call(s)".format(
+                        _cv("label", label), _n(rc), _n(len(calls))))
             _attributed(label, refused, injected=dict(_run_one=_stub_member_runner(calls, {})))
     finally:
         if tmp is not None:
@@ -1591,13 +1711,14 @@ def _check_member_boundary(root):
             _write_fixture(failing, [("opf/tools/" + script, broken.get(script, _RECORDER.encode("utf-8")))
                                      for script in scripts])
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/boundary-scratch: could not build the fixture: {}".format(exc)))
+            raise _CannotEvaluate("closure/boundary-scratch: could not build the fixture")
         made, launches = [], []
 
         def boundary_run():
             rc = _captured(run, fixture)[0]
             if rc != 0:
-                raise AssertionError(_scrub("closure/boundary-run: run() exited {} over recording children".format(rc)))
+                raise AssertionError("closure/boundary-run: run() exited {} over recording "
+                                     "children".format(_n(rc)))
             _check_launches("closure/boundary-run", launches, made, fixture, root, _DECLARED_ROSTER,
                             subprocess.STDOUT)
         with _ambient_sentinels():
@@ -1608,8 +1729,9 @@ def _check_member_boundary(root):
         def boundary_negative():
             _failures, cannot = _closure_legs(fixture)
             if cannot or [Path(where).resolve() for where in roots] != [fixture.resolve()]:
-                raise AssertionError(_scrub("closure/boundary-negative: run() was given {!r}, cannot-evaluate {!r}".format(
-                    roots, cannot)))
+                raise AssertionError("closure/boundary-negative: run() was not given the fixture exactly "
+                                     "once, or a leg could not be evaluated ({} cannot-evaluate "
+                                     "message(s))".format(_n(len(cannot))))
             _check_launches("closure/boundary-negative", neg_launches, neg_made, fixture, root,
                             _DECLARED_NEGATIVE, subprocess.PIPE)
         with _ambient_sentinels():
@@ -1622,16 +1744,17 @@ def _check_member_boundary(root):
             rc, out, err = _captured(run, failing)
             lines, errs = out.splitlines(), err.splitlines()
             codes = dict((name, code) for name, (_script, _body, code) in failed.items())
-            wrong = [name for name, _script, _args, _bound in _DECLARED_ROSTER if _scrub("  {:32s} {}".format(
-                name, "FAILED rc={}".format(codes[name]) if name in codes else "OK")) not in lines]
+            wrong = [name for name, _script, _args, _bound in _DECLARED_ROSTER if "  {:32s} {}".format(
+                name, "FAILED rc={}".format(codes[name]) if name in codes else "OK") not in lines]
             heads = [index for index, line in enumerate(errs)
-                     if line.startswith(_scrub("STANDALONE CLOSURE: BROKEN "))]
+                     if line.startswith("STANDALONE CLOSURE: BROKEN ")]
             under = errs[heads[0] + 1:] if heads else []
             wrong += [name for name, code in codes.items()
-                      if not any(line.startswith(_scrub("  {} (rc={}): ".format(name, code))) for line in under)]
-            if rc != 1 or wrong or _scrub("CANNOT EVALUATE") in err:
-                raise AssertionError(_scrub("closure/boundary-failed: run() exited {} over a member that exits 1 and "
-                                     "one killed by SIGKILL, with wrong or missing lines for {!r}".format(rc, wrong)))
+                      if not any(line.startswith("  {} (rc={})".format(name, code)) for line in under)]
+            if rc != 1 or wrong or "CANNOT EVALUATE" in err:
+                raise AssertionError("closure/boundary-failed: run() exited {} over a member that exits "
+                                     "1 and one killed by SIGKILL, with wrong or missing lines for "
+                                     "{}".format(_n(rc), _cvs("member", wrong)))
         _attributed("closure/boundary-failed", boundary_failed)
     finally:
         if tmp is not None:
@@ -1639,8 +1762,8 @@ def _check_member_boundary(root):
 
 
 def _check_env_canaries(root):
-    """No diagnostic carries a value of the environment (every diagnostic is formatted through
-    _scrub, and closure/scrub-sites pins that structurally; this case observes it with a canary),
+    """No diagnostic carries a value of the environment (every diagnostic emits only closed text,
+    and closure/closed-sites pins that structurally; this case observes it with a canary),
     and no recorded launch writes to an inherited descriptor, while _ENV_CANARY is set in
     os.environ (beside _AMBIENT_SENTINELS). Each sub-check's refutation text, everything it
     printed, and every (stdout, stderr) pair any nested _captured collected while it ran
@@ -1648,7 +1771,8 @@ def _check_env_canaries(root):
     value; an AssertionError, _CannotEvaluate or _HarnessFailure a sub-check raises is scanned,
     with those captures, before it is re-raised:
     closure/env-canary-m17: _check_member_boundary with _isolated_env returning os.environ itself
-      is refuted at closure/boundary-run-env (an environment of the wrong type, named by its type);
+      is refuted at closure/boundary-run-env (an environment of the wrong type, named by a fixed
+      fault text);
       what run() printed inside the sub-check's own nested captures is scanned on the return path,
       and a raised _HarnessFailure or _CannotEvaluate is scanned before the re-raise;
     closure/env-canary-streams: a launch through _launch_recorder whose stdout is None, DEVNULL,
@@ -1669,14 +1793,17 @@ def _check_env_canaries(root):
       before the child runs: the child, which would create a marker file and start a grandchild
       that writes the canary's value to that descriptor, created nothing, nothing was recorded,
       and the sink stays empty; a permitted launch, while the sink's descriptor is inheritable,
-      starts a probe child that holds no descriptor that IS the sink (os.path.samestat against the
-      sink's path, so a number that is open in the child as another file never reads as held: the
-      probe asked about the number 0, open as the child's null stdin, must report not held) and
-      whose stdin is the null device (a recorder that dropped its stdin=DEVNULL is seen whenever
-      this process's own stdin is not the null device);
+      starts a probe child that holds no descriptor that IS the sink (the probe stats the sink's
+      path FIRST and reports an unreadable sink as such, which is cannot-evaluate here, never a
+      pass; only an fstat that fails with the closed-descriptor error EBADF establishes absence,
+      any other fstat error is cannot-evaluate too; os.path.samestat against the sink, so a number
+      that is open in the child as another file never reads as held: the probe asked about the
+      number 0, open as the child's null stdin, must report not held) and whose stdin is the null
+      device (a recorder that dropped its stdin=DEVNULL is seen whenever this process's own stdin
+      is not the null device);
     closure/env-canary-launch: _check_launches over a recorded launch whose cwd is the canary's
-      value, and over one whose argument list carries it, is refuted (-cwd, -argv) with the value
-      scrubbed from the refutation;
+      value, and over one whose argument list carries it, is refuted (-cwd, -argv) with no value
+      printed in the refutation;
     closure/env-canary-report: _check_launches passes a valid report (the control); over a launch
       whose output ends in a line that is not a report (the canary on the line before) it names the
       byte count only; over each report that is valid but for one of _REPORT_FIELDS, which holds
@@ -1708,13 +1835,17 @@ def _check_env_canaries(root):
                     "grandchild = 'import os, sys\\nos.write(int(sys.argv[1]), os.environ[{!r}].encode())\\n'\n"
                     "subprocess.run([sys.executable, '-I', '-c', grandchild, str(fd)],\n"
                     "               pass_fds=(fd,) if fd > 2 else (), timeout=60)\n").format(name).encode("utf-8")),
-                ("probe.py", b"import json, os, sys\ntry:\n    held = os.path.samestat(os.fstat(int(sys.argv[1])), "
-                             b"os.stat(sys.argv[2]))\nexcept OSError:\n    held = False\n"
+                ("probe.py", b"import errno, json, os, sys\n"
+                             b"try:\n    sink = os.stat(sys.argv[2])\nexcept OSError:\n"
+                             b"    print(json.dumps(dict(sink='unreadable')))\n    raise SystemExit(0)\n"
+                             b"try:\n    own = os.fstat(int(sys.argv[1]))\nexcept OSError as exc:\n"
+                             b"    held = False if exc.errno == errno.EBADF else None\nelse:\n"
+                             b"    held = os.path.samestat(own, sink)\n"
                              b"print(json.dumps(dict(held=held, "
                              b"stdin_null=os.path.samestat(os.fstat(0), os.stat(os.devnull)))))\n"),
                 ("sink", b"")])
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/env-canary-scratch: could not build the fixture: {}".format(exc)))
+            raise _CannotEvaluate("closure/env-canary-scratch: could not build the fixture")
 
         def carried(mark):
             return any(value in text for pair in _CAPTURE_LOG[mark:] for text in pair)
@@ -1722,16 +1853,20 @@ def _check_env_canaries(root):
         def judged(label, outcome, start, mark):
             got, out, err = outcome
             if value in str(got) or value in out or value in err or carried(mark):
-                raise AssertionError(_scrub("{}: a diagnostic or a captured stream carries the value of {}".format(
-                    label, name)))
+                raise AssertionError("{}: a diagnostic or a captured stream carries the canary "
+                                     "variable's value".format(_cv("label", label)))
             if isinstance(got, _CannotEvaluate):
                 raise got
             if start is None:
                 if got is not None:
-                    raise AssertionError(_scrub("{}: expected no refutation, got {!r}".format(label, str(got))))
-            elif not isinstance(got, AssertionError) or not str(got).startswith(_scrub(start)):
-                raise AssertionError(_scrub("{}: expected a refutation starting {!r}, got {!r}".format(
-                    label, start, str(got))))
+                    raise AssertionError("{}: expected no refutation".format(_cv("label", label)))
+            elif not isinstance(got, AssertionError) or not str(got).startswith(start):
+                raise AssertionError("{}: expected a refutation with the stated start, got another "
+                                     "outcome{}".format(
+                                         _cv("label", label),
+                                         " (the code under test raised: " + _PIN_MARKER + ")"
+                                         if "the code under test raised" in str(got)
+                                         and _PIN_MARKER in str(got) else ""))
 
         def attempt(label, fn):
             mark = len(_CAPTURE_LOG)
@@ -1739,8 +1874,16 @@ def _check_env_canaries(root):
                 result, out, err = _captured(_attributed, label, fn)
             except (AssertionError, _CannotEvaluate) as exc:
                 if value in str(exc) or carried(mark):
-                    raise AssertionError(_scrub("{}: a diagnostic or a captured stream carries the value of "
-                                                "{}".format(label, name))) from None
+                    raise AssertionError("{}: a diagnostic or a captured stream carries the canary "
+                                         "variable's value".format(_cv("label", label))) from None
+                raise
+            except BaseException:
+                # A terminating exception (SystemExit, KeyboardInterrupt) must not skip the
+                # capture scan: _captured kept the pair, so a canary printed before the
+                # termination is still caught (the alarm takes priority over the termination).
+                if carried(mark):
+                    raise AssertionError("{}: a captured stream carries the canary variable's "
+                                         "value".format(_cv("label", label))) from None
                 raise
             return result, out, err, mark
 
@@ -1767,8 +1910,8 @@ def _check_env_canaries(root):
                     root), injected=dict(_isolated_env=lambda: os.environ)))
             except (AssertionError, _CannotEvaluate) as exc:
                 if value in str(exc) or carried(mark):
-                    raise AssertionError(_scrub("closure/env-canary-m17: a diagnostic or a captured stream carries "
-                                                "the value of {}".format(name))) from None
+                    raise AssertionError("closure/env-canary-m17: a diagnostic or a captured stream "
+                                         "carries the canary variable's value") from None
                 raise
             judged("closure/env-canary-m17", (result[1], out, err), "closure/boundary-run-env: ", mark)
 
@@ -1782,8 +1925,8 @@ def _check_env_canaries(root):
                     env=dict(os.environ), stdout=stdout, stderr=stderr, timeout=120))
                 judged("closure/env-canary-streams", (got, out, err), "closure/env-canary-streams: ", mark)
                 if launches or marker.exists():
-                    raise AssertionError(_scrub("closure/env-canary-streams: the child ran (stream case {}; no "
-                                                "stream value is printed)".format(index)))
+                    raise AssertionError("closure/env-canary-streams: the child ran (stream case {}; no "
+                                         "stream value is printed)".format(_n(index)))
 
             launches, marker = [], tmp / "ran-missing-timeout"
             got, out, err, mark = attempt("closure/env-canary-kwargs", functools.partial(
@@ -1806,18 +1949,23 @@ def _check_env_canaries(root):
                     judged("closure/env-canary-descriptors", (got, out, err),
                            "closure/env-canary-descriptors-kwargs: ", mark)
                     if launches or marker.exists():
-                        raise AssertionError(_scrub("closure/env-canary-descriptors: the child ran with {}".format(
-                            keyword)))
+                        raise AssertionError("closure/env-canary-descriptors: the child ran with "
+                                             "{}".format(_cv("keyword", keyword)))
                 for number in (fd, 0):
                     launches = []
                     got, out, err, mark = attempt("closure/env-canary-descriptors",
                                                   functools.partial(permitted, launches, number))
+                    if isinstance(got, dict) and (got.get("sink") == "unreadable" or got.get("held") is None):
+                        raise _CannotEvaluate("closure/env-canary-descriptors: the probe could not "
+                                              "identify the sink, or its fstat failed with an error "
+                                              "other than the closed-descriptor one, so absence was "
+                                              "not established (cannot evaluate)")
                     if value in out or value in err or carried(mark) or got != dict(held=False, stdin_null=True):
-                        raise AssertionError(_scrub(
+                        raise AssertionError(
                             "closure/env-canary-descriptors: a permitted launch's child held a descriptor that is "
                             "the sink, a stdin other than the null device, or (asked about descriptor number {}) "
                             "read another file's descriptor as held".format(
-                                "0, its null stdin" if number == 0 else "the one it was handed")))
+                                "0, its null stdin" if number == 0 else "the one it was handed"))
             if sink.read_bytes():
                 raise AssertionError("closure/env-canary-descriptors: a descendant wrote to the sink's descriptor")
 
@@ -1865,9 +2013,8 @@ def _check_env_canaries(root):
                 try:
                     attempt("closure/env-canary-noise", noisy(exc_type))
                 except AssertionError as alarm:
-                    if value in str(alarm) or not str(alarm).startswith(_scrub("closure/env-canary-noise: ")):
-                        raise AssertionError(_scrub("closure/env-canary-noise: a wrong alarm: {!r}".format(
-                            str(alarm))))
+                    if value in str(alarm) or not str(alarm).startswith("closure/env-canary-noise: "):
+                        raise AssertionError("closure/env-canary-noise: a wrong alarm")
                 else:
                     raise AssertionError("closure/env-canary-noise: a callback that printed the canary and raised "
                                          "was not caught by the capture scan")
@@ -1876,64 +2023,93 @@ def _check_env_canaries(root):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-# Names a raise may pass to an exception without _scrub (closure/scrub-sites): each is a
-# module-level string literal that carries no environment value.
-_SCRUB_SAFE_NAMES = ("_PIN_MARKER",)
-
-# The sites closure/scrub-sites permits to format a non-literal value without _scrub, as (the
+# The sites closure/closed-sites permits although their arguments are not closed, as (the
 # qualname of the code holding the site, the callee's dotted name, the recorded reason). An entry
 # matching no site, a duplicate entry, or one with no reason is stale (a refutation).
-_SCRUB_SITE_EXCEPTIONS = (
-    ("<module>", "sys.stderr.write",
-     "the version guard runs before _scrub exists and formats only sys.version_info and "
-     "sys.executable (an exempt path)"),
+_CLOSED_SITE_EXCEPTIONS = (
+    ("_self_test_exit", "print",
+     "relays refutation and cannot-evaluate text that reaches it only as str() of exceptions this "
+     "module raised and of leg messages built at closed sites; every construction site is checked "
+     "by this walk, so the relayed text is closed by construction"),
+    ("_check_attribution_inventory", "_CannotEvaluate",
+     "joins cannot-evaluate texts its own entries appended at closed sites above; no other text "
+     "enters the list"),
+    ("_check_closed_sites", "AssertionError",
+     "every text it formats derives from this file's own source, its registries and its flip "
+     "table, never from a runtime value"),
     ("_check_harness_mapping.<locals>.expire", "subprocess.TimeoutExpired",
-     "a stubbed child kill: _run_one maps it to fixed text, and _harness_watch embeds it only in "
-     "a scrubbed _HarnessFailure"),
+     "a stubbed child kill whose arguments are a fixture command and bound: _run_one maps it to "
+     "fixed text, and the watch relays only the primitive's name and a marker"),
     ("_check_env_canaries.<locals>.noisy.<locals>.probe", "print",
      "prints the raw canary inside a capture on purpose, to prove the capture scan catches it"),
 )
 
+# Writer attributes a load of which, outside a call's callee position, is an alias the walk
+# cannot classify (closure/closed-sites refuses it).
+_ALIAS_WRITERS = ("sys.stdout.write", "sys.stderr.write", "os.write", "builtins.print")
 
-def _check_scrub_sites(_root):
-    """Structural pin of the scrubbing rule, over this file's own AST: every call to AssertionError,
-    _CannotEvaluate or _HarnessFailure (raised or not), every print, every sys.stderr.write or
-    sys.stdout.write, and every other raised constructor passes each argument as a constant, a
-    name in _SCRUB_SAFE_NAMES, or a _scrub(...) call; print's keywords other than file must be
-    constants. A site that formats a non-literal value any other way is refuted naming its
-    qualname, callee and line, unless _SCRUB_SITE_EXCEPTIONS records it with a reason; an entry
-    matching no site, a duplicate, or one with no reason is refuted as stale. So a new raise or
-    print that formats a value cannot bypass _scrub. Not seen: text handed to a raise through a
-    name (raise exc re-raises format nothing; the three constructors are checked wherever they
-    are called), writes through other descriptors, and an exception of another type, whose text
-    this module prints only through its own scrubbed outlets. A source that cannot be read is
-    cannot-evaluate."""
-    try:
-        source = Path(_THIS_FILE).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise _CannotEvaluate(_scrub("closure/scrub-sites: could not read this file's source: {}".format(exc)))
 
-    def callee(func):
-        if isinstance(func, ast.Name):
-            return func.id
-        parts, node = [], func
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if parts and isinstance(node, ast.Name):
-            return ".".join([node.id] + parts[::-1])
-        return "<dynamic>"
+def _callee_name(func):
+    """The dotted name of a call's callee node, or "<dynamic>" for one no name chain reaches."""
+    if isinstance(func, ast.Name):
+        return func.id
+    parts, node = [], func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if parts and isinstance(node, ast.Name):
+        return ".".join([node.id] + parts[::-1])
+    return "<dynamic>"
 
-    def formatted(node):
-        if isinstance(node, ast.Constant):
-            return False
-        if isinstance(node, ast.Name) and node.id in _SCRUB_SAFE_NAMES:
-            return False
-        return not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "_scrub")
 
-    checked = ("AssertionError", "_CannotEvaluate", "_HarnessFailure")
+def _closed_argument(node):
+    """True when `node` can evaluate only to closed text (closure/closed-sites): a str or int
+    constant (bool is not), a Name registered in _CLOSED_TEXT_NAMES, a call to a gate (_cv, _cvs,
+    _n) with positional arguments only (the gate closes them at run time), a .format(...) whose
+    receiver and every argument are closed, a + concatenation of closed pieces, or an if/else whose
+    both branches are closed (the test only chooses between closed texts, it cannot add one)."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, int)) and not isinstance(node.value, bool)
+    if isinstance(node, ast.Name):
+        return node.id in _CLOSED_TEXT_NAMES
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id in ("_cv", "_cvs", "_n"):
+            return not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args)
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "format"
+                and _closed_argument(node.func.value)):
+            return (not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args)
+                    and all(_closed_argument(arg) for arg in node.args))
+        return False
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _closed_argument(node.left) and _closed_argument(node.right)
+    if isinstance(node, ast.IfExp):
+        return _closed_argument(node.body) and _closed_argument(node.orelse)
+    return False
+
+
+def _closed_output_violations(tree):
+    """Every output call and exception constructor under `tree` that could carry unclosed text, as
+    (qualname, callee, line, why): a print (builtins.print included) whose positional argument, or
+    whose keyword other than a file= of sys.stdout or sys.stderr, is not closed (_closed_argument);
+    a sys.stdout.write or sys.stderr.write whose argument is not closed or that passes a keyword;
+    an os.write whose descriptor is not the constant 1 or 2 or whose data is not closed; any
+    logging or warnings call (this module never logs or warns); a call to a name in
+    _EXCEPTION_NAMES (a builtin exception, this module's, or TimeoutExpired), raised or built,
+    whose positional or keyword argument is not closed; any other RAISED constructor, checked the
+    same way whatever its name resolves to; and a load of print or of an _ALIAS_WRITERS attribute
+    outside a call's callee position (an alias a later call could write through, which the walk
+    cannot classify). Not seen: a raise of a bare name (re-raising formats nothing; construction
+    is checked wherever a recognized constructor is called), a BUILT exception whose class name is
+    not in _EXCEPTION_NAMES, and a write through a descriptor or an API not listed here."""
+    callee_funcs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            callee_funcs.add(id(node.func))
     found = []
+
+    def closed_call(child):
+        return (all(_closed_argument(arg) for arg in child.args)
+                and all(kw.arg is not None and _closed_argument(kw.value) for kw in child.keywords))
 
     def walk(node, qualname, prefix):
         for child in ast.iter_child_nodes(node):
@@ -1942,42 +2118,150 @@ def _check_scrub_sites(_root):
                 walk(child, own, own + ("." if isinstance(child, ast.ClassDef) else ".<locals>."))
                 continue
             if isinstance(child, ast.Call):
-                name = callee(child.func)
-                if name in checked and (any(formatted(arg) for arg in child.args) or child.keywords):
-                    found.append((qualname, name, child.lineno))
-                elif name == "print" and (any(formatted(arg) for arg in child.args)
-                                          or any(kw.arg != "file" and not isinstance(kw.value, ast.Constant)
-                                                 for kw in child.keywords)):
-                    found.append((qualname, name, child.lineno))
-                elif name in ("sys.stderr.write", "sys.stdout.write") and any(
-                        formatted(arg) for arg in child.args):
-                    found.append((qualname, name, child.lineno))
-            if isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call):
-                name = callee(child.exc.func)
-                if name not in checked and any(formatted(arg) for arg in child.exc.args):
-                    found.append((qualname, name, child.lineno))
+                name = _callee_name(child.func)
+                head, last = name.split(".")[0], name.split(".")[-1]
+                if name in ("print", "builtins.print"):
+                    wrong = [arg for arg in child.args if not _closed_argument(arg)]
+                    for kw in child.keywords:
+                        if kw.arg == "file":
+                            if _callee_name(kw.value) not in ("sys.stdout", "sys.stderr"):
+                                wrong.append(kw.value)
+                        elif kw.arg is None or not _closed_argument(kw.value):
+                            wrong.append(kw.value)
+                    if wrong:
+                        found.append((qualname, name, child.lineno, "unclosed print text"))
+                elif name in ("sys.stdout.write", "sys.stderr.write"):
+                    if child.keywords or not all(_closed_argument(arg) for arg in child.args):
+                        found.append((qualname, name, child.lineno, "unclosed stream write"))
+                elif name == "os.write":
+                    if (child.keywords or len(child.args) != 2
+                            or not (isinstance(child.args[0], ast.Constant)
+                                    and child.args[0].value in (1, 2))
+                            or not _closed_argument(child.args[1])):
+                        found.append((qualname, name, child.lineno,
+                                      "an os.write the walk cannot classify as closed"))
+                elif head in ("logging", "warnings"):
+                    found.append((qualname, name, child.lineno, "a logging or warnings call"))
+                elif last in _EXCEPTION_NAMES and not closed_call(child):
+                    found.append((qualname, name, child.lineno, "unclosed exception text"))
+            if (isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call)
+                    and _callee_name(child.exc.func).split(".")[-1] not in _EXCEPTION_NAMES
+                    and not closed_call(child.exc)):
+                found.append((qualname, _callee_name(child.exc.func), child.lineno,
+                              "unclosed raised-constructor text"))
+            if (isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                    and child.id == "print" and id(child) not in callee_funcs):
+                found.append((qualname, "print", child.lineno, "an aliased writer"))
+            if (isinstance(child, ast.Attribute) and _callee_name(child) in _ALIAS_WRITERS
+                    and id(child) not in callee_funcs):
+                found.append((qualname, _callee_name(child), child.lineno, "an aliased writer"))
             walk(child, qualname, prefix)
 
-    walk(ast.parse(source), "<module>", "")
-    matched = {}
-    for qualname, name, reason in _SCRUB_SITE_EXCEPTIONS:
+    walk(tree, "<module>", "")
+    return found
+
+
+# One snippet per recognized writer or constructor form: each must be flagged by
+# _closed_output_violations, so removing a recognizer fails closure/closed-sites.
+_CLOSED_FLIPS = (
+    ("print", "print(value)\n"),
+    ("print-star", "print(*values)\n"),
+    ("builtins-print", "import builtins\nbuiltins.print(value)\n"),
+    ("print-keyword", "print(1, end=value)\n"),
+    ("print-file", "print(1, file=handle)\n"),
+    ("stdout-write", "import sys\nsys.stdout.write(value)\n"),
+    ("stderr-write", "import sys\nsys.stderr.write(value)\n"),
+    ("os-write-1", "import os\nos.write(1, value)\n"),
+    ("os-write-2", "import os\nos.write(2, value)\n"),
+    ("os-write-other", "import os\nos.write(fd, b'x')\n"),
+    ("logging", "import logging\nlogging.error(1)\n"),
+    ("warnings", "import warnings\nwarnings.warn(1)\n"),
+    ("raised-positional", "raise AssertionError(value)\n"),
+    ("raised-keyword", "raise Wrapped(message=value)\n"),
+    ("raised-star", "raise AssertionError(*values)\n"),
+    ("raised-double-star", "raise Wrapped(**values)\n"),
+    ("built-constructor", "exc = AssertionError(value)\n"),
+    ("built-keyword", "exc = OSError(filename=value)\n"),
+    ("fstring", "raise AssertionError(f'x and more')\n"),
+    ("percent", "raise AssertionError('x: %s' % value)\n"),
+    ("str-of-value", "raise AssertionError(str(value))\n"),
+    ("format-of-value", "raise AssertionError('x {}'.format(value))\n"),
+    ("gate-keyword", "print(_cv('member', token=value))\n"),
+    ("aliased-print", "writer = print\n"),
+    ("aliased-builtins-print", "import builtins\nwriter = builtins.print\n"),
+    ("aliased-stdout-write", "import sys\nwriter = sys.stdout.write\n"),
+    ("aliased-stderr-write", "import sys\nwriter = sys.stderr.write\n"),
+    ("aliased-os-write", "import os\nwriter = os.write\n"),
+)
+
+# A snippet of every closed form, which _closed_output_violations must pass untouched.
+_CLOSED_CONTROL = (
+    "import sys\n"
+    "print('fixed', 2, _PIN_MARKER)\n"
+    "print('a: {}'.format(_cv('member', name)), file=sys.stderr)\n"
+    "sys.stderr.write('x ' + _n(count) + ('a' if flag else 'b'))\n"
+    "raise AssertionError('{} and {}'.format(_cvs('member', names), _n(3)))\n")
+
+
+def _check_closed_sites(_root):
+    """Structural pin of the closed-diagnostics rule (ruling D-428), over this file's own AST: every
+    print (builtins.print included), every sys.stdout.write and sys.stderr.write, every os.write to
+    a standard descriptor, every call to an exception class named in _EXCEPTION_NAMES (built or
+    raised) and every other raised constructor, keyword arguments included, passes each argument as
+    closed text (_closed_argument): a string or int constant, a module literal registered in
+    _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of
+    those; logging and warnings calls, an os.write the walk cannot classify, and a writer loaded
+    outside a call (an alias) are refused outright. A site failing the rule is refuted naming its
+    qualname, callee and line, unless _CLOSED_SITE_EXCEPTIONS records it with a reason; a stale
+    registry entry is refuted (an exception matching no site, a duplicate, one with no reason, or a
+    _CLOSED_TEXT_NAMES entry that is not one module-level string literal). Each recognized form
+    carries a flip in _CLOSED_FLIPS: the walk must flag every flip snippet and pass _CLOSED_CONTROL,
+    so removing a recognizer, or widening the closed grammar, fails here. Not seen (residuals,
+    stated in the module docstring too): a raise of a bare name, a BUILT exception whose class name
+    is not in _EXCEPTION_NAMES, a write through a descriptor or an API the walk does not list, and
+    the interpreter's own traceback on an uncaught exception. A source that cannot be read is
+    cannot-evaluate."""
+    try:
+        source = Path(_THIS_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise _CannotEvaluate("closure/closed-sites: could not read this file's source")
+    tree = ast.parse(source)
+    literal = set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            literal.add(node.targets[0].id)
+    stale_names = [name for name in _CLOSED_TEXT_NAMES if name not in literal]
+    if stale_names or len(set(_CLOSED_TEXT_NAMES)) != len(_CLOSED_TEXT_NAMES):
+        raise AssertionError("closure/closed-sites: a registered text name is not one module-level "
+                             "string literal, or is registered twice: {}".format(
+                                 _cvs("text-name", stale_names)))
+    matched = dict()
+    for qualname, name, reason in _CLOSED_SITE_EXCEPTIONS:
         if (qualname, name) in matched or not reason.strip():
-            raise AssertionError(_scrub("closure/scrub-sites: a duplicate exception entry, or one with no "
-                                        "reason: {} {}".format(qualname, name)))
+            raise AssertionError("closure/closed-sites: a duplicate exception entry, or one with no "
+                                 "reason: {} {}".format(qualname, name))
         matched[qualname, name] = 0
-    unscrubbed = []
-    for qualname, name, lineno in found:
+    unclosed = []
+    for qualname, name, lineno, why in _closed_output_violations(tree):
         if (qualname, name) in matched:
             matched[qualname, name] += 1
         else:
-            unscrubbed.append("{} {} (line {})".format(qualname, name, lineno))
-    if unscrubbed:
-        raise AssertionError(_scrub("closure/scrub-sites: a raise or print formats a non-literal value "
-                                    "outside _scrub: {}".format("; ".join(unscrubbed))))
+            unclosed.append("{} {} (line {}): {}".format(qualname, name, lineno, why))
+    if unclosed:
+        raise AssertionError("closure/closed-sites: an output call or exception constructor can carry "
+                             "unclosed text: {}".format("; ".join(unclosed)))
     stale = ["{} {}".format(*key) for key, count in matched.items() if count == 0]
     if stale:
-        raise AssertionError(_scrub("closure/scrub-sites: a recorded exception matches no site: {}".format(
-            "; ".join(stale))))
+        raise AssertionError("closure/closed-sites: a recorded exception matches no site: {}".format(
+            "; ".join(stale)))
+    for flip, snippet in _CLOSED_FLIPS:
+        if not _closed_output_violations(ast.parse(snippet)):
+            raise AssertionError("closure/closed-sites: the walk passed the {} flip, so that writer "
+                                 "form is no longer recognized".format(_cv("flip", flip)))
+    if _closed_output_violations(ast.parse(_CLOSED_CONTROL)):
+        raise AssertionError("closure/closed-sites: the walk refused the closed control snippet")
 
 
 def _check_entry_points():
@@ -1997,8 +2281,8 @@ def _check_entry_points():
             rc = _captured(self_test_main)[0]
             expected = [("preflight", root)] + ([("legs", root)] if pre is None else [])
             if rc != want or seen != expected:
-                raise AssertionError(_scrub("closure/entry-self-test: preflight {!r}, legs {!r} gave {!r} after {!r}".format(
-                    pre, legs, rc, seen)))
+                raise AssertionError("closure/entry-self-test: a wiring row gave the wrong exit or "
+                                     "call order")
         _attributed("closure/entry-self-test", entry, injected=dict(
             repo_root=lambda: root,
             _preflight_exit=lambda where, pre=pre, seen=seen: seen.append(("preflight", where)) or pre,
@@ -2010,7 +2294,7 @@ def _check_entry_points():
         def entry(argv=argv, want=want, expected=expected, seen=seen):
             rc = _captured(main)[0]
             if rc != want or seen != expected:
-                raise AssertionError(_scrub("closure/entry-main: argv {!r} gave {!r} after {!r}".format(argv, rc, seen)))
+                raise AssertionError("closure/entry-main: an argv row gave the wrong exit or call order")
         _attributed("closure/entry-main", entry, injected=dict(
             sys=_Overlay(sys, argv=argv), repo_root=lambda: root,
             self_test_main=lambda seen=seen: seen.append(("self-test",)) or 7,
@@ -2032,7 +2316,8 @@ def _check_undecodable_fixture(_root):
             fixture = tmp / "root"
             _write_fixture(fixture, (("opf/tools/opf.py", b""), ("opf/tools/_opf_store.py", b"\xff")))
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/undecodable-scratch: could not build the fixture: {}".format(exc)))
+            raise _CannotEvaluate("closure/undecodable-scratch: could not build the fixture"
+                                  + (": " + _INJECT_MARKER if _INJECT_MARKER in str(exc) else ""))
         calls = []
         _attributed("closure/undecodable-fixture", lambda: _expect_negative_cannot(
             "closure/undecodable-fixture", _closure_legs(fixture), calls, _NEG_DECODE_ERROR), injected=dict(
@@ -2054,19 +2339,19 @@ def _failing_harness(scratch_at=None, copy_at=None, write_at=None):
     def mkdtemp(*args, **kwargs):
         count["scratch"] += 1
         if count["scratch"] == scratch_at:
-            raise OSError(_scrub("injected allocation failure #{}".format(scratch_at)))
+            raise OSError(_INJECT_MARKER)
         return inner_tempfile.mkdtemp(*args, **kwargs)
 
     def materialize(opf_src, dest):
         count["copy"] += 1
         if count["copy"] == copy_at:
-            raise OSError(_scrub("injected copy failure #{}".format(copy_at)))
+            raise OSError(_INJECT_MARKER)
         return inner_materialize(opf_src, dest)
 
     def write_fixture(base, files):
         count["write"] += 1
         if count["write"] == write_at:
-            raise OSError(_scrub("injected fixture write failure #{}".format(write_at)))
+            raise OSError(_INJECT_MARKER)
         return inner_write(base, files)
     return dict(tempfile=types.SimpleNamespace(mkdtemp=mkdtemp), _materialize=materialize,
                 _write_fixture=write_fixture)
@@ -2101,18 +2386,22 @@ def _check_undecodable_attribution(_root):
         ("scratch_at=3", lambda: _failing_harness(scratch_at=3), _CannotEvaluate, "injected"),
         ("copy_at=2", lambda: _failing_harness(copy_at=2), _CannotEvaluate, "injected"),
         ("crash", lambda: dict(_closure_legs=crash), AssertionError,
-         "closure/undecodable-fixture: the code under test raised UnboundLocalError: stubbed crash"),
+         "closure/undecodable-fixture: the code under test raised UnboundLocalError"),
         ("wrong-result", lambda: dict(_closure_legs=wrong_result), AssertionError,
          "closure/undecodable-fixture: "),
         ("wiring-crash", lambda: dict(_check_leg_wiring=wiring_crash), AssertionError,
-         "closure/undecodable-wiring: the code under test raised RuntimeError: stubbed wiring crash"),
+         "closure/undecodable-wiring: the code under test raised RuntimeError"),
     ]
-    for name, patches, want_type, want_text in runs:
+    for index, (name, patches, want_type, want_text) in enumerate(runs):
         _result, got = _observed("closure/undecodable-attribution", lambda: _check_undecodable_fixture(None),
                                  patches)
-        if not isinstance(got, want_type) or _scrub(want_text) not in str(got):
-            raise AssertionError(_scrub("closure/undecodable-attribution: {} gave {!r}, expected {} naming {!r}".format(
-                name, got, want_type.__name__, want_text)))
+        if not isinstance(got, want_type) or want_text not in str(got):
+            raise AssertionError("closure/undecodable-attribution: run {} gave the wrong outcome, or "
+                                 "one not naming its expected text{}".format(
+                                     _n(index),
+                                     " (the code under test raised: " + _PIN_MARKER + ")"
+                                     if "the code under test raised" in str(got)
+                                     and _PIN_MARKER in str(got) else ""))
 
     tmp = None
     try:
@@ -2120,13 +2409,15 @@ def _check_undecodable_attribution(_root):
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-utf8-"))
             _write_fixture(tmp, (("opf/tools/opf.py", b""), ("opf/tools/_opf_store.py", b"")))
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/undecodable-attribution: could not build the UTF-8 fixture: {}".format(
-                exc)))
+            raise _CannotEvaluate("closure/undecodable-attribution: could not build the UTF-8 fixture")
         _result, got = _observed("closure/undecodable-attribution", lambda: _check_leg_wiring(tmp),
                                  dict(_closure_legs=wrong_result))
-        if type(got) is not AssertionError or not str(got).startswith(_scrub("closure/negative-bound-lookup")):
-            raise AssertionError(_scrub("closure/undecodable-attribution: wiring wrong-result gave {!r}, expected the "
-                                 "closure/negative-bound-lookup refutation".format(got)))
+        if type(got) is not AssertionError or not str(got).startswith("closure/negative-bound-lookup"):
+            raise AssertionError("closure/undecodable-attribution: wiring wrong-result did not give "
+                                 "the closure/negative-bound-lookup refutation{}".format(
+                                     " (the code under test raised: " + _PIN_MARKER + ")"
+                                     if "the code under test raised" in str(got)
+                                     and _PIN_MARKER in str(got) else ""))
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2161,24 +2452,25 @@ def _check_preflight_collection():
     runs = (
         (((None, _cannot_case), sentinel), 2, ["closure/stubbed-run: stubbed"], ["sentinel"]),
         (((None, _rootless(_boom_case)), sentinel), 2,
-         ["closure/preflight-error: _boom_case raised RuntimeError: boom (stubbed)"], ["sentinel"]),
+         ["closure/preflight-error: _boom_case raised RuntimeError"], ["sentinel"]),
         ((("closure/stubbed-label", _rootless(_boom_case)), sentinel), 2,
-         ["closure/preflight-error: closure/stubbed-label raised RuntimeError: boom (stubbed)"], ["sentinel"]),
+         ["closure/preflight-error: closure/stubbed-label raised RuntimeError"], ["sentinel"]),
         (((None, _undecodable_case), (None, _refuting_case), sentinel), 1,
-         ["closure/preflight-error: _undecodable_case raised UnicodeDecodeError: "], ["refute", "sentinel"]),
+         ["closure/preflight-error: _undecodable_case raised UnicodeDecodeError"], ["refute", "sentinel"]),
     )
     for cases, want_rc, want_cannot, want_ran in runs:
         del ran[:]
         rc, _out, err = _attributed("closure/preflight-collection", lambda: _captured(_preflight_exit, None),
                                     injected=dict(_PREFLIGHT_CASES=cases))
         lines = err.splitlines()
-        cannot_head = _scrub("SELF-TEST CANNOT EVALUATE: ")
+        cannot_head = "SELF-TEST CANNOT EVALUATE: "
         unevaluated = [line[len(cannot_head):] for line in lines if line.startswith(cannot_head)]
-        refuted = [line for line in lines if line.startswith(_scrub("SELF-TEST FAIL: "))]
+        refuted = [line for line in lines if line.startswith("SELF-TEST FAIL: ")]
         if (rc != want_rc or ran != want_ran or len(unevaluated) != len(want_cannot)
-                or not all(got.startswith(_scrub(want)) for got, want in zip(unevaluated, want_cannot))
-                or refuted != ([_scrub("SELF-TEST FAIL: closure/stubbed-refutation")] if want_rc == 1 else [])):
-            raise AssertionError(_scrub("closure/preflight-collection: gave {} after {!r}: {!r}".format(rc, ran, lines)))
+                or not all(got.startswith(want) for got, want in zip(unevaluated, want_cannot))
+                or refuted != (["SELF-TEST FAIL: closure/stubbed-refutation"] if want_rc == 1 else [])):
+            raise AssertionError("closure/preflight-collection: a collection row gave the wrong exit, "
+                                 "case order or lines ({} given)".format(_n(rc)))
     for stop in (KeyboardInterrupt, SystemExit):
         def _stop_case(_root, stop=stop):
             raise stop("stubbed")
@@ -2188,12 +2480,17 @@ def _check_preflight_collection():
                         injected=dict(_PREFLIGHT_CASES=((None, _stop_case), sentinel)))
         except stop:
             pass
-        except BaseException as exc:
-            raise AssertionError(_scrub("closure/preflight-stop: {} became {!r}".format(stop.__name__, exc)))
+        except AssertionError:
+            raise
+        except BaseException:
+            raise AssertionError("closure/preflight-stop: {} became another exception".format(
+                _cv("exception", stop.__name__)))
         else:
-            raise AssertionError(_scrub("closure/preflight-stop: {} did not stop the collection".format(stop.__name__)))
+            raise AssertionError("closure/preflight-stop: {} did not stop the collection".format(
+                _cv("exception", stop.__name__)))
         if ran:
-            raise AssertionError(_scrub("closure/preflight-stop: {} ran {!r} after the stop".format(stop.__name__, ran)))
+            raise AssertionError("closure/preflight-stop: {} did not stop the collection before a later "
+                                 "case".format(_cv("exception", stop.__name__)))
 
 
 def _check_preflight_failure_first(root):
@@ -2221,20 +2518,20 @@ def _check_preflight_failure_first(root):
         rc, _out, err = _attributed("closure/preflight-failure-first", lambda: _captured(_preflight_exit, root),
                                     injected=dict(tempfile=no_scratch, _PREFLIGHT_CASES=cases, **patches))
         lines = err.splitlines()
-        refuted = [line for line in lines if line.startswith(_scrub("SELF-TEST FAIL: "))]
-        unevaluated = [line for line in lines if line.startswith(_scrub("SELF-TEST CANNOT EVALUATE: "))]
-        wrong_refutation = any(not line.startswith(_scrub("SELF-TEST FAIL: closure/negative-verdict"))
+        refuted = [line for line in lines if line.startswith("SELF-TEST FAIL: ")]
+        unevaluated = [line for line in lines if line.startswith("SELF-TEST CANNOT EVALUATE: ")]
+        wrong_refutation = any(not line.startswith("SELF-TEST FAIL: closure/negative-verdict")
                                for line in refuted)
         if rc != want or not unevaluated or bool(refuted) != (want == 1) or wrong_refutation:
-            raise AssertionError(_scrub("closure/preflight-failure-first: {} gave {}, expected {}: {!r}".format(
-                "substring mutant" if patches else "scratch failure alone", rc, want, lines)))
+            raise AssertionError("closure/preflight-failure-first: {} gave {}, expected {}".format(
+                "substring mutant" if patches else "scratch failure alone", _n(rc), _n(want)))
 
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-preflight-absent-"))
         except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/preflight-absent-scratch: {}".format(exc)))
+            raise _CannotEvaluate("closure/preflight-absent-scratch: no scratch directory")
         rc, _out, err = _attributed("closure/preflight-absent-subtree",
                                     lambda: _captured(_preflight_exit, tmp / "no-opf-root"),
                                     injected=dict(_PREFLIGHT_CASES=cases))
@@ -2242,10 +2539,10 @@ def _check_preflight_failure_first(root):
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     lines = err.splitlines()
-    if (rc != 2 or any(line.startswith(_scrub("SELF-TEST FAIL: ")) for line in lines)
-            or not any(line.startswith(_scrub("SELF-TEST CANNOT EVALUATE: ")) for line in lines)):
-        raise AssertionError(_scrub("closure/preflight-absent-subtree: a root with no opf/ gave {}: {!r}".format(
-            rc, lines)))
+    if (rc != 2 or any(line.startswith("SELF-TEST FAIL: ") for line in lines)
+            or not any(line.startswith("SELF-TEST CANNOT EVALUATE: ") for line in lines)):
+        raise AssertionError("closure/preflight-absent-subtree: a root with no opf/ gave {}".format(
+            _n(rc)))
 
 
 # The value the host-independence child's USER, LOGNAME and HOME carry, chosen so that it appears
@@ -2253,83 +2550,114 @@ def _check_preflight_failure_first(root):
 # carries anything of the host this process runs on.
 _HOSTIND_CANARY = "canaryuser"
 
-# The host-independence child: runs the cases the scrubber's whole-path exemption protects, with
-# _preflight_exit's attribution (an AssertionError is that case's refutation, a _CannotEvaluate is
-# its cannot-evaluate) and _self_test_exit's verdict. Written into the scratch fixture and run
-# with the manipulated environment; what it prints, this module's cases print scrubbed there.
+# The host-independence child: with "cases" it runs the named preflight cases over this module,
+# with _preflight_exit's attribution (an AssertionError is that case's refutation, a
+# _CannotEvaluate its cannot-evaluate) and _self_test_exit's verdict; with "probe" (the red leg)
+# it calls _require_subtree over a missing root and prints what it raised RAW, so the parent's
+# scan can observe what a diagnostic reverted to interpolate a value would disclose.
 _HOSTIND_RUNNER = (
     "import sys\n"
+    "sys.path.insert(0, sys.argv[2])\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "import check_opf_standalone_closure as closure\n"
+    "if sys.argv[3] == 'probe':\n"
+    "    try:\n"
+    "        closure._require_subtree(sys.argv[4])\n"
+    "    except closure._CannotEvaluate as exc:\n"
+    "        print(exc)\n"
+    "        sys.exit(2)\n"
+    "    sys.exit(0)\n"
     "failures, cannot = [], []\n"
-    "cases = ((\"closure/absent-subtree-cannot-evaluate\", closure._check_absent_subtree),\n"
-    "         (\"closure/preflight-failure-first\", closure._check_preflight_failure_first),\n"
-    "         (\"closure/env-canaries\", closure._check_env_canaries))\n"
+    "cases = (('closure/absent-subtree-cannot-evaluate', closure._check_absent_subtree),\n"
+    "         ('closure/preflight-failure-first', closure._check_preflight_failure_first),\n"
+    "         ('closure/env-canaries', closure._check_env_canaries))\n"
     "for label, case in cases:\n"
     "    try:\n"
-    "        case(sys.argv[2])\n"
+    "        case(sys.argv[4])\n"
     "    except closure._CannotEvaluate as exc:\n"
-    "        cannot.append(\"{}: {}\".format(label, exc))\n"
+    "        cannot.append('{}: {}'.format(label, exc))\n"
     "    except AssertionError as exc:\n"
-    "        failures.append(\"{}: {}\".format(label, exc))\n"
+    "        failures.append('{}: {}'.format(label, exc))\n"
     "sys.exit(closure._self_test_exit(failures, cannot))\n")
+
+# The one diagnostic the host-independence red leg reverts to interpolate a runtime value: a COPY
+# of this module (this file is never changed) has every occurrence of the first text replaced by
+# the second. The first text no longer appearing in the source is fixture drift (a refutation):
+# the red leg has lost the site it exists to revert.
+_HOSTIND_FLIP_OLD = (
+    'raise _CannotEvaluate("closure/no-subtree: opf/ subtree not found under the given root")')
+_HOSTIND_FLIP_NEW = (
+    'raise _CannotEvaluate("closure/no-subtree: opf/ subtree not found under {}".format(root))')
 
 
 def _check_host_value_independence(root):
-    """The cases the scrubber's whole-path exemption protects pass on a host whose user name
-    appears in its temporary directory's path, and that user name is still never disclosed
-    outside such a path. A child interpreter runs _check_absent_subtree (closure/absent-subtree),
-    _check_preflight_failure_first (closure/preflight-absent-subtree) and _check_env_canaries
-    over this module, with USER, LOGNAME and HOME set to _HOSTIND_CANARY and TMPDIR a fresh
-    directory whose path carries that value (<scratch>/canaryuser/tmp): the shape whose paths the
-    scrubber's substring replacement rewrote before the whole-path exemption, failing
-    closure/absent-subtree on such a host. The child must exit 0. Its output, with every whole
-    path token that is, or lies under, the child's TMPDIR removed (_path_spans_pattern, the token
-    rule _scrub exempts), must not carry the value: inside such a path the value is the stated
-    TMPDIR exception, anywhere else it is a disclosure (refuted by count, the output not
-    printed). A child exit of 2 is cannot-evaluate (the child's cases observed nothing to judge);
-    any other non-zero exit is a refutation naming the exit and the output's last lines. Needs a
-    scratch directory and the opf/ subtree (the child's absent-subtree case needs the real
-    subtree for its later sub-checks). _check_preflight_failure_first leaves this case out of the
-    cases it runs: the child runs that case, so running this one there would recurse through a
-    child of a child. A host failure building the fixture, or one the watch sees at the launch
-    (an OSError, or a child that did not finish within its bound), is cannot-evaluate."""
+    """Closed diagnostics make the self-test host-value independent, shown in both directions
+    (ruling D-428 E). Green leg: a child interpreter runs _check_absent_subtree,
+    _check_preflight_failure_first and _check_env_canaries over this module, with USER, LOGNAME and
+    HOME set to _HOSTIND_CANARY and TMPDIR a fresh directory whose path carries that value
+    (<scratch>/canaryuser/tmp), under a minimal controlled environment; the child must exit 0
+    (PASS), and no value of that environment of length 4 or more may appear ANYWHERE in either of
+    its streams, captured apart (there is no path exemption left to carve out: a closed diagnostic
+    names a path's role, never the path). A disclosure is refuted by occurrence count; the output
+    is not printed. Red leg: a copy of this module with ONE diagnostic reverted to interpolate a
+    runtime value (_HOSTIND_FLIP_OLD -> _HOSTIND_FLIP_NEW) is driven over a missing root under that
+    TMPDIR in the same environment; the same scan must now FIND the value and the probe must exit
+    2, or the case is refuted: a scan that cannot see an interpolating diagnostic would prove
+    nothing. A green-leg exit of 2 is cannot-evaluate (the child's cases observed nothing to
+    judge); any other non-zero green exit is a refutation naming the exit only. Needs a scratch
+    directory and the opf/ subtree (the child's absent-subtree case needs the real subtree for its
+    later sub-checks). _check_preflight_failure_first leaves this case out of the cases it runs:
+    the child runs that case, so running this one there would recurse through a child of a child.
+    A host failure building the fixture, or one the watch sees at a launch (an OSError, or a child
+    that did not finish within its bound), is cannot-evaluate."""
     _require_subtree(root)
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-hostind-"))
             child_tmp = tmp / _HOSTIND_CANARY / "tmp"
+            source = Path(_THIS_FILE).read_text(encoding="utf-8")
+            flipped = source.replace(_HOSTIND_FLIP_OLD, _HOSTIND_FLIP_NEW)
             _write_fixture(tmp, [("runner.py", _HOSTIND_RUNNER.encode("utf-8")),
+                                 ("mutant/check_opf_standalone_closure.py", flipped.encode("utf-8")),
                                  (_HOSTIND_CANARY + "/tmp/.keep", b"")])
-        except OSError as exc:
-            raise _CannotEvaluate(_scrub("closure/host-independence-scratch: could not build the fixture: "
-                                         "{}".format(exc)))
-        env = dict(os.environ)
-        for key in ("TMPDIR", "TEMP", "TMP"):
-            env.pop(key, None)
-        env.update(TMPDIR=str(child_tmp), USER=_HOSTIND_CANARY, LOGNAME=_HOSTIND_CANARY,
-                   HOME=_HOSTIND_CANARY)
+        except (OSError, UnicodeError):
+            raise _CannotEvaluate("closure/host-independence-scratch: could not build the fixture")
+        if flipped == source:
+            raise AssertionError("closure/host-independence-drift: the reverted diagnostic's text was "
+                                 "not found in this file's source (fixture drift)")
+        env = dict(TMPDIR=str(child_tmp), USER=_HOSTIND_CANARY, LOGNAME=_HOSTIND_CANARY,
+                   HOME=_HOSTIND_CANARY, PYTHONDONTWRITEBYTECODE="1")
+        values = sorted(set(value for value in env.values() if len(value) >= 4))
+        tools = str(Path(_THIS_FILE).resolve().parent)
+
+        def launch(primary, mode, where):
+            proc = subprocess.run([sys.executable, "-I", "-B", str(tmp / "runner.py"), primary,
+                                   tools, mode, where],
+                                  cwd=str(tmp), env=env, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+            return proc.returncode, tuple((data or b"").decode("utf-8", "replace")
+                                          for data in (proc.stdout, proc.stderr))
 
         def independent():
-            proc = subprocess.run([sys.executable, "-I", "-B", str(tmp / "runner.py"),
-                                   str(Path(_THIS_FILE).resolve().parent), str(root)],
-                                  cwd=str(tmp), env=env, stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
-            text = (proc.stdout or b"").decode("utf-8", "replace")
-            outside = _path_spans_pattern((child_tmp, child_tmp.resolve())).sub("", text)
-            if _HOSTIND_CANARY in outside:
-                raise AssertionError(_scrub("closure/host-independence-disclosure: the child's output carries "
-                                            "the canary user name outside a path under its TMPDIR ({} "
-                                            "occurrence(s); the output is not printed)".format(
-                                                outside.count(_HOSTIND_CANARY))))
-            tail = " | ".join(text.splitlines()[-3:])
-            if proc.returncode == 2:
-                raise _CannotEvaluate(_scrub("closure/host-independence: the child could not evaluate its "
-                                             "cases: {}".format(tail)))
-            if proc.returncode != 0:
-                raise AssertionError(_scrub("closure/host-independence: the cases gave {} under a user name "
-                                            "that appears in TMPDIR's path: {}".format(proc.returncode, tail)))
+            rc, streams = launch(tools, "cases", str(root))
+            count = sum(stream.count(value) for stream in streams for value in values)
+            if count:
+                raise AssertionError("closure/host-independence-disclosure: the child's output carries "
+                                     "a value of its environment ({} occurrence(s); the output is not "
+                                     "printed)".format(_n(count)))
+            if rc == 2:
+                raise _CannotEvaluate("closure/host-independence: the child could not evaluate its "
+                                      "cases")
+            if rc != 0:
+                raise AssertionError("closure/host-independence: the cases gave {} under a user name "
+                                     "that appears in TMPDIR's path".format(_n(rc)))
+            red_rc, red_streams = launch(str(tmp / "mutant"), "probe", str(child_tmp / "no-opf-root"))
+            disclosed = sum(stream.count(value) for stream in red_streams for value in values)
+            if red_rc != 2 or not disclosed:
+                raise AssertionError("closure/host-independence-red: the copy with one diagnostic "
+                                     "reverted to interpolate a value gave {} with {} disclosure(s); "
+                                     "the scan must catch the revert".format(_n(red_rc), _n(disclosed)))
         _attributed("closure/host-independence", independent)
     finally:
         if tmp is not None:
@@ -2350,11 +2678,11 @@ def _red_one(root, check, label):
     try:
         _attributed("closure/red-bound-lookup", lambda: check(root), injected=dict(_MEMBER_TIMEOUT_S=dict()))
     except AssertionError as exc:
-        if not str(exc).startswith(_scrub(label)):
+        if not str(exc).startswith(label):
             raise
     else:
-        raise AssertionError(_scrub(label + "-not-red"))
-    print(_scrub("RED closure-bound-lookup -> " + label))
+        raise AssertionError(_cv("label", label) + "-not-red")
+    print("RED closure-bound-lookup -> " + _cv("label", label))
 
 
 def _rootless(fn):
@@ -2463,7 +2791,8 @@ def _pin(entry, root, absent_root, where=None):
     label, check, absent, name, attr, n, mode, want = entry
     site = "{} {}{}#{} {}".format(label, name, "." + attr if attr else "", n, mode)
     if absent and absent_root is None:
-        raise _CannotEvaluate(_scrub("closure/attribution-pin: {}: no scratch directory for a root with no opf/".format(site)))
+        raise _CannotEvaluate("closure/attribution-pin: {}: no scratch directory for a root with no "
+                              "opf/".format(_cv("site", site)))
     fired, host, stacks = [], [], []
     with _patched(**_harness_watch(host)):
         with _patched(**_nth_call(name, attr, n, mode, fired, stacks)):
@@ -2474,39 +2803,50 @@ def _pin(entry, root, absent_root, where=None):
             else:
                 got = None
     if host:
-        raise _HarnessFailure(_scrub("closure/attribution-pin: {}: harness failure: {}".format(site, " | ".join(host))))
+        raise _HarnessFailure("closure/attribution-pin: {}: harness failure: {} failed{}{}".format(
+            _cv("site", site), _cvs("primitive", sorted(set(what for what, _text in host))),
+            " " + _PIN_MARKER if any(_PIN_MARKER in text for _what, text in host) else "",
+            " " + _INJECT_MARKER if any(_INJECT_MARKER in text for _what, text in host) else ""))
     text = str(got)
     if fired:
         if mode in ("oserror", "timeout"):
-            held = (isinstance(got, _CannotEvaluate) and _scrub("harness failure") in text
-                    and _scrub(_PIN_MARKER) in text)
-            expected = "cannot-evaluate naming the host failure"
+            held = (isinstance(got, _CannotEvaluate) and "harness failure" in text
+                    and _PIN_MARKER in text)
+            if not held:
+                raise AssertionError("closure/attribution-pin: {} gave {}, expected cannot-evaluate "
+                                     "naming the host failure".format(
+                                         _cv("site", site), _cv("exception", type(got).__name__)))
         else:
-            held = (type(got) is AssertionError and _scrub(want) in text
-                    and _scrub("the code under test raised") in text
-                    and (mode != "crash" or _scrub(_PIN_MARKER) in text))
-            expected = "a refutation naming {!r}".format(want)
-        if not held:
-            raise AssertionError(_scrub("closure/attribution-pin: {} gave {!r}, expected {}".format(site, got, expected)))
+            held = (type(got) is AssertionError and want in text
+                    and "the code under test raised" in text
+                    and (mode != "crash" or _PIN_MARKER in text))
+            if not held:
+                raise AssertionError("closure/attribution-pin: {} gave {}, expected a refutation "
+                                     "naming {}".format(_cv("site", site),
+                                                        _cv("exception", type(got).__name__),
+                                                        _cv("label", want)))
         if where is None:
             return False
         if where[1] is None:
-            raise AssertionError(_scrub("closure/attribution-pin: {} names a site that is neither a call nor a call's "
-                                 "argument, so no call can be identified with it ({!r})".format(site, where)))
+            raise AssertionError("closure/attribution-pin: {} names a site that is neither a call nor a "
+                                 "call's argument, so no call can be identified with it".format(
+                                     _cv("site", site)))
         if not _positions_available():
-            raise _CannotEvaluate(_scrub("closure/attribution-positions: {}: this interpreter gives no instruction "
-                                  "columns (-X no_debug_ranges), so the call's site cannot be checked".format(site)))
+            raise _CannotEvaluate("closure/attribution-positions: {}: this interpreter gives no "
+                                  "instruction columns (-X no_debug_ranges), so the call's site cannot "
+                                  "be checked".format(_cv("site", site)))
         if where not in stacks[n - 1]:
-            raise AssertionError(_scrub("closure/attribution-pin: {} fired outside its site ({} executing the call at "
-                                 "{!r}): {!r}".format(site, where[0], where[1], stacks[n - 1])))
+            raise AssertionError("closure/attribution-pin: {} fired outside its site".format(
+                _cv("site", site)))
         return not any(where in stack for stack in stacks[:n - 1])
     if isinstance(got, AssertionError):
         raise got
     if isinstance(got, _CannotEvaluate) and not absent:
-        raise _CannotEvaluate(_scrub("closure/attribution-pin: {} was not reached: {}".format(site, got)))
+        raise _CannotEvaluate("closure/attribution-pin: {} was not reached".format(
+            _cv("site", site))) from got
     if got is None or isinstance(got, _CannotEvaluate):
-        raise AssertionError(_scrub("closure/attribution-pin: {} was not reached{}: {!r}".format(
-            site, " over a root with no opf/ subtree" if absent else "", got)))
+        raise AssertionError("closure/attribution-pin: {} was not reached{}".format(
+            _cv("site", site), " over a root with no opf/ subtree" if absent else ""))
     raise got
 
 
@@ -2538,8 +2878,8 @@ def _check_pin_rules(spans):
     def masked(_root):
         try:
             _positive_leg_verdict(0)
-        except RuntimeError as exc:
-            raise _CannotEvaluate(_scrub("closure/pin-probe: {}".format(exc)))
+        except RuntimeError:
+            raise _CannotEvaluate("closure/pin-probe: masked (stubbed)")
 
     def unreached(_root):
         raise _CannotEvaluate("closure/pin-probe: no fixture (stubbed)")
@@ -2569,7 +2909,7 @@ def _check_pin_rules(spans):
         (later, False, "_positive_leg_verdict", "crash", 2, here + "later.<locals>.<lambda> _positive_leg_verdict#1",
          None, False),
     )
-    for check, absent, name, mode, n, key, want, want_first in probes:
+    for index, (check, absent, name, mode, n, key, want, want_first) in enumerate(probes):
         first = None
         try:
             first = _pin(("closure/pin-probe", check, absent, name, None, n, mode, "closure/pin-probe"),
@@ -2579,10 +2919,8 @@ def _check_pin_rules(spans):
         else:
             got = None
         if (type(got) if got is not None else None) is not want or first is not want_first:
-            raise AssertionError(_scrub("closure/pin-rules: {} over {} ({}, call {}) gave {!r} (first call: {!r}), "
-                                 "expected {} (first call: {!r})".format(
-                                     check.__name__, name, mode, n, got, first,
-                                     want.__name__ if want else "a pass", want_first)))
+            raise AssertionError("closure/pin-rules: probe {} gave the wrong outcome or first-call "
+                                 "flag".format(_n(index)))
 
 
 # What a load must not do unseen (see _derived_sites): these builtins and module-level names look
@@ -2733,11 +3071,10 @@ def _check_holder_rules():
     holders = [_StrHolder("x"), _IntHolder(1), _ForeignStrHolder("y"), _ForeignListHolder(), _ForeignDictHolder()]
     for holder in holders:
         holder.fn = _check_holder_rules
-    for value, want in [(holder, True) for holder in holders] + [("x", False), (1, False), ([], False),
-                                                                 ({}, False)]:
+    for index, (value, want) in enumerate([(holder, True) for holder in holders]
+                                          + [("x", False), (1, False), ([], False), ({}, False)]):
         if _holds_code(value) is not want:
-            raise AssertionError(_scrub("closure/holds-code: a {} gave {}, expected {}".format(
-                type(value).__name__, not want, want)))
+            raise AssertionError("closure/holds-code: value {} was judged wrongly".format(_n(index)))
 
 
 def _derived_sites():
@@ -2760,9 +3097,9 @@ def _derived_sites():
     a call through it reaches the code under test at that excluded site, which carries no pin, so
     each load of a wrapper needs a recorded reason), or a name an annotation loads (see _site_walk).
     Its key is "<co_qualname> <token>#<k>".
-    _scrub is left out of the targets on purpose (see the comment at the targets set): it formats
-    diagnostic text on every raise and print and calls no code under test, and closure/scrub-sites
-    pins its coverage structurally. Returns (spans, reach, flagged): spans maps every site key in any top-level definition to
+    The closed-text gates _cv, _cvs and _n are left out of the targets on purpose (see the comment
+    at the targets set): they format diagnostic text on every raise and print and call no code
+    under test, and closure/closed-sites pins their coverage structurally. Returns (spans, reach, flagged): spans maps every site key in any top-level definition to
     (qualname, dispatch); reach maps each case's function name to the set of site keys it reaches;
     flagged maps each indirection key any case reaches to the text of the source line holding it
     (stripped of surrounding whitespace), so a record names the load it describes and not only its
@@ -2777,7 +3114,7 @@ def _derived_sites():
     try:
         source = Path(_THIS_FILE).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise _CannotEvaluate(_scrub("closure/attribution-walk: could not read this file's source: {}".format(exc)))
+        raise _CannotEvaluate("closure/attribution-walk: could not read this file's source")
     defs = {node.name: node for node in ast.parse(source).body
             if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     functions = {name for name, node in defs.items() if isinstance(node, ast.FunctionDef)}
@@ -2800,14 +3137,15 @@ def _derived_sites():
     for label, check in _PREFLIGHT_CASES:
         function = getattr(check, "__wrapped__", check)
         if function.__name__ not in functions or function.__code__.co_qualname != function.__name__:
-            raise AssertionError(_scrub("closure/attribution-walk: case {} has no module-level definition: {}".format(
-                label, function.__name__)))
+            raise AssertionError("closure/attribution-walk: a case has no module-level definition: "
+                                 "{}".format(_cv("case", function.__name__)))
         cases.append(function.__name__)
-    # _scrub formats diagnostic text on every raise and print (closure/scrub-sites pins that every
-    # formatted diagnostic goes through it) and calls no code under test; attributing its calls
-    # would make every diagnostic a derived site, so it is left out of the targets on purpose
-    # (its body is still walked like any helper's, and _check_env_canaries observes its effect).
-    targets = frozenset(production | set(cases)) - frozenset(("_scrub",))
+    # The closed-text gates _cv, _cvs and _n format diagnostic text on every raise and print
+    # (closure/closed-sites pins that every formatted diagnostic goes through them, a constant, or
+    # a registered literal) and call no code under test; attributing their calls would make every
+    # diagnostic a derived site, so they are left out of the targets on purpose (their bodies are
+    # still walked like any helper's, and _check_env_canaries observes their effect).
+    targets = frozenset(production | set(cases)) - frozenset(("_cv", "_cvs", "_n"))
     lines = source.splitlines()
     spans, keys, flag_keys, follows = {}, {}, {}, {}
     for name in defs:
@@ -2874,34 +3212,41 @@ def _check_attribution_inventory(root):
     for site, label, check, *_entry in _ATTRIBUTION_PINS:
         case = getattr(check, "__wrapped__", check).__name__
         if site not in reach.get(case, ()):
-            raise AssertionError(_scrub("closure/attribution-stale-pin: {} pins {!r}, which the walk does not find in "
-                                 "what {} reaches".format(label, site, case)))
+            raise AssertionError("closure/attribution-stale-pin: {} pins {}, which the walk does not "
+                                 "find in what {} reaches".format(
+                                     _cv("pin-label", label), _cv("site-key", site), _cv("case", case)))
         pinned.add(site)
     for site, reason in _ATTRIBUTION_EXCLUSIONS:
         if site not in derived or site in pinned or site in excluded or not reason.strip():
-            raise AssertionError(_scrub("closure/attribution-stale-exclusion: {!r} (a site the walk does not find, "
-                                 "one also pinned or excluded, or no reason)".format(site)))
+            raise AssertionError("closure/attribution-stale-exclusion: {} (a site the walk does not "
+                                 "find, one also pinned or excluded, or no reason)".format(
+                                     _cv("site-key", site)))
         excluded.add(site)
     recorded = set()
     for key, line, reason in _ATTRIBUTION_INDIRECTIONS:
         if flagged.get(key) != line or key in recorded or not reason.strip():
-            raise AssertionError(_scrub("closure/attribution-stale-indirection: {!r} recorded at {!r} (an indirection the "
-                                 "walk does not find, one on another source line, one recorded twice, or no "
-                                 "reason)".format(key, line)))
+            raise AssertionError("closure/attribution-stale-indirection: {} (an indirection the walk "
+                                 "does not find, one on another source line, one recorded twice, or no "
+                                 "reason)".format(_cv("indirection-key", key)))
         recorded.add(key)
     unpinned = sorted(derived - pinned - excluded)
     if unpinned:
-        raise AssertionError(_scrub("closure/attribution-unpinned: {}".format("; ".join(unpinned))))
+        raise AssertionError("closure/attribution-unpinned: {} derived site(s) carry neither a pin nor "
+                             "an exclusion (a derived key is drawn from this file's own source but is "
+                             "outside the declared registries, so it is not printed)".format(
+                                 _n(len(unpinned))))
     unevaluated, unrecorded = [], sorted(set(flagged) - recorded)
     if unrecorded:
-        unevaluated.append("closure/attribution-indirection: the walk cannot follow {} (code reached through "
-                           "a string, a namespace, a value, a wrapper or an annotation is no site; record each "
-                           "in _ATTRIBUTION_INDIRECTIONS with a reason, or remove it)".format("; ".join(unrecorded)))
+        unevaluated.append("closure/attribution-indirection: the walk cannot follow {} unrecorded "
+                           "indirection(s) (code reached through a string, a namespace, a value, a "
+                           "wrapper or an annotation is no site; record each in "
+                           "_ATTRIBUTION_INDIRECTIONS with a reason, or remove it; an unrecorded key "
+                           "is not printed)".format(_n(len(unrecorded))))
     if not _positions_available():
         unevaluated.append("closure/attribution-positions: this interpreter gives no instruction columns "
                            "(-X no_debug_ranges), so no pin's call can be told from another call on its line; "
                            "_check_pin_rules and the entries were not run")
-        raise _CannotEvaluate(_scrub(" | ".join(unevaluated)))
+        raise _CannotEvaluate(" | ".join(unevaluated))
     _check_pin_rules(spans)
     first, unknown = set(), set()
     tmp = None
@@ -2909,7 +3254,7 @@ def _check_attribution_inventory(root):
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-pins-"))
         except OSError as exc:
-            unevaluated.append("closure/attribution-pin: no scratch directory for a root with no opf/: {}".format(exc))
+            unevaluated.append("closure/attribution-pin: no scratch directory for a root with no opf/")
         for site, *entry in _ATTRIBUTION_PINS:
             try:
                 if _pin(tuple(entry), root, None if tmp is None else tmp / "no-opf-root", spans[site]):
@@ -2922,10 +3267,10 @@ def _check_attribution_inventory(root):
             shutil.rmtree(tmp, ignore_errors=True)
     late = sorted(pinned - first - unknown)
     if late:
-        raise AssertionError(_scrub("closure/attribution-first-call: no entry pins the first call made at {}".format(
-            "; ".join(late))))
+        raise AssertionError("closure/attribution-first-call: no entry pins the first call made at "
+                             "{}".format(_cvs("site-key", late)))
     if unevaluated:
-        raise _CannotEvaluate(_scrub(" | ".join(unevaluated)))
+        raise _CannotEvaluate(" | ".join(unevaluated))
 
 
 # The attribution inventory (see _check_attribution_inventory and _pin): entries pinning the sites
@@ -3235,6 +3580,14 @@ _ATTRIBUTION_INDIRECTIONS = (
     ("_site_walk getattr#1",
      "outer = list(getattr(node, \"decorator_list\", ()))",
      "reads an AST node's decorator list; calls nothing"),
+    ("_cv _PREFLIGHT_CASES#1",
+     "allowed = frozenset(part for label, check in _PREFLIGHT_CASES",
+     "reads the live case table only to build the \"case\" vocabulary's membership set; calls "
+     "nothing from it"),
+    ("_cv _ATTRIBUTION_PINS#1",
+     "rows = _ATTRIBUTION_PINS",
+     "reads the live pin table only to build the attribution vocabularies' membership sets; calls "
+     "nothing from it"),
 )
 
 # The derived sites that carry no pin, each with the recorded reason (see _check_attribution_inventory).
@@ -3284,7 +3637,7 @@ _PREFLIGHT_CASES = (
     ("closure/self-test-leg-verdicts", _VERDICTS),
     ("closure/preflight-collection", _COLLECTION),
     ("closure/entry-points", _ENTRY),
-    ("closure/scrub-sites", _check_scrub_sites),
+    ("closure/closed-sites", _check_closed_sites),
     ("closure/timeout-cannot-evaluate", _check_timeout_mapping),
     ("closure/harness-cannot-evaluate", _check_harness_mapping),
     ("closure/failure-first", _check_failure_first),
@@ -3352,11 +3705,12 @@ def _preflight_exit(root):
             failures.append(str(exc))
             continue
         except Exception as exc:
-            cannot.append("closure/preflight-error: {} raised {}: {}".format(
-                label if label is not None else check.__name__, type(exc).__name__, exc))
+            cannot.append("closure/preflight-error: {} raised {}".format(
+                _cv("case", label if label is not None else check.__name__),
+                _cv("exception", type(exc).__name__)))
             continue
         if label is not None:
-            print(_scrub("PASS " + label))
+            print("PASS " + _cv("case", label))
     if not failures and not cannot:
         return None
     return _self_test_exit(failures, cannot)
