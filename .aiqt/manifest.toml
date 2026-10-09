@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "938292399bb3c108f4a93adb82cca7416d0830bc4b0c9793436aac580a36646e"
+tree-sha256 = "2aca931dd87022cb9806ea70db6a03105f78b59dbdedd9d156f2fc420e35759f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 264810
-sha256 = "eb7bcc007b4d885d0f8db2c5bcbaff3ecdb206d7aba0c1a1170175e16846c76d"
+bytes = 267795
+sha256 = "3f267407a49d2cb08a30f8c72abb1984600f9dd1b07eb606a82a82e19432a516"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -116,8 +116,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7588
-sha256 = "633146090e3bd75afe4175924793c072bfff859dd7d734a68f10e15744506f16"
+bytes = 7632
+sha256 = "f9b06c49b7114e95c9d3f9c68a651ebbabb3b25450e7636e8623814be31fe94e"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2251,8 +2251,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41966
-sha256 = "33d408270b1c6eb701bddfdcb71eb0801b6839deef8b5dd9ae2d8219f5ac2cbc"
+bytes = 42202
+sha256 = "db05580721811528d4572988f8e6d6cf039bf6b8740978b8518b246a9cf389f3"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2463,6 +2463,26 @@ sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
 path = "opf/enforcement/claude/pretooluse_deny.py"
 bytes = 177979
 sha256 = "46c4b26a69defd748961e5b5057d380e06335f25077dd131412ceda9074694f0"
+
+[[sources]]
+path = "opf/enforcement/codex/AGENTS.opf.md"
+bytes = 3559
+sha256 = "f9a9c1ca39d16553ceab2292c3980c882d8def875de8ce839b88a6b198e9632a"
+
+[[sources]]
+path = "opf/enforcement/cursor/opf.mdc"
+bytes = 3566
+sha256 = "c9d34f0b61f8b0ae055123b351d2d7219d8d2d6678fb27242b60fdde8f31053e"
+
+[[sources]]
+path = "opf/enforcement/gemini-cli/GEMINI.opf.md"
+bytes = 3606
+sha256 = "e27e78b28d6ba6f3313651c952a8e34382d8f343b9562afc7466624dcc58ee4b"
+
+[[sources]]
+path = "opf/enforcement/platforms.toml"
+bytes = 4947
+sha256 = "cad856ca1f9f2e2aeef44563f6010c6c1f829ea344419c92e3825045a61e034c"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -3360,6 +3380,11 @@ bytes = 37848
 sha256 = "0c23ea9cd00329da48218efbd341828c372dde0de2b27cc2ccd7e0fca28e654d"
 
 [[sources]]
+path = "tools/check_opf_enforce_platforms.py"
+bytes = 34331
+sha256 = "573c3f75003e4ec782b4853303711797b2ecc2763e5f65ce87511754e88f56a6"
+
+[[sources]]
 path = "tools/check_opf_standalone_closure.py"
 bytes = 13791
 sha256 = "5e43f5bab71ae523e8c68dd7559d685a38c601aca683a9e01d0bdc4b2b1bbd54"
@@ -3651,8 +3676,8 @@ sha256 = "d85603f7325c71e095078da726bb5217bffa51aa35330f462ebe0c06997e6fe0"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 19154
-sha256 = "a6310c91af88f537612134f973f08cbdb99fc655d06dc363baf9fcae166f169b"
+bytes = 19343
+sha256 = "7f3beb15e8c1b549878cca14f213b9a4dbf34ee36687f5d29d85decdac82507f"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

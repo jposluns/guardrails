@@ -1,0 +1,64 @@
+# opf/enforcement/platforms.toml: the OPF enforcement pack's per-platform roster (OPF-SPEC 14.1).
+#
+# Spec 14.1 names four supported assistant platforms (Claude Code, Codex, Gemini CLI and Cursor) and
+# requires each one covered by one of two means: a verified deny hook, on a platform whose official
+# documentation confirms denial support, or instructions, on a platform without verifiable denial, with
+# that platform's residual disclosed. One [[platform]] row per supported assistant platform, in the order
+# of _opf_adopt.ENFORCEMENT_MEANS (opf/tools/_opf_adopt.py). The CI and pre-commit members (ci/ and
+# precommit/) are platform-independent and carry no row here.
+#
+# tools/check_opf_enforce_platforms.py validates this file and the members it names: the roster, the
+# means vocabulary and required residuals (_opf_adopt), the rule that a deny-hook row needs a deny
+# mechanism this repository documents and tests (tools/gen_hooks.py PLATFORMS), each instructions
+# member's install location (the location the AIQT pack's own adapter generator writes for that
+# platform), the advisory tier marking, and that each instructions member carries exactly the
+# protected-path list rendered from the Claude Code hook (claude/pretooluse_deny.py), so the lists
+# cannot drift.
+#
+# An instructions member's own file name is deliberately NOT the name its platform loads (AGENTS.md,
+# GEMINI.md, or a rule under .cursor/rules/): the pack tree ships inside the product repository, and a
+# member under a loaded name would apply its rules to sessions working on the pack itself. The adopter
+# installs each member's contents at its destination; where that file already exists, adding them is a
+# planned instruction-surface edit under the adoption plan.
+#
+# Fields per [[platform]]:
+#   platform     the plan token (_opf_adopt.ENFORCEMENT_PLATFORMS)
+#   means        "deny-hook" or "instructions" (_opf_adopt.ENFORCEMENT_MEANS)
+#   member       the pack file, relative to opf/enforcement/
+#   destination  where the adopter installs it, relative to the product root
+#   residuals    the disclosed residuals (_opf_adopt.ENFORCEMENT_RESIDUALS), the means' required one included
+#   evidence     why this means was chosen for this platform
+
+format-version = 1
+
+[[platform]]
+platform = "claude-code"
+means = "deny-hook"
+member = "claude/pretooluse_deny.py"
+destination = ".claude/settings.json"
+residuals = ["shell-or-interpreter-wrapping", "per-clone-installation-and-bypass", "same-user-tampering"]
+evidence = "The hook I/O contract is confirmed against the official Claude Code hooks documentation (code.claude.com/docs/en/hooks, confirmation pin 2026-08-17, recorded in the hook's own docstring), and opf/tools/check_opf_doctor.py --self-test launches the shipped hook against its denial vectors. The destination is the registration file the adoption enable-hook op merges (opf/tools/_opf_adopt_hook.py)."
+
+[[platform]]
+platform = "codex"
+means = "instructions"
+member = "codex/AGENTS.opf.md"
+destination = "AGENTS.md"
+residuals = ["unverified-platform-denial", "shell-or-interpreter-wrapping", "same-user-tampering"]
+evidence = "This repository documents and tests no Codex deny mechanism: every control in .aiqt/core/hooks/manifest.toml is platform claude-code, tools/gen_hooks.py accepts that platform only, and the Codex adapter the AIQT pack generates (tools/gen_agents.py, AGENTS.md) is instructions only. Codex denial support was not verified against official Codex documentation for this pack, so Codex takes the instructions tier."
+
+[[platform]]
+platform = "gemini-cli"
+means = "instructions"
+member = "gemini-cli/GEMINI.opf.md"
+destination = "GEMINI.md"
+residuals = ["unverified-platform-denial", "shell-or-interpreter-wrapping", "same-user-tampering"]
+evidence = "This repository documents and tests no Gemini CLI deny mechanism: every control in .aiqt/core/hooks/manifest.toml is platform claude-code, tools/gen_hooks.py accepts that platform only, and the Gemini CLI adapter the AIQT pack generates (tools/gen_adapters.py, GEMINI.md) is instructions only. Gemini CLI denial support was not verified against official Gemini CLI documentation for this pack, so Gemini CLI takes the instructions tier."
+
+[[platform]]
+platform = "cursor"
+means = "instructions"
+member = "cursor/opf.mdc"
+destination = ".cursor/rules/opf.mdc"
+residuals = ["unverified-platform-denial", "shell-or-interpreter-wrapping", "same-user-tampering"]
+evidence = "This repository documents and tests no Cursor deny mechanism: every control in .aiqt/core/hooks/manifest.toml is platform claude-code, tools/gen_hooks.py accepts that platform only, and the Cursor adapter the AIQT pack generates (tools/gen_cursor.py, always-apply .mdc rules under .cursor/rules/, format per cursor.com/docs/rules retrieved 2026-08-17) is instructions only. Cursor denial support was not verified against official Cursor documentation for this pack, so Cursor takes the instructions tier."
