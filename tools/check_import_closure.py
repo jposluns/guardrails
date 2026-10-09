@@ -3,11 +3,13 @@
 
 Every import statement in this tree's Python resolves, by the search roots of the program that imports it, to the
 standard library of the declared floor version, to a module file in this repository, or to a vendored package with
-recorded provenance and licence; every reference to the dynamic-import machinery sits at a reviewed site; every
-action reference in .github/workflows (and in every action.yml or action.yaml in the tree) has the form of a full
-commit SHA; and every container image there is pinned by digest. A third-party or invented package name therefore
-cannot enter through an import statement in a scanned file, a dynamic import cannot enter outside a reviewed site,
-and vendored Python cannot enter without a recognised SPDX identifier whose licence text it carries.
+recorded provenance and licence; every reference to the dynamic-import machinery (an occurrence of a watched name
+or import-system member) is one a reviewed row lists exactly, by its lines and text; every action reference in
+.github/workflows (and in every action.yml or action.yaml in the tree) has the form of a full commit SHA; and every
+container image there is pinned by digest. A third-party or invented package name therefore cannot enter through an
+import statement in a scanned file or as a string literal passed to an importer call, a watched-name occurrence
+cannot enter unless a reviewed row lists that exact reference, and vendored Python cannot enter without a
+recognised SPDX identifier whose licence text it carries.
 
 Search roots. A file's search roots are its own directory (Python puts a script's directory first on
 sys.path; this tree's programs insert it explicitly, since python3 -I leaves it out), except when that
@@ -19,7 +21,8 @@ resolves an absolute import, since an installed regular package of the same name
 
 Rules (each self-test vector is caught by exactly its rule, and passes with that rule removed):
   import-closure     an absolute import statement (an import or from statement anywhere in the file, lazy,
-                     guarded or under TYPE_CHECKING included) resolves by its first dotted component to a module
+                     guarded or under TYPE_CHECKING included; and a string-literal name at an importer call, see
+                     dynamic-import) resolves by its first dotted component to a module
                      present in one of the file's search roots, or to the standard library. A name present in
                      none of them is a finding: a third-party or invented name. A same-named file outside the
                      file's search roots never resolves it. A relative import must name a module or package that
@@ -28,20 +31,35 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      file calls sys.path.insert or sys.path.append and names every component of the root's path
                      relative to the file's directory as a string literal somewhere in the file, and at least one
                      of its imports resolves through that root; a row that fails any of these is a finding.
-  dynamic-import     dynamic imports are not resolved; they are refused outside a reviewed site allowlist. A
-                     site is any occurrence, in a scanned .py file (vendored code included), of a name in
-                     DYNAMIC_IMPORT_NAMES (__import__, __builtins__, importlib and any submodule, imp, runpy,
+  dynamic-import     dynamic imports are not resolved (a literal name excepted, below); a reference to the
+                     dynamic-import machinery is refused unless a reviewed row lists that exact reference. The
+                     watched names are DYNAMIC_IMPORT_NAMES (__import__, __builtins__, importlib, imp, runpy,
                      zipimport, pkgutil, pydoc, the loader, finder and runner names reachable from them, and the
-                     import-system hooks __path__, meta_path and path_hooks): as an identifier anywhere in the
-                     syntax tree (a name read or bound, an attribute, an imported module or alias, a definition,
-                     parameter or keyword name), or as a dotted component of a string or bytes literal that is a
-                     dotted identifier chain (getattr(builtins, "__import__"), sys.modules["importlib"]). No
-                     alias is resolved, so none can hide a site: the alias is itself a site. A site is allowed
-                     only when a DYNAMIC_IMPORT_SITES row (file, enclosing function, names, reason) names its file
-                     and its enclosing function (classes and defs joined by dots; <module> at module level) and
-                     lists its name. Each row is held live: it gives a reason, lists at least one name, does not
-                     repeat a file and function, and every name it lists occurs there; a row that fails any of
-                     these is a finding.
+                     import-system hooks __path__, meta_path and path_hooks) and every undotted name sys.modules
+                     gives a module of IMPORT_SYSTEM_MODULES (the frozen _frozen_importlib and
+                     _frozen_importlib_external, and _imp, among them); the members are the last component of
+                     every dotted such name and every function, class or module defined in those modules
+                     (_bootstrap, _gcd_import, _find_and_load, BuiltinImporter, SourceLoader among them), less
+                     INERT_IMPORT_SYSTEM_MEMBERS. Both sets are read from the modules on every run, never from a
+                     hand list. A site is a reference node holding a watched name as an identifier anywhere in
+                     the syntax tree (a name read or bound, an attribute, an imported module or alias, a
+                     definition, parameter or keyword name), a member as an attribute name, or either as a
+                     dotted component of a string or bytes literal that is a dotted identifier chain
+                     (getattr(builtins, "__import__"), sys.modules["_frozen_importlib"]). The reference node is
+                     an alias's import statement, a def or class by its header, a parameter, keyword or literal,
+                     or the expression climbed through the attribute access, call and subscript the name is the
+                     target of. A site is allowed only when a DYNAMIC_IMPORT_SITES row (file, enclosing scope,
+                     references, reason) names its file and its enclosing scope and lists its reference exactly:
+                     its lines and its unparsed text, as LINE: TEXT or FIRST-LAST: TEXT. The enclosing scope is
+                     the classes, defs and lambdas (<lambda>) around it joined by dots, <module> at module level;
+                     a definition's name, decorators, defaults, annotations, bases and keywords belong to the
+                     scope that runs the definition, and only its parameters and body to its own scope. Each row
+                     is held live: it gives a reason, lists at least one reference of that form, repeats none,
+                     and every reference it lists occurs there; a row that fails any of these is a finding. A
+                     call that reaches __import__, import_module, _gcd_import, find_spec, run_module or locate by
+                     name, by attribute, or by getattr or a subscript with a literal name, and passes a string
+                     literal absolute name at level 0, is also an import record for import-closure, whether its
+                     site is allowlisted or not. No alias is resolved: an alias is itself a site.
   relative-escape    a relative import whose base directory lies outside the repository root, or, for a
                      vendored file, outside its own vendored package root.
   vendor-provenance  each _vendor directory: every NAME.provenance.toml there records [package] name,
@@ -99,50 +117,56 @@ or action line outside the accepted YAML subset (above).
 
   check_import_closure.py              scan this repository
   check_import_closure.py --self-test  fixture trees: every rule vector is red with its rule and green
-                                       without it (one per name in DYNAMIC_IMPORT_NAMES among them), every
-                                       cannot-evaluate vector exits 2, every site vector finds exactly the
-                                       sites it names, every mutant in MUTANTS (one check removed) fails the
-                                       vector it names, removing any one name from DYNAMIC_IMPORT_NAMES fails
-                                       that name's vector, and the live tree passes
+                                       without it (one per watched name and import-system member among them),
+                                       every cannot-evaluate vector exits 2, every site vector finds exactly
+                                       the sites (scope and reference) it names, every mutant in MUTANTS (one
+                                       check removed) fails the vector it names, removing any one watched name
+                                       or member fails its vector, and the live tree passes
 
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
-DISCLOSED RESIDUAL. Dynamic imports: an allowlisted site is reviewed, not evaluated; the gate does not resolve
-what it imports, so its target is never judged by import-closure, and the unreached-module condition is static
-(an allowlisted site can still reach the module at runtime: the vendored marko.helpers, an allowlisted site,
-loads an extension by a computed name). Not seen: exec, eval or compile of a string, whose source the gate does
-not read as Python; a watched name assembled at runtime from pieces (a computed string handed to getattr, vars,
-globals or sys.modules); an import function reached through the object graph without naming it (a function's
-__globals__, a frame, the garbage collector); and other standard-library functions that import by name as a side
-effect (pickle loading a class reference, logging.config factories, unittest name loaders, among others):
-DYNAMIC_IMPORT_NAMES is not exhaustive, since the standard library has many importers by name. A native library
-loaded through ctypes, and Python source handed to a subprocess or written to a file, are outside the surface.
-A row allows its names throughout its function, so another use of an allowed name in an allowed function is not
-a new finding. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's model of
-sys.path; a row is held live by a sys.path.insert or sys.path.append call and the root's path components as
-string literals anywhere in the file, not by evaluating that call's argument; the gate does not evaluate a
-sys.path expression or the order of insertions (it refuses a name present in two places instead), it does not
-model an in-code insertion of a path outside the tree (a site-packages directory, which can then shadow an
-in-repo name), and it does not see a program launched with another path (PYTHONPATH, python3 -m from another
-directory, or python3 -I without the own-directory insertion, under which a sibling import fails or reaches an
-installed module of that name). Third-party code committed outside a _vendor directory and reached through a
-recorded root counts as in-repo, without provenance; the rows are reviewed in this file. Surface: only .py files
-are scanned; Python launched from another suffix, other languages, and install commands (pip, npm) written into
-scripts or documentation are outside it. The walk reads the working tree, not the git index, so an untracked
-local file can change a local verdict (CI checks out clean). The walk does not enter .git, .venv, venv or
-node_modules at the repository root (each run names the ones present); a directory of those names deeper in the
-tree is walked. A *.pyc file inside a __pycache__ directory is not read. Vendored non-Python files outside a
-recorded root (data fixtures) are outside the vendor-provenance surface. Licences: the gate holds that a vendored
-package names recognised SPDX identifiers and that its licence text carries each identifier's marker sentences;
-it does not prove the text complete or unmodified, judge licence compatibility, check the package against a
-registry, or consult vulnerability advisories. A package whose import name differs from its distribution name
-cannot be recorded (the root must be named for the package). Pins: the gate checks a reference's form; it does
-not ask GitHub whether a 40-hex ref names a commit rather than a branch or tag of that name, or whether the
-commit is trustworthy. The local-file exception accepts an action file's image naming a walked file (a
-Dockerfile); the base images that file names (its FROM lines) are not checked. A key named image or container
-inside an action's with: inputs is checked too (an over-rejection). The classifier follows YAML 1.2 for its
-subset, and a local uses path is confined by normalising it; GitHub's own parser and runner were not run against
-the vectors.
+DISCLOSED RESIDUAL. Dynamic imports: an allowlisted site is reviewed, not evaluated; the gate resolves only a
+string-literal absolute name at an importer call, so a computed name is never judged by import-closure, and the
+unreached-module condition is static (an allowlisted site can still reach the module at runtime: the vendored
+marko.helpers, an allowlisted site, loads an extension by a computed name). A row allows one reference, not what
+becomes of its value: a listed reference that is not called in place (an importer returned, stored, passed or bound
+by an alias, or a lambda holding a call) lets whatever later calls that value import without a site of its own, so
+such a row is reviewed for where the value goes, and a finding says when a reference is not a call. References with
+the same text on the same lines are one reference. A row names line numbers, so an edit that moves a listed
+reference makes the row stale and the reference a finding until the row is rewritten (the re-review the binding
+asks for). The members are read from IMPORT_SYSTEM_MODULES, not from every importer: the members of
+importlib.resources and importlib.metadata are reached only through a watched importlib reference, and a member's
+name used for a local object (a def, a parameter, a plain name) is not a site. Not seen: exec, eval or compile of a
+string, whose source the gate does not read as Python; a watched name assembled at runtime from pieces (a computed
+string handed to getattr, vars, globals or sys.modules); an import function reached through the object graph
+without naming it (a function's __globals__, a frame, the garbage collector); and other standard-library functions
+that import by name as a side effect (pickle loading a class reference, logging.config factories, unittest name
+loaders, among others): the watched set covers the import system's own modules, not every importer by name in the
+standard library. A native library loaded through ctypes, and Python source handed to a subprocess or written to a
+file, are outside the surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's
+model of sys.path; a row is held live by a sys.path.insert or sys.path.append call and the root's path components
+as string literals anywhere in the file, not by evaluating that call's argument; the gate does not evaluate a
+sys.path expression or the order of insertions (it refuses a name present in two places instead), it does not model
+an in-code insertion of a path outside the tree (a site-packages directory, which can then shadow an in-repo name),
+and it does not see a program launched with another path (PYTHONPATH, python3 -m from another directory, or python3
+-I without the own-directory insertion, under which a sibling import fails or reaches an installed module of that
+name). Third-party code committed outside a _vendor directory and reached through a recorded root counts as
+in-repo, without provenance; the rows are reviewed in this file. Surface: only .py files are scanned; Python
+launched from another suffix, other languages, and install commands (pip, npm) written into scripts or
+documentation are outside it. The walk reads the working tree, not the git index, so an untracked local file can
+change a local verdict (CI checks out clean). The walk does not enter .git, .venv, venv or node_modules at the
+repository root (each run names the ones present); a directory of those names deeper in the tree is walked. A *.pyc
+file inside a __pycache__ directory is not read. Vendored non-Python files outside a recorded root (data fixtures)
+are outside the vendor-provenance surface. Licences: the gate holds that a vendored package names recognised SPDX
+identifiers and that its licence text carries each identifier's marker sentences; it does not prove the text
+complete or unmodified, judge licence compatibility, check the package against a registry, or consult vulnerability
+advisories. A package whose import name differs from its distribution name cannot be recorded (the root must be
+named for the package). Pins: the gate checks a reference's form; it does not ask GitHub whether a 40-hex ref names
+a commit rather than a branch or tag of that name, or whether the commit is trustworthy. The local-file exception
+accepts an action file's image naming a walked file (a Dockerfile); the base images that file names (its FROM
+lines) are not checked. A key named image or container inside an action's with: inputs is checked too (an
+over-rejection). The classifier follows YAML 1.2 for its subset, and a local uses path is confined by normalising
+it; GitHub's own parser and runner were not run against the vectors.
 """
 import sys
 
@@ -162,6 +186,7 @@ import shutil
 import stat
 import tempfile
 import tomllib
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -229,8 +254,32 @@ DYNAMIC_IMPORT_NAMES = frozenset("""
     run_module run_path resolve_name get_loader get_importer iter_importers walk_packages extend_path locate
     meta_path path_hooks path_importer_cache
 """.split())
+# The import system's own modules. The watched set is read from them on every run (see the docstring): every
+# name sys.modules gives one of them (the frozen _frozen_importlib and _frozen_importlib_external among them) is
+# watched like a name in DYNAMIC_IMPORT_NAMES, and every function, class or module defined in them is watched as
+# a member: as an attribute name or a string literal component, the positions a member is reached by.
+IMPORT_SYSTEM_MODULES = tuple("""
+    importlib importlib._bootstrap importlib._bootstrap_external importlib.abc importlib.machinery importlib.util
+    _imp pkgutil runpy zipimport
+""".split())
+# Members of those modules that neither import nor load a module and whose names this tree uses for its own
+# objects: (name, why it is not watched). Each must still be a member, or the gate cannot evaluate.
+INERT_IMPORT_SYSTEM_MEMBERS = (
+    ("abc", "the leaf name of importlib.abc is also the standard-library abc module; importlib.abc is reached "
+     "only through a watched importlib reference, and its loader and finder classes are watched by name"),
+    ("acquire_lock", "takes the import lock (_imp); it imports nothing"),
+    ("lock_held", "reports whether the import lock is held (_imp); it imports nothing"),
+    ("release_lock", "releases the import lock (_imp); it imports nothing"),
+)
+# Calls that import or locate a module named by their first argument: a string-literal absolute name there is
+# resolved like an import statement wherever the call sits, an allowlisted site included (see the docstring).
+LITERAL_IMPORTERS = frozenset("__import__ import_module _gcd_import find_spec run_module locate".split())
+# The positional index of the level argument, for the importers that take one.
+LITERAL_IMPORTER_LEVELS = dict(zip("__import__ _gcd_import".split(), (4, 2)))
 DOTTED_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+REFERENCE_RE = re.compile(r"(?P<first>[1-9][0-9]*)(?:-(?P<last>[1-9][0-9]*))?: \S.*")
 MODULE_SCOPE = "<module>"
+SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
 # The extra search roots of each program that imports across directories (beyond its own directory): each
 # row is (repo-relative importing file, repo-relative root directory), a sys.path insertion that file makes.
@@ -264,208 +313,382 @@ VENDORED_OPTIONAL_IMPORTS = (
 )
 CONDITIONS = ("guarded-optional", "unreached-module")
 
-# The reviewed dynamic-import sites: (repo-relative file, enclosing function, the watched names it uses there
-# separated by spaces, why the site is legitimate). Dynamic imports are not resolved; a site outside these rows is
-# a finding, and the dynamic-import rule holds every row live (see the docstring).
+# The reviewed dynamic-import sites: (repo-relative file, enclosing scope, the exact references allowed there, each
+# LINE: TEXT or FIRST-LAST: TEXT with the reference's unparsed source, why they are legitimate). Dynamic imports are
+# not resolved; a reference no row lists is a finding, a moved or edited reference included, and the
+# dynamic-import rule holds every row live (see the docstring).
 DYNAMIC_IMPORT_SITES = (
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex",
+     ("8723: __import__('hashlib').sha256(text.encode('utf-8')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_register_wake", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_state_dir_from_registry",
+     ("9148: __import__('hashlib').sha256(root.encode('utf-8', 'replace')).hexdigest()[:16]",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_register_wake",
+     ("10265: __import__('hashlib').sha256(prompt.encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_binding_digest", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_ask_guard",
+     ("10404: __import__('hashlib').sha256(text.encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_blob_id", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_dispatch_ledger",
+     ("11646-11647: __import__('hashlib').sha256((basis + _orch_now().isoformat()).encode('utf-8', "
+      "'replace')).hexdigest()[:12]",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_decide", "__import__",
-     "inline __import__ of the standard-library module threading, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_record_path", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_blob_id",
+     ("11909: __import__('hashlib').new(fmt)",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_worktree_entry", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_worktree_entry",
+     ("11930: __import__('errno')",
+      "11953: __import__('hashlib').new(fmt)"),
      "inline __import__ of the standard-library module errno and hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_state_dir_from_registry", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_decide",
+     ("12335: __import__('threading').Thread(target=_work, name='review-dispatch-pin', daemon=True)",),
+     "inline __import__ of the standard-library module threading, a string literal"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_binding_digest",
+     ("12660: __import__('hashlib').sha256(blob.encode('ascii')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_ask_guard", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_rdp_record_path",
+     ("12695: __import__('hashlib').sha256(json.dumps([identity, rel]).encode('utf-8', 'surrogateescape'))",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_dispatch_ledger", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_prompt_stamp",
+     ("13947-13948: __import__('hashlib').sha256((prompt or '').encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "orch_prompt_stamp", "__import__",
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows",
+     ("14166: __import__('hashlib').sha256",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    (".preview/char-policy-write.py", "_self_test", "__builtins__ importlib",
+    (".preview/char-policy-write.py", "_self_test",
+     ("698: import importlib.util",
+      "1103: '__builtins__'",
+      "1105: '__builtins__'"),
      "vectors name __builtins__ as data for the rebinding check; imports importlib.util for the sibling load"),
-    (".preview/char-policy-write.py", "_self_test.rebound", "__builtins__",
-     "the rebinding analysis watches stores to __builtins__; data, not an import"),
     (".preview/char-policy-write.py", "_self_test.sibling_gate",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling gate it compares"),
+     ("727: importlib.util.spec_from_file_location('_char_policy_sibling_gate', path)",
+      "728: importlib.util.module_from_spec(spec)",
+      "729: spec.loader.exec_module(module)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling gate it compares"),
+    (".preview/char-policy-write.py", "_self_test.rebound",
+     ("966: '__builtins__'",),
+     "the rebinding analysis watches stores to __builtins__; data, not an import"),
     (".preview/clock-inject.py", "_self_test.T.test_r13_shared_lease_code_identical_to_stop_hook",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling hook it compares"),
-    (".preview/future-stamp-write.py", "_self_test", "importlib",
+     ("852: import importlib.util",
+      "855: importlib.util.spec_from_file_location('sts_sibling', sib)",
+      "856: importlib.util.module_from_spec(spec)",
+      "860: spec.loader.exec_module(mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling hook it compares"),
+    (".preview/future-stamp-write.py", "_self_test",
+     ("3528: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
-    (".preview/future-stamp-write.py", "_self_test.T.test_r13_code_quote_helpers_identical_to_sibling",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling hook it compares"),
     (".preview/future-stamp-write.py", "_self_test.T.test_shared_grammar_identical_to_sibling",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling hook it compares"),
-    (".preview/stamp-truth-stop.py", "_self_test", "importlib",
+     ("4040: importlib.util.spec_from_file_location('sts_sibling', sib)",
+      "4041: importlib.util.module_from_spec(spec)",
+      "4045: spec.loader.exec_module(mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling hook it compares"),
+    (".preview/future-stamp-write.py", "_self_test.T.test_r13_code_quote_helpers_identical_to_sibling",
+     ("4559: importlib.util.spec_from_file_location('sts_sibling13', sib)",
+      "4560: importlib.util.module_from_spec(spec)",
+      "4564: spec.loader.exec_module(mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling hook it compares"),
+    (".preview/stamp-truth-stop.py", "_self_test",
+     ("2082: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
     (".preview/stamp-truth-stop.py", "_self_test.T.test_r13_shared_lease_code_identical_to_clock_inject",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling hook it compares"),
+     ("3523: importlib.util.spec_from_file_location('ci_sibling', sib)",
+      "3524: importlib.util.module_from_spec(spec)",
+      "3528: spec.loader.exec_module(mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling hook it compares"),
     (".preview/stamp-truth-stop.py", "_self_test.T.test_shared_grammar_identical_to_sibling",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the sibling hook it compares"),
-    ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test", "__import__",
+     ("3542: importlib.util.spec_from_file_location('fsw_sibling', sib)",
+      "3543: importlib.util.module_from_spec(spec)",
+      "3547: spec.loader.exec_module(mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "sibling hook it compares"),
+    ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test",
+     ("1304: builtins.__import__",
+      "1836: '__import__'"),
      "self-test saves and patches builtins.__import__ to prove no lazy import runs, then restores it"),
-    ("opf/tools/_opf_check.py", "self_test.fn_date", "__import__",
+    ("opf/tools/_opf_check.py", "self_test.fn_date",
+     ("3546: __import__('datetime').date(2026, 6, 1)",),
      "inline __import__ of the standard-library module datetime, a string literal"),
-    ("opf/tools/_opf_emit.py", "_fixture_preload", "import_module importlib",
-     "imports the fixed standard-library names of _FIXTURE_GUARDIAN_MODULES before a fork"),
     ("opf/tools/_opf_emit.py", "_load_byte_canon_authority",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
-     "byte-canon authority"),
+     ("572: import importlib.util",
+      "574: importlib.util.spec_from_file_location('_opf_emit_byte_canon_authority', path)",
+      "577: importlib.util.module_from_spec(spec)",
+      "580: spec.loader.exec_module(module)"),
+     "loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the byte-canon "
+     "authority"),
+    ("opf/tools/_opf_emit.py", "_fixture_preload",
+     ("1534: import importlib",
+      "1536: importlib.import_module(name)"),
+     "imports the fixed standard-library names of _FIXTURE_GUARDIAN_MODULES before a fork"),
     ("opf/tools/_opf_emit.py", "_st_guardian_close_reuse",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the close harness"),
-    ("opf/tools/_opf_schema.py", "self_test", "imp",
+     ("3426: import importlib.util",
+      "3436-3437: importlib.util.spec_from_file_location('_opf_emit_close_harness', Path(__file__).resolve().parent "
+      "/ '_journal.py')",
+      "3438: importlib.util.module_from_spec(spec)",
+      "3439: spec.loader.exec_module(_journal)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "close harness"),
+    ("opf/tools/_opf_schema.py", "self_test",
+     ("1796: imp",
+      "1797: imp['actor']",
+      "1798: imp['refs']",
+      "1799: imp['links']",
+      "1800: imp"),
      "a local variable named imp (an import record), not the imp module"),
-    ("opf/tools/_opf_store.py", MODULE_SCOPE, "imp",
+    ("opf/tools/_opf_store.py", MODULE_SCOPE,
+     ("127: 'imp'",),
      "the string imp is a run-id prefix, not the imp module"),
-    ("opf/tools/_vendor/marko/cli.py", MODULE_SCOPE, "importlib",
+    ("opf/tools/_opf_worklog_regressions.py", "_upgrade_preflight_regressions",
+     ("908: opf._bootstrap()",),
+     "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
+    ("opf/tools/_vendor/marko/cli.py", MODULE_SCOPE,
+     ("6: import importlib",),
      "byte-exact vendored Marko: its command-line entry imports importlib"),
-    ("opf/tools/_vendor/marko/cli.py", "import_class", "import_module importlib",
+    ("opf/tools/_vendor/marko/cli.py", "import_class",
+     ("16: importlib.import_module(module)",),
      "byte-exact vendored Marko: its command-line entry imports a class named on its command line; not on this "
      "tree's parse path"),
-    ("opf/tools/_vendor/marko/helpers.py", MODULE_SCOPE, "import_module importlib",
+    ("opf/tools/_vendor/marko/helpers.py", MODULE_SCOPE,
+     ("10: from importlib import import_module",),
      "byte-exact vendored Marko: imports import_module for load_extension"),
-    ("opf/tools/_vendor/marko/helpers.py", "load_extension", "import_module",
-     "byte-exact vendored Marko: loads an extension by a computed name; this tree passes none (disclosed "
-     "residual)"),
+    ("opf/tools/_vendor/marko/helpers.py", "load_extension",
+     ("125: import_module(f'marko.ext.{name}')",
+      "130: import_module(name)"),
+     "byte-exact vendored Marko: loads an extension by a computed name; this tree passes none (disclosed residual)"),
     ("opf/tools/check_opf_doctor.py", "_claude_hook_self_test",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the Claude hook classifier"),
-    ("opf/tools/check_opf_homes.py", "_self_test_vectors", "imp",
+     ("2285: import importlib.util",
+      "3207: importlib.util.spec_from_file_location('_opf_claude_hook_classifier', hook)",
+      "3208: importlib.util.module_from_spec(hook_spec)",
+      "3209: hook_spec.loader.exec_module(hook_mod)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "Claude hook classifier"),
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors",
+     ("2607: 'imp'",
+      "2647: 'imp'",
+      "2678: 'imp'"),
      "the string imp is a run-id prefix in vectors, not the imp module"),
-    ("opf/tools/check_opf_init_contract.py", MODULE_SCOPE, "runpy",
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>.<lambda>",
+     ("2633: 'imp'",
+      "2673: 'imp'"),
+     "the string imp is a run-id prefix in vectors, not the imp module"),
+    ("opf/tools/check_opf_homes.py", "_self_test_vectors.<lambda>",
+     ("2727: 'imp'",),
+     "the string imp is a run-id prefix in vectors, not the imp module"),
+    ("opf/tools/check_opf_init_contract.py", MODULE_SCOPE,
+     ("24: import runpy",),
      "imports runpy for _checks"),
-    ("opf/tools/check_opf_init_contract.py", "_checks", "run_path runpy",
+    ("opf/tools/check_opf_init_contract.py", "_checks",
+     ("184: runpy.run_path(str(ROOT / 'opf/tools/_opf_init_contract.py'))",),
      "runs opf/tools/_opf_init_contract.py of this tree by its path to read its namespace"),
     ("opf/tools/check_opf_prompt_pack.py", "_close_vectors",
-     "exec_module importlib module_from_spec spec_from_file_location",
-     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
-     "the close harness"),
+     ("359: import importlib.util",
+      "361-362: importlib.util.spec_from_file_location('_prompt_pack_close_harness', Path(__file__).resolve().parent "
+      "/ '_journal.py')",
+      "363: importlib.util.module_from_spec(spec)",
+      "364: spec.loader.exec_module(harness)"),
+     "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
+     "close harness"),
+    ("opf/tools/check_opf_record.py", "_self_test_isolated",
+     ("5977: opf._bootstrap()",),
+     "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
     ("opf/tools/check_opf_upgrade.py", "_suite_isolated",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("591: opf._bootstrap()",),
+     "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
+    ("opf/tools/check_opf_upgrade.py", "_suite_isolated",
+     ("1927: import importlib.util as _importlib_util",
+      "1971: _importlib_util.spec_from_file_location('_opf_u25c_flip', _path25c)",
+      "1972: _importlib_util.module_from_spec(_spec25c)",
+      "1973: _spec25c.loader.exec_module(_mod25c)"),
      "self-test loads a scratch flip of an upgrade file, written from this tree's source, by its path"),
-    ("opf/tools/opf.py", MODULE_SCOPE, "__builtins__",
+    ("opf/tools/opf.py", MODULE_SCOPE,
+     ("300: '__builtins__'",),
      "names __builtins__ as a namespace the entry check refuses stores through; data, not an import"),
-    ("opf/tools/opf.py", "_cli_self_test._import_leg", "__builtins__",
-     "vectors bind __builtins__ to prove the namespace check refuses it; not an import"),
-    ("opf/tools/opf.py", "_import_body_findings", "__builtins__",
-     "the namespace check reads bindings of __builtins__; not an import"),
-    ("opf/tools/opf.py", "_import_namespace_findings", "__builtins__",
-     "compares a function's __builtins__ with the builtins dictionary; not an import"),
-    ("opf/tools/opf.py", "_self_test_entry_gap", "__builtins__",
+    ("opf/tools/opf.py", "_self_test_entry_gap",
+     ("447: '__builtins__'",),
      "the entry check reads bindings of __builtins__; not an import"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows", "__import__",
+    ("opf/tools/opf.py", "_import_body_findings",
+     ("15337: '__builtins__'",
+      "15395: '__builtins__'"),
+     "the namespace check reads bindings of __builtins__; not an import"),
+    ("opf/tools/opf.py", "_import_namespace_findings",
+     ("15521: '__builtins__'",),
+     "compares a function's __builtins__ with the builtins dictionary; not an import"),
+    ("opf/tools/opf.py", "_cli_self_test._import_leg",
+     ("16431: probe.__builtins__",
+      "16437: '__builtins__'"),
+     "vectors bind __builtins__ to prove the namespace check refuses it; not an import"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex",
+     ("8723: __import__('hashlib').sha256(text.encode('utf-8')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_register_wake", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_state_dir_from_registry",
+     ("9148: __import__('hashlib').sha256(root.encode('utf-8', 'replace')).hexdigest()[:16]",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_sha256_hex", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_register_wake",
+     ("10265: __import__('hashlib').sha256(prompt.encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_binding_digest", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_ask_guard",
+     ("10404: __import__('hashlib').sha256(text.encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_blob_id", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_dispatch_ledger",
+     ("11646-11647: __import__('hashlib').sha256((basis + _orch_now().isoformat()).encode('utf-8', "
+      "'replace')).hexdigest()[:12]",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_decide", "__import__",
-     "inline __import__ of the standard-library module threading, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_record_path", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_blob_id",
+     ("11909: __import__('hashlib').new(fmt)",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_worktree_entry", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_worktree_entry",
+     ("11930: __import__('errno')",
+      "11953: __import__('hashlib').new(fmt)"),
      "inline __import__ of the standard-library module errno and hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_state_dir_from_registry", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_decide",
+     ("12335: __import__('threading').Thread(target=_work, name='review-dispatch-pin', daemon=True)",),
+     "inline __import__ of the standard-library module threading, a string literal"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_binding_digest",
+     ("12660: __import__('hashlib').sha256(blob.encode('ascii')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_ask_guard", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_rdp_record_path",
+     ("12695: __import__('hashlib').sha256(json.dumps([identity, rel]).encode('utf-8', 'surrogateescape'))",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_dispatch_ledger", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_prompt_stamp",
+     ("13947-13948: __import__('hashlib').sha256((prompt or '').encode('utf-8', 'replace')).hexdigest()",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "orch_prompt_stamp", "__import__",
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py", "_orch_chained_rows",
+     ("14166: __import__('hashlib').sha256",),
      "inline __import__ of the standard-library module hashlib, a string literal"),
-    ("tools/_selftest_exit_report.py", MODULE_SCOPE, "importlib",
+    ("tools/_selftest_exit_report.py", MODULE_SCOPE,
+     ("178: import importlib.machinery",
+      "179: import importlib.util"),
      "imports importlib.machinery and importlib.util for the runner loader"),
-    ("tools/_selftest_exit_report.py", "_RunnerLoader", "SourceFileLoader importlib",
-     "subclasses SourceFileLoader to launch a registered runner from its source, as a direct launch does"),
-    ("tools/_selftest_exit_report.py", "_bootstrap_main", "__loader__ exec_module",
-     "executes the registered runner through that loader as __main__"),
-    ("tools/_selftest_exit_report.py", "_record_subinterp_files", "find_spec importlib",
+    ("tools/_selftest_exit_report.py", MODULE_SCOPE,
+     ("213: threading.Thread._bootstrap",),
+     "threading's own Thread._bootstrap method, bound to run every thread; not importlib._bootstrap"),
+    ("tools/_selftest_exit_report.py", "_record_subinterp_files",
+     ("396: importlib.util.find_spec(name)",),
      "find_spec locates the files of fixed standard-library extension modules without importing them"),
-    ("tools/check_entry_guard.py", MODULE_SCOPE, "importlib",
+    ("tools/_selftest_exit_report.py", MODULE_SCOPE,
+     ("422: importlib.machinery.SourceFileLoader",),
+     "subclasses SourceFileLoader to launch a registered runner from its source, as a direct launch does"),
+    ("tools/_selftest_exit_report.py", "_bootstrap_main",
+     ("444: main.__loader__",
+      "446: loader.exec_module(main)"),
+     "executes the registered runner through that loader as __main__"),
+    ("tools/check_entry_guard.py", MODULE_SCOPE,
+     ("84: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
     ("tools/check_entry_guard.py", "_load_mutant",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("686: importlib.util.spec_from_file_location('entry_guard_mutant_{}'.format(number), path)",
+      "687: importlib.util.module_from_spec(spec)",
+      "690: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
     ("tools/check_import_closure.py", MODULE_SCOPE,
-     "__builtins__ __import__ exec_module find_spec imp import_module importlib locate pydoc run_module run_path "
-     "runpy",
-     "this gate's tables and self-test data name watched names as strings; it imports importlib.util for "
-     "_load_mutant"),
+     ("182: import importlib.util",
+      "659: 'self_test._NestedMissingFinder.find_spec'",
+      "680: 'self_test._NestedMissingFinder.find_spec'"),
+     "this gate's tables and self-test data name watched names as strings; it imports importlib.util for _load_mutant"),
+    ("tools/check_import_closure.py", "watched_names",
+     ("890: importlib.import_module(name)",),
+     "loads the fixed standard-library modules of IMPORT_SYSTEM_MODULES to read the watched set from them"),
     ("tools/check_import_closure.py", "_load_mutant",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("2335: importlib.util.spec_from_file_location('import_closure_mutant_%d' % number, path)",
+      "2336: importlib.util.module_from_spec(spec)",
+      "2339: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
     ("tools/check_instruction_budget.py", "_mutant",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("1386: import importlib.util",
+      "1402: importlib.util.spec_from_file_location('check_instruction_budget_mutant', path)",
+      "1403: importlib.util.module_from_spec(spec)",
+      "1407: spec.loader.exec_module(mutant)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
-    ("tools/check_instruction_budget.py", "self_test", "imp",
+    ("tools/check_instruction_budget.py", "self_test",
+     ("1655: imp",
+      "1656: imp"),
      "a local variable named imp (an import fixture tree), not the imp module"),
-    ("tools/check_manifest.py", "_self_test_main_isolated", "__import__",
+    ("tools/check_manifest.py", "_self_test_main_isolated",
+     ("387: __import__('subprocess').run(['git', '--version'], capture_output=True).returncode",),
      "inline __import__ of the standard-library module subprocess, a string literal"),
-    ("tools/check_overclaim.py", "_asset_closure_self_test", "imp",
+    ("tools/check_overclaim.py", "_asset_closure_self_test",
+     ("3627: 'imp.css'",
+      "3632: 'imp.css'"),
      "the string imp.css is a fixture file name, not the imp module"),
-    ("tools/check_python_floor.py", MODULE_SCOPE, "importlib",
+    ("tools/check_python_floor.py", MODULE_SCOPE,
+     ("192: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
     ("tools/check_python_floor.py", "_rule_reverts",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("1966: importlib.util.spec_from_file_location('python_floor_copy', copy)",
+      "2045: importlib.util.module_from_spec(spec)",
+      "2046: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
-    ("tools/check_selftest_execution.py", MODULE_SCOPE, "importlib",
+    ("tools/check_selftest_execution.py", MODULE_SCOPE,
+     ("179: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
     ("tools/check_selftest_execution.py", "self_test",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("1585-1587: importlib.util.spec_from_file_location('_selftest_exit_report_probe', "
+      "str(Path(__file__).resolve().parent / '_selftest_exit_report.py'))",
+      "1588: importlib.util.module_from_spec(spec)",
+      "1589: spec.loader.exec_module(probe)"),
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): "
      "tools/_selftest_exit_report.py as a probe"),
-    ("tools/gen_crosswalk.py", "_fdopen_vectors", "importlib",
+    ("tools/gen_crosswalk.py", "_fdopen_vectors",
+     ("648: import importlib.util",),
      "imports importlib.util for this file's loads by path, each reviewed in its own row"),
     ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped",
-     "exec_module importlib module_from_spec spec_from_file_location",
+     ("722: importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
+      "723: importlib.util.module_from_spec(spec)",
+      "725: spec.loader.exec_module(reverted)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
-    ("tools/migrate.py", "self_test", "exec_module importlib meta_path module_from_spec spec_from_file_location",
+    ("tools/migrate.py", "self_test",
+     ("867: import importlib.util",
+      "894: importlib.util.spec_from_file_location('_migrate_no_tomllib', os.path.abspath(__file__))",
+      "896: importlib.util.module_from_spec(nt_spec)",
+      "896: nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))",
+      "931: sys.meta_path.insert(0, nd_finder)",
+      "933: importlib.util.spec_from_file_location('_migrate_nested_missing', os.path.abspath(__file__))",
+      "935: importlib.util.module_from_spec(nd_spec)",
+      "935: nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))",
+      "942: sys.meta_path.remove(nd_finder)"),
      "self-test reloads this file by its path, once under a meta_path finder that fails tomllib, to prove the "
      "missing-dependency path"),
-    ("tools/migrate.py", "self_test._NestedMissingFinder.exec_module", "exec_module",
-     "the self-test finder's loader method, which raises to simulate a missing dependency"),
-    ("tools/migrate.py", "self_test._NestedMissingFinder.find_spec", "find_spec importlib spec_from_loader",
+    ("tools/migrate.py", "self_test._NestedMissingFinder",
+     ("919: def find_spec",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/pin.py", "self_test", "exec_module importlib meta_path module_from_spec spec_from_file_location",
+    ("tools/migrate.py", "self_test._NestedMissingFinder.find_spec",
+     ("920: importlib.util.spec_from_loader(name, self)",),
+     "the self-test finder answers for tomllib only, with spec_from_loader"),
+    ("tools/migrate.py", "self_test._NestedMissingFinder",
+     ("925: def exec_module",),
+     "the self-test finder's loader method, which raises to simulate a missing dependency"),
+    ("tools/pin.py", "self_test",
+     ("1340: import importlib.util",
+      "1394: importlib.util.spec_from_file_location('_pin_no_tomllib', os.path.abspath(__file__))",
+      "1396: importlib.util.module_from_spec(nt_spec)",
+      "1396: nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))",
+      "1430: sys.meta_path.insert(0, nd_finder)",
+      "1432: importlib.util.spec_from_file_location('_pin_nested_missing', os.path.abspath(__file__))",
+      "1434: importlib.util.module_from_spec(nd_spec)",
+      "1434: nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))",
+      "1441: sys.meta_path.remove(nd_finder)"),
      "self-test reloads this file by its path, once under a meta_path finder that fails tomllib, to prove the "
      "missing-dependency path"),
-    ("tools/pin.py", "self_test._NestedMissingFinder.exec_module", "exec_module",
-     "the self-test finder's loader method, which raises to simulate a missing dependency"),
-    ("tools/pin.py", "self_test._NestedMissingFinder.find_spec", "find_spec importlib spec_from_loader",
+    ("tools/pin.py", "self_test._NestedMissingFinder",
+     ("1418: def find_spec",),
      "the self-test finder answers for tomllib only, with spec_from_loader"),
-    ("tools/selftest_orch_hooks.py", "_main_isolated", "__import__ import_module importlib",
-     "imports the in-tree orch_doctor by its literal name through a recorded search root; inline __import__ of "
-     "the standard-library io"),
+    ("tools/pin.py", "self_test._NestedMissingFinder.find_spec",
+     ("1419: importlib.util.spec_from_loader(name, self)",),
+     "the self-test finder answers for tomllib only, with spec_from_loader"),
+    ("tools/pin.py", "self_test._NestedMissingFinder",
+     ("1424: def exec_module",),
+     "the self-test finder's loader method, which raises to simulate a missing dependency"),
+    ("tools/selftest_orch_hooks.py", "_main_isolated",
+     ("3256: import importlib",
+      "3259: importlib.import_module('orch_doctor')",
+      "3755: __import__('io').StringIO()"),
+     "imports the in-tree orch_doctor by its literal name through a recorded search root; inline __import__ of the "
+     "standard-library io"),
 )
 
 
@@ -588,8 +811,47 @@ def _catches_import_error(handler):
     return any(isinstance(k, ast.Name) and k.id in IMPORT_ERRORS for k in kinds)
 
 
+def _callee_name(func):
+    """The name a call reaches its function by: a name, an attribute, getattr with a literal name, or a subscript
+    with a literal key; None otherwise."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "getattr" and \
+            len(func.args) == 2 and isinstance(func.args[1], ast.Constant):
+        return func.args[1].value
+    if isinstance(func, ast.Subscript) and isinstance(func.slice, ast.Constant):
+        return func.slice.value
+    return None
+
+
+def _literal_import_name(call, callee):
+    """The string-literal absolute dotted name a LITERAL_IMPORTERS call names, or None when the name is computed,
+    relative, starred, or given a level that is not the literal 0."""
+    args = call.args
+    if any(isinstance(a, ast.Starred) for a in args) or any(k.arg is None for k in call.keywords):
+        return None
+    name = args[0] if args else None
+    for keyword in call.keywords:
+        if keyword.arg == "name" and name is None:
+            name = keyword.value
+        if keyword.arg == "level" and not (isinstance(keyword.value, ast.Constant) and keyword.value.value == 0):
+            return None
+    level = LITERAL_IMPORTER_LEVELS.get(callee)
+    if level is not None and len(args) > level and not (isinstance(args[level], ast.Constant) and
+                                                        args[level].value == 0):
+        return None
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+        return None
+    if not all(part.isidentifier() for part in name.value.split(".")):
+        return None
+    return name.value
+
+
 def extract_imports(tree):
-    """Import records (lineno, module, level, names, guarded) for every import statement in the file."""
+    """Import records (lineno, module, level, names, guarded) for every import statement in the file, and for
+    every LITERAL_IMPORTERS call with a string-literal absolute name (resolved at an allowlisted site too)."""
     records = []
 
     def visit(node, guarded):
@@ -599,6 +861,10 @@ def extract_imports(tree):
         elif isinstance(node, ast.ImportFrom):
             records.append((node.lineno, node.module or "", node.level,
                             tuple(a.name for a in node.names), guarded))
+        elif isinstance(node, ast.Call) and _callee_name(node.func) in LITERAL_IMPORTERS:
+            name = _literal_import_name(node, _callee_name(node.func))
+            if name is not None:
+                records.append((node.lineno, name, 0, (), guarded))
         if isinstance(node, (ast.Try, ast.TryStar)):
             body_guarded = guarded or any(_catches_import_error(h) for h in node.handlers)
             for child in node.body:
@@ -613,61 +879,160 @@ def extract_imports(tree):
     return records
 
 
-def dynamic_sites(tree):
-    """(lineno, enclosing function, name) for every dynamic-import site in the file: each occurrence of a name in
-    DYNAMIC_IMPORT_NAMES as an identifier anywhere in the tree, or as a dotted component of a string or bytes
-    literal that is a dotted identifier chain. No alias is resolved: an alias is itself a site."""
+def watched_names(modules=IMPORT_SYSTEM_MODULES, inert=INERT_IMPORT_SYSTEM_MEMBERS):
+    """(names, members) the dynamic-import rule watches, read from the import system's modules themselves:
+    names are DYNAMIC_IMPORT_NAMES and every undotted name sys.modules gives one of the modules; members are the
+    last component of every dotted such name and every function, class or module defined in one of them, less
+    the inert members. Fail-closed if a module does not load or an inert name is not a member."""
+    loaded = []
+    for name in modules:
+        try:
+            loaded.append(importlib.import_module(name))
+        except ImportError as exc:
+            raise CannotEvaluate("import-system module %s does not load (%s): the watched set has no other source"
+                                 % (name, exc))
+    aliases = set(k for k, v in list(sys.modules.items()) if any(v is m for m in loaded))
+    members = set(a.rsplit(".", 1)[1] for a in aliases if "." in a)
+    for module in loaded:
+        for key, value in vars(module).items():
+            if isinstance(value, (types.FunctionType, types.BuiltinFunctionType, type, types.ModuleType)) and \
+                    (getattr(value, "__module__", None) in aliases or getattr(value, "__name__", None) in aliases):
+                members.add(key)
+    stale = sorted(n for n, _reason in inert if n not in members)
+    if stale:
+        raise CannotEvaluate("INERT_IMPORT_SYSTEM_MEMBERS names %s, which is not a member of the import system's "
+                             "modules on this interpreter" % stale[0])
+    names = DYNAMIC_IMPORT_NAMES | frozenset(a for a in aliases if "." not in a)
+    return names, frozenset(members) - names - frozenset(n for n, _reason in inert)
+
+
+def _scoped_children(node, scope):
+    """(child, scope, descend) for each child of node. A def, class or lambda runs its body, and binds its
+    parameters, in a scope of its own (a lambda's is <lambda>); everything else it holds (decorators, defaults,
+    annotations, bases, keywords, type parameters) runs where the definition runs, in the enclosing scope. A
+    parameter is a leaf there: its annotation is pushed apart, in the enclosing scope."""
+    if not isinstance(node, SCOPE_NODES):
+        return [(child, scope, True) for child in ast.iter_child_nodes(node)]
+    inner = "<lambda>" if isinstance(node, ast.Lambda) else node.name
+    inner = inner if scope == MODULE_SCOPE else scope + "." + inner
     out = []
-    stack = [(tree, MODULE_SCOPE)]
+    for field, value in ast.iter_fields(node):
+        for child in value if isinstance(value, list) else (value,):
+            if field == "body":
+                out.append((child, inner, True))
+            elif isinstance(child, ast.arguments):
+                for arg in child.posonlyargs + child.args + [child.vararg] + child.kwonlyargs + [child.kwarg]:
+                    if arg is not None:
+                        out.append((arg, inner, False))
+                        if arg.annotation is not None:
+                            out.append((arg.annotation, scope, True))
+                out.extend((d, scope, True) for d in child.defaults + child.kw_defaults if d is not None)
+            elif isinstance(child, ast.AST):
+                out.append((child, scope, True))
+    return out
+
+
+def _site_reference(node, parents):
+    """The node a watched name is reviewed as: an alias's import statement, or the expression climbed through
+    the attribute access, call and subscript the name is the target of (a def, class, parameter, keyword or
+    literal is its own node)."""
+    if isinstance(node, ast.alias):
+        return parents[id(node)]
+    while True:
+        parent = parents.get(id(node))
+        if not (isinstance(parent, ast.Attribute) and parent.value is node or
+                isinstance(parent, ast.Call) and parent.func is node or
+                isinstance(parent, ast.Subscript) and parent.value is node):
+            return node
+        node = parent
+
+
+def reference_text(node):
+    """(first line, last line, text) of a site's reference node: a def or class by its header line, an except
+    clause by its bound name, anything else by its whole span and its unparsed source."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        head = {ast.FunctionDef: "def ", ast.AsyncFunctionDef: "async def ", ast.ClassDef: "class "}[type(node)]
+        return node.lineno, node.lineno, head + node.name
+    if isinstance(node, ast.ExceptHandler):
+        return node.lineno, node.lineno, "except as " + node.name
+    return node.lineno, node.end_lineno, ast.unparse(node)
+
+
+def reference_key(first, last, text):
+    """The reference a DYNAMIC_IMPORT_SITES row lists: LINE: TEXT, or FIRST-LAST: TEXT over several lines."""
+    return "%s: %s" % (first if first == last else "%d-%d" % (first, last), text)
+
+
+def dynamic_sites(tree, names, members):
+    """(reference, enclosing scope, watched names, called) for every dynamic-import site in the file: each
+    reference node holding an occurrence of a watched name, as an identifier anywhere in the tree, or as a dotted
+    component of a string or bytes literal that is a dotted identifier chain; a member counts as an attribute
+    name or a literal component only. called is true when the reference is a call. No alias is resolved: an
+    alias is itself a site, and whatever later uses the name it binds is not."""
+    parents = dict()
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    found = dict()
+    stack = [(tree, MODULE_SCOPE, True)]
     while stack:
-        node, scope = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            scope = node.name if scope == MODULE_SCOPE else scope + "." + node.name
-        for _field, value in ast.iter_fields(node):
+        node, scope, descend = stack.pop()
+        for field, value in ast.iter_fields(node):
             for item in value if isinstance(value, list) else (value,):
                 if isinstance(item, bytes):
                     item = item.decode("latin-1")
                 if not isinstance(item, str) or DOTTED_NAME_RE.fullmatch(item) is None:
                     continue
-                for part in item.split("."):
-                    if part in DYNAMIC_IMPORT_NAMES:
-                        out.append((getattr(node, "lineno", 0), scope, part))
-        stack.extend((child, scope) for child in ast.iter_child_nodes(node))
-    return sorted(out)
+                member = isinstance(node, ast.Constant) or (isinstance(node, ast.Attribute) and field == "attr")
+                hits = set(part for part in item.split(".") if part in names or (member and part in members))
+                if hits:
+                    reference = _site_reference(node, parents)
+                    found.setdefault(id(reference), (reference, scope, set()))[2].update(hits)
+        if descend:
+            stack.extend(_scoped_children(node, scope))
+    out = []
+    for reference, scope, hits in found.values():
+        out.append((reference_key(*reference_text(reference)), scope, " ".join(sorted(hits)),
+                    isinstance(reference, ast.Call)))
+    return sorted(out, key=lambda site: (int(REFERENCE_RE.fullmatch(site[0]).group("first")), site))
 
 
 def check_dynamic_sites(sites, allowlist):
-    """dynamic-import findings: every site (rel, lineno, function, name) no allowlist row allows, and every row
-    that gives no reason, lists no name, repeats a file and function, or lists a name that does not occur there."""
+    """dynamic-import findings: every site (rel, reference, scope, names, called) no allowlist row lists exactly
+    (its file, its enclosing scope and its reference: lines and text), and every row that gives no reason, lists
+    no reference or a malformed one, repeats a reference, or lists a reference that does not occur there."""
     findings = []
-    rows = dict()
-    for rel, function, names, reason in allowlist:
+    listed = dict()
+    for rel, function, references, reason in allowlist:
         problem = None
         if not reason.strip():
             problem = "gives no reason"
-        elif not names.split():
-            problem = "lists no name"
-        elif (rel, function) in rows:
-            problem = "repeats its file and function"
+        elif not references or not all(isinstance(r, str) and REFERENCE_RE.fullmatch(r) for r in references):
+            problem = "lists no reference, or one not of the form LINE: TEXT or FIRST-LAST: TEXT"
+        elif any((rel, function, r) in listed for r in references) or len(set(references)) != len(references):
+            problem = "repeats a reference"
         if problem is not None:
             findings.append(("dynamic-import", rel, 0, "DYNAMIC_IMPORT_SITES row (%r, %r) %s" % (rel, function,
                                                                                                problem)))
             continue
-        rows[(rel, function)] = set(names.split())
-    used = set()
-    for rel, lineno, function, name in sites:
-        if name in rows.get((rel, function), ()):
-            used.add((rel, function, name))
+        for reference in references:
+            listed[(rel, function, reference)] = False
+    for rel, reference, function, names, called in sites:
+        if (rel, function, reference) in listed:
+            listed[(rel, function, reference)] = True
             continue
-        findings.append(("dynamic-import", rel, lineno,
-                         "%s in %s is a dynamic-import site no DYNAMIC_IMPORT_SITES row allows (dynamic imports "
-                         "are not resolved: review the site and record it with a reason, or remove it)"
-                         % (name, function)))
-    for (rel, function), names in sorted(rows.items()):
-        stale = sorted(n for n in names if (rel, function, n) not in used)
-        if stale:
-            findings.append(("dynamic-import", rel, 0, "DYNAMIC_IMPORT_SITES row (%r, %r) is stale: no %s occurs "
-                             "there" % (rel, function, stale[0])))
+        findings.append(("dynamic-import", rel, int(REFERENCE_RE.fullmatch(reference).group("first")),
+                         "%s in %s is a dynamic-import site no DYNAMIC_IMPORT_SITES row lists (dynamic imports are "
+                         "not resolved, and a row allows one exact reference: review it and list %r under (%r, "
+                         "%r) with a reason, or remove it)%s"
+                         % (names, function, reference, rel, function,
+                            "" if called else "; the reference is not called in place, so what it is returned, "
+                            "stored or passed to runs without a site of its own")))
+    for (rel, function, reference), used in sorted(listed.items()):
+        if not used:
+            findings.append(("dynamic-import", rel, 0, "DYNAMIC_IMPORT_SITES row (%r, %r) is stale: no reference %r "
+                             "occurs there (a moved or edited reference is listed again, and reviewed again)"
+                             % (rel, function, reference)))
     return findings
 
 
@@ -847,7 +1212,7 @@ def _row_problem(rel, sroot, trees, used):
     return None
 
 
-def scan_python(root, files, stdlib, records, rules, search_roots=IMPORT_SEARCH_ROOTS):
+def scan_python(root, files, stdlib, records, rules, search_roots, watched):
     """Parse every .py file and classify every import. Returns (findings, stats, by_file, sites)."""
     findings = []
     stats = dict(files=0, imports=0, stdlib=0, repo=0, vendored=0, dispositioned=0)
@@ -866,7 +1231,7 @@ def scan_python(root, files, stdlib, records, rules, search_roots=IMPORT_SEARCH_
             raise CannotEvaluate("%s: does not parse: %s" % (rel, exc))
         trees[rel] = tree
         imports = extract_imports(tree)
-        sites.extend((rel, lineno, function, name) for lineno, function, name in dynamic_sites(tree))
+        sites.extend((rel,) + site for site in dynamic_sites(tree, *watched))
         stats["files"] += 1
         by_file[rel] = imports
         vroot = _vendored_root_of(rel, records)
@@ -1121,16 +1486,18 @@ def scan_workflows(root, files, rules):
 
 
 def scan(root, rules=RULES, sys_module=sys, version_info=None, dispositions=VENDORED_OPTIONAL_IMPORTS,
-         search_roots=IMPORT_SEARCH_ROOTS, allowlist=DYNAMIC_IMPORT_SITES):
+         search_roots=IMPORT_SEARCH_ROOTS, allowlist=DYNAMIC_IMPORT_SITES, import_system=IMPORT_SYSTEM_MODULES,
+         inert=INERT_IMPORT_SYSTEM_MEMBERS):
     """The whole verdict over root. Returns (findings, dispositioned lines, stats); raises CannotEvaluate."""
     stdlib = stdlib_names(sys_module)
     check_interpreter(load_floor(root), version_info if version_info is not None else sys.version_info)
+    watched = watched_names(import_system, inert)
     files = _walk(Path(root))
     records, vendor_findings = _load_vendor(root, files)
-    py_findings, stats, by_file, sites = scan_python(root, files, stdlib, records, rules, search_roots)
+    py_findings, stats, by_file, sites = scan_python(root, files, stdlib, records, rules, search_roots, watched)
     py_findings, shown = apply_dispositions(py_findings, by_file, records, dispositions, rules, stats)
     py_findings += check_dynamic_sites(sites, allowlist)
-    stats.update(dynamic=len(sites), entries=len(allowlist))
+    stats.update(dynamic=len(sites), entries=len(allowlist), names=len(watched[0]), members=len(watched[1]))
     wf_findings, counts = scan_workflows(root, files, rules)
     stats.update(counts)
     stats["skipped"] = ", ".join(n for n in SKIPPED_ROOT_NAMES if os.path.lexists(Path(root) / n)) or "none"
@@ -1149,8 +1516,9 @@ def run(root):
     for rule, rel, lineno, message in findings:
         print("FINDING [%s] %s:%d: %s" % (rule, rel, lineno, message), file=sys.stderr)
     summary = ("%(files)d Python files, %(imports)d imports (%(stdlib)d standard library, %(repo)d in-repo, "
-               "%(vendored)d vendored, %(dispositioned)d dispositioned), %(dynamic)d dynamic-import sites (not "
-               "resolved), each allowed by one of %(entries)d reviewed rows, %(uses)d action references, "
+               "%(vendored)d vendored, %(dispositioned)d dispositioned), %(dynamic)d dynamic-import sites (references "
+               "to %(names)d watched names and %(members)d import-system members; not resolved, a literal name "
+               "excepted), each listed exactly by one of %(entries)d reviewed rows, %(uses)d action references, "
                "%(images)d container images; not walked at the root: %(skipped)s" % stats)
     if findings:
         print("IMPORT CLOSURE: FAILED: %d finding(s); %s" % (len(findings), summary), file=sys.stderr)
@@ -1226,7 +1594,8 @@ _FIXTURE_DISPOSITIONS = (
 )
 _FIXTURE_ROOTS = (("tools/a.py", "lib"), ("tools/a.py", "lib/_vendor"))
 _T_ROOTS = _FIXTURE_ROOTS + (("tools/t.py", "lib/_vendor"),)
-_FIXTURE_SITES = (("tools/a.py", MODULE_SCOPE, "__import__ import_module importlib", "the fixture's own sites"),)
+_FIXTURE_SITES = (("tools/a.py", MODULE_SCOPE, ("6: import importlib", "7: importlib.import_module('json')",
+                                                "10: __import__(os.environ['X'])"), "the fixture's own sites"),)
 _T_VENDOR = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib', '_vendor'))\n"
 _WF = WORKFLOWS_REL + "/p.yml"
 _REC = "lib/_vendor/pkg-1.0.provenance.toml"
@@ -1249,29 +1618,46 @@ _RULE_VECTORS = (
      (("lib/pk/__init__.py", ""), ("lib/pk/m.py", "import n\n"), ("lib/pk/n.py", "")), (), {}, True),
     ("vendored file importing beside itself", "import-closure", "lib/_vendor/pkg/mod.py",
      (("lib/_vendor/pkg/mod.py", "import json\nfrom .sub import leaf\nimport opt\n"),), (), {}, True),
+    # A literal name at a dynamic-import call is resolved like an import statement, at an allowlisted site too.
+    ("literal dynamic import of a third-party name at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import importlib\nimportlib.import_module('yaml')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1: import importlib", "2: importlib.import_module('yaml')"), "r"),)), True),
+    ("__import__ of a third-party name inside an allowlisted function", "import-closure", "tools/t.py",
+     (("tools/t.py", "def f():\n    return __import__('requests')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('requests')",), "r"),)), True),
+    ("__import__ level keyword 0 at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('requests', level=0)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1: __import__('requests', level=0)",), "r"),)),
+     True),
+    ("__import__ fifth argument 0 at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('requests', None, None, (), 0)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1: __import__('requests', None, None, (), 0)",), "r"),)), True),
+    ("_gcd_import of a third-party name at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import importlib\nimportlib._bootstrap._gcd_import('requests')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1: import importlib", "2: importlib._bootstrap._gcd_import('requests')"),
+                                       "r"),)), True),
     ("literal dynamic import of a third-party name", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib\nimportlib.import_module('yaml')\n"),), (), {}, True),
+     (("tools/t.py", "import importlib\nimportlib.import_module('json')\n"),), (), {}, True),
     ("aliased importlib", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib as il\nil.import_module('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import importlib as il\nil.import_module('json')\n"),), (), {}, True),
     ("aliased import_module", "dynamic-import", "tools/t.py",
      (("tools/t.py", "from importlib import import_module as load\nload('requests')\n"),), (), {}, True),
     ("import_module name keyword", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib\nimportlib.import_module(name='requests')\n"),), (), {}, True),
+     (("tools/t.py", "import importlib\nimportlib.import_module(name='json')\n"),), (), {}, True),
     ("__import__ through builtins", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import builtins\nbuiltins.__import__('requests')\n"),), (), {}, True),
-    ("importlib.__import__", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib\nimportlib.__import__('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import builtins\nbuiltins.__import__('json')\n"),), (), {}, True),
+    ("__import__ as an importlib attribute", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import importlib\nimportlib.__import__('json')\n"),), (), {}, True),
     ("find_spec through importlib.util", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "from importlib import util\nutil.find_spec('requests')\n"),), (), {}, True),
+     (("tools/t.py", "from importlib import util\nutil.find_spec('json')\n"),), (), {}, True),
     ("getattr with a literal name", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib\ngetattr(importlib, 'import_module')('requests')\n"),), (), {}, True),
-    ("__import__ level keyword 0", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "__import__('requests', level=0)\n"),), (), {}, True),
-    ("__import__ fifth argument 0", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "__import__('requests', None, None, (), 0)\n"),), (), {}, True),
+     (("tools/t.py", "import importlib\ngetattr(importlib, 'import_module')('json')\n"),), (), {}, True),
     # Round-2 reproductions: each escaped the gate before dynamic imports were refused outside the allowlist.
     ("function-local alias beside a module-level __import__", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "def unrelated():\n    from builtins import print as __import__\n__import__('requests')\n"),),
+     (("tools/t.py", "def unrelated():\n    from builtins import print as __import__\n__import__('json')\n"),),
      (), {}, True),
     ("__import__ fromlist keyword reaching an unreached module", "dynamic-import", "tools/t.py",
      (("tools/t.py", _T_VENDOR + "import pkg\n__import__('pkg', fromlist=['far'])\n"),), (),
@@ -1282,19 +1668,19 @@ _RULE_VECTORS = (
     ("__import__ computed fromlist", "dynamic-import", "tools/t.py",
      (("tools/t.py", "__import__('json', fromlist=names)\n"),), (), {}, True),
     ("__import__ through __builtins__", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "__builtins__.__import__('requests')\n"),), (), {}, True),
+     (("tools/t.py", "__builtins__.__import__('json')\n"),), (), {}, True),
     ("PathFinder spec executed by its loader", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import importlib.machinery, importlib.util\n"
-       "s = importlib.machinery.PathFinder.find_spec('requests')\nm = importlib.util.module_from_spec(s)\n"
+       "s = importlib.machinery.PathFinder.find_spec('json')\nm = importlib.util.module_from_spec(s)\n"
        "s.loader.exec_module(m)\n"),), (), {}, True),
     ("importlib.resources by package name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import importlib.resources\nimportlib.resources.files('requests')\n"),), (), {}, True),
-    ("pydoc.locate", "dynamic-import", "tools/t.py", (("tools/t.py", "import pydoc\npydoc.locate('requests')\n"),),
+    ("pydoc locate by name", "dynamic-import", "tools/t.py", (("tools/t.py", "import pydoc\npydoc.locate('json')\n"),),
      (), {}, True),
     ("importlib through sys.modules", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import sys\nsys.modules['importlib'].import_module('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import sys\nsys.modules['importlib'].import_module('json')\n"),), (), {}, True),
     ("importlib bound to another name", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import importlib\nm = importlib\nm.import_module('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import importlib\nm = importlib\nm.import_module('json')\n"),), (), {}, True),
     ("package __path__ extended outside the tree", "dynamic-import", "tools/pk/__init__.py",
      (("tools/pk/__init__.py", "__path__.append('/usr/lib/python3/dist-packages')\n"),
       ("tools/t.py", "import pk.yaml\n")), (), {}, True),
@@ -1302,37 +1688,77 @@ _RULE_VECTORS = (
      (("tools/pk/__init__.py", "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n"),
       ("tools/t.py", "import pk.thing\n")), (), {}, True),
     ("getattr with a literal string name", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import builtins\ngetattr(builtins, '__import__')('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import builtins\ngetattr(builtins, '__import__')('json')\n"),), (), {}, True),
     ("vars with a literal string key", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "import builtins\nvars(builtins)['__import__']('requests')\n"),), (), {}, True),
+     (("tools/t.py", "import builtins\nvars(builtins)['__import__']('json')\n"),), (), {}, True),
     ("getattr with a bytes literal name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import builtins\ngetattr(builtins, b'__import__'.decode())('requests')\n"),), (), {}, True),
     ("string naming an importlib submodule", "dynamic-import", "tools/t.py",
      (("tools/t.py", "import sys\nsys.modules['importlib.util']\n"),), (), {}, True),
-    # The allowlist: a row allows its names in its own file and function only, and is held live.
-    ("allowlisted name used in another function", "dynamic-import", "tools/t.py",
-     (("tools/t.py", "def f():\n    return __import__\ndef g():\n    return __import__\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "__import__", "r"),)), True),
+    # Round-3 reproductions: each passed while a row allowed its names throughout a function, or while the
+    # import system's own entry points were not watched.
+    ("default argument evaluated outside its function", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f(x=__import__('json')):\n    return x\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("1: __import__('json')",), "reviewed body of f"),)), True),
+    ("decorator evaluated outside its function", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "@((lambda x: lambda f: f)(__import__('json')))\ndef f():\n    pass\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("1: __import__('json')",), "reviewed body of f"),)), True),
+    ("attribute decorator evaluated outside its function", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "@__import__('json').loads\ndef f():\n    pass\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("1: __import__('json').loads",), "r"),)), True),
+    ("class base evaluated outside its class", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "class C(__import__('json').JSONDecoder):\n    pass\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "C", ("1: __import__('json').JSONDecoder",), "r"),)), True),
+    ("importer returned from a function with a reviewed call", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    __import__('json')\n    return __import__\n\ndef g():\n    return f()('json')\n\n"
+       "result = g().__name__\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('json')",), "reviewed body of f"),)), True),
+    ("lambda returned from a function with a reviewed call", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    __import__('json')\n    return lambda: __import__('json')\n\ng = f()\n"
+       "result = g().__name__\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('json')",), "reviewed body of f"),)), True),
+    ("_gcd_import through an allowlisted importlib", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import importlib.util\nimportlib._bootstrap._gcd_import('json')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1: import importlib.util",), "r"),)), True),
+    ("_frozen_importlib named directly", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import _frozen_importlib\n_frozen_importlib._gcd_import('json')\n"),), (), {}, True),
+    ("frozen importlib module imported by its frozen name", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import _frozen_importlib_external\n"),), (), {}, True),
+    ("_frozen_importlib through sys.modules", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import sys\nsys.modules['_frozen_importlib']._gcd_import('json')\n"),), (), {}, True),
+    ("_imp imported", "dynamic-import", "tools/t.py", (("tools/t.py", "import _imp\n"),), (), {}, True),
+    # The allowlist: a row allows exact references (lines and text) in its own file and scope, and is held live.
+    ("allowlisted reference repeated in another function", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    return __import__('json')\ndef g():\n    return __import__('json')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('json')",), "r"),)), True),
     ("allowlist row naming a method by its bare name", "dynamic-import", "tools/t.py",
      (("tools/t.py", "class C:\n    def g(self):\n        return __import__\ndef g():\n    pass\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "g", "__import__", "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "g", ("3: __import__",), "r"),)), True),
     ("module-level row for a site inside a function", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, "__import__", "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("2: __import__",), "r"),)), True),
+    ("allowlisted reference moved to another line", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    x = 1\n    return __import__('json')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('json')",), "r"),)), True),
+    ("allowlisted line holding another expression", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "def f():\n    return __import__('json').dumps\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__('json')",), "r"),)), True),
     ("stale allowlist row", "dynamic-import", "tools/t.py", (("tools/t.py", "def f():\n    return 1\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "__import__", "r"),)), True),
-    ("allowlist row listing a name that does not occur", "dynamic-import", "tools/t.py",
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__",), "r"),)), True),
+    ("allowlist row listing a reference that does not occur", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "__import__ importlib", "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__", "3: x.importlib"), "r"),)), True),
     ("allowlist row with no reason", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "__import__", " "),)), True),
-    ("allowlist row listing no name", "dynamic-import", "tools/t.py", (("tools/t.py", "x = 1\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "", "r"),)), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__",), " "),)), True),
+    ("allowlist row listing no reference", "dynamic-import", "tools/t.py", (("tools/t.py", "x = 1\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", (), "r"),)), True),
+    ("allowlist row with a malformed reference", "dynamic-import", "tools/t.py", (("tools/t.py", "x = 1\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("two: x",), "r"),)), True),
     ("allowlist row repeated", "dynamic-import", "tools/t.py",
      (("tools/t.py", "def f():\n    return __import__\n"),), (),
-     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", "__import__", "r"),
-                                      ("tools/t.py", "f", "__import__", "s"))), True),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2: __import__",), "r"),
+                                      ("tools/t.py", "f", ("2: __import__",), "s"))), True),
     ("relative import naming no module beside a non-package file", "import-closure", "tools/t.py",
      (("tools/t.py", "from . import nothere\n"),), (), {}, True),
     ("relative from-import of a missing module", "import-closure", "lib/_vendor/pkg/sub/leaf.py",
@@ -1452,27 +1878,43 @@ _RULE_VECTORS = (
      dict(dispositions=(_FIXTURE_DISPOSITIONS[0], ("lib/_vendor/pkg/far.py", "heavylib", "optional"))), True),
 )
 
-# One rule vector per watched name, each the name's only site: removing the name from DYNAMIC_IMPORT_NAMES must
-# turn its vector green (the self-test removes each in turn).
-_NAME_VECTORS = tuple(("watched name " + name, "dynamic-import", "tools/t.py",
-                       (("tools/t.py", "def f(o):\n    return o.%s\n" % name),), (), {}, True)
-                      for name in sorted(DYNAMIC_IMPORT_NAMES))
+def _name_vectors(names, members):
+    """One rule vector per watched name and member, each its only site: removing it from the watched set must turn
+    its vector green (the self-test removes each in turn)."""
+    return tuple(("watched name " + name, "dynamic-import", "tools/t.py",
+                  (("tools/t.py", "def f(o):\n    return o.%s\n" % name),), (), {}, True)
+                 for name in sorted(names | members))
 
-# (name, source, the sites (lineno, enclosing function, name) dynamic_sites must find, exactly)
+
+# (name, source, the sites dynamic_sites must find, exactly, each as SCOPE | REFERENCE)
 _SITE_VECTORS = (
     ("alias in a function, use at module level",
-     "def unrelated():\n    from builtins import print as __import__\n__import__('requests')\n",
-     ((2, "unrelated", "__import__"), (3, MODULE_SCOPE, "__import__"))),
+     "def unrelated():\n    from builtins import print as __import__\n__import__('json')\n",
+     ("unrelated | 2: from builtins import print as __import__", "<module> | 3: __import__('json')")),
     ("submodule import and from-import", "import importlib.util as u\nfrom importlib import machinery\n",
-     ((1, MODULE_SCOPE, "importlib"), (2, MODULE_SCOPE, "importlib"))),
+     ("<module> | 1: import importlib.util as u", "<module> | 2: from importlib import machinery")),
     ("parameter and attribute in a nested class method",
      "class A:\n    class B:\n        def m(self, run_path=None):\n            return self.find_spec\n",
-     ((3, "A.B.m", "run_path"), (4, "A.B.m", "find_spec"))),
+     ("A.B.m | 3: run_path", "A.B.m | 4: self.find_spec")),
     ("whole dotted string and bytes literals only", "x = 'importlib.util'\ny = 'use importlib'\nz = b'__import__'\n",
-     ((1, MODULE_SCOPE, "importlib"), (3, MODULE_SCOPE, "__import__"))),
+     ("<module> | 1: 'importlib.util'", "<module> | 3: b'__import__'")),
     ("global and keyword names", "def f():\n    global imp\n    g(run_module=1)\n",
-     ((2, "f", "imp"), (3, "f", "run_module"))),
+     ("f | 2: global imp", "f | 3: run_module=1")),
     ("names outside the set", "import os\nos.path.join('a')\nimporter = 1\n", ()),
+    ("async def scope", "async def f():\n    return __import__('json')\n", ("f | 2: __import__('json')",)),
+    ("definition-time expressions in the enclosing scope",
+     "class C(__import__('json').JSONDecoder):\n    @x.find_spec\n    def m(self, a: importlib = __import__):\n"
+     "        return 1\n",
+     ("<module> | 1: __import__('json').JSONDecoder", "C | 2: x.find_spec", "C | 3: __import__", "C | 3: importlib")),
+    ("a def's name in the enclosing scope", "class C:\n    def find_spec(self):\n        pass\n",
+     ("C | 2: def find_spec",)),
+    ("lambda body in a scope of its own", "f = lambda: __import__('json')\n", ("<lambda> | 1: __import__('json')",)),
+    ("one reference per attribute chain and call",
+     "s = importlib.util.spec_from_file_location('x',\n    'y')\n",
+     ("<module> | 1-2: importlib.util.spec_from_file_location('x', 'y')",)),
+    ("import-system members as attributes and literals only",
+     "def _gcd_import(_load):\n    return _gcd_import(_load)\nx = o._load\ny = '_gcd_import'\n",
+     ("<module> | 3: o._load", "<module> | 4: '_gcd_import'")),
 )
 
 
@@ -1553,14 +1995,19 @@ _CANNOT_VECTORS = (
     ("duplicate manifest path", (), (), dict(), "duplicate-row"),
     ("licence text that is not UTF-8", ((_LICENCE, b"MIT \xff\n"),), (), dict(), None),
     ("no workflow to evaluate", (), (WORKFLOWS_REL + "/q.yml",), dict(), None),
+    ("import-system module that does not load", (), (),
+     dict(import_system=IMPORT_SYSTEM_MODULES + ("no_such_import_system_module",)), None),
+    ("inert member that is no member", (), (),
+     dict(inert=INERT_IMPORT_SYSTEM_MEMBERS + (("no_such_member", "r"),)), None),
 )
 
 
 def _vector_cases(tmp):
     """Build every vector's fixture tree once. Returns [(name, expected, rule, rel, base, kwargs, special)]:
-    expected is 1 (a finding of rule at rel), 2 (cannot evaluate) or "count" (base is then the source)."""
+    expected is 1 (a finding of rule at rel), 2 (cannot evaluate) or "sites" (base is then the source)."""
     cases = []
-    for index, (name, rule, at, extra, drop, kwargs, rehash) in enumerate(_RULE_VECTORS + _NAME_VECTORS):
+    for index, (name, rule, at, extra, drop, kwargs, rehash) in enumerate(_RULE_VECTORS +
+                                                                          _name_vectors(*watched_names())):
         base = _fixture(tmp / ("v%d" % index), tuple(row for row in extra if row[1] is not None and
                                                      not row[0].startswith("+")), drop, rehash)
         manifest = base / _MANIFEST
@@ -1626,7 +2073,8 @@ def _case_failure(module, case):
     """None if the case holds against module (this gate or a mutant of it), else what went wrong."""
     name, expected, rule, at, base, kwargs, special = case
     if expected == "sites":
-        got = tuple(module.dynamic_sites(ast.parse(base)))
+        got = tuple("%s | %s" % (site[1], site[0]) for site in module.dynamic_sites(ast.parse(base),
+                                                                                   *module.watched_names()))
         return None if got == rule else "expected sites %r, got %r" % (rule, got)
     rc, findings = _scan_rc(module, base, special=special, **dict(kwargs))
     if expected == 2:
@@ -1709,22 +2157,65 @@ MUTANTS = (
      "if not isinstance(item, str) or isinstance(node, ast.Constant) or DOTTED_NAME_RE.fullmatch(item) is None:",
      "getattr with a literal string name"),
     ("site-bytes-literals", 'item = item.decode("latin-1")', "pass", "getattr with a bytes literal name"),
-    ("site-dotted-parts", 'for part in item.split("."):', "for part in (item,):",
+    ("site-dotted-parts", 'for part in item.split(".") if', "for part in (item,) if",
      "string naming an importlib submodule"),
-    ("site-scope-entered", "if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):", "if False:",
+    ("site-scope-entered", "    if not isinstance(node, SCOPE_NODES):\n", "    if True:\n",
      "module-level row for a site inside a function"),
-    ("site-scope-nested", 'scope = node.name if scope == MODULE_SCOPE else scope + "." + node.name',
-     "scope = node.name", "allowlist row naming a method by its bare name"),
-    ("site-allowed-in-its-function", "if name in rows.get((rel, function), ()):",
-     "if any(name in n for (r, _f), n in rows.items() if r == rel):", "allowlisted name used in another function"),
-    ("site-uncovered-finding", '        findings.append(("dynamic-import", rel, lineno,',
-     '        (("dynamic-import", rel, lineno,', "function-local alias beside a module-level __import__"),
+    ("site-scope-async", "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)",
+     "SCOPE_NODES = (ast.FunctionDef, ast.ClassDef, ast.Lambda)", "async def scope"),
+    ("site-scope-lambda", "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)",
+     "SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)", "lambda body in a scope of its own"),
+    ("site-scope-nested", 'inner = inner if scope == MODULE_SCOPE else scope + "." + inner', "inner = inner",
+     "allowlist row naming a method by its bare name"),
+    ("site-definition-outer",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, scope, True))",
+     "            elif isinstance(child, ast.AST):\n                out.append((child, inner, True))",
+     "decorator evaluated outside its function"),
+    ("site-defaults-outer", "out.extend((d, scope, True) for d in", "out.extend((d, inner, True) for d in",
+     "default argument evaluated outside its function"),
+    ("site-annotations-outer", "out.append((arg.annotation, scope, True))",
+     "out.append((arg.annotation, inner, True))", "definition-time expressions in the enclosing scope"),
+    ("site-parameters-inner", "out.append((arg, inner, False))", "out.append((arg, scope, False))",
+     "parameter and attribute in a nested class method"),
+    ("site-reference-climbed", "            return node\n        node = parent\n",
+     "            return node\n        return node\n", "one reference per attribute chain and call"),
+    ("site-alias-statement", "        return parents[id(node)]\n", "        return node\n",
+     "submodule import and from-import"),
+    ("site-members-watched",
+     'member = isinstance(node, ast.Constant) or (isinstance(node, ast.Attribute) and field == "attr")',
+     "member = False", "watched name _gcd_import"),
+    ("site-members-positions",
+     'member = isinstance(node, ast.Constant) or (isinstance(node, ast.Attribute) and field == "attr")',
+     "member = True", "import-system members as attributes and literals only"),
+    ("watched-module-aliases", "aliases = set(k for k, v in list(sys.modules.items()) if any(v is m for m in loaded))",
+     "aliases = set(modules)", "frozen importlib module imported by its frozen name"),
+    ("watched-members-derived", "                members.add(key)\n", "                pass\n",
+     "watched name _gcd_import"),
+    ("watched-modules-load",
+     'raise CannotEvaluate("import-system module %s does not load (%s): the watched set has no other source"\n'
+     '                                 % (name, exc))', "continue", "import-system module that does not load"),
+    ("watched-inert-live", "    if stale:\n        raise CannotEvaluate(\"INERT_IMPORT_SYSTEM_MEMBERS",
+     "    if False:\n        raise CannotEvaluate(\"INERT_IMPORT_SYSTEM_MEMBERS", "inert member that is no member"),
+    ("literal-name-resolved", "                records.append((node.lineno, name, 0, (), guarded))\n",
+     "                pass\n", "__import__ of a third-party name inside an allowlisted function"),
+    ("literal-callee-attribute", "    if isinstance(func, ast.Attribute):\n        return func.attr\n",
+     "    if False:\n        return func.attr\n",
+     "literal dynamic import of a third-party name at an allowlisted site"),
+    ("site-listed-exactly", "        if (rel, function, reference) in listed:\n",
+     "        if any(r == rel and f == function for r, f, _x in listed):\n",
+     "importer returned from a function with a reviewed call"),
+    ("site-uncovered-finding", '        findings.append(("dynamic-import", rel, int(REFERENCE_RE',
+     '        (("dynamic-import", rel, int(REFERENCE_RE', "function-local alias beside a module-level __import__"),
     ("sites-checked", "    py_findings += check_dynamic_sites(sites, allowlist)\n", "",
      "__import__ through __builtins__"),
     ("row-reason", "        if not reason.strip():\n", "        if False:\n", "allowlist row with no reason"),
-    ("row-names", "        elif not names.split():\n", "        elif False:\n", "allowlist row listing no name"),
-    ("row-unique", "        elif (rel, function) in rows:\n", "        elif False:\n", "allowlist row repeated"),
-    ("row-stale", "        if stale:\n", "        if False:\n", "stale allowlist row"),
+    ("row-references",
+     "        elif not references or not all(isinstance(r, str) and REFERENCE_RE.fullmatch(r) for r in "
+     "references):\n", "        elif False:\n", "allowlist row listing no reference"),
+    ("row-unique",
+     "        elif any((rel, function, r) in listed for r in references) or len(set(references)) != "
+     "len(references):\n", "        elif False:\n", "allowlist row repeated"),
+    ("row-stale", "        if not used:\n", "        if False:\n", "stale allowlist row"),
     # workflow classification and pins
     ("yaml-forbidden-characters", "    if bad is not None:\n", "    if False:\n",
      "bare CR line break after a comment"),
@@ -1872,7 +2363,7 @@ def self_test_main():
             _f, shown, stats = scan(clean, dispositions=_FIXTURE_DISPOSITIONS, search_roots=_FIXTURE_ROOTS,
                                     allowlist=_FIXTURE_SITES)
             got = (len(shown), stats["dynamic"], stats["vendored"], stats["repo"], stats["uses"], stats["images"])
-            if got != (2, 4, 4, 2, 2, 1):
+            if got != (2, 3, 4, 2, 2, 1):
                 failures.append("clean fixture: dispositions or residual not reported: %r %r" % (shown, stats))
         print("GREEN clean fixture")
         cases = _vector_cases(tmp)
@@ -1903,10 +2394,11 @@ def self_test_main():
                 failures.append("mutant %s: vector %r still holds with the check removed" % (mutant, vector))
             else:
                 print("MUTANT %s caught by %s (%s)" % (mutant, vector, problem.split(",")[0]))
-        # Each watched name removed in turn from a scratch copy: its own vector must then fail.
+        # Each watched name and member removed in turn from a scratch copy: its own vector must then fail.
         copy = _load_mutant(gate_source + marker + rest, mutant_dir, 0)
-        for name in sorted(DYNAMIC_IMPORT_NAMES):
-            copy.DYNAMIC_IMPORT_NAMES = DYNAMIC_IMPORT_NAMES - {name}
+        names, members = watched_names()
+        for name in sorted(names | members):
+            copy.watched_names = lambda *_args, _name=name: (names - {_name}, members - {_name})
             if _case_failure(copy, by_name["watched name " + name]) is None:
                 failures.append("watched name %s: its vector still holds with the name removed" % name)
             else:
@@ -1919,11 +2411,13 @@ def self_test_main():
         for failure in failures:
             print("SELF-TEST FAIL: %s" % failure, file=sys.stderr)
         return 1
+    names, members = watched_names()
     print("SELF-TEST PASS: %d rule vectors red with their rule and green without it (%d of them one per watched "
-          "name), %d cannot-evaluate vectors exit 2, %d dynamic-import site vectors hold, %d mutants (one check "
-          "removed each) caught by their vectors, %d watched names each removed and caught, the live tree passes"
-          % (len(_RULE_VECTORS) + len(_NAME_VECTORS), len(_NAME_VECTORS), len(_CANNOT_VECTORS), len(_SITE_VECTORS),
-             len(MUTANTS), len(DYNAMIC_IMPORT_NAMES)))
+          "name or import-system member), %d cannot-evaluate vectors exit 2, %d dynamic-import site vectors hold, "
+          "%d mutants (one check removed each) caught by their vectors, %d watched names and %d members each "
+          "removed and caught, the live tree passes"
+          % (len(_RULE_VECTORS) + len(names | members), len(names | members), len(_CANNOT_VECTORS),
+             len(_SITE_VECTORS), len(MUTANTS), len(names), len(members)))
     return 0
 
 
