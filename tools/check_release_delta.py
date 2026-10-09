@@ -325,12 +325,18 @@ def _stage1_read_capture(path):
     ONE descriptor opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat-required S_ISREG before any
     read, so a special file the committed child code swapped in at the capture path is refused at
     once, never a blocking open (the fail-closed rule, security-seci-fail-closed: the committed
-    copy ran with access to that directory). Stdlib only: stage 1 may import nothing from the
-    checkout, so this is a local twin of the shared non-blocking readers."""
+    copy ran with access to that directory). A platform that offers no O_NOFOLLOW or no O_NONBLOCK
+    is cannot-evaluate (None), never an unguarded or blocking name-based open (PR #397 QA round 2,
+    gemini: a getattr fallback of 0 silently dropped the containment flag; O_CLOEXEC stays
+    optional, descriptor hygiene rather than containment). Stdlib only: stage 1 may import nothing
+    from the checkout, so this is a local twin of the shared non-blocking readers."""
     import stat
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        return None
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0))
     except (OSError, ValueError):
         return None
     try:
@@ -384,10 +390,17 @@ def _stage2_arm_result():
     flushed makes the result and the exit 2, with a named line on the error stream. The fault and
     hook checks run again AFTER the record is written (PR #397 QA round p1, codex MAJOR): opening
     the result file raises an audit event, and a hook run there can fault or replace a reporting
-    hook after the first checks. A fault found then turns the exit to 2 and overwrites the record
-    in place with code 2, and stage 1 refuses a success record beside a nonzero exit. Only
-    os.close and os._exit follow the second check; a fault another thread of the child raises in
-    that window is not seen, which is inside the residual above (code the child runs). Stage 1
+    hook after the first checks. A fault found then turns the exit to 2, WHATEVER the verdict was
+    (round 2, claude MINOR-1), and overwrites the record in place with code 2; stage 1 refuses a
+    success record beside a nonzero exit. The WHOLE writer runs under a guard that turns ANY
+    escaping exception, the second check itself raising included, into os._exit(2) after a
+    best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1: an
+    exception leaving the atexit callback kept the dispatch's exit beside an already written
+    success record). What remains: an OSError raised by os.close, or a rewrite that itself fails,
+    can leave a code-0 record beside exit 2, which stage 1 refuses (a success record beside a
+    nonzero exit is never a verdict); and only os._exit follows the final checks, so a fault
+    another thread of the child raises in that window is not seen (a disclosed race, separate
+    from the forged-record residual above). Stage 1
     requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
     diagnostics go to a separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other
     byte is a fault.
@@ -420,51 +433,84 @@ def _stage2_arm_result():
     def _write_result():
         if state["code"] is None:
             return
-        code = state["code"]
-        for _pass in range(100):
-            if gc.collect() == 0:
-                break
-        else:
-            faults.append("garbage collection still freed objects after 100 passes")
-        _check_hooks()
         try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception as exc:  # any flush failure is a fault, named below
-            faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
-        if faults:
-            code = 2
-        seen = len(faults)
-        try:
-            if faults:
-                os.write(2, "error: stage-2 cleanup fault ({}); fail-closed "
-                         "(security-seci-fail-closed)\n".format(
-                             ", ".join(sorted(set(faults)))).encode("utf-8", "replace"))
-            os.write(2, "release-delta-stage2-boundary {}\n".format(os.getpid()).encode("ascii"))
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+            code = state["code"]
+            for _pass in range(100):
+                if gc.collect() == 0:
+                    break
+            else:
+                faults.append("garbage collection still freed objects after 100 passes")
+            _check_hooks()
             try:
-                os.write(fd, "release-delta-stage2 {} {}\n".format(code, os.getpid()).encode(
-                    "ascii"))
-                # The second check (PR #397 QA round p1, codex MAJOR): the open above raised an
-                # audit event, and a hook run there may have faulted or replaced a reporting
-                # hook. A late fault overwrites the success record in place (code 2 has the
-                # same length, so no stale byte stays) and makes the exit 2.
-                _check_hooks()
-                if code == 0 and len(faults) != seen:
-                    code = 2
-                    os.write(2, "error: stage-2 fault during the result write ({}); fail-closed "
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception as exc:  # any flush failure is a fault, named below
+                faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
+            if faults:
+                code = 2
+            seen = len(faults)
+            try:
+                if faults:
+                    os.write(2, "error: stage-2 cleanup fault ({}); fail-closed "
                              "(security-seci-fail-closed)\n".format(
-                                 ", ".join(sorted(set(faults[seen:])))).encode("utf-8",
-                                                                              "replace"))
-                    os.pwrite(fd, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
-                        "ascii"), 0)
-            finally:
-                os.close(fd)
-        except OSError:
-            code = 2
+                                 ", ".join(sorted(set(faults)))).encode("utf-8", "replace"))
+                os.write(2, "release-delta-stage2-boundary {}\n".format(os.getpid()).encode(
+                    "ascii"))
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+                try:
+                    os.write(fd, "release-delta-stage2 {} {}\n".format(code, os.getpid()).encode(
+                        "ascii"))
+                    # The second check (PR #397 QA round p1, codex MAJOR): the open above raised
+                    # an audit event, and a hook run there may have faulted or replaced a
+                    # reporting hook. A late fault overwrites the record in place (code 2 has
+                    # the same length, so no stale byte stays) and makes the exit 2 WHATEVER
+                    # the verdict was (round 2, claude MINOR-1: beside verdict 1 it was a
+                    # silent exit 1 with the fault unnamed).
+                    _check_hooks()
+                    if len(faults) != seen:
+                        code = 2
+                        os.write(2, "error: stage-2 fault during the result write ({}); "
+                                 "fail-closed (security-seci-fail-closed)\n".format(
+                                     ", ".join(sorted(set(faults[seen:])))).encode(
+                                         "utf-8", "replace"))
+                        os.pwrite(fd, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
+                            "ascii"), 0)
+                finally:
+                    os.close(fd)
+            except OSError:
+                # The open, a write or the close raising OSError can leave the record written
+                # before it (code 0 included) beside exit 2; stage 1 refuses a success record
+                # beside a nonzero exit (PR #397 QA round 2, codex).
+                code = 2
+        except BaseException:
+            # PR #397 QA round 2 (codex MAJOR, claude MEDIUM-1): ANY exception escaping the
+            # writer (the second check itself raising, an exception a hook or profiler injects
+            # into the result write or close) must still end in os._exit(2), never in atexit's
+            # 'Exception ignored' path, which keeps the dispatch's exit beside an already
+            # written success record. Best effort first: name the fault and rewrite the record
+            # to code 2; if that itself raises, os._exit(2) still runs and any stale success
+            # record sits beside exit 2, which stage 1 refuses.
+            try:
+                os.write(2, b"error: stage-2 result writer fault; fail-closed "
+                         b"(security-seci-fail-closed)\n")
+                fd2 = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+                try:
+                    os.write(fd2, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
+                        "ascii"))
+                finally:
+                    os.close(fd2)
+            except BaseException:
+                pass
+            os._exit(2)
         os._exit(code)
     atexit.register(_write_result)
-    if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
+    ncallbacks = getattr(atexit, "_ncallbacks", None)
+    if ncallbacks is None:
+        # PR #397 QA round 2 (gemini): with no atexit._ncallbacks a handler registered before
+        # the result writer cannot be ruled out; a recorded fault, never a clean default.
+        faults.append("atexit._ncallbacks is unavailable, so a pre-registered exit handler "
+                      "cannot be ruled out")
+    elif ncallbacks() != 1:
         faults.append("an exit handler was registered before the result writer")
     sys.addaudithook(_audit)
     threading.excepthook = _thread_fault
@@ -2098,9 +2144,17 @@ def _child_pycache_x():
 # the cyclic garbage, flushes, writes `release-delta-child <code> <pid>` and ends the child with
 # os._exit, so nothing of interpreter finalization runs after the result. The fault and hook checks
 # run again after the record is written (PR #397 QA round p1, codex MAJOR: the open raises an audit
-# event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2.
-# The record cannot authenticate the validator's code, which can write a well-formed record itself
-# (the residual _stage2_arm_result discloses).
+# event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2,
+# whatever the verdict was (round 2, claude MINOR-1). The whole writer runs under a guard that turns
+# any escaping exception, the second check itself raising included, into os._exit(2) after a
+# best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1); an OSError
+# in os.close, or a rewrite that itself fails, can leave a code-0 record beside exit 2, which
+# _run_recorded_child refuses, and only os._exit follows the final checks, so a fault another
+# thread raises in that window is not seen (a disclosed race, separate from the forged-record
+# residual). With atexit._ncallbacks unavailable, a pre-registered exit handler cannot be ruled
+# out: a recorded fault, never a clean default (round 2, gemini). The record cannot authenticate
+# the validator's code, which can write a well-formed record itself (the residual
+# _stage2_arm_result discloses).
 _CHILD_RECORD_STUB = (
     "import atexit, gc, os, runpy, sys, threading\n"
     "script, result = sys.argv[1], sys.argv[2]\n"
@@ -2118,42 +2172,62 @@ _CHILD_RECORD_STUB = (
     "def record():\n"
     "    if not state:\n"
     "        return\n"
-    "    code = state[0]\n"
-    "    for _ in range(100):\n"
-    "        if gc.collect() == 0:\n"
-    "            break\n"
-    "    else:\n"
-    "        faults.append('garbage collection never settled')\n"
-    "    check_hooks()\n"
     "    try:\n"
-    "        sys.stdout.flush()\n"
-    "        sys.stderr.flush()\n"
-    "    except Exception:\n"
-    "        faults.append('the streams could not be flushed')\n"
-    "    if faults:\n"
-    "        code = 2\n"
-    "        os.write(2, ('release-delta child fault: ' + ', '.join(sorted(set(faults)))\n"
-    "                     + chr(10)).encode())\n"
-    "    seen = len(faults)\n"
-    "    try:\n"
-    "        fd = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)\n"
+    "        code = state[0]\n"
+    "        for _ in range(100):\n"
+    "            if gc.collect() == 0:\n"
+    "                break\n"
+    "        else:\n"
+    "            faults.append('garbage collection never settled')\n"
+    "        check_hooks()\n"
     "        try:\n"
-    "            os.write(fd, ('release-delta-child ' + str(code) + ' ' + str(os.getpid())\n"
-    "                          + chr(10)).encode())\n"
-    "            check_hooks()\n"
-    "            if code == 0 and len(faults) != seen:\n"
-    "                code = 2\n"
-    "                os.write(2, ('release-delta child fault during the result write: '\n"
-    "                             + ', '.join(sorted(set(faults[seen:]))) + chr(10)).encode())\n"
-    "                os.pwrite(fd, ('release-delta-child 2 ' + str(os.getpid())\n"
-    "                               + chr(10)).encode(), 0)\n"
-    "        finally:\n"
-    "            os.close(fd)\n"
-    "    except OSError:\n"
-    "        code = 2\n"
+    "            sys.stdout.flush()\n"
+    "            sys.stderr.flush()\n"
+    "        except Exception:\n"
+    "            faults.append('the streams could not be flushed')\n"
+    "        if faults:\n"
+    "            code = 2\n"
+    "            os.write(2, ('release-delta child fault: ' + ', '.join(sorted(set(faults)))\n"
+    "                         + chr(10)).encode())\n"
+    "        seen = len(faults)\n"
+    "        try:\n"
+    "            fd = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC,\n"
+    "                         0o600)\n"
+    "            try:\n"
+    "                os.write(fd, ('release-delta-child ' + str(code) + ' ' + str(os.getpid())\n"
+    "                              + chr(10)).encode())\n"
+    "                check_hooks()\n"
+    "                if len(faults) != seen:\n"
+    "                    code = 2\n"
+    "                    os.write(2, ('release-delta child fault during the result write: '\n"
+    "                                 + ', '.join(sorted(set(faults[seen:]))) + chr(10)).encode())\n"
+    "                    os.pwrite(fd, ('release-delta-child 2 ' + str(os.getpid())\n"
+    "                                   + chr(10)).encode(), 0)\n"
+    "            finally:\n"
+    "                os.close(fd)\n"
+    "        except OSError:\n"
+    "            code = 2\n"
+    "    except BaseException:\n"
+    "        try:\n"
+    "            os.write(2, ('release-delta child fault during the result write: the writer '\n"
+    "                         'raised' + chr(10)).encode())\n"
+    "            fd2 = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC,\n"
+    "                          0o600)\n"
+    "            try:\n"
+    "                os.write(fd2, ('release-delta-child 2 ' + str(os.getpid())\n"
+    "                               + chr(10)).encode())\n"
+    "            finally:\n"
+    "                os.close(fd2)\n"
+    "        except BaseException:\n"
+    "            pass\n"
+    "        os._exit(2)\n"
     "    os._exit(code)\n"
     "atexit.register(record)\n"
-    "if getattr(atexit, '_ncallbacks', lambda: 1)() != 1:\n"
+    "ncallbacks = getattr(atexit, '_ncallbacks', None)\n"
+    "if ncallbacks is None:\n"
+    "    faults.append('atexit._ncallbacks is unavailable, so a pre-registered exit handler '\n"
+    "                  'cannot be ruled out')\n"
+    "elif ncallbacks() != 1:\n"
     "    faults.append('an exit handler was registered before the result writer')\n"
     "sys.addaudithook(lambda event, _args: event in ('sys.unraisablehook', 'sys.excepthook')\n"
     "                 and faults.append(event))\n"
@@ -5048,6 +5122,36 @@ def _post_release_e2e(tmp, failures, only=None):
                         "with open(_r7s, 'w', encoding='utf-8') as _h7s:\n"
                         "    _h7s.write('release-delta-stage2 0 ' + {} + chr(10))\n"
                         "os._exit({})\n")
+            # PR #397 QA round 2 (codex MAJOR): a profiling hook that raises at the C return
+            # of the named os call inside the writer frame, AFTER the call succeeded, under a
+            # replaced stream, so only the writer's exception guard can refuse it.
+            prof7s = ("import io\n"
+                      "sys.stderr = io.StringIO()\n"
+                      "def _prof7s(frame, event, arg):\n"
+                      "    if (event == 'c_return' and arg is {}\n"
+                      "            and frame.f_code.co_name == '_write_result'\n"
+                      "            and 'fd' in frame.f_locals):\n"
+                      "        raise RuntimeError('QA injected result-writer fault')\n"
+                      "sys.setprofile(_prof7s)\n")
+            # PR #397 QA round 2 (claude MEDIUM-1): an audit hook on the result open deletes a
+            # reporting hook and silences the streams, so the SECOND hook check itself raises
+            # AttributeError; it fires once, so the guard's rewrite path stays clean.
+            raise7s = ("import threading\n"
+                       "_r7q = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                       "_hit7q = []\n"
+                       "def _del7q(event, args):\n"
+                       "    if event == 'open' and args and args[0] == _r7q and not _hit7q:\n"
+                       "        _hit7q.append(1)\n"
+                       "        sys.stderr = None\n"
+                       "        del threading.excepthook\n"
+                       "sys.addaudithook(_del7q)\n")
+            # PR #397 QA round 2 (claude MEDIUM-2): the same window replaces a reporting hook
+            # WITHOUT raising; only the second hook check sees it.
+            swap7s = ("_r7w = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                      "def _swap7w(event, args):\n"
+                      "    if event == 'open' and args and args[0] == _r7w:\n"
+                      "        sys.unraisablehook = lambda _u: None\n"
+                      "sys.addaudithook(_swap7w)\n")
             for tag7s, body7s, want7s in (
                     ("shutdown-fault", "import atexit\n"
                      "def _fault():\n"
@@ -5091,7 +5195,27 @@ def _post_release_e2e(tmp, failures, only=None):
                      "atexit.register(int)\n" + armed7s + settle7s, 2),
                     ("record bound to another pid", forged7s.format("'1'", 0), 2),
                     ("success record beside a nonzero exit",
-                     forged7s.format("str(os.getpid())", 1), 2)):
+                     forged7s.format("str(os.getpid())", 1), 2),
+                    # PR #397 QA round 2 (codex MAJOR / claude MEDIUM-1): any exception escaping
+                    # the writer, injected at the C return of the result write or of the close,
+                    # or raised by the second check itself, must end in os._exit(2), never in
+                    # atexit's 'Exception ignored' path beside the already written success
+                    # record; the streams are silenced so only the writer's own guard refuses.
+                    ("armed exception injected after the successful result write",
+                     armed7s + prof7s.format("os.write") + settle7s, 2),
+                    ("armed exception injected from the result close",
+                     armed7s + prof7s.format("os.close") + settle7s, 2),
+                    ("armed second check raising under silenced streams",
+                     armed7s + raise7s + settle7s, 2),
+                    # PR #397 QA round 2 (claude MEDIUM-2): a reporting hook replaced during the
+                    # result open, without raising, is refused ONLY by the second hook check.
+                    ("armed reporting hook replaced during the result open",
+                     armed7s + swap7s + settle7s, 2),
+                    # PR #397 QA round 2 (gemini): with atexit._ncallbacks unavailable a
+                    # pre-registered exit handler cannot be ruled out; a recorded fault, never a
+                    # clean default.
+                    ("armed atexit._ncallbacks unavailable",
+                     "import atexit\ndel atexit._ncallbacks\n" + armed7s + settle7s, 2)):
                 mal7 = tmp / ("r7-stage2-" + tag7s.replace(" ", "-"))
                 (mal7 / "tools").mkdir(parents=True)
                 gate7 = mal7 / "tools" / "check_release_delta.py"
@@ -5129,26 +5253,60 @@ def _post_release_e2e(tmp, failures, only=None):
                                         label7s, tag7s, proc7s.returncode,
                                         out7s.strip()[-300:]))
 
-            # What a late fault leaves behind (PR #397 QA round p1, codex MAJOR): stage 1 deletes
-            # its captures, so the armed late-fault body runs directly here and its record must
-            # carry code 2, never the success record written before the second check.
-            direct7s = tmp / "r7-stage2-direct-late.py"
-            record7s = tmp / "r7-stage2-direct-late.result"
-            direct7s.write_text(armed7s + late7s + settle7s, encoding="utf-8")
+            # What a late fault leaves behind (PR #397 QA round p1, codex MAJOR; round 2,
+            # claude MINOR-1: the same late fault beside verdict 1 must also turn the exit and
+            # the record to 2, with the fault named, never a silent exit 1): stage 1 deletes its
+            # captures, so the armed late-fault body runs directly here and its record must
+            # carry code 2, never the record written before the second check.
+            for tag7d, settle7d in (("settled 0", settle7s),
+                                    ("settled 1", "_state7s['code'] = 1\n")):
+                direct7s = tmp / "r7-stage2-direct-late.py"
+                record7s = tmp / "r7-stage2-direct-late.result"
+                direct7s.write_text(armed7s + late7s + settle7d, encoding="utf-8")
+                try:
+                    proc7d = subprocess.run([sys.executable, "-I", "-B", str(direct7s)],
+                                            capture_output=True, timeout=120,
+                                            env=dict(env, AIQT_RELEASE_DELTA_STAGE2_RESULT=str(
+                                                record7s)))
+                    rec7d = record7s.read_bytes() if record7s.is_file() else b""
+                except (OSError, subprocess.TimeoutExpired) as exc7d:
+                    proc7d, rec7d = None, "not run ({})".format(exc7d).encode("utf-8")
+                if (proc7d is None or proc7d.returncode != 2
+                        or not rec7d.startswith(b"release-delta-stage2 2 ")):
+                    failures.append("{} [late fault record, run directly, {}]: expected rc=2 "
+                                    "and a code-2 record (got rc={}, record={!r})".format(
+                                        label7s, tag7d,
+                                        None if proc7d is None else proc7d.returncode,
+                                        rec7d[:80]))
+            # PR #397 QA round 2 (gemini BLOCKER): a platform with no O_NOFOLLOW or no
+            # O_NONBLOCK offers no race-free containment for the capture read-back, so the
+            # reader must answer cannot-evaluate (None), never fall back to an unguarded
+            # name-based open; a control read with both primitives present stays intact.
+            cap7p = tmp / "r7-stage1-capture-probe"
+            cap7p.write_bytes(b"release-delta-stage2 0 1\n")
+            saved7p = os.O_NOFOLLOW
+            del os.O_NOFOLLOW
             try:
-                proc7d = subprocess.run([sys.executable, "-I", "-B", str(direct7s)],
-                                        capture_output=True, timeout=120,
-                                        env=dict(env, AIQT_RELEASE_DELTA_STAGE2_RESULT=str(
-                                            record7s)))
-                rec7d = record7s.read_bytes() if record7s.is_file() else b""
-            except (OSError, subprocess.TimeoutExpired) as exc7d:
-                proc7d, rec7d = None, "not run ({})".format(exc7d).encode("utf-8")
-            if (proc7d is None or proc7d.returncode != 2
-                    or not rec7d.startswith(b"release-delta-stage2 2 ")):
-                failures.append("{} [late fault record, run directly]: expected rc=2 and a "
-                                "code-2 record (got rc={}, record={!r})".format(
-                                    label7s, None if proc7d is None else proc7d.returncode,
-                                    rec7d[:80]))
+                got7p = _stage1_read_capture(str(cap7p))
+            finally:
+                os.O_NOFOLLOW = saved7p
+            if got7p is not None:
+                failures.append("{} [no os.O_NOFOLLOW]: _stage1_read_capture must refuse "
+                                "(cannot-evaluate) when the platform lacks the race-free "
+                                "open primitive, got {!r}".format(label7s, got7p))
+            saved7p = os.O_NONBLOCK
+            del os.O_NONBLOCK
+            try:
+                got7p = _stage1_read_capture(str(cap7p))
+            finally:
+                os.O_NONBLOCK = saved7p
+            if got7p is not None:
+                failures.append("{} [no os.O_NONBLOCK]: _stage1_read_capture must refuse "
+                                "(cannot-evaluate) when the platform lacks the race-free "
+                                "open primitive, got {!r}".format(label7s, got7p))
+            if _stage1_read_capture(str(cap7p)) != b"release-delta-stage2 0 1\n":
+                failures.append("{} [capture primitives control]: a regular file must read "
+                                "back intact with both primitives present".format(label7s))
 
         # ---- merge train 3 QA round 2 (codex and claude MAJORs): the nested validator children
         # (_renderer_freshness, _validate_via_tool) judged only the exit code, so a validator
@@ -5210,7 +5368,48 @@ def _post_release_e2e(tmp, failures, only=None):
                      "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
                      "with open(_r, 'w', encoding='utf-8') as _h:\n"
                      "    _h.write('release-delta-child 0 1' + chr(10))\n"
-                     "os._exit(0)\n", True)):
+                     "os._exit(0)\n", True),
+                    # PR #397 QA round 2 (codex MAJOR / claude MEDIUM-1): any exception escaping
+                    # the stub's writer, injected at the C return of the result write or of the
+                    # close, or raised by the second check itself, must end in os._exit(2),
+                    # never in atexit's 'Exception ignored' path beside the already written
+                    # success record.
+                    ("exception injected after the successful result write",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_return' and arg is os.write\n"
+                     "            and frame.f_code.co_name == 'record'\n"
+                     "            and 'fd' in frame.f_locals):\n"
+                     "        raise RuntimeError('QA injected result-writer fault')\n"
+                     "sys.setprofile(_prof)\n", True),
+                    ("exception injected from the result close",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_return' and arg is os.close\n"
+                     "            and frame.f_code.co_name == 'record'\n"
+                     "            and 'fd' in frame.f_locals):\n"
+                     "        raise RuntimeError('QA injected result-writer fault')\n"
+                     "sys.setprofile(_prof)\n", True),
+                    ("second check raising under silenced streams", "import sys, threading\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "_hit = []\n"
+                     "def _del(event, args):\n"
+                     "    if event == 'open' and args and args[0] == _r and not _hit:\n"
+                     "        _hit.append(1)\n"
+                     "        sys.stderr = None\n"
+                     "        del threading.excepthook\n"
+                     "sys.addaudithook(_del)\n", True),
+                    # PR #397 QA round 2 (claude MEDIUM-2): a reporting hook replaced during the
+                    # result open, without raising, is refused ONLY by the stub's second hook
+                    # check.
+                    ("reporting hook replaced during the result open", "import sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "sys.addaudithook(lambda event, args: event == 'open' and args\n"
+                     "                 and args[0] == _r\n"
+                     "                 and setattr(sys, 'unraisablehook', lambda _u: None))\n",
+                     True)):
                 script7n = "qa-nested-{}.py".format(tag7n.replace(" ", "-"))
                 (nest7 / "tools" / script7n).write_text(body7n, encoding="utf-8")
                 (nest7 / "tools" / "gen_renderers.py").write_text(body7n, encoding="utf-8")
@@ -5259,11 +5458,23 @@ def _post_release_e2e(tmp, failures, only=None):
             # The same launcher also pins what a late fault leaves behind: a code-2 record, never
             # the success record written before the second check.
             late7x = nest7 / "tools" / "qa-nested-late-fault-during-the-result-write.py"
+            # PR #397 QA round 2 (claude MINOR-1): the same late fault beside a verdict of 1
+            # must also turn the exit and the record to 2, named, never a silent exit 1.
+            late17x = nest7 / "tools" / "qa-nested-late-fault-beside-verdict-1.py"
+            late17x.write_text(late7x.read_text(encoding="utf-8") + "raise SystemExit(1)\n",
+                               encoding="utf-8")
             for tag7x, pre7x, script7x, want7x, needle7x in (
                     ("control", "", clean7x, 0, b""),
                     ("pre-registered", "atexit.register(int)\n", clean7x, 2,
                      b"an exit handler was registered"),
-                    ("late fault record", "", late7x, 2, b"during the result write")):
+                    # PR #397 QA round 2 (gemini): a platform whose atexit offers no _ncallbacks
+                    # cannot rule out a pre-registered handler; the stub records the fault,
+                    # never a clean default.
+                    ("atexit._ncallbacks unavailable", "del atexit._ncallbacks\n", clean7x, 2,
+                     b"atexit._ncallbacks is unavailable"),
+                    ("late fault record", "", late7x, 2, b"during the result write"),
+                    ("late fault record beside verdict 1", "", late17x, 2,
+                     b"during the result write")):
                 if result7x.exists():
                     result7x.unlink()
                 try:
