@@ -17,7 +17,8 @@ WHAT IT DOES
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with python3
     and this file's absolute path. Output: nothing (allow), ONE line holding the standard PreToolUse deny object, or
     ONE line holding a note (a systemMessage with no permissionDecision, so the permission flow is unchanged). Exit
-    status: always 0; the decision travels in the JSON. This hook never asks.
+    status: 0, or the blocking exit 2 when a DENY line cannot be written to stdout and flushed (a lost deny
+    blocks, never allows; a lost note keeps exit 0); the decision travels in the JSON. This hook never asks.
 
     LITERAL. A bare word, a '...' string, or a "..." string whose value is non-empty, does not start with `-`, and
     uses only the characters A-Z, a-z, 0-9 and _ . / : @ % = , -. Such a value holds no blank, newline, quote or
@@ -965,7 +966,9 @@ def _emit_line(text, *stream):
     """Write one line to `stream` (default stdout) and flush it. A line meant for stderr is written there or
     dropped (sys.stderr is None when descriptor 2 was closed at startup), never sent to stdout. On any output
     failure point that descriptor at /dev/null, so the interpreter's shutdown flush cannot fail either; if even
-    that rescue fails, end the process at once with status 0: the hook always exits 0."""
+    that rescue fails, end the process at once with status 0: every line this path carries is advisory (a
+    note, or the worker line on stderr), so losing one keeps exit 0 (the deny line goes through
+    _emit_deny_line, which fails closed when the deny cannot be written and flushed)."""
     s = stream[0] if stream else sys.stdout
     if s is None:
         return
@@ -983,9 +986,31 @@ def _emit_line(text, *stream):
             os._exit(0)
 
 
+def _emit_deny_line(text):
+    """Write the DENY line to stdout and flush it. A deny that cannot be both written and flushed never
+    provably reached the platform, and the silent exit 0 reads as an allow, so the failure is noted on
+    stderr (best-effort: write, then flush, each failure swallowed) and the process ends at once with the
+    blocking exit 2 through os._exit, which skips the interpreter's exit flush (a stream that buffered a
+    failed write raises again there, and the interpreter's own status, 120, is non-blocking). A lost deny
+    blocks, never allows; a lost NOTE still travels _emit_line's fail-open path and keeps exit 0."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            sys.stderr.write("pattern-self-match: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
+
+
 def main(argv):
-    """The hook: always 0, output only a deny or note line (a payload it cannot read gets the cannot-evaluate
-    note). `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
+    """The hook: 0, or, through _emit_deny_line, the blocking exit 2 when a deny line cannot be written and
+    flushed (a lost deny blocks, never allows); output only a deny or note line (a payload it cannot read
+    gets the cannot-evaluate note).
+    `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
     the worker line, to stderr, whatever its argv; any other argv gets the argv note (_NOTE_ARGV). Both return 0
     before stdin is read."""
     readable = isinstance(argv, (list, tuple)) and bool(argv) and all(isinstance(a, str) for a in argv)
@@ -1009,7 +1034,10 @@ def main(argv):
     except Exception:
         out = {"systemMessage": _NOTE_ERROR}
     if out is not None:
-        _emit_line(json.dumps(out))
+        if "hookSpecificOutput" in out:  # a deny decision: lost means blocked, never allowed
+            _emit_deny_line(json.dumps(out))
+        else:
+            _emit_line(json.dumps(out))
     return 0
 
 
@@ -1484,6 +1512,48 @@ def _self_test():
             # and through main in a child (run_hook), whatever arguments main passes its reader
             out = self.run_hook(payload_bytes("pkill -f qa-x/"))[1]
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+        def test_09b_stream_failure_deny_exits_2(self):
+            """A deny whose stdout cannot be written or flushed exits 2 with the failure noted on stderr
+            (a lost deny blocks, never allows; before this hardening these runs exited 0 with the deny
+            lost, which allowed the call), while a lost NOTE keeps exit 0. One child per state: stdout on
+            /dev/full (the write or flush raises ENOSPC) and on the write end of a pipe whose read end is
+            already closed (EPIPE). Skipped where /dev/full is absent."""
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full is absent on this host")
+
+            def run_streams(data, stdout_to):
+                handles = []
+                if stdout_to == "full":
+                    handle = open("/dev/full", "wb")
+                    handles.append(handle)
+                    stdout_target = handle
+                else:
+                    read_end, write_end = os.pipe()
+                    os.close(read_end)
+                    handles.append(write_end)
+                    stdout_target = write_end
+                try:
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
+                                       stdout=stdout_target, stderr=subprocess.PIPE,
+                                       env=dict(LC_ALL="C"), timeout=60)
+                finally:
+                    for handle in handles:
+                        try:
+                            if isinstance(handle, int):
+                                os.close(handle)
+                            else:
+                                handle.close()
+                        except OSError:
+                            pass
+                return p.returncode, p.stderr
+
+            for stdout_to in ("full", "broken"):
+                rc, err = run_streams(payload_bytes("pkill -f qa-x/"), stdout_to)
+                self.assertEqual(rc, 2, (stdout_to, err))
+                self.assertIn(b"could not be written to stdout", err)
+                rc, err = run_streams(payload_bytes("pkill sleep"), stdout_to)  # a NOTE line, lost, exit 0
+                self.assertEqual((rc, err), (0, b""), stdout_to)
 
         def test_09_process_fail_open(self):
             # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently; each one on

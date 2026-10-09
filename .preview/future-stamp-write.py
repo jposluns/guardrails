@@ -328,9 +328,13 @@ hook never reaches the guard and fails with Python's own error first: one that p
 and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so every matching call is allowed
 unchecked; .preview/README.md (Installing a hook, step 4) describes those cases. The payload is read as
 BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
-error writing the deny (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
-exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with os._exit(0), so no
-exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1
+error writing the DENY line (a closed or full stdout, a broken pipe) no longer fails open: a deny that
+cannot be both written and flushed never provably reached the platform, so the hook notes the failure on
+stderr (best-effort) and ends at once with the blocking exit 2 through os._exit (a lost deny blocks, never
+allows; through round 24 this case was swallowed and the hook exited 0 with the deny lost). An error
+writing any OTHER line (the worker-skip stderr warning) still fails open: it is swallowed, the stream's
+descriptor is pointed at /dev/null so the exit-time flush cannot fail either, and the hook exits 0; if even
+that rescue fails, it ends at once with os._exit(0). Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1
 (legacy spellings are also accepted, see _is_worker), allows, writing one warning line to stderr (round 24;
 never stdout, and on exit 0 stderr reaches only the host's debug log, so the skip is logged, not shown).
 Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
@@ -3166,7 +3170,9 @@ def _emit_line(text, *stream):
     """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
-    (no flush is retried), since any later write or exit flush could fail the hook."""
+    (no flush is retried), since any later write or exit flush could fail the hook. Every line this path
+    carries is advisory (the worker-skip stderr warning), so losing one keeps exit 0: the deny line goes
+    through _emit_deny_line, which fails closed when the deny cannot be written and flushed."""
     # a line meant for another stream (stderr) is written there or dropped, NEVER sent to stdout, the hook's
     # protocol channel: sys.stderr is None when descriptor 2 was closed at startup, and a None default once
     # read that as stdout
@@ -3188,9 +3194,29 @@ def _emit_line(text, *stream):
         return False
 
 
+def _emit_deny_line(text):
+    """Write the DENY line to stdout and flush it. A deny that cannot be both written and flushed never
+    provably reached the platform, and the silent exit 0 reads as an allow, so the failure is noted on
+    stderr (best-effort: write, then flush, each failure swallowed) and the process ends at once with the
+    blocking exit 2 through os._exit, which skips the interpreter's exit flush (a stream that buffered a
+    failed write raises again there, and the interpreter's own status, 120, is non-blocking). A lost deny
+    blocks, never allows; a lost NOTE still travels _emit_line's fail-open path and keeps exit 0."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            sys.stderr.write("future-stamp-write: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
+
+
 def _deny(bad, now):
     local = now.astimezone()
-    _emit_line(json.dumps({
+    _emit_deny_line(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -5171,7 +5197,7 @@ def _self_test():
             rc, out = self.run_stream(io.StringIO(p), argv=[None, 3])  # inspectable: evaluated as a hook
             self.assertEqual((rc, json.loads(out)["hookSpecificOutput"]["permissionDecision"]), (0, "deny"))
 
-        def test_r24_worker_skip_warns_and_output_error_fails_open(self):
+        def test_r24_worker_skip_warns_and_a_lost_deny_fails_closed(self):
             old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
             had = os.environ.get("AIQT_HOOKS_WORKER")
             sys.stdin, sys.stdout, sys.stderr = io.StringIO("{}"), io.StringIO(), io.StringIO()
@@ -5197,7 +5223,18 @@ def _self_test():
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
                                    stderr=subprocess.PIPE, text=True, env=env, timeout=30, input=json.dumps(payload))
-            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("could not be written to stdout", p.stderr)
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            try:
+                p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=write_end,
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30,
+                                   input=json.dumps(payload))
+            finally:
+                os.close(write_end)
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertIn("could not be written to stdout", p.stderr)
 
         def test_r24b_keywords_match_whole_words(self):
             # follow-up (B): a keyword was a PREFIX, so a word that merely STARTS with one exempted a future literal

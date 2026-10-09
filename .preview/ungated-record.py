@@ -10,8 +10,9 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
     python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
-    deny object. Exit status: always 0; the decision travels in the JSON. The verdict is deny or silence: this
-    hook never asks.
+    deny object. Exit status: 0 (silence, or the deny line written and flushed), or the blocking exit 2
+    when the deny line cannot be written to stdout and flushed (a lost deny blocks, never allows); the
+    decision travels in the JSON. The verdict is deny or silence: this hook never asks.
 
     A GATE is a simple command whose command word (found past assignments and the env, sudo, time, nohup,
     command, exec, and timeout prefixes) is one of pytest, py.test, tox, nox, bats, ctest, prove,
@@ -1940,25 +1941,29 @@ def _decide(payload, env, oracle=None):
 
 
 def _emit_line(text):
-    """Write one line to stdout and flush it. On any output failure (a closed pipe, a full device, no stdout at
-    all) point descriptor 1 at /dev/null, so the interpreter's shutdown flush cannot fail either; if even that
-    rescue fails, end the process at once with status 0 (no retry flush): the hook always exits 0."""
+    """Write the deny line to stdout and flush it. The only line this hook ever writes to stdout is a deny
+    decision, so an output failure (a closed pipe, a full device, no stdout at all) must not end in the
+    silent exit 0 the platform reads as an allow: the failure is noted on stderr (best-effort: write, then
+    flush, each failure swallowed) and the process ends at once with the blocking exit 2 through os._exit,
+    which skips the interpreter's exit flush (a stream that buffered a failed write raises again there, and
+    the interpreter's own status, 120, is non-blocking). A lost deny blocks, never allows; before this
+    hardening the failure was swallowed and the hook exited 0 with the deny lost, which allowed the call."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
-    except Exception:
+    except BaseException:
         try:
-            fd = os.open(os.devnull, os.O_WRONLY)
-            try:
-                os.dup2(fd, 1)
-            finally:
-                os.close(fd)
-        except Exception:
-            os._exit(0)
+            sys.stderr.write("ungated-record: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
 
 
 def main(argv):
-    """The hook: always 0, output only a deny line. `--self-test` alone runs the self-test instead."""
+    """The hook: 0 on silence or a written deny line, or, through _emit_line, the blocking exit 2 when
+    the deny line cannot be written and flushed. `--self-test` alone runs the self-test instead."""
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
         return 0  # a bad argv: fail open, reading nothing
     if len(argv) > 1:  # only the plain call and an exact --self-test; any other argv fails open, reading nothing
@@ -2602,6 +2607,49 @@ def _self_test():
             self.assertEqual((rc, err), (0, b""))
             out.decode("ascii")
             self.assertIn(chr(9989), json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+        def test_22_stream_failure_deny_exits_2(self):
+            """A deny whose stdout cannot be written or flushed exits 2 with the failure noted on stderr
+            (a lost deny blocks, never allows; before this hardening these runs exited 0 with the deny
+            lost, which allowed the call), and an allow stays exit 0 whatever the stream state. One child
+            per state: stdout on /dev/full (the write or flush raises ENOSPC) and on the write end of a
+            pipe whose read end is already closed (EPIPE). Skipped where /dev/full is absent."""
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full is absent on this host")
+
+            def run_streams(data, stdout_to):
+                handles = []
+                if stdout_to == "full":
+                    handle = open("/dev/full", "wb")
+                    handles.append(handle)
+                    stdout_target = handle
+                else:
+                    read_end, write_end = os.pipe()
+                    os.close(read_end)
+                    handles.append(write_end)
+                    stdout_target = write_end
+                try:
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
+                                       stdout=stdout_target, stderr=subprocess.PIPE,
+                                       env=dict(LC_ALL="C"), timeout=30)
+                finally:
+                    for handle in handles:
+                        try:
+                            if isinstance(handle, int):
+                                os.close(handle)
+                            else:
+                                handle.close()
+                        except OSError:
+                            pass
+                return p.returncode, p.stderr
+
+            for stdout_to in ("full", "broken"):
+                rc, err = run_streams(payload_bytes(base), stdout_to)
+                self.assertEqual(rc, 2, (stdout_to, err))
+                self.assertIn(b"could not be written to stdout", err)
+                rc, err = run_streams(payload_bytes("echo hi"), stdout_to)
+                self.assertEqual((rc, err), (0, b""), stdout_to)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
     result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2).run(suite)

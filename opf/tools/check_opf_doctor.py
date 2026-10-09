@@ -4205,6 +4205,66 @@ def _claude_hook_self_test():
                  payload("Write", dict(file_path=os.path.join(
                      root, _opf_store.WORKING_DIRNAME, "fresh", "worklog.imported.toml"),
                      content="x"), root), "direct edits under")
+            # Stream-failure vectors: the hook's exit statuses hold when a standard stream cannot
+            # be written or flushed. A deny whose stdout write or flush fails exits 2 (a lost deny
+            # blocks, never allows; before the hardening it exited 0 or 120, each of which waves
+            # the call through), a fail-closed stderr diagnostic keeps its exit 2 with stderr on a
+            # full device or a broken pipe (before the hardening: 120), and a silent allow stays
+            # exit 0 whatever the stream state. Each child points one stream at /dev/full (the
+            # write or flush raises ENOSPC) or at the write end of a pipe whose read end is
+            # already closed (EPIPE). Skipped only where /dev/full is absent (a non-Linux host).
+            if os.path.exists("/dev/full"):
+                stream_deny_payload = json.dumps(payload("Write", dict(
+                    file_path=os.path.join(root, _opf_store.WORKING_DIRNAME, "other",
+                                           "worklog.imported.toml"),
+                    content="x"), root)).encode("utf-8")
+                stream_allow_payload = json.dumps(payload(
+                    "SlashCommand", dict(command="/status"), root)).encode("utf-8")
+
+                def stream_child(label, data, stdout_to, stderr_to, want):
+                    handles = []
+
+                    def stream_target(which):
+                        if which == "pipe":
+                            return subprocess.PIPE
+                        if which == "full":
+                            handle = open("/dev/full", "wb")
+                            handles.append(handle)
+                            return handle
+                        read_end, write_end = os.pipe()
+                        os.close(read_end)
+                        handles.append(write_end)
+                        return write_end
+
+                    child_env = dict((k, v) for k, v in os.environ.items()
+                                     if not k.startswith("GIT_"))
+                    try:
+                        proc = subprocess.run(
+                            [sys.executable, "-I", str(hook)], input=data,
+                            stdout=stream_target(stdout_to), stderr=stream_target(stderr_to),
+                            env=child_env, timeout=60)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        failures.append("claude-hook " + label
+                                        + ": could not run the hook child (" + repr(exc) + ")")
+                        return
+                    finally:
+                        for handle in handles:
+                            try:
+                                if isinstance(handle, int):
+                                    os.close(handle)
+                                else:
+                                    handle.close()
+                            except OSError:
+                                pass
+                    expect(label, proc.returncode, want)
+
+                for stream_state in ("full", "broken"):
+                    stream_child("stream-deny-stdout-" + stream_state, stream_deny_payload,
+                                 stream_state, "pipe", 2)
+                    stream_child("stream-unreadable-stderr-" + stream_state, b"not json",
+                                 "pipe", stream_state, 2)
+                    stream_child("stream-allow-stdout-" + stream_state, stream_allow_payload,
+                                 stream_state, "pipe", 0)
     except OSError as exc:
         print("check_opf_doctor claude-hook self-test: harness error: " + str(exc), file=sys.stderr)
         return EXIT_ERROR
