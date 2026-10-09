@@ -122,7 +122,9 @@
           <li><code>opf adopt plan --inputs FILE</code> freezes and prints the plan from a planning
             worksheet and writes nothing. Its output is an inert, digest-bound proposal, never
             permission to apply. The planner checks the shape of the release, prompt-pack,
-            enforcement and postimage digests the worksheet supplies, not the bytes they name.</li>
+            enforcement and postimage digests the worksheet supplies, not the bytes they name, with
+            one exception: when a kept file registers into a store the plan creates, the digest
+            planned for its manifest must be the default manifest's real digest.</li>
           <li><code>opf adopt status</code> reports adoption runs and the adoption journal and writes
             nothing.</li>
         </ul>
@@ -184,8 +186,9 @@
       <code>status</code> lists the adoption evidence bundles, checking each one, and reports any
       open transaction or held lock in the adoption journal. Neither needs an existing store.</p>
     <p><b style="color:var(--ink)">Result.</b> <code>plan</code> prints the frozen plan on stdout and
-      exits 0, exits 1 when a decision, operation or the plan breaks the schema, and exits 2 when it
-      cannot evaluate (an unreadable worksheet, a changed inventory, an unresolved disposition).
+      exits 0, exits 1 when an operation or the plan breaks the plan schema, and exits 2 when it
+      cannot evaluate (an unreadable worksheet, a malformed decision, a changed inventory, an
+      unresolved disposition).
       <code>status</code> exits 0 clean, 1 on a finding, and 2 when it cannot evaluate. Both write
       nothing.</p>
     <p class="refchips"><code>opf adopt plan --inputs worksheet.toml</code> <code>opf adopt status</code> <code>opf adopt apply</code> <span>refused, exit 2</span></p>

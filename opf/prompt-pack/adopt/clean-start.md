@@ -12,13 +12,14 @@ obligation was fulfilled or converted. Two cases qualify:
 
 - **No prior records.** Investigation (section 3) lists no candidate and no empty directory,
   and reports `first-adoption`. There is nothing to preserve or retire.
-- **Prior files, nothing imported.** Each candidate takes `retire` (or `keep` or `move`), no
-  candidate takes `migrate`, and `skip_policy` is `no-skip`. The store starts empty, and its
-  `import_status` stays `none`.
+- **Prior files, nothing imported.** Each candidate takes `retire` (or `keep` or `move`), and no
+  candidate takes `migrate`. The store starts empty, and its `import_status` stays `none`. With
+  no migrate source, the skip policy has nothing to govern.
 
 In both cases the plan for a first adoption carries `init-store` (no store resolves yet),
 `render-views` listing exactly the views of the default manifest (thirteen in this build, all
-under `.working/`), and the operations that install each enforcement member (section 4).
+under `.working/`), and the operations that install each enforcement member (section 4). The
+sample worksheet in section 4 is a plan of this kind.
 
 ## What runs in this build
 

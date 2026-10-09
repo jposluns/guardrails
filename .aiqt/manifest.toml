@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2887894b00e6b1c760665aec45914d3ceb1b5e694c4ebbf14574ddf08f623750"
+tree-sha256 = "c2944443236cbde45801ba5a96f2f967e12b8f4ac932fca9a967c99917326b83"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2476,13 +2476,13 @@ sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
-bytes = 17157
-sha256 = "7dcdca974e2697803a87bc3aca9f3f54546af8a8e5eea70fb8fbc53d2ff38dfd"
+bytes = 23128
+sha256 = "9a22be46673a8de58af60d22d264747bb1ef83fe1e7585233f6f0d4c15741bd2"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/clean-start.md"
-bytes = 4326
-sha256 = "bbcea5c264995510b74a9151e056faf49bd2f3808290935d25bf044305512047"
+bytes = 4419
+sha256 = "9229160a53785a58f3d5c3e945add7815e84ed7f038dd68b41e7710471b3386b"
 
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
@@ -2491,8 +2491,8 @@ sha256 = "deb4c717bba3cefb3f42f83ec454702a7890894426d38f7eed1506f4ae6d1b07"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
-bytes = 1621
-sha256 = "08bc9cc8cd5ab13ae338f9801df372c6a6832e6166c38b2a327200fb83c2f763"
+bytes = 1816
+sha256 = "7042dbf6b464bdee9fccf28f5a0c394d72373fd90b5791b2a6dc69df749bf9a4"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -2506,13 +2506,13 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 42391
-sha256 = "5911addf31635486a3e4b9f5b8fbf1e59c750fcd7c30ceadf747337fdcd40477"
+bytes = 42597
+sha256 = "b1b62bcd416abd89fbf2dd62748e69ddec9342b11186b818897c8d63cd23b2b5"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 7112
-sha256 = "af863354ccac5a74abf0b6b63a6925e4d62ea031864869e5e4ec1195ac647555"
+bytes = 7270
+sha256 = "404fcde24e09c2c1715b607e93a25e4930bfc7db338825b9a2d97dbbdab0bb7d"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2526,8 +2526,8 @@ sha256 = "664c263516f5edd3cebb5f882ff66a456d33774ec8a1174b51c847b32b58551e"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 12913
-sha256 = "a4bffa618968833c44a584373885771693b9d92bb457906e76ffa7c9ecc806a6"
+bytes = 13105
+sha256 = "9ed6769e5e14b3ad544982c86ec14011b1f9054c7f09bc1e9bfeb26568181878"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2581,8 +2581,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 13013
-sha256 = "e4c693cf6e724c8b732d27d30b2c9b240eeb28d09e8edad7c928368784f5bc50"
+bytes = 13241
+sha256 = "769c0aa3bb570d8dfa612ab6f68572ad1d0f68ce426b0722ae141e3531682848"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"

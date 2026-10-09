@@ -5,22 +5,24 @@
 # The gate checks byte and digest agreement; it does not enforce the version-bump obligation.
 # Member documents are consumed by deployment (an adopter or deployer copies a member beside its digest
 # into the assistant harness, for example flow/SKILL.md, or adopt/SKILL.md with adopt/clean-start.md,
-# into a skills directory), by a deployer that renders a member with a per-project overlay into a
+# into a skills directory; adopt/SKILL.md asks the assistant for this manifest's version and digest, and
+# names this file at the pack root, or in the reference repository when a deployment copied the member
+# without it), by a deployer that renders a member with a per-project overlay into a
 # per-account command (the member doubles as the render template; its overlay slots and the drift check
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
 # which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
 # against this manifest yet.
 format = "opf.prompt-pack/v1"
 version = "0.4.0"
-digest = "sha256:7cf7795c543e146c1b454cd131db47ab8f985282842bbabf8f9f15852f6c5342"
+digest = "sha256:025d4d4b3abb0d96b8d1437c2374259269e12a130b567769322803f3bc184eb4"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "7dcdca974e2697803a87bc3aca9f3f54546af8a8e5eea70fb8fbc53d2ff38dfd"
+sha256 = "9a22be46673a8de58af60d22d264747bb1ef83fe1e7585233f6f0d4c15741bd2"
 
 [[members]]
 path = "adopt/clean-start.md"
-sha256 = "bbcea5c264995510b74a9151e056faf49bd2f3808290935d25bf044305512047"
+sha256 = "9229160a53785a58f3d5c3e945add7815e84ed7f038dd68b41e7710471b3386b"
 
 [[members]]
 path = "flow/SKILL.md"

@@ -21,7 +21,7 @@ The prompt pack ships the instructions an assistant follows: `adopt/SKILL.md`, t
 What the reference CLI runs today:
 
 - Investigation, through the planner's read-only library entry; no `opf adopt` subcommand prints the inventory yet. It records a digest-stamped inventory, tells first adoption from re-adoption, and lists each file in its scope that needs a disposition: keep, migrate, move, or retire.
-- `opf adopt plan --inputs FILE`, which freezes and prints the plan from a planning worksheet and writes nothing. Its output is an inert, digest-bound proposal, never permission to apply. The planner checks the shape of the release, prompt-pack, enforcement and postimage digests the worksheet supplies, not the bytes they name.
+- `opf adopt plan --inputs FILE`, which freezes and prints the plan from a planning worksheet and writes nothing. Its output is an inert, digest-bound proposal, never permission to apply. The planner checks the shape of the release, prompt-pack, enforcement and postimage digests the worksheet supplies, not the bytes they name, with one exception: when a kept file registers into a store the plan creates, the digest planned for its manifest must be the default manifest's real digest.
 - `opf adopt status`, which reports adoption runs and the adoption journal and writes nothing.
 
 What it does not run yet: `opf adopt approve`, `apply`, `complete` and `reconcile` refuse with exit 2, so no approval is recorded, nothing is applied, and nothing is retired. Installing the enforcement pack through adoption, and post-adoption import, are not available either. An assistant following the pack stops at the approval step and reports, rather than doing the missing stages by hand.
