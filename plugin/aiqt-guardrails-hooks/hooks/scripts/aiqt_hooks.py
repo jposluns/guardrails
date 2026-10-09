@@ -164,8 +164,9 @@ manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own lo
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
 These exits hold on every interpreter that can start this file, the floor guard's exits on an older one
-included; one that cannot start this file fails first with Python's own exit, as the PYTHON-FLOOR comment
-below describes.
+included while the guard can write its error line to stderr; the PYTHON-FLOOR comment below describes the
+guard's exit when that write fails and the exit of an interpreter that cannot start this file, which
+fails first with Python's own exit.
 """
 import sys
 
@@ -174,6 +175,10 @@ import sys
 # HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
 # such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
 # mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# Both forms write the refusal line to stderr first, and the exits above need that write to succeed: with
+# stderr closed the guard currently exits 1, and a failing write can also end it with a status other than 0 or
+# 2, so a PreToolUse call then goes ahead unchecked and a fail-open mode, though it still never blocks, may
+# lose its warning.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
 # (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals, and 3.4 also rejects its starred items

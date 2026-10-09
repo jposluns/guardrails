@@ -178,16 +178,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `de1123ebbd3d8dd8108e5f8cc4e45b8a20df17656cb47b72b066f19064616d41` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `3077f218ba7ed8266229b75a13d484a1bff8ba26fc62c98d362f367214ac587b` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `7ef8c0bc8ca2ff075b5d77dd023dec3bd46ff4938a7ed6d3a203857beb05eff5` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `1b56964629ac0c4747e6ba609f93fc58d021860c5a34c2d3f26233873e44a1a1` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `02fb872917dedd97b10a543f506278803e583568fa04dc41e0335d2dc6b7010d` | [record-remove-check.py](record-remove-check.py) |
+| `pattern-self-match.py` | `c847f9844b04bf18d755fec232288d140ad5d32560af242717b775a3c96a02ae` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `9fc814f7b3fa4f6f9b4205be659d685323bbb476864df8014accd50d9100f2ba` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `8c7ebe4a60093d056f802df799197efeb79e50d6f98ab67ef804ac9d932ceac0` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `6120397c4903badc9ce82336f2cdacf1f38a2f82a94fdae2ed4af7e79c11a2a9` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `e93dd2ebeae38778fa9df12b9476a73a9eef6c983512e69b237b2d8462994bf2` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `ee2c9a5947c19ec80b5b0661721a5a239dee0b7589ef3094a4ec2a56d01bc7a4` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `fa9d98472a9886138d85c77032362b2d3bef8708e8fc3930e76f69d99d5ba6a7` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -273,21 +273,24 @@ fails and report it; do not work around a failed check.
      `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
      start the hook, each hook reads no input, writes one line beginning
      `error: <file> requires Python 3.14 or newer` to standard error, and exits.
-     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
-     `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the six `PreToolUse` hooks the exit is 2 and every matching
-     tool call is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
+     Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`, `PostToolUseFailure`) the
+     exit is 2 and the tool has already run, so the line only reaches the assistant and nothing is
+     blocked; for the six `PreToolUse` hooks the exit is 2 and every matching tool call the launch guard
+     does not skip is denied; for `stamp-truth-stop.py` (`Stop`), `constraint-reread.py` (`SessionStart`,
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
-     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no reminder or note is
-     added and every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap
-     would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
-     the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
-     that predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates
-     f-strings cannot compile the three clock hooks and `char-policy-write.py`, which use them, and
-     exits 1. Exit 1 is a non-blocking error on these hooks' events, so a `PreToolUse` hook then allows
-     every tool call unchecked; exit 2 on `Stop` blocks the stop, and the hook's own block cap never
-     runs, and exit 2 on `UserPromptSubmit` blocks the prompt. If you see any of these errors, upgrade
-     Python or remove the hook's entry.
+     `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no
+     reminder or note is added and every stop goes ahead unchecked (exit 2 would block the stop, and the
+     hook's own block cap would never run, since the hook stops before its loop guard runs). Those exits
+     need the line to reach standard error: with standard error closed, each hook currently exits 1
+     instead, and a failing write can also end it with a status other than 0 or 2. Either is a
+     non-blocking error on every one of these events, so the six `PreToolUse` hooks then allow every tool
+     call unchecked. An interpreter that cannot start the hook fails before its guard runs, with Python's
+     own error instead of that line: an interpreter that predates the `-I` option rejects it and exits 2,
+     and one that accepts `-I` but predates f-strings cannot compile the three clock hooks and
+     `char-policy-write.py`, which use them, and exits 1. Exit 1 is a non-blocking error on these hooks'
+     events, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop` blocks the
+     stop, and the hook's own block cap never runs, and exit 2 on `UserPromptSubmit` blocks the prompt.
+     If you see any of these errors, upgrade Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 

@@ -15,10 +15,11 @@
 #                     tools/check_entry_guard.py are listed, so every shipped entrypoint carries the
 #                     guard. The deny hook (opf/enforcement/claude/pretooluse_deny.py, PreToolUse only)
 #                     carries the CLI form with exit 2, so a sub-floor interpreter that can start it
-#                     blocks the call (one that cannot start it fails first with Python's own exit,
-#                     and an exit other than 2 lets the call proceed). The core hook and its plugin
-#                     copy carry the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's
-#                     mode warns on exit 0 instead of refusing.
+#                     blocks the call while the guard can write its error line to stderr (with stderr
+#                     closed the guard currently exits 1; one that cannot start it fails first with
+#                     Python's own exit; an exit other than 2 lets the call proceed). The core hook and
+#                     its plugin copy carry the guard's hook form (HOOK_SURFACES in the gate): a
+#                     fail-open event's mode warns on exit 0 instead of refusing.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
 #                     blocks the stop, and the guard runs before the hook's own block cap). Never a
