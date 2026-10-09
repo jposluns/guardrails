@@ -2612,58 +2612,113 @@ The gates in this standard are strong where they are strong and say so where the
   `.working/`, which only the `import_status` item reaches. Admission parses only the section 16.1
   candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and
   14.2), and never reads beneath a path registered under `[unmanaged]` that section 14.2 permits, so
-  a listed item kept outside those candidates, such as a legacy-format inventory kept under such a
-  path or anywhere but the root of a staging or evidence run folder, goes undetected; an
-  `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave
-  a path unsearched. Admission recognizes only the adoption receipts of the implementation's own
-  section 14 adoption writer, so where another implementation's writer placed a store's adoption
-  receipt under `.working/imported/adoption/` at another path or in another format, and that area
-  holds no adoption receipt of the implementation's own writer, the check cannot establish whether
-  that store holds an adoption receipt, and a `partial` or `complete` `import_status` there is
-  cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format
-  adoption set that status. An adoption receipt kept outside `.working/imported/adoption/`, which
-  section 14.2 does not permit, decides nothing, so where that area holds no file, its store's
-  `partial` or `complete` `import_status` is refused as `unsupported-legacy-state`. A refusal at its
-  pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an
-  adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included,
-  needs an upgrade-capable implementation for that store. The lease and recovery steps of sections
-  5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that
-  follows them (section 16.1). The pre-scan refuses, before any write, a store whose manifest
-  declares a version or generation that the check refuses or that shows a listed legacy-state item,
-  the live bytes of an operand of an interrupted transaction included, and defers only the
-  cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of
-  such a transaction within the recovery bound, so a store that only the later check refuses or
-  cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own
-  result meets a refusal, or where something that does not take the lease changed the store between
-  the pre-scan and the recovery, may carry the effects of a completed recovery of the
-  implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the
-  section 5.7 reconciliation of a dead run's leftover lease. A command that writes and takes its
-  lease after admission rechecks admission once that lease is taken and observable and before any
-  other write; a stop there writes nothing but what section 5.7 requires to end the command's own
-  claim: it releases a `lease.toml` that carries its own claim and leaves untouched one that carries
-  another holder's claim. That stop restores nothing else, so a change that another process made and
-  the recheck detected stays in the tree; where the store has a sync target, that target's history
-  can keep the lease's claim and release, and where the concurrent-operation module is enabled the
-  `session_lease` record of that claim and its release remain. Within the section 16.1 recovery
-  bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1,
-  or 14.2 recovery does, to complete or roll back an interrupted transaction before admission runs;
-  a command that performs no such recovery, a read-only command included, reports a store with a
-  torn candidate as cannot-evaluate until a recovering command recovers it, and a clone without the
-  journal (section 4.2) stays cannot-evaluate. Only the transactions section 16.1 lists are
-  recovered that way: a candidate torn by any other write, such as a section 12 rotation or a
-  non-green outcome event appended to an adoption receipt, is classed like any other candidate even
-  where the implementation journals that write, so one left unparseable stays cannot-evaluate for
-  every command of a fresh-only implementation, its own writers included, until it is repaired by
-  hand, and one left parseable is not recognized as torn. A section 14.1 restore after a committed
-  apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's
-  store manifest apart from a foreign source at a candidate path binds only that first adoption, so
-  a restore that copies archived bytes to a candidate path, such as an importer-authored
+  a listed item defined by file content and kept outside those candidates, such as a legacy-format
+  inventory kept under such a path or anywhere but the root of a staging or evidence run folder,
+  goes undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input,
+  never a reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
+  implementation's own section 14 adoption writer, so where another implementation's writer placed a
+  store's adoption receipt under `.working/imported/adoption/` at another path or in another format,
+  and that area holds no adoption receipt of the implementation's own writer, the check cannot
+  establish whether that store holds an adoption receipt, and a `partial` or `complete`
+  `import_status` there is cannot-evaluate: never refused as legacy, but not admitted either, even
+  where a current-format adoption set that status. An adoption receipt kept outside
+  `.working/imported/adoption/`, which section 14.2 does not permit, decides nothing, so where that
+  area holds no file, a store at the supported version whose `import_status` is `partial` or
+  `complete` is refused as `unsupported-legacy-state`. A refusal at its pre-scan leaves a store
+  unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds
+  legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
+  implementation for that store. The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2
+  run after a read-only pre-scan and before the admission check that follows them (section 16.1).
+  The pre-scan refuses, before any write, a store whose manifest declares a version or generation
+  that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of
+  an interrupted transaction included, and defers only the cannot-evaluate classification of an
+  unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery
+  bound, together with a discovery outcome that such an operand alone decides, so a store that only
+  the later check refuses or cannot evaluate, as where such an operand stays contradictory after
+  recovery or the recovery's own result meets a refusal, or where something that does not take the
+  lease changed the store between the pre-scan and the recovery, may carry the effects of a
+  completed recovery of the implementation's own interrupted transaction, within the section 16.1
+  recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease. A command
+  that writes and takes its lease after admission confirms, once that lease is taken and observable
+  and before any other write, that the `lease.toml` carries its own claim and that every directory
+  listing, existence-probe result, and candidate the admission check read is unchanged apart from
+  exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what
+  section 5.7 requires to end the command's own claim: it releases a `lease.toml` that carries its
+  own claim and leaves untouched one that does not. That stop restores nothing else, so a change
+  that another process made and the recheck detected stays in the tree; where the store has a sync
+  target, that target's history can keep the lease's claim and release, and where the
+  concurrent-operation module is enabled the `session_lease` record of that claim and its release
+  remain. Within the section 16.1 recovery bound, a fresh-only implementation trusts its own
+  writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back
+  an interrupted transaction before the admission check that follows recovery runs; a command that
+  performs no such recovery, a read-only command included, reports a store with a candidate that an
+  interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering
+  command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate. Only the
+  transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such
+  as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed
+  like any other candidate even where the implementation journals that write, so one left
+  unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own
+  writers included, until something outside that implementation, such as a hand edit, repairs it,
+  and one left parseable is not recognized as torn. A section 14.1 restore after a committed apply
+  is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store
+  manifest apart from a foreign source at a candidate path binds only that first adoption, so a
+  restore that copies archived bytes to a candidate path, such as an importer-authored
   `worklog.toml` restored over the live one, leaves a store that every command of a fresh-only
-  implementation, its own writers included, then refuses as `unsupported-legacy-state` where those
-  bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable,
-  malformed, or contradictory. A change made after the recheck by
-  anything that does not take the lease, such as a hand edit or a branch switch, is outside
-  admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+  implementation, its own writers included, then refuses where those bytes show a listed item, as
+  `unsupported-legacy-state` where the store stays at the supported version, or reports as
+  cannot-evaluate where it classes them unreadable, malformed, or contradictory. A change made after
+  the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is
+  outside admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+- The section 16.1 runtime check compares the installed copy of a release's declaration file with
+  the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
+  which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy
+  and the digest the implementation carries to match it, and an anchor outside the installation,
+  such as a signature over that file that the implementation verifies, is the stronger option only
+  against an edit that does not also change the implementation's verification key or its anchor
+  check; section 16.1 does not require one. Whether a release's runtime check compares the installed
+  copy's bytes with the digest the implementation carries at all, and whether that digest sits at
+  the place the documentation states, are established only by an inspection of the implementation,
+  never by a reference run: every reference run's installed copy holds the shipped bytes, over which
+  a runtime check that skips that comparison and one that makes it can yield the same report.
+  Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock
+  baseline and of what it changed, so an alteration the checker did not detect, such as an
+  organization-wide package-manager configuration file taken for part of the stock install, can
+  mislead that checker, another checker contests a claim only with its own attempts and reference
+  runs, and honest checkers on stock installs of different platforms or versions within a documented
+  family can reach different verdicts, each of which the release must meet. The same residual covers
+  the section 16.1 rule that an attempt altered by anything other than the documented steps, the
+  release's own code, code those steps install from a directed source, and the stock platform's
+  defaults is not an attempt and establishes nothing: only a checker that detects the alteration can
+  know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's
+  eligibility report what only such attempts show as unresolved, never established. It covers
+  whether a checker observed every write of a run the same way: the section 16.1 runtime-result
+  token comparison and store part read the writes the checker observed, so a write a checker missed
+  could make an honest token read as disagreeing, and a checker that cannot determine whether it
+  observed every write of a run reports what only the behaviour-coupled comparisons of such runs
+  show as unresolved, never established. The working and temporary locations a checker chose are its
+  own, and what sits there alters nothing, the installation apart: the installed files, the
+  installed copy included, and the files a documented step or the release's own code wrote stay part
+  of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an
+  installed copy, alters the installation it probes. That probe, like every run outside the
+  checker's own attempts and reference runs, is an observation of the implementation's behaviour,
+  never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes
+  nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its
+  own, and it informs only the section 16.1 inspection of the implementation, which rests on the
+  same observer-local attribution. A requirement of section 16.1 on the conduct of the
+  implementation's commands that its two rules do not compare, the fresh-only admission, lease,
+  recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a
+  checker cannot attribute to the bytes the release ships decides nothing for that checker, and one
+  it can attribute is decided by what that inspection finds in those bytes, never by the observed
+  run itself on any number of showings. A failure that a checker cannot show twice in its own
+  attempts and reference runs stays unresolved, however many other checkers each show it once, and
+  an unresolved failure neither establishes nor counters any conformance or nonconformance of the
+  release. Where the documentation of a release directs that a file the release does not ship be
+  installed and does not pin its bytes, attempts made at different times can differ as the bytes the
+  directed source serves differ, a residual of the release's own documentation. Appendix E gives
+  informative guidance for checking release conformance: a record of attempts, redaction of secrets,
+  sharing and repetition, corroboration across checkers, a consistency probe over third-party
+  reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference
+  environment.
 
 ## Appendix A: record envelope example
 
@@ -2759,5 +2814,47 @@ baseline record types, deterministic views with a drift gate, and the first impo
 tooling; then renamed types can no longer leave a stale generated view behind, and
 composed views now surface records awaiting ratification.
 ```
+
+## Appendix E: checking release conformance (informative)
+
+This appendix is informative: it recommends practice for checkers and releases working under
+section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a
+conformance claim is.
+
+- Keep a record of each attempt. A useful record holds the platform and version the documentation
+  names, if any, and the platform and version used; the account and whether it held administrative
+  privilege; the umask, locale, and character encoding; every environment variable set; the path and
+  SHA-256 digest of each interpreter, version-control, and package-manager configuration file a step
+  read; each package index or other source a step used; the documented steps followed and the
+  commands run; the interpreter and tool versions; the store a run read, with the SHA-256 digest of
+  each of its files; the list of installed files, with the SHA-256 digest of each; and each setting
+  or component the checker knows it changed relative to the stock install.
+- Redact secrets everywhere in a record: a credential, a token, a password, or a private key, in an
+  environment variable's value, in a source's address, or in a command argument, is written as its
+  name and a redaction marker, never as its value.
+- Share records so that another checker can repeat an attempt on its own stock install; keeping the
+  bytes each source served, and replaying them, makes a repetition closer. A shared record informs
+  another checker's work and never substitutes for that checker's own attempts and reference runs.
+- Corroborate across checkers: where two checkers each show the same failure once, on the same
+  platform and version, that agreement is a strong reason to keep attempting, though under
+  section 16.1 the failure stays unresolved until one checker's own evidence shows it twice
+  (section 17).
+- A report of a third-party installation can be probed for consistency: one whose installed-copy
+  digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's
+  bytes and whose runtime result is other than `cannot_evaluate` did not come from a runtime check
+  that compares the installed copy's bytes before reading any field. Such a report shows an altered
+  installation, a defective emitter, or a defective runtime check, without telling which, and it
+  establishes nothing under section 16.1.
+- Probe the byte comparison on a scratch copy: install the release somewhere disposable, edit the
+  installed copy, and confirm that the runtime check yields cannot-evaluate and authorizes no store
+  operation. This inspects the implementation's behaviour over bytes the release did not ship;
+  section 17 discloses that no reference run can show whether that comparison is made. An edited
+  installed copy is an altered installation under section 16.1 wherever it sits, a disposable
+  location included, so a probe run is no attempt and no reference run and, however often it is
+  repeated, establishes nothing under the section 16.1 availability and reference-run rules; what it
+  yields is inspection evidence about the shipped implementation.
+- A content-addressed reference environment, such as a container image named by digest, makes a
+  checker's stock baseline reproducible and repetitions cheaper; section 16.1 does not require one,
+  and a release's documentation can name one as the platform it documents.
 
 ---

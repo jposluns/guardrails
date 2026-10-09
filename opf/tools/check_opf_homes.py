@@ -897,19 +897,30 @@ _CONTRACT = {
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
         _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
-        _D("Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched."),
+        _D("Admission parses only the section 16.1 candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item defined by file content and kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched."),
         _D("Admission recognizes only the adoption receipts of the implementation's own section 14 adoption writer, so where another implementation's writer placed a store's adoption receipt under .working/imported/adoption/ at another path or in another format, and that area holds no adoption receipt of the implementation's own writer, the check cannot establish whether that store holds an adoption receipt, and a partial or complete import_status there is cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format adoption set that status."),
-        _D("An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, its store's partial or complete import_status is refused as unsupported-legacy-state."),
+        _D("An adoption receipt kept outside .working/imported/adoption/, which section 14.2 does not permit, decides nothing, so where that area holds no file, a store at the supported version whose import_status is partial or complete is refused as unsupported-legacy-state."),
         _D('A refusal at its pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
         _D('The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that follows them (section 16.1).'),
-        _D("The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease."),
-        _D("A command that writes and takes its lease after admission rechecks admission once that lease is taken and observable and before any other write; a stop there writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that carries another holder's claim."),
+        _D("The pre-scan refuses, before any write, a store whose manifest declares a version or generation that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of an interrupted transaction included, and defers only the cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery bound, together with a discovery outcome that such an operand alone decides, so a store that only the later check refuses or cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own result meets a refusal, or where something that does not take the lease changed the store between the pre-scan and the recovery, may carry the effects of a completed recovery of the implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease."),
+        _D("A command that writes and takes its lease after admission confirms, once that lease is taken and observable and before any other write, that the lease.toml carries its own claim and that every directory listing, existence-probe result, and candidate the admission check read is unchanged apart from exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what section 5.7 requires to end the command's own claim: it releases a lease.toml that carries its own claim and leaves untouched one that does not."),
         _D("That stop restores nothing else, so a change that another process made and the recheck detected stays in the tree; where the store has a sync target, that target's history can keep the lease's claim and release, and where the concurrent-operation module is enabled the session_lease record of that claim and its release remain."),
-        _D("Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before admission runs; a command that performs no such recovery, a read-only command included, reports a store with a torn candidate as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate."),
-        _D('Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until it is repaired by hand, and one left parseable is not recognized as torn.'),
-        _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses as unsupported-legacy-state where those bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
+        _D("Within the section 16.1 recovery bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back an interrupted transaction before the admission check that follows recovery runs; a command that performs no such recovery, a read-only command included, reports a store with a candidate that an interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate."),
+        _D('Only the transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed like any other candidate even where the implementation journals that write, so one left unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own writers included, until something outside that implementation, such as a hand edit, repairs it, and one left parseable is not recognized as torn.'),
+        _D("A section 14.1 restore after a committed apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store manifest apart from a foreign source at a candidate path binds only that first adoption, so a restore that copies archived bytes to a candidate path, such as an importer-authored worklog.toml restored over the live one, leaves a store that every command of a fresh-only implementation, its own writers included, then refuses where those bytes show a listed item, as unsupported-legacy-state where the store stays at the supported version, or reports as cannot-evaluate where it classes them unreadable, malformed, or contradictory."),
         _D('A change made after the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is outside admission.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
+        _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
+        _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
+        _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker, another checker contests a claim only with its own attempts and reference runs, and honest checkers on stock installs of different platforms or versions within a documented family can reach different verdicts, each of which the release must meet."),
+        _D("The same residual covers the section 16.1 rule that an attempt altered by anything other than the documented steps, the release's own code, code those steps install from a directed source, and the stock platform's defaults is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established."),
+        _D('It covers whether a checker observed every write of a run the same way: the section 16.1 runtime-result token comparison and store part read the writes the checker observed, so a write a checker missed could make an honest token read as disagreeing, and a checker that cannot determine whether it observed every write of a run reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established.'),
+        _D("The working and temporary locations a checker chose are its own, and what sits there alters nothing, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an installed copy, alters the installation it probes."),
+        _D("That probe, like every run outside the checker's own attempts and reference runs, is an observation of the implementation's behaviour, never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its own, and it informs only the section 16.1 inspection of the implementation, which rests on the same observer-local attribution."),
+        _D("A requirement of section 16.1 on the conduct of the implementation's commands that its two rules do not compare, the fresh-only admission, lease, recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides nothing for that checker, and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings."),
+        _D('A failure that a checker cannot show twice in its own attempts and reference runs stays unresolved, however many other checkers each show it once, and an unresolved failure neither establishes nor counters any conformance or nonconformance of the release.'),
+        _D("Where the documentation of a release directs that a file the release does not ship be installed and does not pin its bytes, attempts made at different times can differ as the bytes the directed source serves differ, a residual of the release's own documentation."),
+        _D('Appendix E gives informative guidance for checking release conformance: a record of attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference environment.'),
     ),
 }
 # Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
@@ -2851,7 +2862,7 @@ def _self_test_vectors():
     check("spec-flip-9.2-idempotence", lambda: removed == 1 and
           "spec 9.2 missing contract: The upgrade MUST be idempotent." in
           contract_findings(text.replace(body, mutated, 1)))
-    # Section 16.1 declaration rules: deleting the wrapped
+    # Section 16.1 declaration rules and their section 17 residuals: deleting the wrapped
     # sentence in place, or rewording its operative clause, turns the gate red with that pin's
     # own finding. Each reword vector also asserts its target finding is absent before the
     # mutation, so a vector cannot pass against a text that already lacks its whole pin.
@@ -3093,6 +3104,94 @@ def _self_test_vectors():
             ('That sentence is the refusal-report rule', (
              ('a breach of it deviates there, never as a direct verdict.',
               'a breach of it is a direct verdict.'),
+            )),
+    ))
+    spec_vectors("17", (
+            ("Admission parses only the section 16.1 candidates",
+             (("so a listed item defined by file content and kept outside those candidates,",
+               "so a listed item kept outside those candidates,"),)),
+            ("An adoption receipt kept outside",
+             (("a store at the supported version whose `import_status` is `partial` or `complete` is"
+               " refused", "its store's `partial` or `complete` `import_status` is refused"),)),
+            ("The pre-scan refuses, before any write,",
+             (("within the recovery bound, together with a discovery outcome that such an operand alone"
+               " decides, so", "within the recovery bound, so"),)),
+            ("A command that writes and takes its lease after admission",
+             (("after admission confirms, once that lease is taken and observable and before any other"
+               " write, that the `lease.toml` carries its own claim and that",
+               "after admission rechecks admission once that lease is taken and observable and before"
+               " any other write, and checks that"),
+              ("is unchanged apart from exactly the bytes its own claim of the lease wrote;",
+               "is unchanged;"),
+              ("and leaves untouched one that does not.",
+               "and leaves untouched one that carries another holder's claim."))),
+            ("Within the section 16.1 recovery bound,",
+             (("before the admission check that follows recovery runs;", "before admission runs;"),
+              ("reports a store with a candidate that an interruption left unreadable, malformed, or"
+               " contradictory as cannot-evaluate", "reports a store with a torn candidate as"
+               " cannot-evaluate"))),
+            ("Only the transactions section 16.1 lists",
+             (("until something outside that implementation, such as a hand edit, repairs it,",
+               "until it is repaired by hand,"),)),
+            ("A section 14.1 restore after a committed apply",
+             (("then refuses where those bytes show a listed item, as `unsupported-legacy-state` where"
+               " the store stays at the supported version,", "then refuses as"
+               " `unsupported-legacy-state` where those bytes show a listed item,"),)),
+            ('- The section 16.1 runtime check compares', (
+             ('so it detects an edit of that copy alone,',
+              'so it detects any edit,'),
+             ('it does not detect a co-edit that changes both',
+              'it detects a co-edit that changes both'),
+             ('section 16.1 does not require one.',
+              'section 16.1 requires one.'),
+            )),
+            ("Whether a release's runtime check compares", (
+             ('are established only by an inspection of the implementation, never by a reference run:',
+              'are established by reference runs:'),
+            )),
+            ('Section 16.1 verdicts are observer-local:', (
+             ('can mislead that checker,',
+              'cannot mislead any checker,'),
+             ('honest checkers on stock installs of different platforms or versions within a documented family can reach different verdicts,',
+              'honest checkers always reach one verdict,'),
+            )),
+            ('The same residual covers the section 16.1 rule', (
+             ("anything other than the documented steps, the release's own code, code those steps install from a directed source, and the stock platform's defaults",
+              "anything other than the documented steps and the release's own code"),
+             ("and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established.",
+              'and such an attempt counts until the alteration is proven.'),
+            )),
+            ('A failure that a checker cannot show twice', (
+             ('stays unresolved, however many other checkers each show it once,',
+              'is established where two checkers each show it once,'),
+            )),
+            ('Where the documentation of a release directs', (
+             ('attempts made at different times can differ as the bytes the directed source serves differ,',
+              'attempts made at different times never differ,'),
+            )),
+            ('It covers whether a checker observed every write of a run', (
+             ('reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established.',
+              'reports what such runs show as established.'),
+            )),
+            ('The working and temporary locations a checker chose are its own', (
+             ("the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit,",
+              'nothing placed there is part of the installation,'),
+            )),
+            ('That probe, like every run outside', (
+             ('it establishes nothing under the section 16.1 rules however often it is repeated,',
+              'it establishes a failure where it is repeated,'),
+             ('it decides no verdict of its own,',
+              'it decides a verdict of its own,'),
+            )),
+            ('A requirement of section 16.1 on the conduct of', (
+             ('is judged only by that inspection,',
+              'is judged by reference runs,'),
+             ('and one it can attribute is decided by what that inspection finds in those bytes, never by the observed run itself on any number of showings.',
+              'and one it can attribute is decided by the observed run.'),
+            )),
+            ('Appendix E gives informative guidance', (
+             ('Appendix E gives informative guidance',
+              'Appendix E gives normative rules'),
             )),
     ))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
