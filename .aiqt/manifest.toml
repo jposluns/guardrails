@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "544b241c275b9490ba6f57c2cf794ad3b507e2508b005a4e0c39e65b5e62f74e"
+tree-sha256 = "0d82cf4f0a025a9c51d66693489867e95b24d899c578029b1c32c7ef947017b5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3411,8 +3411,8 @@ sha256 = "5d850add54d28b754e69345f8b2029a4a7882ce4ef552728e8611ce60b1d398a"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 467525
-sha256 = "34ba2832f11d11ce198f66d9e3f4bfd8c146c797d958847c54d20a73c876400a"
+bytes = 468833
+sha256 = "8e775f334e3f033276090f1e169a31a5e9f93995314c2edcd5ee44c9ae5d0d87"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

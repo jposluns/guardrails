@@ -47,9 +47,10 @@ itself is checkout code: an attacker who controls it controls the launch (the di
 The stage-2 child and each nested validator child also write a completion record that stage 1 (or
 this gate) requires beside exit 0. The record detects an omitted, truncated or foreign-pid result;
 it cannot authenticate that the child ran its checks, because the child writes it (the second
-disclosed residual; see _stage2_arm_result). For the same reason no in-process exit holds against
-child code that installs a hook which keeps intercepting calls (a sys.monitoring callback, a trace
-function re-arming a raising profile function): it can stop the result writer's own exit.
+disclosed residual; see _stage2_arm_result). For the same reason no in-process exit guarantee
+holds against child code that installs a tracing, profiling, monitoring or audit hook: such a hook,
+firing once or repeatedly, can defeat the result writer's exit 2, so exit 0 can stand beside a
+success record (the same child-controlled-code class; see _stage2_arm_result).
 
 Exit: 0 clean / genesis / NOT APPLICABLE legs; 1 a real finding (an under-claimed bump, a rowless
 change, an unconsumed or wrong row, a register incompleteness); 2 malformed or unreadable input
@@ -395,27 +396,34 @@ def _stage2_arm_result():
     hook after the first checks. A fault found then turns the exit to 2, WHATEVER the verdict was
     (round 2, claude MINOR-1), and overwrites the record in place with code 2; stage 1 refuses a
     success record beside a nonzero exit. The whole writer, its final os._exit(code) call
-    included, runs under a guard: an exception raised anywhere in it (the second check itself
-    raising, a profiling hook raising at a call's event, at the final exit call included) ends in
-    os._exit(2) after a best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude
-    MEDIUM-1: an exception leaving the atexit callback kept the dispatch's exit beside an already
-    written success record; round 3, codex MAJOR / claude MAJOR-1: the final exit call sat
-    outside the guard, so a profiling hook raising at it left exit 0 beside a success record).
-    CPython unsets a sys.setprofile or sys.settrace function that raises, so the guard's own
-    os._exit(2) then runs. What this does NOT guarantee:
+    included, runs inside an outer guard: an exception raised in its guarded body (the second
+    check itself raising, a profiling hook raising at a call's event, at the final exit call
+    included) ends in os._exit(2) after a best-effort rewrite of the record to code 2 (round 2,
+    codex MAJOR / claude MEDIUM-1: an exception leaving the atexit callback kept the dispatch's
+    exit beside an already written success record; round 3, codex MAJOR / claude MAJOR-1: the
+    final exit call sat outside the guard, so a profiling hook raising at it left exit 0 beside
+    a success record). The body holds nested try statements, and an exception a trace function
+    raises at the line event of a nested `try:` line escapes the outer handler (observed on
+    Python 3.14.4; PR #397 QA round 4, claude MINOR-1). No complete record exists at any of
+    those points, so that outcome is still fail-closed. What this does NOT guarantee:
     - An OSError from the result open, from a write (the record's or a diagnostic line's) or from
       the close, or a rewrite that itself fails, can leave a code-0 record beside exit 2, which
       stage 1 refuses (a success record beside a nonzero exit is never a verdict).
     - Only the record's close and the exit call follow the final checks, so a fault another
       thread of the child raises in that window is not seen (a disclosed race).
-    - No in-process exit holds against code the child runs that installs a hook which keeps
-      intercepting calls: a sys.monitoring callback (CPython does not unset one that raises), or
-      a trace function that re-arms a raising profile function, stops the guard's os._exit(2) as
-      well, and the exception then leaves the atexit callback with the dispatch's exit beside
-      whatever record was written. That is code the child runs controlling the child, the same
-      class as the forged-record residual above. (os._exit raises no audit event, so an audit
-      hook cannot raise at the exit call; one that raises during the guard's rewrite only loses
-      the rewrite.)
+    - No in-process exit guarantee holds against code the child runs that installs a tracing,
+      profiling, monitoring or audit hook (PR #397 QA round 4, claude MEDIUM-1). Such a hook,
+      raising once or repeatedly, alone or beside another hook, can defeat the guard: one that
+      has not raised yet can raise inside the guard's handler, outside its inner try, and the
+      exception then leaves the atexit callback with the dispatch's exit beside whatever record
+      was written, so exit 0 can stand beside a success record. Observed: an audit hook that
+      makes the second check raise, then a trace function raising once in the handler before
+      the rewrite, left exit 0 beside a code-0 record; a sys.monitoring callback, a trace
+      function that re-arms a raising profile function, and a profile function raising once at
+      the guard's own os._exit(2) each left exit 0. That is code the child runs controlling the
+      child, the same class as the forged-record residual above, and no in-process change
+      closes it. (os._exit raises no audit event, so an audit hook cannot raise at an exit call
+      itself; one that raises during the guard's rewrite loses the rewrite.)
     Stage 1 requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
     diagnostics go to a separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other
     byte is a fault.
@@ -509,8 +517,9 @@ def _stage2_arm_result():
             # dispatch's exit beside an already written success record. Best effort first:
             # name the fault and rewrite the record to code 2; if that itself raises,
             # os._exit(2) still runs and any stale success record sits beside exit 2, which
-            # stage 1 refuses. A hook that keeps intercepting calls can stop this os._exit(2)
-            # too (the residual _stage2_arm_result's docstring states).
+            # stage 1 refuses. A tracing, profiling, monitoring or audit hook the child installs
+            # can stop this os._exit(2) too, firing once or repeatedly (the residual
+            # _stage2_arm_result's docstring states; PR #397 QA round 4).
             try:
                 os.write(2, b"error: stage-2 result writer fault; fail-closed "
                          b"(security-seci-fail-closed)\n")
@@ -627,12 +636,14 @@ def _stage1_main():
         # refused by name (PR #397 QA round p1, codex MAJOR: a fault during the result write).
         # The record detects an omitted, truncated or foreign-pid result; it does not
         # authenticate the committed child, which can write a well-formed record without
-        # running the dispatch (the disclosed residual, _stage2_arm_result). Any exception in
-        # the child's result writer, at its final exit call included, ends in exit 2 (PR #397
-        # QA round 3), EXCEPT where the committed code installs a hook that keeps intercepting
-        # calls (a sys.monitoring callback, a trace function re-arming a raising profile
-        # function): it can stop any in-process exit, the writer's own exit 2 included, the
-        # same code-controls-the-child class as the forged record.
+        # running the dispatch (the disclosed residual, _stage2_arm_result). An exception
+        # raised in the guarded body of the child's result writer, at its final exit call
+        # included, ends in exit 2 (PR #397 QA round 3; a trace function raising at a nested
+        # `try:` line escapes the guard before any complete record exists, which is still
+        # fail-closed), EXCEPT where the committed code installs a tracing, profiling,
+        # monitoring or audit hook: firing once or repeatedly, it can stop any in-process exit,
+        # the writer's own exit 2 included, so exit 0 can stand beside a success record, the
+        # same code-controls-the-child class as the forged record (PR #397 QA round 4).
         result_path = os.path.join(tmp, "stage2-result")
         err_path = os.path.join(tmp, "stage2-stderr")
         diag_path = os.path.join(tmp, "stage2-diagnostics")
@@ -2171,15 +2182,18 @@ def _child_pycache_x():
 # run again after the record is written (PR #397 QA round p1, codex MAJOR: the open raises an audit
 # event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2,
 # whatever the verdict was (round 2, claude MINOR-1). The whole writer, its final os._exit(code)
-# call included (round 3, codex MAJOR / claude MAJOR-1), runs under a guard: an exception raised
-# anywhere in it, at the final exit call included, ends in os._exit(2) after a best-effort rewrite
-# of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1). Not guaranteed: an OSError from
-# the result open, a write or the close, or a rewrite that itself fails, can leave a code-0 record
-# beside exit 2, which _run_recorded_child refuses; only the close and the exit call follow the
-# final checks, so a fault another thread raises in that window is not seen (a disclosed race); and
-# a hook the validator installs that keeps intercepting calls (a sys.monitoring callback, a trace
-# function re-arming a raising profile function) can stop the guard's os._exit(2) too, the class of
-# the code-controls-the-child residual _stage2_arm_result states. With atexit._ncallbacks
+# call included (round 3, codex MAJOR / claude MAJOR-1), runs inside an outer guard: an exception
+# raised in its guarded body, at the final exit call included, ends in os._exit(2) after a
+# best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1); an
+# exception a trace function raises at a nested `try:` line escapes the outer handler before any
+# complete record exists, which is still fail-closed (round 4, claude MINOR-1). Not guaranteed: an
+# OSError from the result open, a write or the close, or a rewrite that itself fails, can leave a
+# code-0 record beside exit 2, which _run_recorded_child refuses; only the close and the exit call
+# follow the final checks, so a fault another thread raises in that window is not seen (a
+# disclosed race); and a tracing, profiling, monitoring or audit hook the validator installs,
+# firing once or repeatedly, can stop the guard's os._exit(2) and leave exit 0 beside a success
+# record (round 4, claude MEDIUM-1), the class of the code-controls-the-child residual
+# _stage2_arm_result states. With atexit._ncallbacks
 # unavailable, a pre-registered exit handler cannot be ruled out: a recorded fault, never a clean
 # default (round 2, gemini). The record cannot authenticate the validator's code, which can write a
 # well-formed record itself (the residual _stage2_arm_result discloses).
