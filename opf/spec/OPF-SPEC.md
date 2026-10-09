@@ -2688,50 +2688,54 @@ The gates in this standard are strong where they are strong and say so where the
   changed, so an alteration the checker did not detect, such as an organization-wide package-manager
   configuration file taken for part of the stock install, can mislead that checker. Another checker
   contests a claim only with its own evidence: under the section 16.1 availability and reference-run
-  rules, with its own attempts and reference runs alone, and otherwise with what it inspects in the
-  bytes the release ships or reads in the documentation of the release, such as a release that
-  carries no shipped-file digest or whose documentation states no place for it. Honest checkers can
-  reach different verdicts on stock installs of different platforms or versions within what the
-  documentation of the release names, since section 16.1 has the release meet the defaults of every
-  such install, and on one platform and version, where the changes the section 16.1 closed
-  operational list permits, such as the account name or the clock, differ between their attempts, or
-  where a failure shows twice in one checker's own attempts and reference runs and once or never in
-  another's. The same residual covers the section 16.1 rule that an attempt whose installation or
-  execution environment differs from what the stock install's defaults, the changes the closed
-  operational list permits, the documented steps, the release's own code, and code those steps
-  install from a source the documentation of the release directs left it is not an attempt and
-  establishes nothing: only a checker that detects the alteration can know to set that attempt
-  aside, and section 16.1 has a checker that cannot determine an attempt's eligibility report what
-  only such attempts show as unresolved, never established. It covers whether a checker observed
-  every write of a run the same way: the section 16.1 runtime-result token comparison and store part
-  read the writes the checker observed, so a write a checker missed could make an honest token read
-  as disagreeing, or hide a disagreeing token or a store-part failure that the run's writes show,
-  and a checker that cannot determine whether it observed every write of a run reports what only the
-  behaviour-coupled comparisons of such runs show as unresolved, never established. The working and
-  temporary locations a checker chose are its own, and what sits there alters nothing, the
-  installation apart: the installed files, the installed copy included, and the files a documented
-  step or the release's own code wrote stay part of the installation wherever they sit, so the
-  Appendix E scratch-copy probe, which edits an installed copy, alters the installation it probes.
-  That probe, like every run outside the checker's own attempts and reference runs, is an
-  observation of the implementation's behaviour, never an attempt, a reference run, or an inspection
-  of the bytes the release ships: it establishes nothing under the section 16.1 rules however often
-  it is repeated, it decides no verdict of its own, and it informs only the section 16.1 inspection
-  of the implementation, which rests on the same observer-local attribution. A requirement of
-  section 16.1 on the conduct of the implementation's commands that its two rules do not compare,
-  the fresh-only admission, lease, recovery, and sync conduct included, is judged only by that
-  inspection, so a conduct breach a checker cannot attribute to the bytes the release ships decides
-  nothing for that checker, and one it can attribute is decided by what that inspection finds in
-  those bytes, never by the observed run itself on any number of showings. A failure that a checker
-  cannot show twice in its own attempts and reference runs, on the same platform and version and,
-  under the reference-run rule, in the same part, stays unresolved, however many other checkers each
-  show it once, and an unresolved failure neither establishes nor counters any conformance or
-  nonconformance of the release. Where the documentation of a release directs that a file the
-  release does not ship be installed and does not pin its bytes, attempts made at different times
-  can differ as the bytes the directed source serves differ, a residual of the release's own
-  documentation. Appendix E gives informative guidance for checking release conformance: a record of
-  attempts, redaction of secrets, sharing and repetition, corroboration across checkers, a
-  consistency probe over third-party reports, scratch-copy probes of the byte comparison, and an
-  optional content-addressed reference environment.
+  rules, with its own attempts and reference runs alone, and otherwise with what it finds by
+  inspecting the bytes the release ships or by reading the documentation of the release, such as
+  that the release carries no shipped-file digest or that its documentation states no place for it.
+  Honest checkers can reach different verdicts on stock installs of different platforms or versions,
+  each within what the documentation of the release names or, where that documentation names none,
+  the platform the checker in question uses, since section 16.1 makes every default of each such
+  install that the documentation does not exclude, by directing that it be changed or by naming a
+  platform that lacks it, the release's to meet. They can also reach different verdicts on one
+  platform and version, where the changes the section 16.1 closed operational list permits, such as
+  the account name or the clock, differ between their attempts, or where one checker's own attempts
+  and reference runs show a failure of one rule twice, under the reference-run rule in the same part
+  both times, and another checker's show it once or never. The same residual covers the section 16.1
+  rule that an attempt whose installation or execution environment differs from what the stock
+  install's defaults, the changes the closed operational list permits, the documented steps, the
+  release's own code, and code those steps install from a source the documentation of the release
+  directs left it is not an attempt and establishes nothing: only a checker that detects the
+  alteration can know to set that attempt aside, and section 16.1 has a checker that cannot
+  determine an attempt's eligibility report what only such attempts show as unresolved, never
+  established. It covers whether a checker observed every write of a run the same way: the
+  section 16.1 runtime-result token comparison and store part read the writes the checker observed,
+  so a write a checker missed could make an honest token read as disagreeing, or hide a disagreeing
+  token or a store-part failure that the run's writes show, and a checker that cannot determine
+  whether it observed every write of a run reports what only the behaviour-coupled comparisons of
+  such runs show as unresolved, never established. The working and temporary locations a checker
+  chose are its own, and what sits there alters nothing, the installation apart: the installed
+  files, the installed copy included, and the files a documented step or the release's own code
+  wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which
+  edits an installed copy, alters the installation it probes. That probe, like every run outside the
+  checker's own attempts and reference runs, is an observation of the implementation's behaviour,
+  never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes
+  nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its
+  own, and it informs only the section 16.1 inspection of the implementation, which rests on the
+  same observer-local attribution. A requirement of section 16.1 on the conduct of the
+  implementation's commands that its two rules do not compare, the fresh-only admission, lease,
+  recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a
+  checker cannot attribute to the bytes the release ships decides nothing for that checker, and one
+  it can attribute is decided by what that inspection finds in those bytes, never by the observed
+  run itself on any number of showings. A failure that a checker cannot show twice in its own
+  attempts and reference runs, on the same platform and version and, under the reference-run rule,
+  in the same part, stays unresolved, however many other checkers each show it once, and an
+  unresolved failure neither establishes nor counters any conformance or nonconformance of the
+  release. Where the documentation of a release directs that a file the release does not ship be
+  installed and does not pin its bytes, attempts made at different times can differ as the bytes the
+  directed source serves differ, a residual of the release's own documentation. Appendix E gives
+  informative guidance for checking release conformance: a record of attempts, redaction of secrets,
+  sharing and repetition, corroboration across checkers, a consistency probe over third-party
+  reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference
+  environment.
 
 ## Appendix A: record envelope example
 
@@ -2850,17 +2854,19 @@ conformance claim is.
   another checker's work and never substitutes for that checker's own attempts and reference runs.
 - Corroborate across checkers: where two checkers each show the same failure once, on the same
   platform and version, that agreement is a strong reason to keep attempting, though under
-  section 16.1 the failure stays unresolved until one checker's own attempts or reference runs show
-  it twice, on the same platform and version and, under the reference-run rule, in the same part.
+  section 16.1 the failure stays unresolved for each checker until its own attempts or reference
+  runs show it twice, on the same platform and version and, under the reference-run rule, in the
+  same part.
 - A report of a third-party installation can be probed for consistency. Where its installed-copy
   digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's
   bytes and its runtime result is other than `cannot_evaluate`, the report is inconsistent with a
-  runtime check that compared the installed copy's bytes with that original digest before reading
-  any field together with an emitter that reported that run truthfully. It does not show that no
-  comparison ran: a co-edit that also changed the digest the implementation carries (section 17), a
-  comparison that is skipped or defective, an emitter that misreports, and a report altered after it
-  was written each explain it, and the report does not tell which. It establishes nothing under
-  section 16.1.
+  run whose runtime check compared the installed copy's bytes with that digest before reading any
+  field and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose
+  emitter reported that run truthfully, and whose report no one altered after the emitter wrote it.
+  It does not show that no comparison ran: a co-edit that also changed the digest the implementation
+  carries (section 17), a comparison that is skipped, defective, or made without refusing a
+  mismatch, an emitter that misreports, and a report altered after it was written each explain it,
+  and the report does not tell which. It establishes nothing under section 16.1.
 - Probe the byte comparison on a scratch copy: install the release somewhere disposable, edit the
   installed copy, and observe whether the runtime check yields cannot-evaluate and authorizes no
   store operation. This observes the implementation's behaviour over bytes the release did not ship;

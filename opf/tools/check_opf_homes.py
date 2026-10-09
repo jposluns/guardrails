@@ -13,7 +13,9 @@ and 13), a default-gate run without the self-test, and an addition landed togeth
 matching registry edit, which review of registry changes catches. Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
-the rest of 9.1, and additions to it, stay unprotected. The quickstart's implementation-class
+the rest of 9.1, and additions to it, stay unprotected. Appendix E stays untiled too, and its
+sentences that state what section 16.1 makes of its probes are pinned the same way; the rest of
+Appendix E, and additions to it, stay unprotected here. The quickstart's implementation-class
 sentences and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
 tag-stripped text (_SURFACE), outside the keyword lint; the rest of those files, and additions
 to them, stay unprotected.
@@ -913,8 +915,9 @@ _CONTRACT = {
         _D("- The section 16.1 runtime check compares the installed copy of a release's declaration file with the shipped-file digest the implementation carries, so it detects an edit of that copy alone, which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy and the digest the implementation carries to match it, or one that changes the installed copy together with the implementation's comparison code so that the comparison no longer refuses that copy, and an anchor outside the installation, such as a signature over that file that the implementation verifies, is the stronger option only against an edit that does not also change the implementation's verification key or its anchor check; section 16.1 does not require one."),
         _D("Whether a release's runtime check compares the installed copy's bytes with the digest the implementation carries at all, and whether that digest sits at the place the documentation states, are established only by an inspection of the implementation, never by a reference run: every reference run's installed copy holds the shipped bytes, over which a runtime check that skips that comparison and one that makes it can yield the same report."),
         _D("Section 16.1 verdicts are observer-local: each rests on a checker's own knowledge of its stock baseline and of what it changed, so an alteration the checker did not detect, such as an organization-wide package-manager configuration file taken for part of the stock install, can mislead that checker."),
-        _D("Another checker contests a claim only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it inspects in the bytes the release ships or reads in the documentation of the release, such as a release that carries no shipped-file digest or whose documentation states no place for it."),
-        _D("Honest checkers can reach different verdicts on stock installs of different platforms or versions within what the documentation of the release names, since section 16.1 has the release meet the defaults of every such install, and on one platform and version, where the changes the section 16.1 closed operational list permits, such as the account name or the clock, differ between their attempts, or where a failure shows twice in one checker's own attempts and reference runs and once or never in another's."),
+        _D("Another checker contests a claim only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it finds by inspecting the bytes the release ships or by reading the documentation of the release, such as that the release carries no shipped-file digest or that its documentation states no place for it."),
+        _D("Honest checkers can reach different verdicts on stock installs of different platforms or versions, each within what the documentation of the release names or, where that documentation names none, the platform the checker in question uses, since section 16.1 makes every default of each such install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, the release's to meet."),
+        _D("They can also reach different verdicts on one platform and version, where the changes the section 16.1 closed operational list permits, such as the account name or the clock, differ between their attempts, or where one checker's own attempts and reference runs show a failure of one rule twice, under the reference-run rule in the same part both times, and another checker's show it once or never."),
         _D("The same residual covers the section 16.1 rule that an attempt whose installation or execution environment differs from what the stock install's defaults, the changes the closed operational list permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it is not an attempt and establishes nothing: only a checker that detects the alteration can know to set that attempt aside, and section 16.1 has a checker that cannot determine an attempt's eligibility report what only such attempts show as unresolved, never established."),
         _D("It covers whether a checker observed every write of a run the same way: the section 16.1 runtime-result token comparison and store part read the writes the checker observed, so a write a checker missed could make an honest token read as disagreeing, or hide a disagreeing token or a store-part failure that the run's writes show, and a checker that cannot determine whether it observed every write of a run reports what only the behaviour-coupled comparisons of such runs show as unresolved, never established."),
         _D("The working and temporary locations a checker chose are its own, and what sits there alters nothing, the installation apart: the installed files, the installed copy included, and the files a documented step or the release's own code wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which edits an installed copy, alters the installation it probes."),
@@ -928,12 +931,25 @@ _CONTRACT = {
 # Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
 # like _CONTRACT pins, each proven unique and deletion-red by the self-test, but with no
 # per-section tiling equality, so additions there stay green. Section 9.1 stays untiled because
-# its profile rule uses a lowercase "may", which section 2 reads as descriptive.
+# its profile rule uses a lowercase "may", which section 2 reads as descriptive. Appendix E is
+# informative and stays untiled; its pins are the sentences that state what section 16.1 makes of
+# its probes, so reverting one of them turns the gate red.
 _PINNED = {
     "9.1": (
         _D('Implementation conformance classes (section 16.1) are defined by the base, not by profiles.'),
         'A profile MAY require an upgrade-capable implementation, because that adds a requirement.',
         "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
+    ),
+    "E": (
+        _D('This appendix is informative: it recommends practice for checkers and releases working under section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a conformance claim is.'),
+        _D("A shared record informs another checker's work and never substitutes for that checker's own attempts and reference runs."),
+        _D('Corroborate across checkers: where two checkers each show the same failure once, on the same platform and version, that agreement is a strong reason to keep attempting, though under section 16.1 the failure stays unresolved for each checker until its own attempts or reference runs show it twice, on the same platform and version and, under the reference-run rule, in the same part.'),
+        _D("Where its installed-copy digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's bytes and its runtime result is other than cannot_evaluate, the report is inconsistent with a run whose runtime check compared the installed copy's bytes with that digest before reading any field and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose emitter reported that run truthfully, and whose report no one altered after the emitter wrote it."),
+        _D('It does not show that no comparison ran: a co-edit that also changed the digest the implementation carries (section 17), a comparison that is skipped, defective, or made without refusing a mismatch, an emitter that misreports, and a report altered after it was written each explain it, and the report does not tell which.'),
+        _D('It establishes nothing under section 16.1.'),
+        _D("This observes the implementation's behaviour over bytes the release did not ship; section 17 discloses that no reference run can show whether that comparison is made."),
+        _D('An edited installed copy is an altered installation under section 16.1 wherever it sits, a disposable location included, so a probe run is no attempt and no reference run and, however often it is repeated, establishes nothing under the section 16.1 availability and reference-run rules.'),
+        _D('It is an observation, never an inspection of the bytes the release ships, and it decides no verdict: it can only direct the checker to what an inspection of those bytes then finds.'),
     ),
 }
 
@@ -975,16 +991,17 @@ def surface_findings(texts=None):
 
 def _sections(text):
     # Every heading bounds a section, so a numbered section never swallows an appendix; the
-    # preamble before the first heading is registered as section "0".
+    # preamble before the first heading is registered as section "0", and an appendix under its
+    # letter ("E" for Appendix E).
     bounds = list(re.finditer(r"^#{2,3} .*$", text, re.MULTILINE))
     sections = dict()
     if bounds:
         sections["0"] = text[:bounds[0].start()]
     for i, m in enumerate(bounds):
-        number = re.match(r"^#{2,3} ([0-9]+(?:\.[0-9]+)?)\.? ", m.group(0))
+        number = re.match(r"^#{2,3} (?:([0-9]+(?:\.[0-9]+)?)\.?|Appendix ([A-Z]):) ", m.group(0))
         if number:
             end = bounds[i + 1].start() if i + 1 < len(bounds) else len(text)
-            sections[number.group(1)] = text[m.end():end]
+            sections[number.group(1) or number.group(2)] = text[m.end():end]
     return sections
 
 
@@ -2864,14 +2881,14 @@ def _self_test_vectors():
     check("spec-flip-9.2-idempotence", lambda: removed == 1 and
           "spec 9.2 missing contract: The upgrade MUST be idempotent." in
           contract_findings(text.replace(body, mutated, 1)))
-    # Section 16.1 declaration rules and their section 17 residuals: deleting the wrapped
-    # sentence in place, or rewording its operative clause, turns the gate red with that pin's
-    # own finding. A reword vector states no precondition of its own: spec-contract above fails
+    # Section 16.1 declaration rules, their section 17 residuals, and the Appendix E pins: deleting
+    # the wrapped sentence in place, or rewording its operative clause, turns the gate red with that
+    # pin's own finding. A reword vector states no precondition of its own: spec-contract above fails
     # on any text that already lacks a pin, and c == 1 fails where the operative wording is absent.
     def spec_vectors(section, cases):
         body = _sections(text)[section]
         for start, rewordings in cases:
-            pin = [f for f in _CONTRACT[section] if f.startswith(start)]
+            pin = [f for f in dict(_CONTRACT, **_PINNED)[section] if f.startswith(start)]
             sentence = pin[0] if len(pin) == 1 else start
             finding = "spec " + section + " missing contract: " + sentence
             pattern = r"\s+".join("`?" + "`?".join(map(re.escape, w)) + "`?"
@@ -3177,16 +3194,24 @@ def _self_test_vectors():
               'cannot mislead any checker.'),
             )),
             ('Another checker contests a claim only with its own evidence:', (
-             ('only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it inspects in the bytes the release ships or reads in the documentation of the release,',
+             ('only with its own evidence: under the section 16.1 availability and reference-run rules, with its own attempts and reference runs alone, and otherwise with what it finds by inspecting the bytes the release ships or by reading the documentation of the release,',
               'only with its own attempts and reference runs,'),
              ('with its own attempts and reference runs alone,',
               'with any attempts and reference runs,'),
+             ('such as that the release carries no shipped-file digest or that its documentation states no place for it.',
+              'such as a release that carries no shipped-file digest or whose documentation states no place for it.'),
             )),
             ('Honest checkers can reach different verdicts', (
-             ('since section 16.1 has the release meet the defaults of every such install,',
-              'each of which the release must meet,'),
-             ("and on one platform and version, where the changes the section 16.1 closed operational list permits, such as the account name or the clock, differ between their attempts, or where a failure shows twice in one checker's own attempts and reference runs and once or never in another's.",
-              'and never on one platform and version.'),
+             ("since section 16.1 makes every default of each such install that the documentation does not exclude, by directing that it be changed or by naming a platform that lacks it, the release's to meet.",
+              'since section 16.1 has the release meet the defaults of every such install.'),
+             ('or, where that documentation names none, the platform the checker in question uses,',
+              ''),
+            )),
+            ('They can also reach different verdicts', (
+             ('They can also reach different verdicts on one platform and version,',
+              'They never reach different verdicts on one platform and version,'),
+             ('show a failure of one rule twice, under the reference-run rule in the same part both times,',
+              'show a failure twice,'),
             )),
             ('The same residual covers the section 16.1 rule', (
              ("whose installation or execution environment differs from what the stock install's defaults, the changes the closed operational list permits, the documented steps, the release's own code, and code those steps install from a source the documentation of the release directs left it",
@@ -3231,6 +3256,56 @@ def _self_test_vectors():
             ('Appendix E gives informative guidance', (
              ('Appendix E gives informative guidance',
               'Appendix E gives normative rules'),
+            )),
+    ))
+    # Appendix E: each reword below reverts a fix of the PR #480 review, or states the opposite of
+    # what section 16.1 makes of a probe, and turns the gate red with that pin's own finding.
+    spec_vectors("E", (
+            ('This appendix is informative:', (
+             ('section 16.1 alone decides',
+              'this appendix decides'),
+            )),
+            ('A shared record informs', (
+             ('never substitutes for',
+              'can substitute for'),
+            )),
+            ('Corroborate across checkers:', (
+             ('stays unresolved for each checker until its own attempts or reference runs show it twice,',
+              "stays unresolved until one checker's own attempts or reference runs show it twice,"),
+             ('until its own attempts or reference runs show it twice, on the same platform and version and, under the reference-run rule, in the same part.',
+              'until its own evidence shows it twice (section 17).'),
+            )),
+            ('Where its installed-copy digest', (
+             ('the report is inconsistent with a run whose runtime check compared',
+              'the report did not come from a runtime check that compared'),
+             ('and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose emitter reported that run truthfully, and whose report no one altered after the emitter wrote it.',
+              'together with an emitter that reported that run truthfully.'),
+             ('and, on finding them different, yielded cannot-evaluate as section 16.1 requires,',
+              ''),
+             ('truthfully, and whose report no one altered after the emitter wrote it.',
+              'truthfully.'),
+            )),
+            ('It does not show that no comparison ran:', (
+             ('It does not show that no comparison ran:',
+              'It shows that no comparison ran:'),
+             ('a comparison that is skipped, defective, or made without refusing a mismatch,',
+              'a comparison that is skipped or defective,'),
+            )),
+            ('It establishes nothing under section 16.1.', (
+             ('It establishes nothing under section 16.1.',
+              'It establishes a failure under section 16.1.'),
+            )),
+            ('This observes the implementation', (
+             ('This observes',
+              'This inspects'),
+            )),
+            ('An edited installed copy is an altered installation', (
+             ('establishes nothing under the section 16.1 availability and reference-run rules.',
+              'establishes nothing under the section 16.1 availability and reference-run rules; what it yields is inspection evidence about the shipped implementation.'),
+            )),
+            ('It is an observation, never an inspection', (
+             ('It is an observation, never an inspection of the bytes the release ships,',
+              'It is an inspection of the bytes the release ships,'),
             )),
     ))
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
