@@ -132,8 +132,9 @@ WHAT IT DOES
     UserPromptSubmit (no matcher; it resets the refusal count and gives no output), and Stop.
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext note (after a tool
     call), a top-level decision "block" object with a reason, or a top-level systemMessage warning (Stop).
-    Exit status: 0, except the floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE
-    DIRECTION). No configuration is needed. State: one JSON file per session (named by a SHA-256 of
+    Exit status: 0, except the floor guard's exit 1 on an interpreter older than Python 3.14 that can start
+    the hook; one that cannot start it exits with Python's own status first (FAILURE DIRECTION). No
+    configuration is needed. State: one JSON file per session (named by a SHA-256 of
     session_id, else transcript_path) in AIQT_HOOK_STATE_DIR/rerun-pass-check when that is an absolute path,
     else $XDG_STATE_HOME/aiqt-guardrails/rerun-pass-check, else $HOME/.local/state/aiqt-guardrails/
     rerun-pass-check (created 0700, written by an atomic replace), with its lock file (the same name plus .lock)

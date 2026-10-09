@@ -180,11 +180,11 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `545db95126a701dc2c4bfff75a38345814a08b0b879b20d9477578290bd2dd93` | [constraint-reread.py](constraint-reread.py) |
+| `constraint-reread.py` | `7ef8c0bc8ca2ff075b5d77dd023dec3bd46ff4938a7ed6d3a203857beb05eff5` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `bbb2e0b1996e072a15eac0c740949dceb7205a5643b0dd0460e604f9ac9cb737` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `be6c07021581b6bb64c9c7efea80165fe6731a3c7d8524a299570060a677a2d8` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `rerun-pass-check.py` | `8c7ebe4a60093d056f802df799197efeb79e50d6f98ab67ef804ac9d932ceac0` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
@@ -283,11 +283,11 @@ fails and report it; do not work around a failed check.
      would never run, since the hook stops before its loop guard runs). An interpreter that cannot start
      the hook fails before its guard runs, with Python's own error instead of that line: an interpreter
      that predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates
-     f-strings cannot compile the three clock hooks, which use them, and exits 1. Exit 1 is a
-     non-blocking error on every event, so a `PreToolUse` hook then allows every tool call unchecked;
-     exit 2 on `Stop` blocks the stop, and the hook's own block cap never runs, and exit 2 on
-     `UserPromptSubmit` blocks the prompt. If you see any of these errors, upgrade Python or remove the
-     hook's entry.
+     f-strings cannot compile the three clock hooks and `char-policy-write.py`, which use them, and
+     exits 1. Exit 1 is a non-blocking error on these hooks' events, so a `PreToolUse` hook then allows
+     every tool call unchecked; exit 2 on `Stop` blocks the stop, and the hook's own block cap never
+     runs, and exit 2 on `UserPromptSubmit` blocks the prompt. If you see any of these errors, upgrade
+     Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 

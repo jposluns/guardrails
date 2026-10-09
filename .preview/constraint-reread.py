@@ -24,7 +24,8 @@ WHAT IT DOES
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext reminder
     (SessionStart, UserPromptSubmit), a top-level decision "block" object with a reason (Stop), or a top-level
     systemMessage warning (Stop, at the cap or when the count cannot be kept). Exit status: 0, except the
-    floor guard's exit 1 on an interpreter older than Python 3.14 (FAILURE DIRECTION).
+    floor guard's exit 1 on an interpreter older than Python 3.14 that can start the hook; one that cannot
+    start it exits with Python's own status first (FAILURE DIRECTION).
 
 LOOP CAP
     The refusal count is kept in the state file, so the cap holds when the platform's stop_hook_active field is

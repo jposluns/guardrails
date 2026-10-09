@@ -172,8 +172,9 @@ import sys
 # such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
 # mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
-# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file exits
-# 1, a non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
+# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
+# (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals) stops with a SyntaxError and exits 1, a
+# non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
 # hook entry passes exits 2 on every event the plugin hooks.json registers. That denies each PreToolUse
 # call a registered matcher selects; blocks every UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says
 # an error must never do; blocks every Stop, with no cap as above, and every TeammateIdle, the two

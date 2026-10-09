@@ -19,9 +19,11 @@ malformed expectation manifest (a suite container that is not an array of
 tables included), a ci-status.sh whose jq program cannot be extracted, a duplicate check id, and a
 diagnostic or result that cannot be printed or flushed. The execution set is reconciled against the
 manifest only when no check recorded a harness error, because an unevaluated check would also be
-reported missing. Bad arguments, a Python older than 3.14, a
+reported missing. Bad arguments, a Python older than 3.14 that can start this file, a
 missing tomllib, and a refused arming of the execution-report finalizer are refused before any check
-runs, so they always exit 2.
+runs, so they always exit 2. An older interpreter that cannot start this file fails with Python's own
+error first, and that exit is Python's: 1 for a compile failure, which reads as an assertion failure,
+or 2 for an interpreter predating -I when run with it.
 
 Reporting can never escape or change the rule (under --execution-report, a refusal of the report
 finalizer, described below, ends the run with 2 after reporting). An uncaught exception is recorded
