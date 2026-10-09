@@ -68,7 +68,12 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
    for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
-   silently.
+   silently. `opf init` also refuses when the git history of HEAD's first-parent line shows a
+   prior store (specification section 8.2: counters never restart, so record ids are never
+   reissued). That scan follows the first-parent line only: a store that only ever existed on an
+   unmerged side branch is not detected, and `opf adopt` is the path for re-adopting any prior
+   ancestry. A repository whose history the scan cannot trust as-is (a shallow clone, or a legacy
+   `.git/info/grafts` file) is refused as cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.
