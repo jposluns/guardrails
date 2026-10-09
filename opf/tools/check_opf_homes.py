@@ -22,6 +22,25 @@ The default entry also runs a section 2 keyword lint over every registered pin: 
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D). Residual:
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
+
+The default entry also guards the informative sections: a heading that says "(informative)" or
+whose body declares itself informative (Appendix E), and every descendant heading beneath it at
+any level, is red where its title or its body carries an uppercase requirement keyword (MUST,
+SHALL, REQUIRED, SHOULD, MAY, RECOMMENDED, OPTIONAL) outside the one exempt quotation form, a
+code span holding exactly the keyword preceded by "the keyword" or "the term"; a keyword in any
+other form there, a bare code span or a fenced block included, is a finding (the guard fails
+closed). Headings are read as CommonMark reads them: a document-level ATX heading takes 0 to 3
+columns of indentation and a space or tab after its hashes, a setext heading underlines a
+document-level paragraph, and a line of 4 or more columns (a tab counts to the next multiple of
+4) is never a heading; lines end at LF, CR LF or CR only. A fenced line never bounds a section:
+a fence opens only on 0 to 3 columns and three or more tildes, or three or more backticks whose
+info string holds no backtick, and closes only on 0 to 3 columns, a run of the opening character
+at least as long, and nothing after it but spaces or tabs, so a tilde line inside a backtick
+fence, a shorter run inside a longer fence, or a run with text after it never closes it. Where
+the guard reads CommonMark loosely it errs toward scanning more: a heading inside a list item or
+block quote never bounds a section but marks one informative where its title says so, and a raw
+HTML block is a finding (the guard reads no HTML). The gate is red where Appendix E loses that
+marking.
 """
 import sys
 
@@ -1029,6 +1048,211 @@ def keyword_findings(contract=None):
             elif not keyword:
                 findings.append("spec {} requirement without a section 2 keyword: {}".format(
                     section, fragment))
+    return findings
+
+
+_INFORMATIVE_KEYWORD = re.compile(
+    r"\b(?:MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)\b")
+_INFORMATIVE_MARK = re.compile(r"\bThis (?:appendix|section|subsection) is informative\b")
+# The one exempt quotation form: a code span holding exactly one keyword, preceded by
+# "the keyword" or "the term" (sentence case allowed). Every other uppercase occurrence in an
+# informative section, inside any other code span or a fenced block included, is a finding.
+_INFORMATIVE_QUOTED = re.compile(
+    r"\b[Tt]he (?:keyword|term) `(?:MUST(?: NOT)?|SHALL(?: NOT)?|SHOULD(?: NOT)?|MAY"
+    r"|REQUIRED|RECOMMENDED|NOT RECOMMENDED|OPTIONAL)`")
+
+
+# Block structure as CommonMark reads it, for the informative guard alone. Lines end at LF,
+# CR LF or CR only. Indentation counts columns, a tab advancing to the next multiple of four.
+_ATX = re.compile(r"(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*\Z")
+_SETEXT = re.compile(r"(=+|-+)[ \t]*\Z")
+_THEMATIC = re.compile(r"(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})\Z")
+_FENCE_OPEN = re.compile(r"(`{3,})[^`]*\Z|(~{3,})")
+_LIST_MARK = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?=[ \t]|\Z)")
+_CONTAINER_MARK = re.compile(r"[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|\Z))")
+_REFERENCE_DEF = re.compile(r"\[[^\]]+\]:")
+_HTML_BLOCK = re.compile(
+    r"<(?:(?:script|pre|style|textarea)(?:[ \t>]|\Z)|!--|\?|![A-Za-z]|!\[CDATA\["
+    r"|/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col"
+    r"|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form"
+    r"|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem"
+    r"|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody"
+    r"|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|/?>|\Z)"
+    r"|/?[A-Za-z][A-Za-z0-9-]*[^<>]*>[ \t]*\Z)", re.IGNORECASE)
+
+
+def _columns(line):
+    # The column of a line's first character after its leading spaces and tabs, and the rest.
+    col = i = 0
+    while i < len(line) and line[i] in " \t":
+        col = col + 4 - col % 4 if line[i] == "\t" else col + 1
+        i += 1
+    return col, line[i:]
+
+
+def _contained(line):
+    # A line inside a list item or block quote, every leading marker and indentation removed.
+    while (m := _CONTAINER_MARK.match(line)) is not None:
+        line = line[m.end():]
+    return line.lstrip(" \t")
+
+
+def _atx_title(m):
+    return (m.group(2) or "").strip()
+
+
+def _heading_bounds(text):
+    # Headings at every level as CommonMark reads them, and the lines that open a raw HTML
+    # block. A section boundary is a document-level ATX heading (0 to 3 columns of
+    # indentation, a space, a tab or the line end after the hashes) or a setext heading
+    # under a document-level paragraph; a line of 4 or more columns is indented code or a
+    # paragraph continuation, never a heading. Fenced blocks are masked, so a heading-shaped
+    # line inside one neither starts nor ends a section: a fence opens on 0 to 3 columns, then
+    # three or more tildes, or three or more backticks whose info string holds no backtick,
+    # and closes only on 0 to 3 columns, a run of the opening character at least as long, and
+    # nothing after it but spaces or tabs. Where the guard models CommonMark loosely it errs
+    # toward scanning more: a heading inside a list item or block quote, or a setext-shaped
+    # one it cannot place under a document-level paragraph, never bounds a section but is
+    # kept where its title says "(informative)"; a list item's content starts one column
+    # after its marker (the least CommonMark allows); and a line after one inside a list
+    # item or block quote continues it lazily unless it starts a block.
+    headings = []
+    html = []
+    fence = None  # (delimiter character, opening run length) of the open fence
+    list_col = None  # content column of the open list item
+    lazy = False  # the previous line, inside a list item or block quote, takes lazy lines
+    para = None  # [start, texts] of the open document-level paragraph
+    run = None  # [start, texts] of the current run of non-blank lines
+
+    def marked(end, level, title, start):
+        if "(informative)" in title.lower():
+            headings.append((end, level, title, start))
+
+    def inner(number, start, end, line):
+        # A line inside a container: it bounds nothing; a heading there is only kept marked.
+        nonlocal run
+        content = _contained(line)
+        if _HTML_BLOCK.match(content):
+            html.append(number)
+        m = _ATX.match(content)
+        if m:
+            marked(end, len(m.group(1)), _atx_title(m), start)
+        m = _SETEXT.match(content)
+        if m and run is not None:
+            marked(end, 1 if m.group(1)[0] == "=" else 2, " ".join(run[1]).strip(), run[0])
+        run = run or [start, []]
+        run[1].append(content)
+
+    lines = re.finditer(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+", text)
+    for number, found in enumerate(lines, 1):
+        start = found.start()
+        line = found.group().rstrip("\r\n")
+        end = start + len(line)
+        col, rest = _columns(line)
+        if fence is not None:
+            if col <= 3 and re.fullmatch(
+                    re.escape(fence[0]) + "{%d,}[ \t]*" % fence[1], rest):
+                fence = None
+            continue
+        if not rest:
+            lazy, para, run = False, None, None
+            continue
+        block = col <= 3 and (rest.startswith(">") or any(
+            p.match(rest) for p in (_ATX, _FENCE_OPEN, _THEMATIC, _LIST_MARK)))
+        if (list_col is not None and col >= list_col) or (lazy and not block):
+            inner(number, start, end, line)
+            lazy = True
+            continue
+        list_col, lazy = None, False
+        if col >= 4:
+            if para is not None:
+                para[1].append(rest)
+            run = run or [start, []]
+            run[1].append(rest)
+            continue
+        m = _FENCE_OPEN.match(rest)
+        if m:
+            fence = (rest[0], len(m.group(1) or m.group(2)))
+            para = run = None
+            continue
+        m = _ATX.match(rest)
+        if m:
+            headings.append((end, len(m.group(1)), _atx_title(m), start))
+            para = run = None
+            continue
+        m = _SETEXT.match(rest)
+        if m:
+            level = 1 if m.group(1)[0] == "=" else 2
+            if para is not None and not _REFERENCE_DEF.match(para[1][0]):
+                headings.append((end, level, " ".join(para[1]).strip(), para[0]))
+                para = run = None
+                continue
+            if run is not None:
+                marked(end, level, " ".join(run[1]).strip(), run[0])
+        if _THEMATIC.match(rest):
+            para = run = None
+            continue
+        if _HTML_BLOCK.match(rest):
+            html.append(number)
+        m = _LIST_MARK.match(rest)
+        if m or rest.startswith(">"):
+            if m:
+                list_col = col + m.end() + 1
+            run = None
+            inner(number, start, end, line)
+            lazy, para = True, None
+            continue
+        para = para or [start, []]
+        para[1].append(rest)
+        run = run or [start, []]
+        run[1].append(rest)
+    return headings, html
+
+
+def _informative_sections(text):
+    # A heading is informative where it says "(informative)" or its own body (to the next
+    # heading at any level) declares itself informative (_INFORMATIVE_MARK), and informative
+    # status is inherited by every descendant heading at any deeper level, until the next
+    # heading at the same or a shallower level. Returns (title, own body) pairs; the
+    # guard scans the title with the body, so a keyword in a heading cannot hide.
+    headings, _html = _heading_bounds(text)
+    out = []
+    informative_level = None
+    for i, (end, level, title, _start) in enumerate(headings):
+        body_end = headings[i + 1][3] if i + 1 < len(headings) else len(text)
+        body = text[end:body_end]
+        if informative_level is not None and level <= informative_level:
+            informative_level = None
+        own = "(informative)" in title.lower() or _INFORMATIVE_MARK.search(body)
+        if own and informative_level is None:
+            informative_level = level
+        if own or informative_level is not None:
+            out.append((title, body))
+    return out
+
+
+def informative_findings(text):
+    # An informative section adds no requirement (Appendix E says so itself), so a section 2
+    # requirement keyword there, or SHALL, REQUIRED, RECOMMENDED or OPTIONAL read as one, is
+    # drift: a removed MUST could regain force there unnoticed. The one exempt form is the
+    # quotation _INFORMATIVE_QUOTED names; every other uppercase occurrence, in a bare code
+    # span or a fenced block included, is a finding, so an operative keyword cannot hide in
+    # markup or in a heading title (the guard fails closed on quoting in any other form; the
+    # title of every informative heading is scanned like its body). Residual: the guard reads
+    # uppercase keywords, so a lowercase restatement that a reader takes as binding stays
+    # green; review catches that.
+    # A raw HTML block is a finding wherever it opens outside a fence: the guard reads no HTML
+    # (a heading there, or a section boundary it hides, stays unseen), so it fails closed.
+    findings = ["spec informative guard: raw HTML block at line {} is not read".format(n)
+                for n in _heading_bounds(text)[1]]
+    sections = _informative_sections(text)
+    if not any(title.startswith("Appendix E") for title, _ in sections):
+        findings.append("spec informative guard: Appendix E not marked informative")
+    for title, body in sections:
+        scanned = _INFORMATIVE_QUOTED.sub(" ", title + "\n" + body)
+        for word in sorted(set(_INFORMATIVE_KEYWORD.findall(scanned))):
+            findings.append("spec informative section {} carries requirement keyword {}".format(
+                title, word))
     return findings
 
 
@@ -3194,6 +3418,213 @@ def _self_test_vectors():
               'Appendix E gives normative rules'),
             )),
     ))
+    # Appendix E guard: every informative section is keyword-free, the guard sees Appendix E,
+    # and planting a requirement keyword there, in prose, a bare code span, or a fenced block,
+    # turns the gate red with that keyword's finding; the quotation form (a code span holding
+    # exactly the keyword after "the keyword" or "the term") stays green; unmarking Appendix E
+    # turns the gate red too, so the guard cannot be sidestepped by unmarking.
+    informative_anchor = "This appendix is informative:"
+    check("spec-informative-clean", lambda: not informative_findings(text))
+    check("spec-informative-appendix-e", lambda: any(
+        t.startswith("Appendix E") for t, _ in _informative_sections(text)))
+    for word in ("MUST", "MUST NOT", "SHALL", "REQUIRED", "SHOULD", "MAY", "RECOMMENDED",
+                 "OPTIONAL"):
+        planted = text.replace(informative_anchor,
+                               informative_anchor + " A checker " + word + " share each record.", 1)
+        quoted = text.replace(informative_anchor,
+                              informative_anchor + " Normative sections use the keyword `"
+                              + word + "`.", 1)
+        check("spec-informative-flip-" + word.replace(" ", "-"), lambda m=planted, w=word.split()[0]:
+              text.count(informative_anchor) == 1 and any(
+                  f.endswith("carries requirement keyword " + w) and "Appendix E" in f
+                  for f in informative_findings(m)))
+        check("spec-informative-quoted-green-" + word.replace(" ", "-"),
+              lambda q=quoted: not informative_findings(q))
+    for plant, name in (
+            (" A checker `MUST` share records.", "bare-codespan"),
+            (" The rule `MUST NOT` applies here.", "codespan-no-lead-in"),
+            ("\n\n```text\nA checker MUST share records.\n```\n", "fenced-keyword"),
+    ):
+        planted = text.replace(informative_anchor, informative_anchor + plant, 1)
+        check("spec-informative-markup-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f and "Appendix E" in f
+            for f in informative_findings(m)))
+    check("spec-informative-lowercase-green", lambda: not informative_findings(text.replace(
+        informative_anchor, informative_anchor + " A checker must share records.", 1)))
+    check("spec-informative-unmarked-red", lambda: "spec informative guard: Appendix E not marked"
+          " informative" in informative_findings(text.replace("(informative)", "", 1).replace(
+              informative_anchor, "This appendix recommends practice:", 1)))
+    # Informative status is inherited by every descendant heading at any level, a fenced line
+    # that looks like a heading bounds nothing, and a deeper heading marked informative under a
+    # normative parent is guarded on its own.
+    appendix_tail = "a release's documentation can name one as the platform it documents."
+    sub3 = text.replace(appendix_tail, appendix_tail
+                        + "\n\n### E.1 Record sharing\n\nA checker MUST share records.", 1)
+    sub4 = text.replace(appendix_tail, appendix_tail
+                        + "\n\n#### E.1.1 Sharing detail\n\nEvery record SHOULD be shared.", 1)
+    fence_break = text.replace(appendix_tail, appendix_tail
+                               + "\n\n```markdown\n## not a heading\n```\n\nA checker MUST obey.", 1)
+    marked4 = text.replace(
+        "## 15. Genericization boundary",
+        "#### 14.9 Notes (informative)\n\nA checker MUST keep notes.\n\n## 15. Genericization"
+        " boundary", 1)
+    for name, planted, kw in (("subsection-3", sub3, "MUST"), ("subsection-4", sub4, "SHOULD"),
+                              ("fence-no-boundary", fence_break, "MUST"),
+                              ("marked-level-4", marked4, "MUST")):
+        check("spec-informative-inherit-" + name, lambda m=planted, w=kw:
+              text.count(appendix_tail) == 1 and any(
+                  ("carries requirement keyword " + w) in f for f in informative_findings(m)))
+    # Round-19 guard vectors: heading titles are scanned like bodies (a keyword in a
+    # descendant title or in a marked heading's own title is red), the exempt quotation form
+    # covers "the term" and a sentence-start "The", a fence closes only on a matching delimiter
+    # (same character, at least the opening length, nothing else on the line), the
+    # same-or-shallower reset ends inheritance, and "This subsection is informative" marks its
+    # heading informative. Each vector discriminates one guard behaviour: reverting that
+    # behaviour alone turns the vector red.
+    title_sub = text.replace(appendix_tail, appendix_tail
+                             + "\n\n### E.9 Checkers MUST share records\n\nDetails.", 1)
+    title_marked = text + "\n\n## Appendix Z: what checkers MUST do (informative)\n\nDetails.\n"
+    fence_tilde = text.replace(appendix_tail, appendix_tail
+                               + "\n\n```text\n~~~\n## not a boundary\n```\n\nA checker MUST obey.", 1)
+    fence_short = text.replace(appendix_tail, appendix_tail
+                               + "\n\n````markdown\n```\n## not a boundary\n````\n\nA checker MUST obey.", 1)
+    sub_marked = (text + "\n\n## Appendix Z: subsection notes\n\nThis subsection is informative:"
+                  " background only. A checker MUST share records.\n")
+    for name, planted, kw in (("title-descendant", title_sub, "MUST"),
+                              ("title-marked", title_marked, "MUST"),
+                              ("fence-tilde-inside-backticks", fence_tilde, "MUST"),
+                              ("fence-short-inside-longer", fence_short, "MUST"),
+                              ("subsection-mark", sub_marked, "MUST")):
+        check("spec-informative-guard-red-" + name, lambda m=planted, w=kw: any(
+            ("carries requirement keyword " + w) in f for f in informative_findings(m)))
+    for name, planted in (
+            ("quoted-term", text.replace(informative_anchor, informative_anchor
+             + " Normative sections use the term `MUST`.", 1)),
+            ("quoted-sentence-start", text.replace(informative_anchor, informative_anchor
+             + " The keyword `MUST NOT` is quoted here.", 1)),
+            ("reset-same-level", text
+             + "\n\n## Appendix Z: operative addendum\n\nThe gate MUST stay green.\n"),
+            ("reset-shallower", text + "\n\n# Coda\n\nThe gate MUST stay green.\n"),
+    ):
+        check("spec-informative-guard-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Round-20 guard vectors: headings and fences are read as CommonMark reads them. A heading
+    # takes 0 to 3 columns of indentation and a space or tab after its hashes; a line of 4 or
+    # more columns (a tab counts 4) is no heading and no fence; a backtick fence's info string
+    # holds no backtick; a fence closes only on 0 to 3 columns, a run at least as long, then
+    # spaces or tabs alone; lines end at LF, CR LF or CR only. A heading inside a list item or
+    # block quote bounds nothing but is kept where it says "(informative)", and a raw HTML
+    # block is a finding. Each red vector plants an informative heading the guard must see or
+    # keeps an informative scope open; each green vector is the matching form that is no
+    # heading, a fence that masks, or a boundary that ends the scope.
+    normative = text + "\n## Normative\n\n"
+    informative = text + "\n## Z (informative)\n\n"
+    plant = "\n\nA checker MUST share records.\n"
+    stays = "\n\nThe gate MUST stay green.\n"
+    for name, planted in (
+            ("heading-indent-1", normative + " ## Z (informative)" + plant),
+            ("heading-indent-3", normative + "   ## Z (informative)" + plant),
+            ("heading-tab-separator", normative + "##\tZ (informative)" + plant),
+            ("setext-equals", normative + "Z (informative)\n===" + plant),
+            ("setext-dash", normative + "Z (informative)\n---" + plant),
+            ("setext-continued", normative + "Z notes\n    (informative)\n---" + plant),
+            ("quote-heading", normative + "> ## Z (informative)\n>\n> A checker MUST obey.\n"),
+            ("list-heading", normative + "- ## Z (informative)\n\n  A checker MUST obey.\n"),
+            ("list-setext", normative + "- Z (informative)\n  ---\n\n  A checker MUST obey.\n"),
+            ("fence-inline-code-line", normative + "```literal```\n\n## Z (informative)" + plant),
+            ("fence-indented-code", normative + "    ```\n\n## Z (informative)" + plant),
+            ("fence-tab-indented", normative + "\t```\n\n## Z (informative)" + plant),
+            ("fence-two-backticks", normative + "``\n\n## Z (informative)" + plant),
+            ("fence-two-tildes", normative + "~~\n\n## Z (informative)" + plant),
+            ("fence-after-list-item", informative + "- note\n```\n## Normative\n```" + plant),
+            ("setext-after-ordered-two", normative + "Z notes\n2. more (informative)\n---"
+             + plant),
+            ("setext-then-equals", text + "\n# Z (informative)\n\nCoda\n---\n===" + plant),
+            ("close-indented-4", informative + "```text\n    ```\n## Normative\n```" + plant),
+            ("close-trailing-text", informative + "```text\n```not-a-close\n## Normative\n```"
+             + plant),
+            ("close-trailing-nbsp", informative + "```text\n```\u00a0\n## Normative\n```" + plant),
+            ("indented-4-no-boundary", informative + "    ## Normative" + plant),
+            ("tab-indent-no-boundary", informative + "\t## Normative" + plant),
+            ("list-heading-no-boundary", informative + "- note\n\n  ## Normative" + plant),
+            ("quote-heading-no-boundary", informative + "> ## Normative" + plant),
+            ("lazy-no-boundary", informative + "- note\nlazy line\n  ## Normative" + plant),
+            ("lazy-indented-no-boundary", informative + "   10. note\n    ## x\nplain\n===" + plant),
+            ("reference-setext-no-boundary", informative + "[ref]: /url\n===" + plant),
+            ("separator-u2028", informative + "note\u2028## Normative\u2028A checker MUST obey.\n"),
+            ("separator-formfeed", informative + "note\x0c## Normative\x0cA checker MUST obey.\n"),
+    ):
+        check("spec-informative-commonmark-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f for f in informative_findings(m)))
+    for name, planted in (
+            ("heading-indent-4", normative + "    ## Z (informative)" + plant),
+            ("heading-tab-indent", normative + "\t## Z (informative)" + plant),
+            ("heading-no-separator", normative + "##Z (informative)" + plant),
+            ("heading-seven-hashes", normative + "####### Z (informative)" + plant),
+            ("boundary-indent-3", informative + "   ## Coda" + stays),
+            ("boundary-tab-separator", informative + "##\tCoda" + stays),
+            ("boundary-setext", informative + "Coda\n----" + stays),
+            ("boundary-list-closed", informative + "- note\n## Coda" + stays),
+            ("boundary-after-list-blank", informative + "- note\n\n ## Coda" + stays),
+            ("boundary-thematic-closes-list", informative + "- note\n***\n  ## Coda" + stays),
+            ("boundary-cr", informative + "note\r## Coda\r\rThe gate MUST stay green.\n"),
+            ("boundary-after-ordered-item", informative + "- note\n10. item\n  ## Coda" + stays),
+            ("boundary-quote-closes-list", informative + "- note\n> quote\n  ## Coda" + stays),
+            ("boundary-paragraph-after-list", informative + "- note\n\nplain\n  ## Coda" + stays),
+            ("boundary-setext-after-list-break", informative + "- note\n***\nCoda\n===" + stays),
+            ("thematic-after-blank", normative + "Z (informative)\n\n---" + plant),
+            ("paragraph-ends-at-fence", normative + "Z (informative)\n```\n```\n---" + plant),
+            ("paragraph-ends-at-heading", normative + "Z (informative)\n## Normative\n---" + plant),
+            ("paragraph-ends-at-thematic", normative + "Z (informative)\n***\n---" + plant),
+            ("paragraph-ends-at-list", normative + "Z (informative)\n- item\n---" + plant),
+            ("setext-then-underline-text", normative + "Z (informative)\n---\n===\n\n## Coda"
+             + stays),
+            ("fence-indent-3", normative
+             + "   ```\n## Z (informative)\nA checker MUST obey.\n   ```\n"),
+            ("fence-tilde-backtick-info", normative
+             + "~~~ a`b\n## Z (informative)\nA checker MUST obey.\n~~~\n"),
+            ("fence-unclosed", normative + "```\n## Z (informative)\nA checker MUST obey.\n"),
+            ("close-indent-3", informative + "```text\n## x\n   ```\n\n## Coda" + stays),
+            ("close-trailing-space", informative + "```text\n## x\n``` \t\n\n## Coda" + stays),
+            ("close-longer-run", informative + "```text\n## x\n`````\n\n## Coda" + stays),
+    ):
+        check("spec-informative-commonmark-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Each HTML vector opens one block type alone (no line of it is a lone tag of another type).
+    for name, planted in (("div", "<DIV>text\n\n## Z\n"), ("comment", "<!--\n## Z\n-->\n"),
+                          ("heading", "<h2>Z (informative)</h2>\n"), ("in-list", "- <div>\n"),
+                          ("pre", "<pre>text\n## Z\n"), ("processing", "<?x\n## Z\n?>\n"),
+                          ("declaration", "<!X\n## Z\n>\n"), ("cdata", "<![CDATA[\n## Z\n]]>\n"),
+                          ("custom-tag", "<custom-tag>\n## Z\n")):
+        check("spec-informative-commonmark-html-red-" + name, lambda m=normative + planted: any(
+            f.startswith("spec informative guard: raw HTML block at line ")
+            for f in informative_findings(m)))
+    check("spec-informative-commonmark-closing-sequence-title", lambda: (
+        "spec informative section Z (informative) carries requirement keyword MUST"
+        in informative_findings(normative + "## Z (informative) ##" + plant)))
+    # The default entry runs the informative guard: over a spec with a planted violation,
+    # main([]) is red with the guard's own finding, so unwiring informative_findings from
+    # main() is a named failure here; the unmodified baseline stays green with no output.
+    import io
+    from contextlib import redirect_stdout
+    module = sys.modules[__name__]
+    with tempfile.TemporaryDirectory(prefix="opf-homes-main-") as tmp:
+        planted_spec = Path(tmp) / "OPF-SPEC.md"
+        planted_spec.write_text(text.replace(
+            informative_anchor, informative_anchor + " A checker MUST share each record.", 1),
+            encoding="utf-8")
+        with patch.object(module, "SPEC", planted_spec):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                planted_rc = main([])
+        check("main-default-entry-runs-informative-guard",
+              lambda r=planted_rc, out=buf.getvalue():
+              r == 1 and "carries requirement keyword MUST" in out)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        baseline_rc = main([])
+    check("main-default-entry-green-baseline", lambda r=baseline_rc, out=buf.getvalue():
+          r == 0 and out == "")
     # Section 2 keyword lint: synthetic cases, then every registry marker and keyword flipped,
     # then named fix-5a rewrites reverted.
     check("spec-keywords", lambda: not keyword_findings())
@@ -3254,8 +3685,9 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
-                    + surface_findings())
+        spec_text = SPEC.read_text(encoding="utf-8")
+        findings = (contract_findings(spec_text) + keyword_findings()
+                    + surface_findings() + informative_findings(spec_text))
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
