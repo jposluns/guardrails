@@ -43,10 +43,15 @@ and a clean filter can transform the captured bytes, so the snapshot is not guar
 exception is limited to recovery snapshots written for the actor's own protection; it is not a general
 licence to mutate repository metadata.
 
-Running code a worker returns is an apply step, not an inspection. A label, a claimed print-only purpose,
-or a check the deliverable carries does not show that its code changes nothing, so the orchestrator
-extracts, decodes, and prints a deliverable with a reader it wrote or reviewed, never with code the
-deliverable supplies. Deliverable code that has to run to be evaluated is first read in full, then run in
-a disposable copy that is its working directory and every target it names, with no live checkout named in
-its environment; a changed working directory alone is not that isolation. That code reaches a live
-checkout only through the orchestrator's own verified apply.
+Running code a worker returns is an apply step, not an inspection; this governs the orchestrator running a
+deliverable it receives, not a worker running a candidate in its own scratch. A label, a claimed print-only
+purpose, or a check the deliverable carries does not show that its code changes nothing, so the
+orchestrator extracts, decodes, and prints a deliverable with a reader it wrote or reviewed, never with
+code the deliverable supplies. That code runs only to be evaluated, first read in full and then run in a
+disposable copy. A disposable copy is a separate clone or an exported tree outside every live checkout,
+never a linked worktree of the live repository; it shares nothing writable with a live checkout, git
+metadata included, and has no remote it can push to. The code's working directory and every target it names
+are inside the copy, and no live checkout is named in its environment; a changed working directory alone is
+not that isolation. That code's changes reach a live checkout only through the orchestrator's own verified
+apply. This is a rule on what the orchestrator runs and where, not OS containment: only the full reading
+checks a path the code builds at run time or configuration it inherits.
