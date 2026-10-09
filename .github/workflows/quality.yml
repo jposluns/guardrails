@@ -20,12 +20,12 @@ jobs:
       # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
       # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
       # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
 
@@ -467,6 +467,11 @@ jobs:
       - name: Entry-guard gate
         run: python3 -I -B tools/check_entry_guard.py
 
+      - name: Import-closure self-test
+        run: python3 -I -B tools/check_import_closure.py --self-test
+      - name: Import-closure gate
+        run: python3 -I -B tools/check_import_closure.py
+
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test
 
@@ -612,8 +617,8 @@ jobs:
     steps:
       - name: Hostile checkout line-ending setting (before checkout)
         run: git config --global core.autocrlf true
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
       - name: Byte canon self-test (vectors)

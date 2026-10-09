@@ -845,10 +845,19 @@
     {
       "corpus-id": "liccmp",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "import-closure",
+          "platform": "ci",
+          "residue": "Partial for every rule it cites. It decides fully over the imports in .py files: an import whose first dotted component is not the floor interpreter's standard library (read from sys.stdlib_module_names; exit 2 when that is absent or the interpreter is not the floor version), an in-repo module, or a vendored package under a provenance record whose licence, source and per-file sha256 manifest verify is a finding, and so is a uses: reference in .github/workflows or an action file that is not a full commit SHA. It does not see: a dynamic import whose name is computed (counted and printed, not resolved); a dependency that enters other than as a Python import (an install command, another language, documentation); whether a licence is compatible (it holds only that vendored Python records an SPDX identifier and carries a licence text); whether a package exists in a registry or a pinned commit is trustworthy; known vulnerabilities (no advisory is consulted, so reject-vulnerable-versions is not cited); vendored non-Python files outside a recorded root; and whether a new external dependency was needed at all, the judgement minimize-dependencies asks for. Third-party imports inside byte-exact vendored code are dispositioned row by row in the gate, each held live and either guarded by an ImportError handler or unreached by any static import, and printed on every run.",
+          "script": "tools/check_import_closure.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/integ-licence-compatibility.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "lvw001",
@@ -861,10 +870,19 @@
     {
       "corpus-id": "mindep",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "import-closure",
+          "platform": "ci",
+          "residue": "Partial for every rule it cites. It decides fully over the imports in .py files: an import whose first dotted component is not the floor interpreter's standard library (read from sys.stdlib_module_names; exit 2 when that is absent or the interpreter is not the floor version), an in-repo module, or a vendored package under a provenance record whose licence, source and per-file sha256 manifest verify is a finding, and so is a uses: reference in .github/workflows or an action file that is not a full commit SHA. It does not see: a dynamic import whose name is computed (counted and printed, not resolved); a dependency that enters other than as a Python import (an install command, another language, documentation); whether a licence is compatible (it holds only that vendored Python records an SPDX identifier and carries a licence text); whether a package exists in a registry or a pinned commit is trustworthy; known vulnerabilities (no advisory is consulted, so reject-vulnerable-versions is not cited); vendored non-Python files outside a recorded root; and whether a new external dependency was needed at all, the judgement minimize-dependencies asks for. Third-party imports inside byte-exact vendored code are dispositioned row by row in the gate, each held live and either guarded by an ImportError handler or unreached by any static import, and printed on every run.",
+          "script": "tools/check_import_closure.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/quali-minimize-dependencies.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "mstreg",
@@ -1474,10 +1492,19 @@
     {
       "corpus-id": "secsup",
       "family": "security",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "import-closure",
+          "platform": "ci",
+          "residue": "Partial for every rule it cites. It decides fully over the imports in .py files: an import whose first dotted component is not the floor interpreter's standard library (read from sys.stdlib_module_names; exit 2 when that is absent or the interpreter is not the floor version), an in-repo module, or a vendored package under a provenance record whose licence, source and per-file sha256 manifest verify is a finding, and so is a uses: reference in .github/workflows or an action file that is not a full commit SHA. It does not see: a dynamic import whose name is computed (counted and printed, not resolved); a dependency that enters other than as a Python import (an install command, another language, documentation); whether a licence is compatible (it holds only that vendored Python records an SPDX identifier and carries a licence text); whether a package exists in a registry or a pinned commit is trustworthy; known vulnerabilities (no advisory is consulted, so reject-vulnerable-versions is not cited); vendored non-Python files outside a recorded root; and whether a new external dependency was needed at all, the judgement minimize-dependencies asks for. Third-party imports inside byte-exact vendored code are dispositioned row by row in the gate, each held live and either guarded by an ImportError handler or unreached by any static import, and printed on every run.",
+          "script": "tools/check_import_closure.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-dependency-provenance.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "secsyn",
@@ -1540,10 +1567,19 @@
     {
       "corpus-id": "secvde",
       "family": "security",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "import-closure",
+          "platform": "ci",
+          "residue": "Partial for every rule it cites. It decides fully over the imports in .py files: an import whose first dotted component is not the floor interpreter's standard library (read from sys.stdlib_module_names; exit 2 when that is absent or the interpreter is not the floor version), an in-repo module, or a vendored package under a provenance record whose licence, source and per-file sha256 manifest verify is a finding, and so is a uses: reference in .github/workflows or an action file that is not a full commit SHA. It does not see: a dynamic import whose name is computed (counted and printed, not resolved); a dependency that enters other than as a Python import (an install command, another language, documentation); whether a licence is compatible (it holds only that vendored Python records an SPDX identifier and carries a licence text); whether a package exists in a registry or a pinned commit is trustworthy; known vulnerabilities (no advisory is consulted, so reject-vulnerable-versions is not cited); vendored non-Python files outside a recorded root; and whether a new external dependency was needed at all, the judgement minimize-dependencies asks for. Third-party imports inside byte-exact vendored code are dispositioned row by row in the gate, each held live and either guarded by an ImportError handler or unreached by any static import, and printed on every run.",
+          "script": "tools/check_import_closure.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-verify-dependency-exists.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "secvln",
