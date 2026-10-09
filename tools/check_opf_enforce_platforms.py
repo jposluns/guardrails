@@ -842,7 +842,10 @@ def _vectors():
          "allows the probe write", 1),  # the adoption-archive probe
         ("hook-frozen-logic", edit(HOOK_REL, "            if disposition in FROZEN_DISPOSITIONS:",
                                    '            if disposition == "retire":'),
-         "allows the probe write", 1),  # the frozen-source probes
+         "allows the probe write", 1),  # the migrate-disposed source probe
+        ("hook-retire-logic", edit(HOOK_REL, "            if disposition in FROZEN_DISPOSITIONS:",
+                                   '            if disposition == "migrate":'),
+         "allows the probe write", 1),  # the retire-disposed source probe
         ("hook-views-logic", edit(HOOK_REL, "if cand in views[0]:", "if cand in ():", 3),
          "allows the probe write", 1),  # the declared-view probe
         ("hook-guard-logic", edit(HOOK_REL, "        if candidate == prefix or candidate.startswith(prefix + os.sep):",
@@ -870,6 +873,10 @@ def _vectors():
         ("hook-no-kept-disposition", edit(HOOK_REL, 'VALID_DISPOSITIONS = frozenset(("keep", "move", "migrate", '
                                           '"retire"))', 'VALID_DISPOSITIONS = frozenset(("migrate", "retire"))'),
          "no non-frozen string disposition", None),
+        # the rendered registration list is sorted, so the hook's iteration order leaves the block unchanged.
+        ("hook-registration-order", edit(HOOK_REL, "        for base in sorted(REGISTRATION_LEAVES):",
+                                         "        for base in sorted(REGISTRATION_LEAVES, reverse=True):"),
+         None, 0),
         # renderer refusals: a hook surface the renderer cannot represent is cannot-evaluate.
         ("hook-registration-outside-probe", edit(HOOK_REL, 'REGISTRATION_LEAVES = frozenset(("settings.json", '
                                                  '"settings.local.json"))', 'REGISTRATION_LEAVES = frozenset(('
@@ -973,6 +980,16 @@ def _vectors():
          "coexistence is unresolved", 1),
         ("coexist-line-twice", append(CODEX, "\n" + COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md") + "\n"),
          "coexistence is unresolved", 1),
+        # coexistence: the line counts only on a line of its own, and only naming the member's destination.
+        ("coexist-line-embedded", edit(CODEX, COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md"),
+                                       "Note: " + COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md")),
+         "coexistence is unresolved", 1),
+        ("coexist-line-wrong-destination-codex", edit(CODEX, COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md"),
+                                                      COEXIST_LINE % (GEN_AGENTS_REL, "GEMINI.md")),
+         "coexistence is unresolved", 1),
+        ("coexist-line-wrong-destination-gemini", edit(GEMINI, COEXIST_LINE % (GEN_ADAPTERS_REL, "GEMINI.md"),
+                                                       COEXIST_LINE % (GEN_ADAPTERS_REL, "AGENTS.md")),
+         "coexistence is unresolved", 1),
         ("member-loaded-name", _loaded_name, "carries a name its platform loads", 1),
         ("member-dot-cursor-component", _dot_cursor_member, "carries a name its platform loads", 1),
         ("member-absent", remove(GEMINI), "CANNOT EVALUATE", None),
@@ -1025,11 +1042,13 @@ def self_test():
         runs += 1
         if token not in block:
             failures.append("real-block: the rendered list lacks %s" % (token,))
-    # The registration renderer judges identities on their normalised spelling and refuses, never
-    # raises, on identities it cannot sort or list (stub hooks: each returns fixed identities).
+    # The registration renderer sorts identities, judges them on their normalised spelling and refuses,
+    # never raises, on identities it cannot sort or list (stub hooks: each returns fixed identities).
     probe = PROBE_ROOT + os.sep + os.path.join(".claude", "settings.json")
     for case_id, idents, expect in (
             ("registration-clean", {probe: None}, [".claude/settings.json"]),
+            ("registration-unsorted", {probe.replace("settings.json", "settings.local.json"): None,
+                                       probe: None}, [".claude/settings.json", ".claude/settings.local.json"]),
             ("registration-not-normalised", {probe: None, os.path.join(PROBE_ROOT, ".claude", os.pardir,
                                                                       os.pardir, "x.json"): None}, None),
             ("registration-mixed-types", {1: None, "a": None}, None),
