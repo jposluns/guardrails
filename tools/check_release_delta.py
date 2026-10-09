@@ -47,7 +47,9 @@ itself is checkout code: an attacker who controls it controls the launch (the di
 The stage-2 child and each nested validator child also write a completion record that stage 1 (or
 this gate) requires beside exit 0. The record detects an omitted, truncated or foreign-pid result;
 it cannot authenticate that the child ran its checks, because the child writes it (the second
-disclosed residual; see _stage2_arm_result).
+disclosed residual; see _stage2_arm_result). For the same reason no in-process exit holds against
+child code that installs a hook which keeps intercepting calls (a sys.monitoring callback, a trace
+function re-arming a raising profile function): it can stop the result writer's own exit.
 
 Exit: 0 clean / genesis / NOT APPLICABLE legs; 1 a real finding (an under-claimed bump, a rowless
 change, an unconsumed or wrong row, a register incompleteness); 2 malformed or unreadable input
@@ -392,16 +394,29 @@ def _stage2_arm_result():
     the result file raises an audit event, and a hook run there can fault or replace a reporting
     hook after the first checks. A fault found then turns the exit to 2, WHATEVER the verdict was
     (round 2, claude MINOR-1), and overwrites the record in place with code 2; stage 1 refuses a
-    success record beside a nonzero exit. The WHOLE writer runs under a guard that turns ANY
-    escaping exception, the second check itself raising included, into os._exit(2) after a
-    best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1: an
-    exception leaving the atexit callback kept the dispatch's exit beside an already written
-    success record). What remains: an OSError raised by os.close, or a rewrite that itself fails,
-    can leave a code-0 record beside exit 2, which stage 1 refuses (a success record beside a
-    nonzero exit is never a verdict); and only os._exit follows the final checks, so a fault
-    another thread of the child raises in that window is not seen (a disclosed race, separate
-    from the forged-record residual above). Stage 1
-    requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
+    success record beside a nonzero exit. The whole writer, its final os._exit(code) call
+    included, runs under a guard: an exception raised anywhere in it (the second check itself
+    raising, a profiling hook raising at a call's event, at the final exit call included) ends in
+    os._exit(2) after a best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude
+    MEDIUM-1: an exception leaving the atexit callback kept the dispatch's exit beside an already
+    written success record; round 3, codex MAJOR / claude MAJOR-1: the final exit call sat
+    outside the guard, so a profiling hook raising at it left exit 0 beside a success record).
+    CPython unsets a sys.setprofile or sys.settrace function that raises, so the guard's own
+    os._exit(2) then runs. What this does NOT guarantee:
+    - An OSError from the result open, from a write (the record's or a diagnostic line's) or from
+      the close, or a rewrite that itself fails, can leave a code-0 record beside exit 2, which
+      stage 1 refuses (a success record beside a nonzero exit is never a verdict).
+    - Only the record's close and the exit call follow the final checks, so a fault another
+      thread of the child raises in that window is not seen (a disclosed race).
+    - No in-process exit holds against code the child runs that installs a hook which keeps
+      intercepting calls: a sys.monitoring callback (CPython does not unset one that raises), or
+      a trace function that re-arms a raising profile function, stops the guard's os._exit(2) as
+      well, and the exception then leaves the atexit callback with the dispatch's exit beside
+      whatever record was written. That is code the child runs controlling the child, the same
+      class as the forged-record residual above. (os._exit raises no audit event, so an audit
+      hook cannot raise at the exit call; one that raises during the guard's rewrite only loses
+      the rewrite.)
+    Stage 1 requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
     diagnostics go to a separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other
     byte is a fault.
     Returns the mutable state the dispatch settles, or None when no result path is named (a
@@ -482,14 +497,20 @@ def _stage2_arm_result():
                 # before it (code 0 included) beside exit 2; stage 1 refuses a success record
                 # beside a nonzero exit (PR #397 QA round 2, codex).
                 code = 2
+            # PR #397 QA round 3 (codex MAJOR, claude MAJOR-1): the final exit call runs INSIDE
+            # the guard, so an exception raised AT it (a profiling hook raising at the call
+            # event, before os._exit runs) also ends in the guard's os._exit(2).
+            os._exit(code)
         except BaseException:
             # PR #397 QA round 2 (codex MAJOR, claude MEDIUM-1): ANY exception escaping the
             # writer (the second check itself raising, an exception a hook or profiler injects
-            # into the result write or close) must still end in os._exit(2), never in atexit's
-            # 'Exception ignored' path, which keeps the dispatch's exit beside an already
-            # written success record. Best effort first: name the fault and rewrite the record
-            # to code 2; if that itself raises, os._exit(2) still runs and any stale success
-            # record sits beside exit 2, which stage 1 refuses.
+            # into the result write or close, or, round 3, at the final exit call) must still
+            # end in os._exit(2), never in atexit's 'Exception ignored' path, which keeps the
+            # dispatch's exit beside an already written success record. Best effort first:
+            # name the fault and rewrite the record to code 2; if that itself raises,
+            # os._exit(2) still runs and any stale success record sits beside exit 2, which
+            # stage 1 refuses. A hook that keeps intercepting calls can stop this os._exit(2)
+            # too (the residual _stage2_arm_result's docstring states).
             try:
                 os.write(2, b"error: stage-2 result writer fault; fail-closed "
                          b"(security-seci-fail-closed)\n")
@@ -502,7 +523,6 @@ def _stage2_arm_result():
             except BaseException:
                 pass
             os._exit(2)
-        os._exit(code)
     atexit.register(_write_result)
     ncallbacks = getattr(atexit, "_ncallbacks", None)
     if ncallbacks is None:
@@ -607,7 +627,12 @@ def _stage1_main():
         # refused by name (PR #397 QA round p1, codex MAJOR: a fault during the result write).
         # The record detects an omitted, truncated or foreign-pid result; it does not
         # authenticate the committed child, which can write a well-formed record without
-        # running the dispatch (the disclosed residual, _stage2_arm_result).
+        # running the dispatch (the disclosed residual, _stage2_arm_result). Any exception in
+        # the child's result writer, at its final exit call included, ends in exit 2 (PR #397
+        # QA round 3), EXCEPT where the committed code installs a hook that keeps intercepting
+        # calls (a sys.monitoring callback, a trace function re-arming a raising profile
+        # function): it can stop any in-process exit, the writer's own exit 2 included, the
+        # same code-controls-the-child class as the forged record.
         result_path = os.path.join(tmp, "stage2-result")
         err_path = os.path.join(tmp, "stage2-stderr")
         diag_path = os.path.join(tmp, "stage2-diagnostics")
@@ -2145,16 +2170,19 @@ def _child_pycache_x():
 # os._exit, so nothing of interpreter finalization runs after the result. The fault and hook checks
 # run again after the record is written (PR #397 QA round p1, codex MAJOR: the open raises an audit
 # event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2,
-# whatever the verdict was (round 2, claude MINOR-1). The whole writer runs under a guard that turns
-# any escaping exception, the second check itself raising included, into os._exit(2) after a
-# best-effort rewrite of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1); an OSError
-# in os.close, or a rewrite that itself fails, can leave a code-0 record beside exit 2, which
-# _run_recorded_child refuses, and only os._exit follows the final checks, so a fault another
-# thread raises in that window is not seen (a disclosed race, separate from the forged-record
-# residual). With atexit._ncallbacks unavailable, a pre-registered exit handler cannot be ruled
-# out: a recorded fault, never a clean default (round 2, gemini). The record cannot authenticate
-# the validator's code, which can write a well-formed record itself (the residual
-# _stage2_arm_result discloses).
+# whatever the verdict was (round 2, claude MINOR-1). The whole writer, its final os._exit(code)
+# call included (round 3, codex MAJOR / claude MAJOR-1), runs under a guard: an exception raised
+# anywhere in it, at the final exit call included, ends in os._exit(2) after a best-effort rewrite
+# of the record to code 2 (round 2, codex MAJOR / claude MEDIUM-1). Not guaranteed: an OSError from
+# the result open, a write or the close, or a rewrite that itself fails, can leave a code-0 record
+# beside exit 2, which _run_recorded_child refuses; only the close and the exit call follow the
+# final checks, so a fault another thread raises in that window is not seen (a disclosed race); and
+# a hook the validator installs that keeps intercepting calls (a sys.monitoring callback, a trace
+# function re-arming a raising profile function) can stop the guard's os._exit(2) too, the class of
+# the code-controls-the-child residual _stage2_arm_result states. With atexit._ncallbacks
+# unavailable, a pre-registered exit handler cannot be ruled out: a recorded fault, never a clean
+# default (round 2, gemini). The record cannot authenticate the validator's code, which can write a
+# well-formed record itself (the residual _stage2_arm_result discloses).
 _CHILD_RECORD_STUB = (
     "import atexit, gc, os, runpy, sys, threading\n"
     "script, result = sys.argv[1], sys.argv[2]\n"
@@ -2207,6 +2235,7 @@ _CHILD_RECORD_STUB = (
     "                os.close(fd)\n"
     "        except OSError:\n"
     "            code = 2\n"
+    "        os._exit(code)\n"
     "    except BaseException:\n"
     "        try:\n"
     "            os.write(2, ('release-delta child fault during the result write: the writer '\n"
@@ -2221,7 +2250,6 @@ _CHILD_RECORD_STUB = (
     "        except BaseException:\n"
     "            pass\n"
     "        os._exit(2)\n"
-    "    os._exit(code)\n"
     "atexit.register(record)\n"
     "ncallbacks = getattr(atexit, '_ncallbacks', None)\n"
     "if ncallbacks is None:\n"
@@ -5133,6 +5161,17 @@ def _post_release_e2e(tmp, failures, only=None):
                       "            and 'fd' in frame.f_locals):\n"
                       "        raise RuntimeError('QA injected result-writer fault')\n"
                       "sys.setprofile(_prof7s)\n")
+            # PR #397 QA round 3 (codex MAJOR / claude MAJOR-1): the same hook raising at the
+            # CALL event of the writer's final os._exit(code), so the exit never runs; only a
+            # guard that covers the final exit call refuses it (with the call outside the guard,
+            # the gate passed with exit 0).
+            exit7s = ("import io\n"
+                      "sys.stderr = io.StringIO()\n"
+                      "def _exit7s(frame, event, arg):\n"
+                      "    if (event == 'c_call' and arg is os._exit\n"
+                      "            and frame.f_code.co_name == '_write_result'):\n"
+                      "        raise RuntimeError('QA injected final-exit fault')\n"
+                      "sys.setprofile(_exit7s)\n")
             # PR #397 QA round 2 (claude MEDIUM-1): an audit hook on the result open deletes a
             # reporting hook and silences the streams, so the SECOND hook check itself raises
             # AttributeError; it fires once, so the guard's rewrite path stays clean.
@@ -5207,6 +5246,8 @@ def _post_release_e2e(tmp, failures, only=None):
                      armed7s + prof7s.format("os.close") + settle7s, 2),
                     ("armed second check raising under silenced streams",
                      armed7s + raise7s + settle7s, 2),
+                    ("armed exception injected at the final exit call",
+                     armed7s + exit7s + settle7s, 2),
                     # PR #397 QA round 2 (claude MEDIUM-2): a reporting hook replaced during the
                     # result open, without raising, is refused ONLY by the second hook check.
                     ("armed reporting hook replaced during the result open",
@@ -5257,12 +5298,24 @@ def _post_release_e2e(tmp, failures, only=None):
             # claude MINOR-1: the same late fault beside verdict 1 must also turn the exit and
             # the record to 2, with the fault named, never a silent exit 1): stage 1 deletes its
             # captures, so the armed late-fault body runs directly here and its record must
-            # carry code 2, never the record written before the second check.
-            for tag7d, settle7d in (("settled 0", settle7s),
-                                    ("settled 1", "_state7s['code'] = 1\n")):
+            # carry code 2, never the record written before the second check. PR #397 QA round 3
+            # (claude MINOR-2): the guard's best-effort rewrite of the record to code 2, with its
+            # fault named, is pinned the same way for an exception after the successful result
+            # write and for one at the final exit call (rewrite removed: the code-0 record stays;
+            # final exit outside the guard: exit 0 beside the code-0 record).
+            for tag7d, body7d, needle7d in (
+                    ("late fault, settled 0", late7s + settle7s, b"during the result write"),
+                    ("late fault, settled 1", late7s + "_state7s['code'] = 1\n",
+                     b"during the result write"),
+                    ("exception after the successful result write, guard rewrite",
+                     prof7s.format("os.write") + settle7s, b"result writer fault"),
+                    ("exception at the final exit call, guard rewrite", exit7s + settle7s,
+                     b"result writer fault")):
                 direct7s = tmp / "r7-stage2-direct-late.py"
                 record7s = tmp / "r7-stage2-direct-late.result"
-                direct7s.write_text(armed7s + late7s + settle7d, encoding="utf-8")
+                if record7s.exists():
+                    record7s.unlink()
+                direct7s.write_text(armed7s + body7d, encoding="utf-8")
                 try:
                     proc7d = subprocess.run([sys.executable, "-I", "-B", str(direct7s)],
                                             capture_output=True, timeout=120,
@@ -5272,12 +5325,15 @@ def _post_release_e2e(tmp, failures, only=None):
                 except (OSError, subprocess.TimeoutExpired) as exc7d:
                     proc7d, rec7d = None, "not run ({})".format(exc7d).encode("utf-8")
                 if (proc7d is None or proc7d.returncode != 2
-                        or not rec7d.startswith(b"release-delta-stage2 2 ")):
-                    failures.append("{} [late fault record, run directly, {}]: expected rc=2 "
-                                    "and a code-2 record (got rc={}, record={!r})".format(
+                        or not rec7d.startswith(b"release-delta-stage2 2 ")
+                        or needle7d not in proc7d.stderr):
+                    failures.append("{} [record, run directly, {}]: expected rc=2, a code-2 "
+                                    "record and the fault named (got rc={}, record={!r}, "
+                                    "stderr={!r})".format(
                                         label7s, tag7d,
                                         None if proc7d is None else proc7d.returncode,
-                                        rec7d[:80]))
+                                        rec7d[:80],
+                                        None if proc7d is None else proc7d.stderr[-200:]))
             # PR #397 QA round 2 (gemini BLOCKER): a platform with no O_NOFOLLOW or no
             # O_NONBLOCK offers no race-free containment for the capture read-back, so the
             # reader must answer cannot-evaluate (None), never fall back to an unguarded
@@ -5392,6 +5448,18 @@ def _post_release_e2e(tmp, failures, only=None):
                      "            and 'fd' in frame.f_locals):\n"
                      "        raise RuntimeError('QA injected result-writer fault')\n"
                      "sys.setprofile(_prof)\n", True),
+                    # PR #397 QA round 3 (codex MAJOR / claude MAJOR-1): the hook raises at the
+                    # CALL event of the stub's final os._exit(code), so the exit never runs; only
+                    # a guard that covers the final exit call refuses it (with the call outside
+                    # the guard, both legs passed on exit 0 beside a success record).
+                    ("exception injected at the final exit call",
+                     "import io, os, sys\n"
+                     "sys.stderr = io.StringIO()\n"
+                     "def _prof(frame, event, arg):\n"
+                     "    if (event == 'c_call' and arg is os._exit\n"
+                     "            and frame.f_code.co_name == 'record'):\n"
+                     "        raise RuntimeError('QA injected final-exit fault')\n"
+                     "sys.setprofile(_prof)\n", True),
                     ("second check raising under silenced streams", "import sys, threading\n"
                      "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
                      "_hit = []\n"
@@ -5474,7 +5542,17 @@ def _post_release_e2e(tmp, failures, only=None):
                      b"atexit._ncallbacks is unavailable"),
                     ("late fault record", "", late7x, 2, b"during the result write"),
                     ("late fault record beside verdict 1", "", late17x, 2,
-                     b"during the result write")):
+                     b"during the result write"),
+                    # PR #397 QA round 3 (claude MINOR-2): the guard's best-effort rewrite of
+                    # the record to code 2, with its fault named, for an exception after the
+                    # successful result write (rewrite removed: the code-0 record stays) and at
+                    # the final exit call (call outside the guard: exit 0, code-0 record).
+                    ("guard rewrite after the successful result write", "",
+                     nest7 / "tools" / "qa-nested-exception-injected-after-the-successful-"
+                     "result-write.py", 2, b"the writer raised"),
+                    ("guard rewrite at the final exit call", "",
+                     nest7 / "tools" / "qa-nested-exception-injected-at-the-final-exit-call.py",
+                     2, b"the writer raised")):
                 if result7x.exists():
                     result7x.unlink()
                 try:
