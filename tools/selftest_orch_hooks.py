@@ -1882,13 +1882,17 @@ def _fixture_tmpdir(prefix):
 # 0100, ... 0700 in order. call: "sched" a ScheduleWakeup the decision core denies on wake hygiene, "ystop"
 # a ScheduleWakeup stop=true over an actionable item, "stop" a Stop over it, "quiet" a ScheduleWakeup whose
 # quiet-duration claim contradicts the measured gap, "badreg" a ScheduleWakeup under an unreadable registry,
-# "ybadreg" a ScheduleWakeup stop=true under it.
+# "ybadreg" a ScheduleWakeup stop=true under it. Under an unreadable registry the hook resolves the default
+# state directory, never the registry's state_dir, so the badreg and ybadreg cells set that directory and its
+# turn-state.json: the state a relief added before the unreadable-registry deny would read.
 # writer: "opath" the O_PATH directory open, "rdonly" the O_RDONLY fallback of a platform without O_PATH.
-# earned: "0", "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound), "bad" (both counts
-# the malformed value "m", which validation rejects), or "sig" (both counts 0, and the payload carries the
-# platform's stop_hook_active loop signal set to true). A cell is the outcome (a allow, w warn, d deny,
-# b block), the counter on disk after the call (the stop count for ystop and stop, else the schedule count),
-# the wake digests on disk after it, then c when the output names a failed denial-counter save and w when it
+# earned: "0", "cap" (3 schedule denials and 2 stop denials: the cap and the loop bound), "over" (4 and 3: one
+# above each), "big" (9999 each: the largest valid count), "bad" (both counts the malformed value "m", which
+# validation rejects), "nonobj" (turn-state.json holds the JSON array [], not an object), or "sig" (both
+# counts 0, and the payload carries stop_hook_active set to true). A cell is the outcome (a allow, w warn,
+# d deny, b block), the counter on disk after the call (the stop count for ystop, stop and ybadreg, else the
+# schedule count; j while turn-state.json holds no JSON object), the wake digests on disk after it, then c
+# when the output names a failed denial-counter save and w when it
 # names a failed wake-digest save. Each output channel of the outcome is judged on its own (the deny reason
 # and the banner of a deny, the banner of a warn, stderr of a block): the letter needs every channel to name
 # the failure, '-' means none does, and '!' (never expected) means only some do.
@@ -1963,6 +1967,34 @@ _PERM_SWEEP_TABLE = {
     ("ybadreg", "rdonly", "read", "same", "bad"): "dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0-- dm0--",
     ("ybadreg", "opath", "read", "same", "sig"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
     ("ybadreg", "rdonly", "read", "same", "sig"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "opath", "unread", "same", "0"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "rdonly", "unread", "same", "0"): "d00-- d00-- d00-- d00-- d00-- d00-- d00-- d00--",
+    ("ybadreg", "opath", "read", "same", "nonobj"): "dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0--",
+    ("ybadreg", "rdonly", "read", "same", "nonobj"): "dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0-- dj0--",
+    ("sched", "opath", "read", "same", "nonobj"): "dj0c- dj0c- dj0c- d10-- dj0c- dj0c- dj0c- d10--",
+    ("sched", "rdonly", "read", "same", "nonobj"): "dj0c- dj0c- dj0c- dj0c- dj0c- dj0c- dj0c- d10--",
+    ("ystop", "opath", "read", "same", "nonobj"): "dj0c- wj0-- dj0c- wj0-- dj0c- wj0-- dj0c- wj0--",
+    ("ystop", "rdonly", "read", "same", "nonobj"): "dj0c- wj0-- dj0c- wj0-- dj0c- wj0-- dj0c- wj0--",
+    ("stop", "opath", "read", "same", "nonobj"): "wj0c- wj0-- wj0c- wj0-- wj0c- wj0-- wj0c- wj0--",
+    ("stop", "rdonly", "read", "same", "nonobj"): "wj0c- wj0-- wj0c- wj0-- wj0c- wj0-- wj0c- wj0--",
+    ("sched", "opath", "read", "same", "over"): "d40c- w40-w d40c- w41-- d40c- w40-w d40c- w41--",
+    ("sched", "rdonly", "read", "same", "over"): "d40c- w40-w d40c- w40-w d40c- w40-w d40c- w41--",
+    ("sched", "opath", "read", "same", "big"):
+        "d99990c- w99990-w d99990c- w99991-- d99990c- w99990-w d99990c- w99991--",
+    ("sched", "rdonly", "read", "same", "big"):
+        "d99990c- w99990-w d99990c- w99990-w d99990c- w99990-w d99990c- w99991--",
+    ("ystop", "opath", "read", "same", "over"): "d30c- w30-- d30c- w30-- d30c- w30-- d30c- w30--",
+    ("ystop", "rdonly", "read", "same", "over"): "d30c- w30-- d30c- w30-- d30c- w30-- d30c- w30--",
+    ("ystop", "opath", "read", "same", "big"):
+        "d99990c- w99990-- d99990c- w99990-- d99990c- w99990-- d99990c- w99990--",
+    ("ystop", "rdonly", "read", "same", "big"):
+        "d99990c- w99990-- d99990c- w99990-- d99990c- w99990-- d99990c- w99990--",
+    ("stop", "opath", "read", "same", "over"): "w30c- w30-- w30c- w30-- w30c- w30-- w30c- w30--",
+    ("stop", "rdonly", "read", "same", "over"): "w30c- w30-- w30c- w30-- w30c- w30-- w30c- w30--",
+    ("stop", "opath", "read", "same", "big"):
+        "w99990c- w99990-- w99990c- w99990-- w99990c- w99990-- w99990c- w99990--",
+    ("stop", "rdonly", "read", "same", "big"):
+        "w99990c- w99990-- w99990c- w99990-- w99990c- w99990-- w99990c- w99990--",
 }
 
 
@@ -2103,8 +2135,13 @@ def _perm_sweep(base):
         fx.set_turn_state(dict())
         aiqt_hooks.orch_yield_tool(fx.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting")))
         fixtures[call] = (fx, sd, fx.turn_state().get("schedule_basis"))
-    fixtures["quiet"] = fixtures["badreg"] = fixtures["sched"]
-    fixtures["ybadreg"] = fixtures["ystop"]
+    fixtures["quiet"] = fixtures["sched"]
+    for call, like in (("badreg", "sched"), ("ybadreg", "ystop")):
+        fx, _sd, recorded = fixtures[like]
+        # the directory _orch_state_dir_for_root falls back to when the registry cannot be read
+        sd = Path(aiqt_hooks._state_dir_from_registry(str(fx.root), None))
+        sd.mkdir(parents=True, exist_ok=True)
+        fixtures[call] = (fx, sd, recorded)
     inputs = dict(sched=dict(prompt="waiting"), quiet=dict(prompt="quiet for 90 minutes, recheck QA-R6"),
                   badreg=dict(prompt="waiting"), ystop=dict(prompt="done", stop=True),
                   ybadreg=dict(prompt="done", stop=True))
@@ -2113,8 +2150,9 @@ def _perm_sweep(base):
     def _cell(key, mode, model):
         call, writer, readable, basis, earned = key
         fx, sd, recorded = fixtures[call]
-        state = dict(schedule_denials=aiqt_hooks._ORCH_SCHEDULE_CAP if earned == "cap" else 0,
-                     stop_denials=aiqt_hooks._ORCH_LOOP_BOUND if earned == "cap" else 0,
+        cap, bound, top = aiqt_hooks._ORCH_SCHEDULE_CAP, aiqt_hooks._ORCH_LOOP_BOUND, aiqt_hooks._ORCH_COUNTER_MAX
+        scount, bcount = dict(cap=(cap, bound), over=(cap + 1, bound + 1), big=(top, top)).get(earned, (0, 0))
+        state = dict(schedule_denials=scount, stop_denials=bcount,
                      schedule_basis=recorded if basis == "same" else "a changed basis")
         if earned == "bad":
             state.update(schedule_denials="m", stop_denials="m")
@@ -2124,7 +2162,7 @@ def _perm_sweep(base):
         fmode = 0o600 if readable == "read" else 0
         for name in os.listdir(str(sd)):
             os.unlink(str(sd / name))
-        (sd / "turn-state.json").write_text(json.dumps(state), encoding="utf-8")
+        (sd / "turn-state.json").write_text("[]" if earned == "nonobj" else json.dumps(state), encoding="utf-8")
         registry = fx.root / ".aiqt" / "orchestration.local.json"
         saved_registry = registry.read_bytes()
         if call in ("badreg", "ybadreg"):
@@ -2149,7 +2187,7 @@ def _perm_sweep(base):
             os.chmod(str(sd), 0o700)
             os.chmod(str(sd / "turn-state.json"), 0o600)
             registry.write_bytes(saved_registry)
-        after = fx.turn_state()
+        after = json.loads((sd / "turn-state.json").read_text(encoding="utf-8"))
         verdict = _verdict(result)
         obj = result[1] if isinstance(result[1], dict) else dict()
         hso = obj.get("hookSpecificOutput")
@@ -2160,7 +2198,10 @@ def _perm_sweep(base):
         def named(phrase, mark):
             found = [isinstance(text, str) and phrase in text for text in channels]
             return mark if found and all(found) else "!" if any(found) else "-"
-        count = after.get("stop_denials" if call in ("ystop", "stop", "ybadreg") else "schedule_denials", "x")
+        if not isinstance(after, dict):
+            count, after = "j", dict()
+        else:
+            count = after.get("stop_denials" if call in ("ystop", "stop", "ybadreg") else "schedule_denials", "x")
         return "{}{}{}{}{}".format(letter.get(verdict, "?"), count, len(after.get("wake_digests") or []),
                                    named("denial counter could not be", "c"),
                                    named("prompt digest could not be written", "w"))
@@ -5067,6 +5108,28 @@ def _main_isolated(report_path=None):
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
         check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+        # QA round 10: every deny branch is relieved at the loop bound or the cap and above it, never below:
+        # one below, at, one above, and the largest valid count, for each stop and each schedule deny branch.
+        _core_held = dict(actionable=[("A", "t", "no blocker")])
+        _core_branches = [
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND, dict(base, **_core_held)),
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND, dict(base, enum_status="ENUMERATOR_ERROR")),
+            ("stop", "counter", aiqt_hooks._ORCH_LOOP_BOUND,
+             dict(base, cannot_evaluate=[("CE", "cannot-evaluate", "held")])),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True, enum_status="ENUMERATOR_ERROR")),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True,
+                  cannot_evaluate=[("CE", "cannot-evaluate", "held")])),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP, wake_ctx),
+            ("schedule", "schedule_denials", aiqt_hooks._ORCH_SCHEDULE_CAP,
+             dict(base, kind="schedule_idle", basis_unchanged=True, **_core_held)),
+        ]
+        check("core/bound-and-cap-relieve-above-the-limit-not-only-at-it",
+              [[aiqt_hooks.decide_yield(dict(ctx, **{key: n}))[0]
+                for n in (limit - 1, limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)]
+               for _kind, key, limit, ctx in _core_branches],
+              [["DENY"] + ["ALLOW_WITH_FINDINGS"] * 3] * len(_core_branches))
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
@@ -5668,9 +5731,10 @@ def _main_isolated(report_path=None):
                   _rw_deny(_rw_sched(dict(stop=True, prompt="end after RW-1")),
                            _rw_counter + ", so this deny does not count toward the loop bound"),
                   ("deny", True, True))
-            # QA round 9: the whole unsaved-counter sentence of each deny, and the comment above it, are pinned
-            # so that restoring an earlier wording (a stop relieved only "at" the bound, no stop_hook_active
-            # loop signal, or a schedule call relieved only "at" the cap) fails this row
+            # QA rounds 9 and 10: the whole unsaved-counter sentence of each deny, and the comment above it, are
+            # pinned so that restoring an earlier wording (a stop relieved only "at" the bound, no
+            # stop_hook_active field, that field claimed as a documented signal of a PreToolUse call, no Stop
+            # fail-open on its own unsaved deny, or a schedule call relieved only "at" the cap) fails this row
             _rw.set_turn_state(dict())
             _rw_full = (_rw_counter + ", so this deny does not count toward the {} (PermissionError); {}; record "
                         "it manually (nocncl).")
@@ -5679,7 +5743,10 @@ def _main_isolated(report_path=None):
                       "loop bound", "a later stop=true call or Stop takes the loop-bound exit only when the count "
                       "it reads from turn-state.json is at or above the bound, that file cannot be read as a JSON "
                       "object or its stop_denials value is malformed (each of which needs a state directory it "
-                      "can search), or that call carries the platform's stop_hook_active loop signal")),
+                      "can search), or that call's payload carries stop_hook_active set to true (a field the "
+                      "Claude Code hooks reference documents in the Stop input and does not list in the "
+                      "PreToolUse input), and a later Stop the decision core denies also allows with findings "
+                      "when its own denial counter cannot be saved")),
                    _rw_deny(_rw_sched(dict(prompt="recheck RW-1 later")), _rw_full.format(
                        "scheduling cap", "a later call is relieved only when the count it reads from "
                        "turn-state.json is at or above the cap on an unchanged basis, which needs a state "
@@ -5687,10 +5754,13 @@ def _main_isolated(report_path=None):
                    "\n".join((
                        "        # a counter that cannot be saved leaves this deny uncounted; relief on a later call "
                        "comes only from",
-                       "        # what that call reads (its turn-state count, see _orch_build_ctx, or for a stop the "
-                       "payload's",
-                       "        # stop_hook_active loop signal), never from this deny. The deny stands and the "
-                       "failure is reported on it",
+                       "        # what that call reads (its turn-state count, see _orch_build_ctx, or a "
+                       "stop_hook_active field set to",
+                       "        # true in its payload, documented in the Stop input and not in the PreToolUse "
+                       "input) or, for a Stop,",
+                       "        # from its own deny failing to save, never from this deny. The deny stands and "
+                       "the failure is",
+                       "        # reported on it",
                        "        unsaved = _orch_record_denial(root, ts, kind, basis)"))
                    in Path(aiqt_hooks.__file__).read_text(encoding="utf-8")),
                   (("deny", True, True), ("deny", True, True), True))
@@ -6473,14 +6543,47 @@ def _main_isolated(report_path=None):
               (_r6_run("recwrite6b", 0o700, 0o100), _r6_run("recwrite6c", 0o700, 0o300, walk=os.O_RDONLY)),
               ((["deny", "deny", "deny", "warn"], True, 3), (["deny", "deny", "deny", "warn"], True, 3)))
 
-        # QA rounds 7 to 9: one sweep pins the counter-save and relief sentences of the orch-yield-tool-guard
-        # and orch-stop-guard residues (see _PERM_SWEEP_TABLE), the malformed-count and stop_hook_active exits
-        # included, and that no relief reaches the unreadable-registry deny of a schedule or stop=true call; it
-        # checks each output channel of a cell on its own: the kernel leg runs the platform's writers without
-        # root, the model leg runs both writers everywhere, and every cell matches the table.
+        # QA rounds 7 to 10: one sweep pins the counter-save and relief sentences of the orch-yield-tool-guard
+        # and orch-stop-guard residues (see _PERM_SWEEP_TABLE), the malformed-count, non-object turn-state,
+        # above-the-limit count and stop_hook_active exits included, and that no relief reaches the
+        # unreadable-registry deny of a schedule or stop=true call, judged on the default state directory that
+        # deny's call resolves; it checks each output channel of a cell on its own: the kernel leg runs the
+        # platform's writers without root, the model leg runs both writers everywhere, and every cell matches
+        # the table.
         check("recwrite7/state-dir-permission-sweep-matches-the-table",
               _perm_sweep(tmp),
-              (0 if os.geteuid() == 0 else 560 if getattr(os, "O_PATH", 0) else 280, 560, []))
+              (0 if os.geteuid() == 0 else 736 if getattr(os, "O_PATH", 0) else 368, 736, []))
+
+        # QA round 10: a count above the loop bound or the cap is a forced exit like one at it, so a Stop, a
+        # stop=true call and a schedule call each record forced_unresolved at the limit, one above it, and at
+        # the largest valid count (the sweep pins the verdicts; this pins the record).
+        _r10 = Fixture(tmp, "recwrite10")
+        _r10_sd = Path(aiqt_hooks._orch_state_dir_for_root(str(_r10.root)))
+        _r10.set_items([item("R10-B", blocker=dict(kind="not-before", ref=now_iso(-48)))])
+        _r10.set_turn_state(dict())
+        aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup", dict(prompt="waiting")))
+        _r10_basis = _r10.turn_state().get("schedule_basis")
+
+        def _r10_forced(kind, count):
+            (_r10_sd / "forced-exit.jsonl").unlink(missing_ok=True)
+            if kind == "schedule":
+                _r10.set_turn_state(dict(schedule_denials=count, schedule_basis=_r10_basis))
+                result = aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup",
+                                                                 dict(prompt="waiting")))
+            else:
+                _r10.set_turn_state(dict(stop_denials=count))
+                result = (aiqt_hooks.orch_stop_guard(_r10.payload("Stop")) if kind == "stop" else
+                          aiqt_hooks.orch_yield_tool(_r10.payload("PreToolUse", "ScheduleWakeup",
+                                                                  dict(prompt="done", stop=True))))
+            rows, _bad = aiqt_hooks._orch_read_jsonl(str(_r10_sd / "forced-exit.jsonl"))
+            return _verdict(result), len(rows or [])
+        _r10_limits = dict(schedule=aiqt_hooks._ORCH_SCHEDULE_CAP, stop=aiqt_hooks._ORCH_LOOP_BOUND,
+                           ystop=aiqt_hooks._ORCH_LOOP_BOUND)
+        check("recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
+              [(kind, count, _r10_forced(kind, count)) for kind, limit in sorted(_r10_limits.items())
+               for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)],
+              [(kind, count, ("warn", 1)) for kind, limit in sorted(_r10_limits.items())
+               for count in (limit, limit + 1, aiqt_hooks._ORCH_COUNTER_MAX)])
 
         # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
         e = Fixture(tmp, "forced5")

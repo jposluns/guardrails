@@ -425,6 +425,7 @@ expected-check-ids = [
   "core/stop-enum-error-loop-bound-findings",
   "core/wake-hygiene-below-cap-denies",
   "core/wake-hygiene-at-cap-findings",
+  "core/bound-and-cap-relieve-above-the-limit-not-only-at-it",
   # ---------- C.2: the attestation register for blocker evidence ----------
   "attest/no-snapshot-stop-holds",
   "attest/no-snapshot-schedule-denies",
@@ -550,6 +551,7 @@ expected-check-ids = [
   "recwrite6/search-only-state-dir-yield-denials-accumulate-and-cap-relieves",
   "recwrite6/earned-cap-relief-survives-a-failed-save",
   "recwrite7/state-dir-permission-sweep-matches-the-table",
+  "recwrite10/forced-exit-recorded-at-and-above-the-bound-and-cap",
   # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
   "forced5/deny-1",
   "forced5/deny-2",
