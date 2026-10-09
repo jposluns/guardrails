@@ -64,16 +64,34 @@ an HTML attribute or comment read as text, or one inside a fenced or indented co
 body is also read as written) marks its section informative too, over-fires. The guard reads
 no inline HTML tag and no character reference it does not decode; it refuses them where they
 could hide a declaration: a declaration candidate (a heading title anywhere, or any paragraph
-in any section, block-quoted or not) whose text outside code spans carries a "<" followed by
-a letter, "/", "!" or "?" other than a URI autolink (a tag, a closing tag, a comment, a
-processing instruction, a declaration or a CDATA section) or a character reference the guard
-does not decode is a finding naming the section and the construct, whatever the section's
-classification, so no composition of such markup can hide a declaration by making it
-unreadable: an unreadable candidate is refused, never silently skipped. A code span shows its
-text verbatim, so markup-shaped text inside one hides nothing and is skipped there; a URI
-autolink or a backslash escape consumes its characters first, as CommonMark reads them, so a
-backtick inside one opens no code span. That refusal names plain text of the same shape (a<b,
-informa&x;tive) too, an over-fire. A heading title anywhere that holds inline syntax the
+in any section, block-quoted or not) whose text outside masked code spans carries a "<"
+followed by a letter, "/", "!" or "?" other than a URI autolink (a tag, a closing tag, a
+comment, a processing instruction, a declaration or a CDATA section) or a character reference
+the guard does not decode is a finding naming the section and the construct, whatever the
+section's classification, so no composition of such markup can hide a declaration by making
+it unreadable: an unreadable candidate is refused, never silently skipped. A code span shows
+its text verbatim, so markup-shaped text inside one hides nothing and the span is masked
+(skipped); a URI autolink consumes its characters first, as CommonMark reads them, and a
+backslash consumes the one character after it (CommonMark escapes only ASCII punctuation, but
+a character it does not escape is never a backtick, a "<" or an "&", so consuming it unread
+changes no finding), so a backtick inside either opens no code span. A link or image target
+is never consumed: a "](" or "][" opens a destination, title or reference label the guard
+does not parse, and CommonMark reads a backtick inside one as part of the target, never as a
+code-span opener, so in a candidate that may hold a backtick inside such a target region the
+guard masks no code span at all and reads every construct in the candidate. The region is
+judged fail closed, never parsed: a backtick at or after a "](" or "][" may be inside its
+region unless a plain ")" (for a "](") or "]" (for a "][") comes first; a quote, parenthesis,
+angle bracket or backslash after a "](", or a backslash after a "][", leaves the region
+unsettled, so any later backtick in the candidate counts there; and a "](" or "][" that opens
+no link counts the same way, since reading its region as a target could instead mask a code
+span CommonMark pairs. So a declaration hidden by markup that a backtick-holding target would
+unhide (between two such targets, after one, or after a bare "](" holding a backtick) is
+refused, never silently skipped. In a paragraph that refusal also names, as over-fires: plain
+text shaped like such markup (a<b, informa&x;tive), an email autolink (<a@b.org>), an
+angle-bracket link destination ([x](<a b>)), and, in a candidate the target rule unmasks,
+markup-shaped text inside a real code span (see [a](/u`) and the `<type>` key; a quoted title
+with no backtick, [a](/u "t") then `<type>`, unmasks the same way, since a quote leaves the
+region unsettled). A heading title anywhere that holds inline syntax the
 guard does not read (below) is a finding, since it could hide a marker; the finding names the
 title line holding that syntax and reads the title's code spans like the rest of the title,
 an over-fire. An informative section also fails closed, with a finding that
@@ -1193,9 +1211,6 @@ _INLINE_EMPHASIS = re.compile(r"[*~`]")
 # (_unread_markup_at, _inline_unread_at). The guard reads no inline HTML tag anywhere: a "<"
 # that may open one is refused the same way, so no tag form needs enumerating.
 _REFERENCE_SHAPE = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
-# The characters a backslash escapes (ASCII punctuation, as CommonMark reads escapes): an
-# escaped backtick opens no code span and an escaped "<" opens no tag (_unread_markup_at).
-_ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 # Characters that render invisibly or only modify the character before them: format,
 # nonspacing and enclosing marks, unassigned, private-use and surrogate code points, control
 # characters other than whitespace, and the Hangul fillers.
@@ -1313,29 +1328,68 @@ def _code_span_end(text, at, length):
         pos = end
 
 
+def _target_may_hold_backtick(text):
+    # Whether text holds a backtick that may fall inside a link or image target region (a
+    # destination, title or reference label), judged fail closed, never parsed: from each
+    # "](" or "][" (_LINK_SYNTAX), a backtick met first may be inside the region; a plain
+    # ")" (after a "](") or "]" (after a "][") met first settles the opener as holding none,
+    # since with no quote, parenthesis, angle bracket or backslash before it that closer ends
+    # any target CommonMark could read there; and such a character met first (a quoted title,
+    # a parenthesised or angle destination, or an escape can carry the region past any closer
+    # read cheaply) leaves the region unsettled, so any later backtick in text counts.
+    # Whether the opener opens a link is not judged either: a backtick CommonMark pairs
+    # counts the same as one a target consumes, since reading its region as a target could
+    # mask a code span CommonMark pairs. Widening only unmasks more markup
+    # (_unread_markup_at); settling wrongly could mask a construct CommonMark shows.
+    for m in _LINK_SYNTAX.finditer(text):
+        closer, unsettled = (")", "\"'(<\\") if text[m.start() + 1] == "(" else ("]", "\\")
+        for i in range(m.end(), len(text)):
+            ch = text[i]
+            if ch == "`":
+                return True
+            if ch == closer:
+                break
+            if ch in unsettled:
+                if "`" in text[i:]:
+                    return True
+                break
+    return False
+
+
 def _unread_markup_at(text):
-    # (offset, form) for each markup construct outside the code spans of a declaration
+    # (offset, form) for each markup construct outside the masked code spans of a declaration
     # candidate that the plain reading forms do not read: a "<" that may open inline HTML (a
     # letter, "/", "!" or "?" after it, so a tag, a closing tag, a comment, a processing
     # instruction, a declaration or a CDATA section) other than a URI autolink, and a
     # character reference the guard does not decode. One left-to-right pass, as CommonMark
     # reads inline text: a code span (_code_span_end) shows its text verbatim, so a construct
-    # inside one hides nothing and is skipped; a URI autolink or a backslash escape
-    # (_ESCAPABLE) consumes its characters, so a backtick inside one opens no code span and an
-    # escaped "<" opens no tag. Plain text shaped like a construct (a<b) is named too, an
-    # over-fire.
+    # inside one hides nothing and the span is masked (skipped); a URI autolink consumes its
+    # characters, and a backslash the one character after it (CommonMark escapes only ASCII
+    # punctuation, but a character it does not escape is never a backtick, a "<" or an "&",
+    # so consuming it unread changes no finding), so a backtick inside either opens no code
+    # span and an escaped "<" opens no tag. A link or image target is never consumed, and a
+    # backtick inside one is read by CommonMark as part of the target, never paired as a code
+    # span, so where a backtick may fall inside a target region (_target_may_hold_backtick)
+    # no code span is masked at all: every construct in the candidate is read, the markup a
+    # backtick-holding target would unhide included. Plain text shaped like a construct (a<b)
+    # is named too, an over-fire, as is a construct inside a real code span of a candidate
+    # the target rule unmasks.
     out = []
+    masked = "`" in text and not _target_may_hold_backtick(text)
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
-        if ch == "\\" and i + 1 < n and text[i + 1] in _ESCAPABLE:
+        if ch == "\\" and i + 1 < n:
             i += 2
         elif ch == "`":
             j = i + 1
             while j < n and text[j] == "`":
                 j += 1
-            end = _code_span_end(text, i, j - i)
-            i = j if end < 0 else end
+            if masked:
+                end = _code_span_end(text, i, j - i)
+                i = j if end < 0 else end
+            else:
+                i = j
         elif ch == "<":
             m = _AUTOLINK.match(text, i)
             if m is not None:
@@ -1677,12 +1731,13 @@ def informative_findings(text):
                     " not read and which could hide an \"(informative)\" marker; write the title"
                     " plainly".format(n, form) for n, form in titles)
     # Every declaration candidate is read plainly or refused: a paragraph (block-quoted or
-    # not, in any section) whose text outside code spans carries markup the plain forms do not
-    # read (_unread_markup_at) is a finding naming the section and the construct, whatever the
-    # section's classification, so no composition of tags, comments, CDATA sections,
-    # processing instructions or undecoded character references can hide a declaration by
-    # making it unreadable; heading titles get the same refusal through the title findings
-    # above.
+    # not, in any section) whose text outside masked code spans carries markup the plain
+    # forms do not read (_unread_markup_at; where a backtick may fall inside a link or image
+    # target region, no code span is masked and the whole paragraph is read) is a finding
+    # naming the section and the construct, whatever the section's classification, so no
+    # composition of tags, comments, CDATA sections, processing instructions or undecoded
+    # character references can hide a declaration by making it unreadable; heading titles get
+    # the same refusal through the title findings above.
     for start, texts, first in paragraphs:
         section = "(preamble)"
         for _end, _level, heading_title, heading_start in headings:
@@ -4419,18 +4474,22 @@ def _self_test_vectors():
              + stays)):
         check("spec-informative-marker-green-" + name, lambda m=planted: not informative_findings(m))
     # Candidate refusal vectors. Any paragraph (block-quoted or not, in any section) or
-    # heading title whose text outside code spans carries a "<" that may open inline HTML
-    # (other than a URI autolink) or a character reference the guard does not decode is a
-    # finding naming the section and the construct, whatever the section's classification, so
-    # no composition of tags, comments, CDATA sections, processing instructions or undecoded
-    # references can hide a declaration by making it unreadable. Each red vector hides a
-    # declaration under one construct or composition in a normative section, or checks one
-    # scanner behaviour (a URI autolink or a backslash escape consumes its characters; a code
-    # span is closed only by a backtick run of exactly the opening length); each green vector
-    # is a reading the scan excludes for a stated reason: a code span, a URI autolink, a "<"
-    # before no letter, a decoded reference, an "&" shaping no reference, or an escaped "<" (a
-    # fenced block and indented code are excluded as blocks, the commonmark-html-green
-    # vectors).
+    # heading title whose text outside masked code spans carries a "<" that may open inline
+    # HTML (other than a URI autolink) or a character reference the guard does not decode is
+    # a finding naming the section and the construct, whatever the section's classification,
+    # so no composition of tags, comments, CDATA sections, processing instructions or
+    # undecoded references can hide a declaration by making it unreadable. Each red vector
+    # hides a declaration under one construct or composition in a normative section, or
+    # checks one scanner behaviour (a URI autolink consumes its characters, a backslash the
+    # one character after it; a code span is closed only by a backtick run of exactly the
+    # opening length; a candidate that may hold a backtick inside a link or image target
+    # region, judged fail closed by _target_may_hold_backtick, has no code span masked, so a
+    # backtick a target consumes never desynchronises the masking from CommonMark and the
+    # markup a backtick-holding target would unhide is always read); each green vector is a
+    # reading the scan excludes for a stated reason: a code span, a URI autolink, a "<"
+    # before no letter, a decoded reference, an "&" shaping no reference, an escaped "<", or
+    # a link target that settles at a plain closer before any backtick (a fenced block and
+    # indented code are excluded as blocks, the commonmark-html-green vectors).
     could_hide = "guard does not read and which could hide an informative declaration"
     html_form = 'a "<" that may open inline HTML'
     ref_form = "a character reference the guard does not decode"
@@ -4469,7 +4528,41 @@ def _self_test_vectors():
             ("autolink-consumes-backtick",
              "See <https://e.org/`> this section is informa<b></b>tive `x`.", html_form),
             ("closer-length-mismatch", "`` This section is informa<b></b>tive. ` x",
-             html_form)):
+             html_form),
+            # A backtick inside a link or image target (a destination, title or reference
+            # label) is read by CommonMark as part of the target, never as a code-span
+            # opener, so pairing it would mask the markup between two such targets; where a
+            # candidate may hold one (_target_may_hold_backtick), no code span is masked and
+            # that markup is read.
+            ("target-title-backtick-comment",
+             '[a](/u "`") This section is informa<!-- x -->tive. [b](/v "`")', html_form),
+            ("target-title-backtick-break",
+             '[a](/u "`") This section<br>is informative. [b](/v "`")', html_form),
+            ("target-title-backtick-hidden-span",
+             '[a](/u "`") This section is informa<span hidden>x</span>tive. [b](/v "`")',
+             html_form),
+            ("target-title-backtick-trailing",
+             '[x](/u "`") This section is informa<b></b>tive. `', html_form),
+            ("target-destination-backtick",
+             "[a](/u`) This section is informa<!-- x -->tive. [b](/v`)", html_form),
+            ("target-angle-destination-backtick",
+             "[a](<`>) This section is informa<!-- x -->tive. [b](<`>)", html_form),
+            ("image-destination-backtick",
+             "![a](/u`) This section is informa<!-- x -->tive. ![b](/v`)", html_form),
+            ("image-title-backtick",
+             '![a](/u "`") This section is informa<!-- x -->tive. ![b](/v "`")', html_form),
+            ("reference-label-backtick",
+             "[a][r`] This section is informa<!-- x -->tive. [b][s`]", html_form),
+            # A "](" that opens no link counts the same way: consuming its region as a target
+            # would desynchronise the pairing the other way and mask a code span CommonMark
+            # pairs, so the guard masks nothing there either and the "<b>" is read.
+            ("bracket-no-link-backtick", "x](`) a ` <b> `", html_form),
+            # Disclosed over-fires of the unmasking: a real code span after a target holding
+            # a backtick, or after a quoted title that leaves the region unsettled, is read.
+            ("code-span-after-backtick-target-over-fire",
+             "See [a](/u`) and the `<type>` key.", html_form),
+            ("code-span-after-quoted-title-over-fire",
+             'See [a](/u "t") and the `<type>` key.', html_form)):
         check("spec-informative-candidate-red-" + name, lambda m=notes + planted + plant,
               w=form: any("section Z notes" in f and could_hide in f and ("carries " + w) in f
                           for f in informative_findings(m)))
@@ -4487,7 +4580,10 @@ def _self_test_vectors():
             ("less-than-no-letter", "Keep a < b and a <= b ordered."),
             ("decoded-reference", "Pins use &amp; and &#105; forms."),
             ("plain-ampersand", "Pins cover AT&T and a & b."),
-            ("escaped-less-than", "Write \\<type> for a placeholder.")):
+            ("escaped-less-than", "Write \\<type> for a placeholder."),
+            ("target-settles-before-code-span",
+             "See [the guide](docs/a.md) and read `<type>` there."),
+            ("quoted-title-no-backtick", 'See [a](/u "t") for details.')):
         check("spec-informative-candidate-green-" + name,
               lambda m=notes + planted + stays: not informative_findings(m))
     # The default entry runs the informative guard: over a spec with a planted violation,
