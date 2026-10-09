@@ -2,8 +2,11 @@
 
 These TOML files are the crosswalk's no-fabrication source of truth. Each one pins a single external
 framework: its edition and the enumerated set of canonical control ids that a rule's `map-<key>`
-frontmatter is allowed to cite. A rule may cite a framework only after its manifest lands here, so a
-citation to an unsourced framework, or to an id that does not exist in the pinned edition, cannot ship.
+frontmatter is allowed to cite. A rule's `map-<key>` frontmatter may cite a framework only after its
+manifest lands here, so a mapping to an unsourced framework, or to an id that does not exist in the
+pinned edition, cannot ship. Rule-body prose is checked more narrowly: a numbered designator (ISO,
+ISO/IEC, NIST SP, NIST AI, NIST IR, FIPS or RFC followed by its number) must resolve to a manifest or a
+recorded exclusion. A framework named in prose without such a number is not detected.
 
 ## How it is enforced
 
@@ -18,6 +21,10 @@ citation to an unsourced framework, or to an id that does not exist in the pinne
   mutual exclusivity (an id is not asserted both tight and broad for one rule+framework). A malformed
   manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
   private source catalogues.
+- `tools/check_cited_standards.py` (a CI gate, and part of `run_all_checks.sh`) scans the rule corpus for
+  numbered standard designators and fails on one that no manifest's `name` or `edition` carries and no
+  recorded exclusion covers. It prints its residual on every run; a clean result is not a complete
+  enumeration of the standards the prose names.
 
 ## Manifest schema
 

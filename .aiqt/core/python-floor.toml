@@ -91,6 +91,7 @@ guarded-surfaces = [
     "tools/check_branch_root.py",
     "tools/check_byte_canon.py",
     "tools/check_ci_parity.py",
+    "tools/check_cited_standards.py",
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
     "tools/check_derived_command_parameters.py",

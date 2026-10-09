@@ -474,6 +474,15 @@ class = "a"
 residue = "It validates every standards-mapping id against its pinned framework manifest. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "cited-standards"
+script = "tools/check_cited_standards.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It discovers numbered standard designators (ISO, ISO/IEC, NIST SP, NIST AI, NIST IR, FIPS, RFC) in the rule corpus and fails on one that resolves to no manifest and no recorded exclusion. It does not see a framework named without a number, a control id cited in prose, or a prose edition that differs from the manifest's. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "reference-facts"
 script = "tools/check_reference_facts.py"
 rules = []
