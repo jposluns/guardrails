@@ -103,9 +103,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import gen_hooks  # noqa: E402  the generator whose plugin hooks.json path this gate tracks
 except Exception as exc:  # noqa: BLE001  an import failure is a cannot-evaluate, not a traceback
-    sys.stderr.write("check_python_launcher_isolation: cannot import gen_hooks ({}); fail-closed\n"
-                     .format(exc))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write("check_python_launcher_isolation: cannot import gen_hooks ({}); fail-closed\n"
+                         .format(exc))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 HOOKS_JSON_REL = gen_hooks.HOOKS_JSON_REL
 RUN_ALL_REL = "tools/run_all_checks.sh"

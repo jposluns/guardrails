@@ -121,6 +121,17 @@ Legs, in order:
                  None), and must still exit with its refusal exit with empty stdout and stderr;
                  a HOOK_SURFACES entry must also still warn (exit 0, the exact warning on
                  stdout) under each condition with its first FLOOR_FAIL_OPEN_MODES mode.
+  fallback       every .py file outside EXCLUDED_TREES (a directory in SKIPPED_DIR_NAMES is not
+                 walked): a handler of a module-level try whose body holds an import (an import
+                 fallback, such as the shared tooling's tomllib fallback) may not carry a retired
+                 guard shape: a `raise SystemExit` or a sys.exit call (a sys.stderr whose flush fails
+                 at CPython's interpreter-exit flush of the std streams replaces that exit with the
+                 interpreter's own exit 120), a sys.stderr or sys.stdout write or flush outside
+                 try/except BaseException (with the stream None the bare call raises out of the
+                 handler and the refusal exit is lost), or a wrapped write without the same stream's
+                 explicit flush (os._exit skips the interpreter-exit flush, so the unflushed
+                 diagnostic is lost). Code inside a function, class or lambda body does not run at
+                 import time and is not scanned.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
@@ -1294,11 +1305,12 @@ def _has_main_block(tree):
     return False
 
 
-def shipped_entrypoints(root):
+def _python_files(root):
+    """Every repo-relative .py path outside EXCLUDED_TREES, directory by directory in sorted order
+    (a directory in SKIPPED_DIR_NAMES is not walked)."""
     def _fail(exc):
         raise CannotEvaluate("cannot walk the tree: {}".format(exc))
 
-    found = []
     for dirpath, dirnames, filenames in os.walk(root, onerror=_fail):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         prefix = "" if rel_dir == "." else rel_dir + "/"
@@ -1306,15 +1318,120 @@ def shipped_entrypoints(root):
                              and not _excluded(prefix + name + "/"))
         for name in sorted(filenames):
             rel = prefix + name
-            if name.endswith(".py") and not _excluded(rel) and _has_main_block(_parse(root, rel)):
-                found.append(rel)
-    return found
+            if name.endswith(".py") and not _excluded(rel):
+                yield rel
+
+
+def shipped_entrypoints(root):
+    return [rel for rel in _python_files(root) if _has_main_block(_parse(root, rel))]
 
 
 def completeness_findings(root, surfaces):
     listed = set(surfaces)
     return ["{}: a shipped entrypoint missing from guarded-surfaces in {}".format(rel, SOURCE_REL)
             for rel in shipped_entrypoints(root) if rel not in listed]
+
+
+# The fallback leg's refusal guidance, shared by its findings.
+FALLBACK_GUIDANCE = ("wrap the diagnostic write and its explicit flush in try/except BaseException "
+                     "and exit through os._exit, as GUARD_TEMPLATE does")
+
+
+def _import_time_nodes(nodes):
+    """Every AST node under nodes that runs at import time: the walk does not descend into a
+    function, class or lambda (code there runs only when called; a decorator or default argument
+    inside one is not judged, a disclosed residual of the fallback leg)."""
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _stream_call(node, attr):
+    """The stream name when node is a call of sys.stderr.<attr> or sys.stdout.<attr>, else None."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == attr and isinstance(node.func.value, ast.Attribute) \
+            and node.func.value.attr in ("stderr", "stdout") \
+            and isinstance(node.func.value.value, ast.Name) and node.func.value.value.id == "sys":
+        return node.func.value.attr
+    return None
+
+
+def _catches_base_exception(node):
+    """True when node is a try statement one of whose handlers catches BaseException, by that name or
+    bare."""
+    return isinstance(node, ast.Try) and any(
+        handler.type is None
+        or (isinstance(handler.type, ast.Name) and handler.type.id == "BaseException")
+        for handler in node.handlers)
+
+
+def _fallback_handler_findings(rel, handler):
+    """The retired guard shapes inside one import-fallback handler (fallback_findings)."""
+    found = []
+    nodes = list(_import_time_nodes(handler.body))
+    wrapped = set()
+    for node in nodes:
+        if _catches_base_exception(node):
+            inside = list(_import_time_nodes(node.body))
+            wrapped.update(id(sub) for sub in inside)
+            for stream in ("stderr", "stdout"):
+                writes = sorted(sub.lineno for sub in inside if _stream_call(sub, "write") == stream)
+                if writes and not any(_stream_call(sub, "flush") == stream for sub in inside):
+                    found.append(
+                        "{}:{}: an import fallback wraps a sys.{} write without its explicit "
+                        "sys.{}.flush(), a retired guard shape (os._exit skips the interpreter-exit "
+                        "flush of the std streams, so the unflushed diagnostic is lost); {}".format(
+                            rel, writes[0], stream, stream, FALLBACK_GUIDANCE))
+    for node in nodes:
+        if isinstance(node, ast.Raise):
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(exc, ast.Name) and exc.id == "SystemExit":
+                found.append(
+                    "{}:{}: an import fallback exits through `raise SystemExit`, a retired guard "
+                    "shape (a sys.stderr whose flush fails at CPython's interpreter-exit flush of "
+                    "the std streams replaces that exit with the interpreter's own exit 120); {}"
+                    .format(rel, node.lineno, FALLBACK_GUIDANCE))
+            continue
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "exit" and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == "sys":
+            found.append(
+                "{}:{}: an import fallback exits through sys.exit, a retired guard shape (sys.exit "
+                "raises SystemExit, whose exit a failing sys.stderr flush at interpreter exit "
+                "replaces with CPython's own exit 120); {}".format(rel, node.lineno, FALLBACK_GUIDANCE))
+            continue
+        if id(node) in wrapped:
+            continue
+        for attr in ("write", "flush"):
+            stream = _stream_call(node, attr)
+            if stream:
+                found.append(
+                    "{}:{}: an import fallback calls sys.{}.{} outside try/except BaseException, a "
+                    "retired guard shape (with the stream None the bare call raises out of the "
+                    "handler and the refusal exit is lost); {}".format(
+                        rel, node.lineno, stream, attr, FALLBACK_GUIDANCE))
+    return found
+
+
+def fallback_findings(root):
+    """The fallback leg: every module-level import fallback in the tree exits through the canonical
+    shape, never a retired one (see the module docstring)."""
+    findings = []
+    for rel in _python_files(root):
+        tree = _parse(root, rel)
+        try:
+            for node in _import_time_nodes(tree.body):
+                if isinstance(node, ast.Try) and any(
+                        isinstance(item, (ast.Import, ast.ImportFrom)) for item in node.body):
+                    for handler in node.handlers:
+                        findings.extend(_fallback_handler_findings(rel, handler))
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
+    return findings
 
 
 def documentation_findings(root, floor):
@@ -1371,6 +1488,7 @@ def evaluate(root):
         findings.extend(pin_findings(root, floor))
         findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
         findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(fallback_findings(root))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
@@ -1380,7 +1498,7 @@ def evaluate(root):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard and dynamic legs over {} "
+    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and fallback legs over {} "
                "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
@@ -1401,6 +1519,7 @@ REVERT_CALLS = (
     ("pins", "pin_findings(root, floor)"),
     ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("fallback", "fallback_findings(root)"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
     ("claims", "documentation_claim_findings(root, floor)"),
@@ -1822,7 +1941,7 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
+        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and fallback legs over 1 guarded "
         "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
         "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
@@ -2077,6 +2196,32 @@ def _self_test_cases(base):
             ".venv/lib/tool.py": _entry("import sys\n"),
             "tools/helper.py": "VALUE = 1\n"}))[0], 0)
 
+    # The fallback leg: a module-level import fallback must not carry a retired guard shape; the
+    # fixture file is no entrypoint and is not listed, so only this leg judges it.
+    fallback_head = "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
+    fallback_wrapped = ("    import os\n    try:\n"
+                        "        sys.stderr.write(\"error: no tomllib\\n\")\n"
+                        "        sys.stderr.flush()\n    except BaseException:\n        pass\n")
+    code, lines = evaluate(_fixture(base, files=dict([("tools/helper.py", fallback_head
+        + "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n")])))
+    check("fallback/raise-systemexit-and-bare-write-finding",
+          (code, _has(lines, "exits through `raise SystemExit`"),
+           _has(lines, "calls sys.stderr.write outside try/except BaseException")), (1, True, True))
+    code, lines = evaluate(_fixture(base, files=dict([("tools/helper.py",
+        fallback_head + fallback_wrapped + "    sys.exit(2)\n")])))
+    check("fallback/sys-exit-finding", (code, _has(lines, "exits through sys.exit")), (1, True))
+    code, lines = evaluate(_fixture(base, files=dict([("tools/helper.py", fallback_head
+        + "    import os\n    try:\n        sys.stderr.write(\"error: no tomllib\\n\")\n"
+        "    except BaseException:\n        pass\n    os._exit(2)\n")])))
+    check("fallback/wrapped-write-no-flush-finding",
+          (code, _has(lines, "without its explicit sys.stderr.flush()")), (1, True))
+    check("fallback/current-template-passes", evaluate(_fixture(base, files=dict([(
+        "tools/helper.py", fallback_head + fallback_wrapped + "    os._exit(2)\n")])))[0], 0)
+    check("fallback/function-body-not-scanned-passes", evaluate(_fixture(base, files=dict([(
+        "tools/helper.py", "import sys\n\n\ndef load():\n    try:\n        import tomllib\n"
+        "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
+        "        raise SystemExit(2)\n    return tomllib\n")])))[0], 0)
+
     code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
     check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
           (1, ["FAIL: {}: documentation-check is false, but its decided value is true "
@@ -2181,6 +2326,10 @@ def _red_on_revert(base, good):
          "canonical floor guard"),
         ("dynamic", dict(source=listed, files={"tools/demo.py": _entry(good, after="return\n")}),
          "at patched"),
+        ("fallback", dict(files=dict([("tools/helper.py", (
+            "import sys\n\ntry:\n    import tomllib\nexcept ModuleNotFoundError:\n"
+            "    sys.stderr.write(\"error: no tomllib\\n\")\n    raise SystemExit(2)\n"))])),
+         "exits through `raise SystemExit`"),
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
@@ -2200,6 +2349,7 @@ def _red_on_revert(base, good):
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
+    check("revert/fallback-leg", results["fallback"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
     check("revert/claims-leg", results["claims"], (1, True, 0))

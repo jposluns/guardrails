@@ -60,10 +60,15 @@ from _gen_common import repo_root, reconcile  # noqa: E402
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 

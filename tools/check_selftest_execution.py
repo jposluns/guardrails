@@ -195,10 +195,15 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: check_selftest_execution.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: check_selftest_execution.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}

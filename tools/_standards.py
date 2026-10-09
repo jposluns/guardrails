@@ -28,6 +28,7 @@ except ModuleNotFoundError:
                 "error: the standards loader requires Python 3.14 or newer; this is Python %d.%d.%d "
                 "(%s). Nothing was run (cannot evaluate).\n"
                 % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+            sys.stderr.flush()
         except BaseException:
             pass
     else:  # every Python 3.14 ships tomllib, so this installation is incomplete
@@ -35,9 +36,10 @@ except ModuleNotFoundError:
             sys.stderr.write(
                 "error: the standards loader cannot import tomllib, part of the Python standard library; "
                 "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
         except BaseException:
             pass
-    raise SystemExit(2)
+    os._exit(2)
 
 # Required top-level fields in every manifest. Attribution (licence, source-url) is intentionally NOT
 # required here: it is added, per-source verified, with the public NOTICE. This file's job is to make

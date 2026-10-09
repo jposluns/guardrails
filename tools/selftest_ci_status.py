@@ -77,10 +77,15 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402

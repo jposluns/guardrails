@@ -19,6 +19,7 @@ except ModuleNotFoundError:
                 "error: the roadmap/changelog generators require Python 3.14 or newer; this is Python "
                 "%d.%d.%d (%s). Nothing was run (cannot evaluate).\n"
                 % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+            sys.stderr.flush()
         except BaseException:
             pass
     else:  # every Python 3.14 ships tomllib, so this installation is incomplete
@@ -26,9 +27,10 @@ except ModuleNotFoundError:
             sys.stderr.write(
                 "error: the roadmap/changelog generators cannot import tomllib, part of the Python "
                 "standard library; this installation is incomplete. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
         except BaseException:
             pass
-    raise SystemExit(2)
+    os._exit(2)
 
 from pathlib import Path
 from urllib.parse import urlparse

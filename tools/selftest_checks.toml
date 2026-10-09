@@ -1343,6 +1343,12 @@ expected-check-ids = [
   "revert/completeness-leg",
   "revert/documentation-leg",
   "revert/claims-leg",
+  "fallback/raise-systemexit-and-bare-write-finding",
+  "fallback/sys-exit-finding",
+  "fallback/wrapped-write-no-flush-finding",
+  "fallback/current-template-passes",
+  "fallback/function-body-not-scanned-passes",
+  "revert/fallback-leg",
 ]
 
 [[suite]]

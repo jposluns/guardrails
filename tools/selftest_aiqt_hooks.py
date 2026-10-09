@@ -941,18 +941,28 @@ def _close_fd2():
     os.close(2)
 
 
+def _close_fd1():
+    """preexec_fn for the closed-stdout stream vectors: descriptor 1 is closed in the child between fork
+    and exec, so the hook starts with sys.stdout None."""
+    os.close(1)
+
+
 def _test_stream_failure_exits(failures):
     """(stream-*) Real-subprocess vectors: the dispatcher's exit codes survive a standard stream that
     cannot be written or flushed. Each child runs the LIVE hook file under [sys.executable, "-I", "-B"]
     with one stream pointed at /dev/full (the write or flush raises ENOSPC), at the write end of a pipe
-    whose read end is already closed (EPIPE), or with descriptor 2 closed before exec (sys.stderr is
-    None). Expected: every PreToolUse fail-closed path keeps its blocking exit 2 (the diagnostic line is
-    best-effort); a deny decision or an allow-note whose stdout cannot be written or flushed exits 2
-    instead of 0 (the dispatcher cannot inspect the lost object, so a lost decision blocks, never
-    allows); a fail-open mode keeps exit 0 with its warning lost. Before the dispatcher hardening these
-    runs ended with the interpreter's own status (1 or 120, both of which the platform treats as
-    non-blocking) or with exit 0 and the deny lost, so each failure-stream vector fails on the
-    unhardened code."""
+    whose read end is already closed (EPIPE), or with descriptor 2 or descriptor 1 closed before exec
+    (the hook starts with sys.stderr or sys.stdout None). Expected: every PreToolUse fail-closed path
+    keeps its blocking exit 2 and leaves stdout, the decision channel, empty (the diagnostic line is
+    best-effort and belongs on stderr alone); a deny decision or an allow-note whose stdout cannot be
+    written or flushed, or whose descriptor is closed, exits 2 instead of 0 (the dispatcher cannot
+    inspect the lost object, so a lost decision blocks, never allows); a fail-open mode keeps exit 0
+    with its warning lost. Each failure-stream vector fails on the unhardened code: before the
+    dispatcher hardening these runs ended with the interpreter's own status (1 or 120, both of which
+    the platform treats as non-blocking), with exit 0 and the deny or note silently lost (stdout on
+    /dev/full, broken, or closed), or, with descriptor 2 closed, with the diagnostic printed to STDOUT
+    (print falls back to sys.stdout when sys.stderr is None), which the stderr vectors' empty-stdout
+    assertion catches."""
     hook = os.path.abspath(aiqt_hooks.__file__)
     if not os.path.exists("/dev/full"):
         failures.append("(stream-no-devfull) /dev/full is absent on this host, so the stream-failure "
@@ -969,10 +979,12 @@ def _test_stream_failure_exits(failures):
     wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
     wall_payload = json.dumps(dict(hook_event_name="Stop", last_assistant_message=wall)).encode("utf-8")
 
-    def child(label, modes, payload, stdout_to, stderr_to, want_rc, out_needle=None, err_needle=None):
+    def child(label, modes, payload, stdout_to, stderr_to, want_rc, out_needle=None, err_needle=None,
+              out_empty=False):
         """One hook child. stdout_to / stderr_to: "pipe" (captured), "full" (/dev/full), "broken" (the
-        write end of a pipe whose read end is closed), or "closed" (stderr only). A needle is asserted
-        only against a captured ("pipe") stream."""
+        write end of a pipe whose read end is closed), or "closed" (the descriptor is closed before
+        exec, so the stream is None). A needle, or out_empty, is asserted only against a captured
+        ("pipe") stream."""
         files = []
 
         def target(which):
@@ -988,7 +1000,11 @@ def _test_stream_failure_exits(failures):
             return write_end
 
         preexec = None
-        stdout_target = target(stdout_to)
+        if stdout_to == "closed":
+            stdout_target = subprocess.DEVNULL
+            preexec = _close_fd1
+        else:
+            stdout_target = target(stdout_to)
         if stderr_to == "closed":
             stderr_target = subprocess.DEVNULL
             preexec = _close_fd2
@@ -1019,6 +1035,9 @@ def _test_stream_failure_exits(failures):
             failures.append("(" + label + ") stdout does not name " + repr(out_needle) + ": " + repr(out))
         if err_needle is not None and err_needle not in err:
             failures.append("(" + label + ") stderr does not name " + repr(err_needle) + ": " + repr(err))
+        if out_empty and out:
+            failures.append("(" + label + ") expected empty stdout, the decision channel, got "
+                            + repr(out))
 
     # Working-stream controls: each path's normal exit and output, so the failure vectors below are
     # proven against a live baseline, not a stale expectation.
@@ -1038,16 +1057,18 @@ def _test_stream_failure_exits(failures):
     child("stream-stopwarn-ok", ["diff_wall_stop"], wall_payload, "pipe", "pipe", 0,
           out_needle="systemMessage")
     # The dispatcher's fail-closed stderr diagnostics: exit 2 holds with stderr on /dev/full, on a
-    # broken pipe, and closed outright.
+    # broken pipe, and closed outright, and stdout, the decision channel, stays empty. The empty-stdout
+    # assertion is what fails on the unhardened code for the closed state: there the exit was already 2,
+    # but the diagnostic landed on stdout (print falls back to sys.stdout when sys.stderr is None).
     for stream_state in ("full", "broken", "closed"):
         child("stream-unknown-stderr-" + stream_state, ["no_such_mode"], b"garbage",
-              "pipe", stream_state, 2)
+              "pipe", stream_state, 2, out_empty=True)
         child("stream-badargv-stderr-" + stream_state, ["absolute_paths", "extra"], b"",
-              "pipe", stream_state, 2)
+              "pipe", stream_state, 2, out_empty=True)
         child("stream-payload-stderr-" + stream_state, ["absolute_paths"], b"not json",
-              "pipe", stream_state, 2)
+              "pipe", stream_state, 2, out_empty=True)
         child("stream-hardblock-stderr-" + stream_state, ["absolute_paths"], miswired_payload,
-              "pipe", stream_state, 2)
+              "pipe", stream_state, 2, out_empty=True)
     # A PreToolUse decision or note whose stdout fails is a lost decision: blocking exit 2, with the
     # diagnostic (best-effort) naming the lost write; a fail-open mode keeps exit 0, warning lost.
     for stream_state in ("full", "broken"):
@@ -1059,6 +1080,14 @@ def _test_stream_failure_exits(failures):
               stream_state, "pipe", 0)
         child("stream-stopwarn-stdout-" + stream_state, ["diff_wall_stop"], wall_payload,
               stream_state, "pipe", 0)
+    # Descriptor 1 closed outright (sys.stdout None): a deny or an allow-note is a lost decision, so
+    # the exit is the blocking 2 with the diagnostic naming the lost write. On the unhardened code
+    # these runs exited 0 with the decision silently lost, the one state where a deny was silently
+    # turned into an allow.
+    child("stream-deny-stdout-closed", ["absolute_paths"], deny_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
+    child("stream-note-stdout-closed", ["bash_absolute_paths"], note_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
 
 
 def _test_note_shape_pins(failures, tmp):
