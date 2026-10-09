@@ -16,16 +16,27 @@ these rules:
   deny hook   a deny-hook row is allowed only for a platform whose deny mechanism this repository
               documents and tests: a platform in tools/gen_hooks.py PLATFORMS, the only hook platform
               the AIQT pack renders and tests. Any other platform takes the instructions tier. The
-              deny-hook row's member must BE the verified hook: the hook path itself
-              (opf/enforcement/claude/pretooluse_deny.py) or a byte-identical copy of it, and its
-              destination must be one of the hook registration paths the hook itself protects.
+              deny-hook row's member must be exactly the canonical hook path
+              (opf/enforcement/claude/pretooluse_deny.py), the one file this gate loads, renders and
+              probes. Any other path is a finding, a byte-identical copy included: the hook derives the
+              pack trees it guards from its own location (__file__), so a relocated copy guards
+              different directories than the hook this gate verified. The destination must be one of
+              the hook registration paths the hook itself protects.
   location    an instructions row installs at the location the AIQT pack's own adapter generator writes
               for that platform: AGENTS.md for Codex (tools/gen_agents.py), GEMINI.md for Gemini CLI
               (tools/gen_adapters.py), a .mdc rule under .cursor/rules/ for Cursor (tools/gen_cursor.py),
-              each read statically from that generator's own literals. A platform with no such generator
-              location has no instructions row. The member's own file name is not a name a platform
-              loads (AGENTS.md, AGENTS.override.md, GEMINI.md, CLAUDE.md, anything under a .cursor
-              directory), so the shipped pack tree does not apply its rules to sessions working on it.
+              each read statically from that generator's own literals. The Cursor rule must lie outside
+              the reserved subtree tools/gen_cursor.py rewrites and orphan-prunes (OUT_PARTS,
+              .cursor/rules/aiqt-guardrails/, compared case-insensitively), where a regeneration would
+              delete it. A platform with no such generator location has no instructions row. The
+              member's own file name is not a name a platform loads (AGENTS.md, AGENTS.override.md,
+              GEMINI.md, CLAUDE.md, anything under a .cursor directory), so the shipped pack tree does
+              not apply its rules to sessions working on it.
+  coexistence AGENTS.md and GEMINI.md are files the AIQT pack regenerates whole (tools/gen_agents.py,
+              tools/gen_adapters.py), so the OPF instructions cannot coexist with the AIQT output there
+              today. Each of those two members must state that, as the exact line COEXIST_LINE names
+              for its generator and destination. This gate provides no composition of the two and
+              verifies none; coexistence is an unresolved adoption prerequisite.
   tier        an instructions member states the exact tier line "Enforcement tier: instructions
               (advisory, not enforced)." and, outside that line, inline code spans and the rendered
               block, makes no denial, blocking or enforcement claim (CLAIM_RE), since nothing on that
@@ -43,21 +54,29 @@ these rules:
               (IMPORTED_LEAF_RE). A change to any of those in the hook changes the rendered block, so
               every platform's list then differs from the hook's and this gate is red until the
               members carry the new block.
-  behaviour   the gate probes the LOADED hook's own file-tool rule at a throwaway fixture product
-              root: a Write to a concrete instance of every rendered protected-path entry must be
-              denied, and a Write to the rendered imported-series exemption leaves, to a keep-disposed
-              plan source and to an unlisted file must be allowed. So a hook whose rule logic stops
-              denying a rendered entry (a disposition no longer frozen, a view or registration rule
-              disabled) turns this gate red even where the hook constants, and so the block, are
-              unchanged. Hook behaviour the block does not render (the Bash rules, the plain and
-              coarse classifiers, R6/R7 handling, the control-subdirectory set and every other rule)
-              is NOT probed here; opf/tools/check_opf_doctor.py carries the hook's own vectors.
+  behaviour   the gate calls the LOADED hook's own file-tool rule (_file_tool_rule) directly, for the
+              Write tool only, at one throwaway fixture product root: a Write to one concrete instance
+              of every rendered protected-path entry must be denied, and a Write to the two rendered
+              imported-series exemption leaves, to one keep-disposed plan source and to one unlisted
+              file must be allowed. So a hook whose file-tool rule stops denying the probed instance of
+              a rendered entry (a disposition no longer frozen, the store, evidence, archive, view,
+              pack-tree or registration rule disabled) turns this gate red even where the hook
+              constants, and so the block, are unchanged. The probe set is fixed: where the hook's
+              constants leave a probe unbuildable (an exemption leaf its pattern does not match, no
+              non-frozen disposition), and where the rule raises on a probe, the gate cannot evaluate
+              (exit 2) rather than drop the probe. NOT probed here: the Edit, MultiEdit and
+              NotebookEdit tools, the hook's main() dispatch and its deny output, every other fixture
+              layout, and hook behaviour the block does not render (the Bash rules, the plain and
+              coarse classifiers, R6/R7 handling, the control-subdirectory set and every other rule);
+              opf/tools/check_opf_doctor.py launches the hook against its own denial vectors.
   Cursor      the Cursor member opens with the always-apply frontmatter tools/gen_cursor.py emits.
 
   check_opf_enforce_platforms.py              check the real tree
   check_opf_enforce_platforms.py --self-test  fixture copies of the inputs; each enforced rule above is
-              held red by at least one fixture mutant, the behavioural probes among them by hook
-              rule-logic mutants that leave every rendered constant unchanged.
+              held red by at least one fixture mutant, and each behavioural probe leg (store, evidence,
+              archive, view, frozen source, pack tree, registration, exemption, keep-disposed source,
+              unlisted file, and the refusal when the rule raises) by a hook rule-logic mutant that
+              leaves every rendered constant unchanged.
 
 Exit convention (the repository's gates): 0 clean, 1 a finding, 2 cannot evaluate (an unreadable or
 malformed input, a hook that cannot be loaded, a generator literal that cannot be read).
@@ -67,14 +86,17 @@ the functions named above; the prose around those tokens and two literals the ho
 manifest's views table and its target key) are fixed text in this gate, so a hook change to those two
 literals alone is not seen here. The behavioural probes cover ONLY the rendered entries, the rendered
 exemption leaves, one keep-disposed source and one unlisted file, each at one fixture layout and through
-the file-tool rule alone: a hook rule change outside that surface (the Bash rules, the classifiers, the
-control-subdirectory set, R6/R7 handling) is not seen by this gate. The tier scan is lexical: it reads
-words, not meaning, skips inline code spans and the rendered block, and cannot judge a claim worded
-without the listed words. The deny-hook rule reads tools/gen_hooks.py PLATFORMS as the repository's
+the file-tool rule for a Write alone: a hook change outside that surface (the other file tools, main()
+dispatch and the deny output, a rule that holds only at the probed layout, the Bash rules, the
+classifiers, the control-subdirectory set, R6/R7 handling) is not seen by this gate. The tier scan is
+lexical: it reads words, not meaning, skips inline code spans and the rendered block, and cannot judge a
+claim worded without the listed words. The deny-hook rule reads tools/gen_hooks.py PLATFORMS as the repository's
 record of a tested deny mechanism; it does not itself verify a platform's documentation. Input files are
 read after a symlinked-parent check and a regular-file check, so a file swapped between those checks and
 the read is a check-to-use race. This gate checks the pack's text and the loaded hook's behaviour on
-the probes above; it does not prove that any platform follows an instructions member.
+the probes above; it does not prove that any platform follows an instructions member, and it does not
+make the Codex and Gemini CLI members coexist with the AIQT pack's generated AGENTS.md and GEMINI.md
+(an unresolved adoption prerequisite, stated in those members and in the roster).
 """
 import sys
 
@@ -119,6 +141,12 @@ CLAIM_RE = re.compile(r"\b(?:den(?:y|ies|ied|ial|ials|ying)|block(?:s|ed|ing)?|e
                       r"prevent(?:s|ed|ing)?|refus(?:e|es|ed|ing|al)|guarantee(?:s|d)?|ensure(?:s|d)?)\b",
                       re.IGNORECASE)
 CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+# The line a member whose destination the AIQT pack regenerates whole must carry (module docstring,
+# "coexistence"), filled with that generator and destination.
+COEXIST_LINE = ("Coexistence is an unresolved adoption prerequisite: the AIQT pack's %s regenerates %s "
+                "whole, so these contents cannot coexist with the AIQT instructions there today.")
+# The two exemption leaves the behavioural probes write; the hook's IMPORTED_LEAF_RE must match both.
+EXEMPTION_PROBE_LEAVES = ("worklog.imported.toml", "probe.imported.index.toml")
 # File names a platform loads as instructions; a pack member never carries one (module docstring).
 LOADED_NAMES = frozenset(("AGENTS.md", "AGENTS.override.md", "GEMINI.md", "CLAUDE.md"))
 # A probe root no filesystem holds, for reading the registration identities the hook derives per root.
@@ -227,15 +255,23 @@ def _registration_rels(hook):
     except Exception as exc:  # noqa: BLE001  a hook without this surface cannot be rendered
         raise CannotEvaluate("the Claude Code deny hook cannot derive its registration identities (%r)"
                              % (exc,))
+    try:
+        keys = list(idents)
+    except Exception as exc:  # noqa: BLE001  identities that cannot be listed cannot be rendered
+        raise CannotEvaluate("the Claude Code deny hook's registration identities cannot be listed (%r)"
+                             % (exc,))
     prefix = PROBE_ROOT + os.sep
     rels = []
-    for key in sorted(idents):
-        if not isinstance(key, str) or not key.startswith(prefix):
-            raise CannotEvaluate("the Claude Code deny hook derives the registration identity %r outside "
-                                 "the probe root %s, which this gate cannot render as a product-root-"
-                                 "relative protected path; it refuses rather than dropping a protected "
-                                 "identity" % (key, PROBE_ROOT))
+    for key in keys:
+        # Judged on the normalised spelling, never lexically: "<probe>/.claude/../../x" starts with the
+        # probe root but names a path outside it.
+        if not isinstance(key, str) or os.path.normpath(key) != key or not key.startswith(prefix):
+            raise CannotEvaluate("the Claude Code deny hook derives the registration identity %r, which is "
+                                 "not a normalised path inside the probe root %s, so this gate cannot "
+                                 "render it as a product-root-relative protected path; it refuses rather "
+                                 "than dropping or misplacing a protected identity" % (key, PROBE_ROOT))
         rels.append(os.path.relpath(key, PROBE_ROOT).replace(os.sep, "/"))
+    rels.sort()
     if not rels:
         raise CannotEvaluate("the Claude Code deny hook yields no registration path")
     return rels
@@ -299,9 +335,11 @@ def render_block(hook, root):
         lines.append("- `%s` (R8): the Claude Code hook registration of the product root." % (rel,))
     lines.extend([
         "",
-        "On Claude Code the deny hook refuses a direct write to each path on this list, and "
-        "tools/check_opf_enforce_platforms.py probes that refusal against the loaded hook at a throwaway "
-        "fixture root; on every other platform nothing refuses such a write, and this list is advisory.",
+        "On Claude Code the registered deny hook refuses a direct write to each path on this list. "
+        "tools/check_opf_enforce_platforms.py calls only that hook's file-tool rule, for a Write at one "
+        "throwaway fixture layout, never the other file tools, the hook's entry point or its deny output; "
+        "opf/tools/check_opf_doctor.py launches the hook against its own denial vectors. On every other "
+        "platform nothing refuses such a write, and this list is advisory.",
         "",
         "Not on the list until the import writer ships: a leaf directly inside the machine store directory "
         "`%s/<machine>/` whose name matches `%s`." % (working, leaf_pattern),
@@ -326,7 +364,8 @@ def _behaviour_findings(hook, root, pack_rels, registrations):
     loaded hook's own file-tool rule must DENY a Write to a concrete instance of every rendered
     protected-path entry, and ALLOW a Write to the rendered imported-series exemption leaves, to a
     keep-disposed plan source and to an unlisted file. The allow probes keep the deny probes honest: a
-    hook that denied everything would satisfy them vacuously."""
+    hook that denied everything would satisfy them vacuously. The probe set never shrinks: a hook whose
+    constants leave an allow probe unbuildable, or whose rule raises on a probe, cannot be evaluated."""
     try:
         rule = hook._file_tool_rule
         field = hook.FILE_TOOL_TARGET["Write"]
@@ -344,6 +383,20 @@ def _behaviour_findings(hook, root, pack_rels, registrations):
     except Exception as exc:  # noqa: BLE001  a hook without this surface cannot be probed
         raise CannotEvaluate("the Claude Code deny hook lacks the file-tool rule surface this gate "
                              "probes behaviourally (%r)" % (exc,))
+    for leaf in EXEMPTION_PROBE_LEAVES:
+        try:
+            matched = leaf_re.match(leaf)
+        except Exception as exc:  # noqa: BLE001  a pattern that cannot match cannot be probed
+            raise CannotEvaluate("the Claude Code deny hook's IMPORTED_LEAF_RE cannot be applied (%r)" % (exc,))
+        if not matched:
+            raise CannotEvaluate("the Claude Code deny hook's IMPORTED_LEAF_RE does not match the exemption "
+                                 "probe leaf %r, so the rendered exemption cannot be probed; the probe set "
+                                 "never shrinks silently" % (leaf,))
+    kept = [d for d in sorted(valid - set(frozen), key=repr) if isinstance(d, str)][:1]
+    if not kept:
+        raise CannotEvaluate("the Claude Code deny hook's VALID_DISPOSITIONS carries no non-frozen string "
+                             "disposition, so no keep-disposed plan source can be probed; the probe set "
+                             "never shrinks silently")
     findings = []
     with tempfile.TemporaryDirectory(prefix="opf-enforce-behaviour-") as base:
         proot = os.path.join(os.path.realpath(base), "product")
@@ -359,10 +412,8 @@ def _behaviour_findings(hook, root, pack_rels, registrations):
                 _probe_token(d, "frozen disposition")
                 plan += ["[[sources]]", "path = \"frozen-%s.md\"" % (d,),
                          "disposition = \"%s\"" % (d,), ""]
-            kept = [d for d in sorted(valid - set(frozen)) if isinstance(d, str)][:1]
-            for d in kept:
-                _probe_token(d, "disposition")
-                plan += ["[[sources]]", "path = \"kept.md\"", "disposition = \"%s\"" % (d,), ""]
+            _probe_token(kept[0], "disposition")
+            plan += ["[[sources]]", "path = \"kept.md\"", "disposition = \"%s\"" % (kept[0],), ""]
             Path(run_home, plan_name).write_text("\n".join(plan), encoding="utf-8")
             Path(machine, "manifest.toml").write_text(
                 "[%s]\nstandard = \"%s\"\n\n[views.probe]\ntarget = \"VIEW-PROBE.md\"\n"
@@ -385,11 +436,9 @@ def _behaviour_findings(hook, root, pack_rels, registrations):
         for rel in registrations:
             probes.append((os.path.join(proot, *rel.split("/")),
                            "the hook registration %s (R8)" % (rel,), True))
-        for leaf in ("worklog.imported.toml", "probe.imported.index.toml"):
-            if leaf_re.match(leaf):
-                probes.append((os.path.join(machine, leaf), "the rendered imported-series exemption", False))
-        if kept:
-            probes.append((os.path.join(proot, "kept.md"), "a keep-disposed plan source", False))
+        for leaf in EXEMPTION_PROBE_LEAVES:
+            probes.append((os.path.join(machine, leaf), "the rendered imported-series exemption", False))
+        probes.append((os.path.join(proot, "kept.md"), "a keep-disposed plan source", False))
         probes.append((os.path.join(proot, "unlisted-probe.md"), "an unlisted file", False))
         for target, entry, expect_deny in probes:
             try:
@@ -455,11 +504,13 @@ def _vocabulary(root):
         residuals=residuals,
         required=required,
         deny_platforms=deny_platforms,
+        # (kind, location, generator, the subtree that generator rewrites and prunes, or None)
         locations=dict((
-            ("codex", ("file", target(agents["GENSRC_OUTPUTS"], "AGENTS.md", GEN_AGENTS_REL), GEN_AGENTS_REL)),
+            ("codex", ("file", target(agents["GENSRC_OUTPUTS"], "AGENTS.md", GEN_AGENTS_REL), GEN_AGENTS_REL,
+                       None)),
             ("gemini-cli", ("file", target(adapters["GENSRC_OUTPUTS"], "GEMINI.md", GEN_ADAPTERS_REL),
-                            GEN_ADAPTERS_REL)),
-            ("cursor", ("mdc", "/".join(parts[:2]) + "/", GEN_CURSOR_REL)),
+                            GEN_ADAPTERS_REL, None)),
+            ("cursor", ("mdc", "/".join(parts[:2]) + "/", GEN_CURSOR_REL, "/".join(parts) + "/")),
         )),
         frontmatter=frontmatter,
     )
@@ -521,12 +572,12 @@ def _row_findings(root, vocab, block, where, row):
             findings.append("%s: a deny-hook row needs a deny mechanism this repository documents and tests, "
                             "and %s PLATFORMS %s does not name %s; use the instructions tier"
                             % (where, GEN_HOOKS_REL, sorted(vocab["deny_platforms"]), platform))
-        member_bytes = _read(member_path, "the deny-hook member")
-        if PACK_REL + "/" + member != HOOK_REL and member_bytes != _read(
-                _input(root, HOOK_REL, "the Claude Code deny hook"), "the Claude Code deny hook"):
-            findings.append("%s: member %r is not the verified deny hook %s, by path or by byte content: "
-                            "the roster's deny-hook member must be the hook this gate renders and "
-                            "probes, never a substitute" % (where, member, HOOK_REL))
+        if PACK_REL + "/" + member != HOOK_REL:
+            findings.append("%s: member %r is not %r, the canonical deny hook path %s: the roster's "
+                            "deny-hook member must be the hook this gate loads, renders and probes, never "
+                            "a copy (the hook derives its guarded trees from its own location, so even a "
+                            "byte-identical copy elsewhere guards different directories)"
+                            % (where, member, HOOK_REL[len(PACK_REL) + 1:], HOOK_REL))
         if destination not in vocab["registrations"]:
             findings.append("%s: destination %r is not a hook registration path the deny hook itself "
                             "protects %s" % (where, destination, vocab["registrations"]))
@@ -535,11 +586,15 @@ def _row_findings(root, vocab, block, where, row):
     if location is None:
         findings.append("%s: no AIQT adapter generator names an instructions location for %s" % (where, platform))
         return findings
-    kind, spot, generator = location
+    kind, spot, generator, pruned = location
     if (kind == "file" and destination != spot) or (kind == "mdc" and not (
             destination.startswith(spot) and destination.endswith(".mdc"))):
         findings.append("%s: destination %r is not the location %s generates for this platform (%s%s)"
                         % (where, destination, generator, spot, "<name>.mdc" if kind == "mdc" else ""))
+    elif pruned is not None and destination.casefold().startswith(pruned.casefold()):
+        findings.append("%s: destination %r lies inside %s, the subtree %s rewrites and orphan-prunes, so a "
+                        "regeneration would delete it; install it under %s outside that subtree"
+                        % (where, destination, pruned, generator, spot))
     parts = member.split("/")
     if parts[-1] in LOADED_NAMES or any(p.startswith(".cursor") for p in parts):
         findings.append("%s: member %r carries a name its platform loads; the pack tree would apply it to "
@@ -547,6 +602,10 @@ def _row_findings(root, vocab, block, where, row):
     text = _text(member_path, "the instructions member")
     findings.extend(_member_findings(PACK_REL + "/" + member, text, block,
                                      vocab["frontmatter"] if kind == "mdc" else None))
+    if kind == "file" and text.split("\n").count(COEXIST_LINE % (generator, spot)) != 1:
+        findings.append("%s: does not state exactly once, on a line of its own, that %s regenerates %s whole "
+                        "and coexistence is unresolved: %r"
+                        % (PACK_REL + "/" + member, generator, spot, COEXIST_LINE % (generator, spot)))
     return findings
 
 
@@ -613,8 +672,8 @@ def main(argv):
         print("check_opf_enforce_platforms: FAIL (%d finding(s))" % (len(findings),))
         return 1
     print("check_opf_enforce_platforms: OK (%s covers every supported assistant platform; every instructions "
-          "member carries the protected-path list rendered from %s, and the loaded hook denies each "
-          "rendered entry on the behavioural probes)" % (ROSTER_REL, HOOK_REL))
+          "member carries the protected-path list rendered from %s, and the loaded hook's file-tool rule "
+          "denies a Write to each rendered entry on the behavioural probes)" % (ROSTER_REL, HOOK_REL))
     return 0
 
 
@@ -690,6 +749,18 @@ def _deny_member_byte_copy(tree):
           'member = "claude/pretooluse_deny_copy.py"')
 
 
+RELOCATED_HOOK_REL = PACK_REL + "/codex/nested/hook.py"
+
+
+def _deny_member_relocated_copy(tree):
+    """The unchanged hook bytes at another depth, named as the deny-hook member: the copy derives its
+    guarded trees from its own location, so it guards different directories (self_test checks that)."""
+    (tree / RELOCATED_HOOK_REL).parent.mkdir(parents=True)
+    shutil.copyfile(tree / HOOK_REL, tree / RELOCATED_HOOK_REL)
+    _edit(tree, ROSTER_REL, 'member = "claude/pretooluse_deny.py"',
+          'member = "%s"' % (RELOCATED_HOOK_REL[len(PACK_REL) + 1:],))
+
+
 def _loaded_name(tree):
     (tree / CODEX).rename(tree / PACK_REL / "codex" / "AGENTS.md")
     _edit(tree, ROSTER_REL, 'member = "codex/AGENTS.opf.md"', 'member = "codex/AGENTS.md"')
@@ -718,8 +789,9 @@ def _vectors():
     cannot-evaluate result). Each red vector contradicts at least one rule this gate enforces and pins
     the exact finding count plus a message substring, so a weakened rule that stops reporting it turns
     the self-test red; the clean vectors prove the named permissions fire no finding. The vectors mutate
-    fixture INPUTS only: what each one demonstrates is the gate's response to that mutated input (the
-    record of which gate-code mutation each vector catches lives in the PR evidence, not here)."""
+    fixture INPUTS only: what each one demonstrates is the gate's response to that mutated input; the
+    behavioural vectors name the probe leg each one holds, and the full record of which gate-code
+    mutation each vector catches lives in the PR evidence."""
     def edit(rel, old, new, count=1):
         return lambda tree: _edit(tree, rel, old, new, count)
 
@@ -748,32 +820,62 @@ def _vectors():
                                           'FROZEN_DISPOSITIONS = ("migrate", "retire", "move")'), differs, 3),
         ("hook-writer-verbs", edit(HOOK_REL, 'WRITER_VERBS = frozenset(("record", "render"))',
                                    'WRITER_VERBS = frozenset(("record", "render", "import"))'), differs, 3),
-        ("hook-leaf-pattern", edit(HOOK_REL, r'IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.toml|',
-                                   r'IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.tom|'), differs, 3),
+        ("hook-leaf-pattern", edit(HOOK_REL, r'[A-Za-z0-9_-]+\.imported\.index\.toml)',
+                                   r'[A-Za-z0-9_.-]+\.imported\.index\.toml)'), differs, 3),
         ("hook-pack-tree", edit(HOOK_REL, 'tools = os.path.realpath(os.path.join(here, os.pardir, os.pardir, '
                                 '"tools"))', 'tools = os.path.realpath(os.path.join(here, os.pardir, os.pardir, '
                                 '"bin"))'), differs, 3),
         ("hook-unloadable", edit(HOOK_REL, "\nimport errno\n", "\nimport errno\nraise RuntimeError('broken')\n"),
          "CANNOT EVALUATE", None),
         # behaviour: a hook whose RULE LOGIC stops matching a rendered entry leaves every constant, and
-        # so the block, unchanged; only the behavioural probes turn these red.
+        # so the block, unchanged; only the behavioural probes turn these red. Each probe leg of
+        # _behaviour_findings is held by the vector named beside it: dropping that leg from the gate
+        # changes the vector's exact finding count, so the self-test turns red.
+        ("hook-store-logic", edit(HOOK_REL, '    return ("direct edits under %s/ are denied:',
+                                  '    return None and ("direct edits under %s/ are denied:'),
+         "allows the probe write", 1),  # the store-tree probe
+        ("hook-evidence-logic", edit(HOOK_REL, '        return ("direct writes under %s/imported/ are denied:',
+                                     '        return None and ("direct writes under %s/imported/ are denied:'),
+         "allows the probe write", 1),  # the evidence-home probe
+        ("hook-archive-logic", edit(HOOK_REL, '        return ("writes under %s/archive/adoption/<run-id>/ are',
+                                    '        return None and ("writes under %s/archive/adoption/<run-id>/ are'),
+         "allows the probe write", 1),  # the adoption-archive probe
         ("hook-frozen-logic", edit(HOOK_REL, "            if disposition in FROZEN_DISPOSITIONS:",
                                    '            if disposition == "retire":'),
-         "allows the probe write", 1),
+         "allows the probe write", 1),  # the frozen-source probes
         ("hook-views-logic", edit(HOOK_REL, "if cand in views[0]:", "if cand in ():", 3),
-         "allows the probe write", 1),
+         "allows the probe write", 1),  # the declared-view probe
+        ("hook-guard-logic", edit(HOOK_REL, "        if candidate == prefix or candidate.startswith(prefix + os.sep):",
+                                  "        if False:"),
+         "allows the probe write", 2),  # the two pack-tree probes
         ("hook-registration-logic", edit(HOOK_REL, "    hit = idents.get(candidate)",
                                          "    hit = idents.get(candidate) and None"),
-         "allows the probe write", 2),
+         "allows the probe write", 2),  # the registration probes
         ("hook-exemption-logic", edit(HOOK_REL, "    if (len(after) == 2 and",
                                       "    if (False and len(after) == 2 and"),
-         "denies the probe write", 2),
+         "denies the probe write", 2),  # the two exemption-leaf probes
+        ("hook-every-source-frozen", edit(HOOK_REL, "            if disposition in FROZEN_DISPOSITIONS:",
+                                          "            if disposition in VALID_DISPOSITIONS:"),
+         "denies the probe write", 1),  # the keep-disposed source probe
+        ("hook-deny-all", edit(HOOK_REL, "    return None\n\n\ndef _plain_command_word",
+                               '    return "deny-all mutant"\n\n\ndef _plain_command_word'),
+         "denies the probe write", 4),  # every allow probe, the unlisted-file probe among them
+        ("hook-rule-raises", edit(HOOK_REL, "    field = FILE_TOOL_TARGET[tool_name]\n",
+                                  "    field = FILE_TOOL_TARGET[tool_name]\n    raise RuntimeError('mutant')\n"),
+         "fails on the behavioural probe", None),  # the refusal when the rule raises
+        # behaviour: a hook whose constants leave a probe unbuildable refuses; the set never shrinks.
+        ("hook-leaf-pattern-unprobeable", edit(HOOK_REL, r'IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported'
+                                               r'\.toml|', r'IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported'
+                                               r'\.tom|'), "does not match the exemption probe leaf", None),
+        ("hook-no-kept-disposition", edit(HOOK_REL, 'VALID_DISPOSITIONS = frozenset(("keep", "move", "migrate", '
+                                          '"retire"))', 'VALID_DISPOSITIONS = frozenset(("migrate", "retire"))'),
+         "no non-frozen string disposition", None),
         # renderer refusals: a hook surface the renderer cannot represent is cannot-evaluate.
         ("hook-registration-outside-probe", edit(HOOK_REL, 'REGISTRATION_LEAVES = frozenset(("settings.json", '
                                                  '"settings.local.json"))', 'REGISTRATION_LEAVES = frozenset(('
                                                  '"settings.json", "settings.local.json", '
                                                  '"../../outside-settings.json"))'),
-         "outside the probe root", None),
+         "not a normalised path inside the probe root", None),
         ("hook-no-render-verb", edit(HOOK_REL, 'WRITER_VERBS = frozenset(("record", "render"))',
                                      'WRITER_VERBS = frozenset(("record",))'), "no render verb", None),
         ("hook-one-guarded-tree", edit(HOOK_REL, "    return (pack, tools)", "    return (pack,)"),
@@ -795,7 +897,7 @@ def _vectors():
          None, 0),
         ("cursor-frontmatter", edit(CURSOR, "alwaysApply: true", "alwaysApply: false"), "frontmatter", 1),
         # deny hook: allowed only where the repository documents and tests a deny mechanism, and the
-        # member must BE the verified hook (path or byte-identical), at a registration destination.
+        # member must be the canonical hook path exactly, at a registration destination.
         ("deny-hook-codex", _codex_deny_hook, "needs a deny mechanism", 3),
         ("deny-hook-gemini", edit(ROSTER_REL, 'means = "instructions"\nmember = "gemini-cli/GEMINI.opf.md"',
                                   'means = "deny-hook"\nmember = "gemini-cli/GEMINI.opf.md"'),
@@ -803,14 +905,15 @@ def _vectors():
         ("deny-hook-tested-renderer", _codex_deny_hook_with_renderer, None, 0),
         ("deny-member-not-hook", edit(ROSTER_REL, 'member = "claude/pretooluse_deny.py"',
                                       'member = "codex/AGENTS.opf.md"'),
-         "is not the verified deny hook", 1),
-        ("deny-member-byte-identical-copy", _deny_member_byte_copy, None, 0),
+         "the canonical deny hook path", 1),
+        ("deny-member-byte-identical-copy", _deny_member_byte_copy, "the canonical deny hook path", 1),
+        ("deny-member-relocated-copy", _deny_member_relocated_copy, "the canonical deny hook path", 1),
         ("deny-destination-unpinned", edit(ROSTER_REL, 'destination = ".claude/settings.json"',
                                            'destination = "README.md"'),
          "is not a hook registration path", 1),
         ("deny-member-missing", edit(ROSTER_REL, 'member = "claude/pretooluse_deny.py"',
                                      'member = "claude/no-such-hook.py"'),
-         "deny-hook member", None),
+         "the canonical deny hook path", 1),
         # roster: vocabulary, required residuals, evidence, coverage, order, keys and the exact schema.
         ("means-outside-vocabulary", edit(ROSTER_REL, 'means = "instructions"\nmember = "cursor/opf.mdc"',
                                           'means = "ci-checks"\nmember = "cursor/opf.mdc"'),
@@ -852,6 +955,24 @@ def _vectors():
                                     'destination = ".cursor/opf.md"'), "is not the location", 1),
         ("destination-not-contained", edit(ROSTER_REL, 'destination = ".cursor/rules/opf.mdc"',
                                            'destination = "/etc/opf.mdc"'), "contained relative paths", 1),
+        # location: a Cursor rule inside the subtree tools/gen_cursor.py orphan-prunes would be deleted.
+        ("destination-cursor-pruned-subtree", edit(ROSTER_REL, 'destination = ".cursor/rules/opf.mdc"',
+                                                   'destination = ".cursor/rules/aiqt-guardrails/opf.mdc"'),
+         "orphan-prunes", 1),
+        ("destination-cursor-pruned-subtree-case", edit(ROSTER_REL, 'destination = ".cursor/rules/opf.mdc"',
+                                                        'destination = ".cursor/rules/AIQT-Guardrails/opf.mdc"'),
+         "orphan-prunes", 1),
+        ("destination-cursor-beside-subtree", edit(ROSTER_REL, 'destination = ".cursor/rules/opf.mdc"',
+                                                   'destination = ".cursor/rules/aiqt-guardrails-opf/opf.mdc"'),
+         None, 0),
+        # coexistence: a member whose destination the AIQT pack regenerates whole states so exactly once.
+        ("coexist-line-missing", edit(CODEX, COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md") + "\n", ""),
+         "coexistence is unresolved", 1),
+        ("coexist-line-wrong-generator", edit(GEMINI, COEXIST_LINE % (GEN_ADAPTERS_REL, "GEMINI.md"),
+                                              COEXIST_LINE % (GEN_AGENTS_REL, "GEMINI.md")),
+         "coexistence is unresolved", 1),
+        ("coexist-line-twice", append(CODEX, "\n" + COEXIST_LINE % (GEN_AGENTS_REL, "AGENTS.md") + "\n"),
+         "coexistence is unresolved", 1),
         ("member-loaded-name", _loaded_name, "carries a name its platform loads", 1),
         ("member-dot-cursor-component", _dot_cursor_member, "carries a name its platform loads", 1),
         ("member-absent", remove(GEMINI), "CANNOT EVALUATE", None),
@@ -900,10 +1021,29 @@ def self_test():
                   "`.working/imported/adoption/<run-id>/plan.toml`", "`migrate` or `retire`",
                   "`opf/enforcement/**`", "`opf/tools/**`", "`.claude/settings.json`",
                   "`.claude/settings.local.json`", "`opf record` and `opf render`",
-                  "probes that refusal against the loaded hook"):
+                  "calls only that hook's file-tool rule, for a Write at one throwaway fixture layout"):
         runs += 1
         if token not in block:
             failures.append("real-block: the rendered list lacks %s" % (token,))
+    # The registration renderer judges identities on their normalised spelling and refuses, never
+    # raises, on identities it cannot sort or list (stub hooks: each returns fixed identities).
+    probe = PROBE_ROOT + os.sep + os.path.join(".claude", "settings.json")
+    for case_id, idents, expect in (
+            ("registration-clean", {probe: None}, [".claude/settings.json"]),
+            ("registration-not-normalised", {probe: None, os.path.join(PROBE_ROOT, ".claude", os.pardir,
+                                                                      os.pardir, "x.json"): None}, None),
+            ("registration-mixed-types", {1: None, "a": None}, None),
+            ("registration-not-iterable", 5, None)):
+        runs += 1
+        stub = type("StubHook", (), {"_registration_idents": staticmethod(lambda roots, i=idents: i)})
+        try:
+            got = _registration_rels(stub)
+        except CannotEvaluate:
+            got = None
+        except Exception as exc:  # noqa: BLE001  any other exception is the failure under test
+            got = "raised %r" % (exc,)
+        if got != expect:
+            failures.append("%s: expected %r, got %r" % (case_id, expect, got))
     with tempfile.TemporaryDirectory(prefix="opf-enforce-platforms-") as base:
         for case_id, mutate, expect, count in _vectors():
             runs += 1
@@ -926,6 +1066,23 @@ def self_test():
             elif isinstance(got, str) or len(got) != count or not any(expect in f for f in got):
                 failures.append("%s: expected %d finding(s), one containing %r, got %r"
                                 % (case_id, count, expect, got))
+        # Why the deny-hook member must be the canonical path (deny-member-relocated-copy): the same
+        # bytes at another depth guard other trees, so the copy allows a write the canonical hook denies.
+        runs += 1
+        try:
+            tree = _fixture(base, "relocated-copy-guards-elsewhere")
+            _deny_member_relocated_copy(tree)
+            canonical = load_hook(_input(tree, HOOK_REL, "the Claude Code deny hook"))
+            relocated = load_hook(_input(tree, RELOCATED_HOOK_REL, "the relocated copy"))
+            target = {"file_path": os.path.join(str(tree), "opf", "tools", "opf.py")}
+            got = (_pack_rels(canonical, tree) != _pack_rels(relocated, tree),
+                   canonical._file_tool_rule("Write", target, str(tree)) is not None,
+                   relocated._file_tool_rule("Write", target, str(tree)) is None)
+        except (AssertionError, OSError, ValueError, CannotEvaluate) as exc:
+            got = "raised %r" % (exc,)
+        if got != (True, True, True):
+            failures.append("relocated-copy-guards-elsewhere: expected the copy to guard other trees and "
+                            "to allow a write to opf/tools that the canonical hook denies, got %r" % (got,))
     for failure in failures:
         print("SELF-TEST FAIL: %s" % (failure,))
     if failures:

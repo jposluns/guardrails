@@ -13,9 +13,10 @@ Cursor mechanism that would. A Cursor session can still edit every path below; f
 up to the assistant.
 
 That is an always-apply rule file under .cursor/rules/. The AIQT pack's Cursor adapter
-(tools/gen_cursor.py) writes its own rules only under the reserved subtree
-.cursor/rules/aiqt-guardrails/, so .cursor/rules/opf.mdc lies outside every generated tree and a
-regeneration leaves it in place.
+(tools/gen_cursor.py) rewrites and orphan-prunes only the reserved subtree
+.cursor/rules/aiqt-guardrails/, so a regeneration leaves .cursor/rules/opf.mdc in place beside the AIQT
+rules. tools/check_opf_enforce_platforms.py reports a Cursor destination inside that subtree as a
+finding, because a regeneration would delete a rule there.
 
 ## Working rules
 
@@ -41,7 +42,7 @@ Code, rendered from that hook. On Cursor it is advisory.
 - `.claude/settings.json` (R8): the Claude Code hook registration of the product root.
 - `.claude/settings.local.json` (R8): the Claude Code hook registration of the product root.
 
-On Claude Code the deny hook refuses a direct write to each path on this list, and tools/check_opf_enforce_platforms.py probes that refusal against the loaded hook at a throwaway fixture root; on every other platform nothing refuses such a write, and this list is advisory.
+On Claude Code the registered deny hook refuses a direct write to each path on this list. tools/check_opf_enforce_platforms.py calls only that hook's file-tool rule, for a Write at one throwaway fixture layout, never the other file tools, the hook's entry point or its deny output; opf/tools/check_opf_doctor.py launches the hook against its own denial vectors. On every other platform nothing refuses such a write, and this list is advisory.
 
 Not on the list until the import writer ships: a leaf directly inside the machine store directory `.working/<machine>/` whose name matches `\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.imported\.index\.toml)\Z`.
 

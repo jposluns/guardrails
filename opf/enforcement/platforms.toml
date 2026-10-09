@@ -10,28 +10,36 @@
 # tools/check_opf_enforce_platforms.py validates this file and the members it names: the roster, the
 # means vocabulary and required residuals (_opf_adopt), the rule that a deny-hook row needs a deny
 # mechanism this repository documents and tests (tools/gen_hooks.py PLATFORMS), that the deny-hook
-# member IS the verified hook (its own path or a byte-identical copy) with a hook-registration
-# destination, each instructions member's install location (the location the AIQT pack's own adapter
-# generator writes for that platform), the advisory tier marking, and that each instructions member
-# carries exactly the protected-path list rendered from the Claude Code hook's constants
-# (claude/pretooluse_deny.py). That gate also probes the LOADED hook's own file-tool rule at a
-# throwaway fixture root for every rendered entry and for the rendered imported-series exemption, so
-# a member list that differs from the hook's constants, and a hook whose rule logic stops denying a
-# rendered entry, each turn the gate red. Hook behaviour the rendered block does not cover (the Bash
-# rules and the command classifiers among it) is outside that gate; opf/tools/check_opf_doctor.py
-# carries the hook's own denial vectors.
+# member is exactly the canonical hook path claude/pretooluse_deny.py (a copy at any other path is a
+# finding even when byte-identical, since the hook derives the trees it guards from its own location)
+# with a hook-registration destination, each instructions member's install location (the location the
+# AIQT pack's own adapter generator writes for that platform), the advisory tier marking, and that
+# each instructions member carries exactly the protected-path list rendered from the Claude Code hook's
+# constants (claude/pretooluse_deny.py). That gate also calls the LOADED hook's own file-tool rule, for
+# a Write at one throwaway fixture layout, on one instance of every rendered entry and on the rendered
+# imported-series exemption leaves, so a member list that differs from the hook's constants, and a
+# hook whose file-tool rule stops denying a Write to a probed instance, each turn the gate red. Outside
+# that gate: the Edit, MultiEdit and NotebookEdit tools, the hook's main() dispatch and deny output,
+# every other layout, the control-subdirectory set, R6/R7 handling, and hook behaviour the rendered
+# block does not cover (the Bash rules and the command classifiers among it);
+# opf/tools/check_opf_doctor.py launches the hook against its own denial vectors.
 #
 # An instructions member's own file name is deliberately NOT the name its platform loads (AGENTS.md,
 # GEMINI.md, or a rule under .cursor/rules/): the pack tree ships inside the product repository, and a
 # member under a loaded name would apply its rules to sessions working on the pack itself. The adopter
-# installs each member's contents at its destination. The Codex and Gemini CLI destinations are files
-# the AIQT pack's own generators rewrite whole and drift-gate with --check (tools/gen_agents.py
-# writes AGENTS.md, tools/gen_adapters.py writes GEMINI.md, each with a GENERATED do-not-hand-edit
-# header), so in a product that runs those generators these contents must be installed through the
-# generator (extending what it emits), never as a hand edit the next regeneration overwrites; only in
-# a product without that generator is adding them to the file a direct planned instruction-surface
-# edit. tools/gen_cursor.py writes only under .cursor/rules/aiqt-guardrails/, so the Cursor
-# destination .cursor/rules/opf.mdc lies outside every generated tree.
+# installs each member's contents at its destination.
+#
+# UNRESOLVED ADOPTION PREREQUISITE (coexistence). The Codex and Gemini CLI destinations, AGENTS.md and
+# GEMINI.md, are files the AIQT pack regenerates whole from its own rule sources and drift-gates with
+# --check (tools/gen_agents.py writes AGENTS.md, tools/gen_adapters.py writes GEMINI.md, each with a
+# GENERATED do-not-hand-edit header). So the OPF instructions cannot coexist with the AIQT output there
+# today: a hand edit is discarded by the next regeneration, and replacing the file discards the AIQT
+# instructions. This pack provides no composition of the two and the gate verifies none; each of those
+# two members states this on a line the gate requires. Only in a product that does not generate the
+# file can its member's contents be added to it directly, as a planned instruction-surface edit.
+# tools/gen_cursor.py rewrites and orphan-prunes only .cursor/rules/aiqt-guardrails/, so the Cursor
+# destination .cursor/rules/opf.mdc, outside that subtree, survives a regeneration; the gate reports a
+# Cursor destination inside that subtree (compared case-insensitively) as a finding.
 #
 # Fields per [[platform]]:
 #   platform     the plan token (_opf_adopt.ENFORCEMENT_PLATFORMS)

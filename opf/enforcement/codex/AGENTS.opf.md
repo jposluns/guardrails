@@ -2,18 +2,21 @@
 
 Enforcement tier: instructions (advisory, not enforced).
 
-This is the Codex member of the OPF enforcement pack (opf/enforcement/platforms.toml). Install its
-contents in the product root's AGENTS.md. Codex reads these rules as instructions only: no Codex hook or
+This is the Codex member of the OPF enforcement pack (opf/enforcement/platforms.toml). Its destination
+is the product root's AGENTS.md. Codex reads these rules as instructions only: no Codex hook or
 setting in this pack stops a write to a listed path, because this repository documents and tests no
 Codex mechanism that would. A Codex session can still edit every path below; following these rules is
 up to the assistant.
 
-AGENTS.md is the file the AIQT pack's Codex adapter (tools/gen_agents.py) writes, and that generator
-rewrites the whole file: its output opens with a GENERATED, do-not-hand-edit header, and its --check
-mode reports a hand edit as drift. In a product that runs that generator, a hand edit to AGENTS.md does
-not survive the next regeneration, so the adoption plan must either extend the generator so that its
-output carries these contents, or install them at another location Codex reads. Only in a product that
-does not generate AGENTS.md, add these contents to it directly as a planned instruction-surface edit.
+Coexistence is an unresolved adoption prerequisite: the AIQT pack's tools/gen_agents.py regenerates AGENTS.md whole, so these contents cannot coexist with the AIQT instructions there today.
+
+That generator writes AGENTS.md from the AIQT rule sources (.aiqt/core/rules/) alone: its output opens
+with a GENERATED, do-not-hand-edit header, its --check mode reports a hand edit as drift, and the next
+regeneration discards the edit. Replacing AGENTS.md with these contents alone would discard the AIQT
+instructions instead. This pack provides no way to compose the two, and
+tools/check_opf_enforce_platforms.py verifies none. In a product that runs that generator, installing
+this member waits until the adopter settles that composition; only in a product that does not generate
+AGENTS.md can these contents be added to it directly, as a planned instruction-surface edit.
 
 ## Working rules
 
@@ -39,7 +42,7 @@ Code, rendered from that hook. On Codex it is advisory.
 - `.claude/settings.json` (R8): the Claude Code hook registration of the product root.
 - `.claude/settings.local.json` (R8): the Claude Code hook registration of the product root.
 
-On Claude Code the deny hook refuses a direct write to each path on this list, and tools/check_opf_enforce_platforms.py probes that refusal against the loaded hook at a throwaway fixture root; on every other platform nothing refuses such a write, and this list is advisory.
+On Claude Code the registered deny hook refuses a direct write to each path on this list. tools/check_opf_enforce_platforms.py calls only that hook's file-tool rule, for a Write at one throwaway fixture layout, never the other file tools, the hook's entry point or its deny output; opf/tools/check_opf_doctor.py launches the hook against its own denial vectors. On every other platform nothing refuses such a write, and this list is advisory.
 
 Not on the list until the import writer ships: a leaf directly inside the machine store directory `.working/<machine>/` whose name matches `\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.imported\.index\.toml)\Z`.
 
