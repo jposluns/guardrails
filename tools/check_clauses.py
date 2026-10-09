@@ -28,6 +28,19 @@ gen_manifest.py at build time).
   FAIL; the gate never picks the first occurrence. Uniqueness is within THAT ROW'S window only, not global,
   so several clause-ids may legitimately share one source sentence. (3.1 canonicalization of the source
   file itself is check_byte_canon.py's job, not re-scanned here.)
+  WHOLE-CLAUSE EDGES: a window line may hold several sentences, so a canonical-text may be shorter than
+  its window, but only by whole sentences or whole clauses. Both edges are judged against the WHOLE
+  source file (a line edge is no free pass): the text BEGINS at the start of the file or of a paragraph
+  (after a blank line), after a sentence end (one of . ? ! ; then whitespace), after a clause separator
+  and a coordinating conjunction (", and " / "; and "), or with a conjunction itself after a comma
+  (", so ..."); and it ENDS at the end of the file or of a paragraph, on one of . ? ! ; followed by
+  whitespace, just before a ';', or just before a comma that a coordinating conjunction follows
+  (", and ..."). The conjunctions are and, but, or, nor, so, yet. Every other edge is a FAIL, so a text
+  cut short inside a sentence (a dropped final '.', a dropped word, a cut at a plain comma, a dropped
+  wrapped line) never passes. RESIDUAL, disclosed: a row cut back to an EARLIER whole sentence or whole
+  clause still passes when what it drops sits on its end-line (a dropped part that fills a later line
+  breaks the tight window instead), and a period inside an abbreviation reads as a sentence end; the
+  gate has no record of where an obligation ends other than the source text itself.
 
   `.aiqt/core/id-history.toml` (7.3), the pack-owned, append-only, cumulative register of every corpus-id
   AND clause-id ever assigned. Three arrays:
@@ -47,7 +60,8 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         byte-exact substring within that window, beginning on start-line and ending on
                         end-line (a tight window); the source digest is the SHA-256 of the whole source
                         file. Zero or more than one occurrence, an untight occurrence, an empty
-                        canonical-text, or a digest disagreement is a FAIL.
+                        canonical-text, an edge that is not a whole-sentence or whole-clause edge of
+                        the source file (a truncated text), or a digest disagreement is a FAIL.
   CUMULATIVE-MAX (7.1): each ordinal newly assigned this release (a born row at the newest release in the
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
@@ -538,6 +552,45 @@ def _span_content(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
+SENTENCE_ENDS = ".?!;"  # a sentence end, or a semicolon that closes a whole clause
+CONJUNCTIONS = ("and", "but", "or", "nor", "so", "yet")  # coordinating conjunctions a clause split may use
+_CONJ = "(?:{})".format("|".join(CONJUNCTIONS))
+_AFTER_SPLIT_RE = re.compile(r"[,;]\s+{}\s+\Z".format(_CONJ))  # text begins after ", and " / "; and "
+_LEADS_WITH_CONJ_RE = re.compile(r"{}\s".format(_CONJ))  # text itself begins with a conjunction word
+_BEFORE_SPLIT_RE = re.compile(r",\s+{}\s".format(_CONJ))  # text ends just before ", and ..."
+
+
+def _edge_findings(source, begin, finish):
+    """WHOLE-CLAUSE EDGES (Model C). source is the whole decoded source file and [begin, finish) is the
+    one occurrence of a canonical-text in it (non-empty, no edge whitespace). Returns a list of edge
+    problems, empty when both edges are whole-sentence or whole-clause edges of the file. Judged on the
+    file, not the window, so an edge at a line end or line start is checked against the next or previous
+    line too. The leading edge is clean at the start of the file or of a paragraph (a blank line before
+    it), after one of . ? ! ; and whitespace, after a separator and a conjunction (", and "), or when the
+    text begins with a conjunction after a comma. The trailing edge is clean at the end of the file or of
+    a paragraph, on one of . ? ! ; followed by whitespace, just before a ';', or just before a comma that
+    a conjunction follows. Anything else is a cut inside a clause (a truncated text)."""
+    problems = []
+    text = source[begin:finish]
+    before = source[:begin]
+    kept = before.rstrip()
+    gap = before[len(kept):]
+    if not (not kept or gap.count("\n") >= 2
+            or (gap and kept[-1] in SENTENCE_ENDS)
+            or (gap and kept[-1] == "," and _LEADS_WITH_CONJ_RE.match(text))
+            or _AFTER_SPLIT_RE.search(before)):
+        problems.append("begins inside a clause (after {!r})".format(before[-20:]))
+    after = source[finish:]
+    rest = after.lstrip()
+    gap = after[:len(after) - len(rest)]
+    if not (not rest or gap.count("\n") >= 2
+            or (gap and text[-1] in SENTENCE_ENDS)
+            or after.startswith(";")
+            or _BEFORE_SPLIT_RE.match(after)):
+        problems.append("ends inside a clause (before {!r})".format(after[:20]))
+    return problems
+
+
 def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     """PER-ROW (7.2), Model C. For each row: the source file is read (its whole raw bytes hashed for the
     digest and its text sliced for the window); the [start,end] block resolves inside the file and is
@@ -550,7 +603,9 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     finding (an out-of-rules-dir or wrong-file path). An empty or whitespace-only canonical-text never
     passes, and a canonical-text that begins or ends with whitespace is a finding (a leading or trailing
     space, tab, or newline would otherwise falsely satisfy the tight begin/end-line check). Zero or more
-    than one occurrence, an untight occurrence, or a digest disagreement is a finding. When manifest_sources
+    than one occurrence, an untight occurrence, an occurrence whose edges are not whole-sentence or
+    whole-clause edges of the source file (_edge_findings: a truncated canonical-text), or a digest
+    disagreement is a finding. When manifest_sources
     is not None (the DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES
     entry. Returns a list of finding strings; a required field of the wrong type, including a non-integer or
     boolean start-line/end-line or a source-digest that is not 64 lowercase hex characters, is a GateError
@@ -645,6 +700,12 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                     findings.append("{}: canonical-text resolves inside the window but does not begin on "
                                     "start-line and end on end-line (window not tight) in {}"
                                     .format(where, source_path))
+                window_at = len("\n".join(decoded.split("\n")[:start - 1])) + (1 if start > 1 else 0)
+                problems = _edge_findings(decoded, window_at + first, window_at + first + len(text_field))
+                if problems:
+                    findings.append("{}: canonical-text {} in {}; a canonical-text covers whole sentences or "
+                                    "whole clauses, so a text cut short is a truncated row"
+                                    .format(where, " and ".join(problems), source_path))
         if digest_field != digest:
             findings.append("{}: source-digest does not match the SHA-256 of {}".format(where, source_path))
         try:
@@ -768,14 +829,20 @@ def _canon(lines):
     return "\n".join(lines) + "\n"
 
 
-def _rule_lines(corpus_id, obligations):
+def _rule_lines(corpus_id, obligations, paragraphs=True):
     """A tiny canonical rule source: frontmatter carrying corpus-id, then one body line per obligation.
     Returns (lines, {ordinal_index -> 1-based body line number}). Obligations are placed on their own
-    lines so each clause span is a single line, keeping fixtures trivially verifiable."""
+    lines so each clause span is a single line, keeping fixtures trivially verifiable. With paragraphs
+    (the default) a blank line precedes each obligation, so each is a whole paragraph and its edges are
+    whole-clause edges; paragraphs=False keeps the obligation lines adjacent, for a multi-line span."""
     lines = ["---", "corpus-id: {}".format(corpus_id), "origin: pack", "slug: fixture", "---", "",
              "# Fixture rule"]
+    if not paragraphs:
+        lines.append("")
     line_of = {}
     for idx, text in enumerate(obligations):
+        if paragraphs:
+            lines.append("")
         lines.append(text)
         line_of[idx] = len(lines)  # 1-based line number of this obligation
     return lines, line_of
@@ -1010,12 +1077,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                                  list(born), list(tombstones), list(successors))
             return base
 
-        def _model_c_case(corpus, obligations, clause_text, start_off, end_off):
+        def _model_c_case(corpus, obligations, clause_text, start_off, end_off, paragraphs=True):
             """Build a one-corpus, one-clause genesis corpus whose single row spans the obligation lines
             [start_off, end_off] (0-based indices into obligations) with canonical-text clause_text, then
             run the gate under --genesis and return its exit code. Exercises the Model C window/substring
-            resolution for a sub-line or multi-line obligation."""
-            lines, line_of = _rule_lines(corpus, obligations)
+            resolution for a sub-line or multi-line obligation (paragraphs=False for adjacent lines)."""
+            lines, line_of = _rule_lines(corpus, obligations, paragraphs)
             digest = _sha_of(lines)
             clause_id = "{}.1".format(corpus)
             row = {"clause-id": clause_id, "corpus-id": corpus,
@@ -1199,7 +1266,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # (15) Model C multi-line obligation: canonical-text carries an embedded line-wrap LF and spans
             # two source lines, in a tight 2-line window -> PASS (verifies the LF round-trips through TOML).
             if _model_c_case("cmulti", ["first half of the obligation", "second half of the obligation"],
-                             "first half of the obligation\nsecond half of the obligation", 0, 1) != 0:
+                             "first half of the obligation\nsecond half of the obligation", 0, 1,
+                             paragraphs=False) != 0:
                 failures.append("Model C multi-line embedded-LF obligation: expected exit 0")
 
             # (16) Model C canonical-text absent from its window -> FAIL.
@@ -1214,7 +1282,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # (18) Model C window too wide: the occurrence is present but does not begin on start-line (a
             # noise line precedes it inside the 3-line window) -> FAIL on tightness.
             if _model_c_case("cwidew", ["noise before", "the obligation", "noise after"],
-                             "the obligation", 0, 2) != 1:
+                             "the obligation", 0, 2, paragraphs=False) != 1:
                 failures.append("Model C window not tight: expected exit 1")
 
             # (19) Model C empty canonical-text: an empty string trivially substring-matches, so the gate
@@ -1245,13 +1313,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # (21) tightness: a TRAILING newline in canonical-text no longer falsely satisfies end-on-end
             # (before the fix "actual obligation\n" spanning lines 8-9 passed) -> exit 1.
             if _model_c_case("ctailn", ["actual obligation", "noise"],
-                             "actual obligation\n", 0, 1) != 1:
+                             "actual obligation\n", 0, 1, paragraphs=False) != 1:
                 failures.append("tightness trailing-newline canonical-text: expected exit 1")
 
             # (22) tightness: a LEADING newline in canonical-text no longer falsely satisfies begin-on-start
             # -> exit 1.
             if _model_c_case("cleadn", ["noise", "actual obligation"],
-                             "\nactual obligation", 0, 1) != 1:
+                             "\nactual obligation", 0, 1, paragraphs=False) != 1:
                 failures.append("tightness leading-newline canonical-text: expected exit 1")
 
             # (23) source-path outside the rules dir now FAILS. The row points at a copy under .aiqt/ (not
@@ -1372,6 +1440,63 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh({"cshare": lines}, shared, born)
             if _run_quiet(**_paths(base, genesis=True)) != 0:
                 failures.append("legitimate shared-window rows: expected exit 0")
+
+            # (50) WHOLE-CLAUSE EDGES: a canonical-text cut short inside a clause FAILS. Before the fix the
+            # window was checked by line, not by character, so each of these passed (exit 0). The first is
+            # the reported vector: only the final '.' removed, the cut inside the last line of the window.
+            stop = "Every pause is continuation, not a stop."
+            if _model_c_case("ctrnc1", [stop + " A later sentence follows."], stop, 0, 0) != 0:
+                failures.append("whole-clause edges, the whole sentence: expected exit 0")
+            if _model_c_case("ctrnc2", [stop + " A later sentence follows."], stop[:-1], 0, 0) != 1:
+                failures.append("whole-clause edges, final '.' dropped inside the line: expected exit 1")
+            if _model_c_case("ctrnc3", [stop], stop[:-1], 0, 0) != 1:
+                failures.append("whole-clause edges, final '.' dropped at the window end: expected exit 1")
+            if _model_c_case("ctrnc4", [stop], "Every pause is continuation, not a", 0, 0) != 1:
+                failures.append("whole-clause edges, last word dropped: expected exit 1")
+            if _model_c_case("ctrnc5", [stop], "Every pause is continuation", 0, 0) != 1:
+                failures.append("whole-clause edges, cut at a comma with no conjunction: expected exit 1")
+            if _model_c_case("ctrnc6", ["A first sentence ends. " + stop], stop[1:], 0, 0) != 1:
+                failures.append("whole-clause edges, first character dropped: expected exit 1")
+            # A dropped wrapped line with end-line moved up with it: the window is whole lines and tight,
+            # but the sentence continues on the next source line -> FAIL.
+            if _model_c_case("ctrnc7", ["Every pause is continuation and", "never a stop."],
+                             "Every pause is continuation and", 0, 0, paragraphs=False) != 1:
+                failures.append("whole-clause edges, wrapped last line dropped: expected exit 1")
+
+            # (51) WHOLE-CLAUSE EDGES: the legitimate clause splits the register uses PASS (exit 0): a split
+            # before ", and" and after it, before ";" and after it, and a clause that begins with its own
+            # conjunction after a comma.
+            lines, line_of = _rule_lines("csplit", [
+                "Alpha holds the lease, and beta waits for it; gamma logs the wait.",
+                "Delta blocks the claim, so the claim waits."])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/csplit.md"
+            split_rows = []
+            for ordinal, (off, text) in enumerate(((0, "Alpha holds the lease"), (0, "beta waits for it"),
+                                                   (0, "gamma logs the wait."), (1, "so the claim waits.")),
+                                                  1):
+                split_rows.append({"clause-id": "csplit.{}".format(ordinal), "corpus-id": "csplit",
+                                   "source-path": sp, "start-line": line_of[off], "end-line": line_of[off],
+                                   "canonical-text": text, "source-digest": digest})
+            born = [("csplit", "1.1.0")] + [("csplit.{}".format(k), "1.1.0") for k in range(1, 5)]
+            base = _fresh({"csplit": lines}, split_rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 0:
+                failures.append("whole-clause edges, legitimate clause splits: expected exit 0")
+
+            # (52) WHOLE-CLAUSE EDGES at a line start: the start-line edge is judged against the previous
+            # line, so a row that begins at the start of its line PASSES only when the sentence before it
+            # has ended. The FAIL case is the shape a whole-line overwrite leaves: the tail of the earlier
+            # sentence ("figures.") sat on the row's start-line and was overwritten with it, so the earlier
+            # sentence now runs straight into the row -> exit 1.
+            pinned = "A count is pinned to its predicate."
+            if _model_c_case("cline1", ["The earlier sentence yields two", "figures. " + pinned],
+                             pinned, 1, 1, paragraphs=False) != 0:
+                failures.append("whole-clause edges, a row after a sentence end on its own line: expected "
+                                "exit 0")
+            if _model_c_case("cline2", ["The earlier sentence yields two", pinned],
+                             pinned, 1, 1, paragraphs=False) != 1:
+                failures.append("whole-clause edges, a row at a line start after an unended sentence: "
+                                "expected exit 1")
 
             # (36) absolute source-path now FAILS. The row points at the ABSOLUTE path of its real scanned
             # source (matching digest and frontmatter), so pathlib would discard the root and only the
@@ -1552,7 +1677,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "and the Step-4 deferred items: a predecessor inventory with an integer or a malformed "
               "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
               "at an earlier release is a resurrection through the register (exit 1), and a same-release "
-              "pass-through fold is permitted (exit 0))"
+              "pass-through fold is permitted (exit 0); and the whole-clause edges: a whole sentence passes, a "
+              "canonical-text cut short inside a clause fails (final '.' dropped inside the line or at the "
+              "window end, last word dropped, cut at a plain comma, first character dropped, wrapped last "
+              "line dropped, a row at a line start after an unended sentence), and the legitimate ', and' / "
+              "';' / ', so' clause splits and a row after a sentence end on an earlier part of its line pass)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
