@@ -109,7 +109,8 @@ def main():
 #   T10 a legacy target holding a pasted marker line: --check 1, write 2.
 #   T11 migration: the exact legacy rendering composes (write 0); with extra text, write 2.
 #   T12 each registry error: exit 2 in both modes, nothing written; every field of the wrong TOML type
-#       (an array, a table, a number or a boolean) is a clean refusal naming the field, never an exception.
+#       (an array, a table, a number or a boolean) is a clean refusal naming the field and stating the
+#       type rule it broke, never an exception.
 #   T13 each block-source error: exit 2, nothing written.
 #   T14 a CRLF-converted legacy AGENTS.md: --check 1.
 #   T15 two targets in one run (the gen_adapters pair) with either one refused: the other is not written.
@@ -122,8 +123,23 @@ def main():
 #       and the sibling target are unchanged, and nothing is created through the link.
 #   T20 a legacy target already in sync is not judged: a rule body holding a marker-like line writes once
 #       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
-#   T21 a write keeps the target's mode and leaves no temporary file; a failed rename is exit 2 with the
-#       target unchanged and the temporary file removed.
+#   T21 a write keeps the target's mode (umask pinned; the asserted mode holds execute bits no creation
+#       mode supplies, so a dropped fchmod cannot pass) and leaves no temporary file; a failed rename is
+#       exit 2 with the target unchanged and the temporary file removed.
+#   T22 a parent directory swapped for a symlink after the write-side walk: the write lands through the
+#       held descriptor in the original directory and nothing outside the tree changes.
+#   T23 the same swap after the read-side walk: the bytes read are the real target's, never the planted
+#       outside file's.
+#   T24 the target swapped for a symlink after the walk's stat: the no-follow open refuses (exit 2) and
+#       the outside file is never read.
+#   T25 the target swapped for a FIFO after the walk's stat: the fstat re-check refuses (exit 2).
+#   T26 a symlink planted where mkdir was about to make a missing parent: the no-follow re-open refuses
+#       (exit 2) and nothing lands outside the tree.
+#   T27 a pre-existing file at a colliding temporary name survives: every name colliding is exit 2 with
+#       the file kept; one collision is retried and the write succeeds, the file still kept.
+#   T28 an existing target without write permission is refused (exit 2) with its bytes and mode kept and
+#       no temporary file left (skipped where the runner can write it anyway, e.g. root).
+#   T29 a platform without dir_fd support is exit 2 in both modes: no path-based fallback.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -339,19 +355,27 @@ def self_test_main():
             root = tree(composed_reg.replace(old, new, 1), agents=golden)
             expect("T12 " + label, root, True, 2)
             expect("T12 " + label, root, False, 2)
-        # Wrong TOML types: each is exit 2 in both modes, and the refusal names the field.
+        # Wrong TOML types: each of these 26 values is exit 2 in both modes, and the refusal names the
+        # field AND states the type rule it broke. The stated rule is what discriminates each _string,
+        # _plain_int, _valid_id or _check_rel check from the membership refusal behind it, which would
+        # also refuse cleanly and also name the field (retired-blocks takes two message forms, so only
+        # its field name is pinned).
         type_cases = (
-            ("block target", 'target = "AGENTS.md"', ('["AGENTS.md"]', "{ p = 1 }", "1", "true")),
-            ("block owner", 'owner = "opf"', ('["opf"]', '{ o = "opf" }', "1")),
-            ("block position", 'position = "after-rules"', ('["after-rules"]', "{ p = 1 }", "2")),
-            ("block order", "order = 1", ("1.0", "[1]", "{ o = 1 }")),
-            ("block source", 'source = "opf/blocks/a.md"', ('["opf/blocks/a.md"]', "{ s = 1 }", "1")),
-            ("block id", 'id = "OPF-A"', ('["OPF-A"]', "{ i = 1 }", "1")),
-            ("target-row path", 'path = "GEMINI.md"', ('["GEMINI.md"]', "{ p = 1 }")),
-            ("target-row layout", 'layout = "composed"', ('["composed"]', "{ l = 1 }")),
-            ("retired-blocks", "retired-blocks = []", ("{}", "[{}]", "[1]")),
+            ("block target", 'target = "AGENTS.md"', ('["AGENTS.md"]', "{ p = 1 }", "1", "true"),
+             "must be a string"),
+            ("block owner", 'owner = "opf"', ('["opf"]', '{ o = "opf" }', "1"), "must be a string"),
+            ("block position", 'position = "after-rules"', ('["after-rules"]', "{ p = 1 }", "2"),
+             "must be a string"),
+            ("block order", "order = 1", ("1.0", "[1]", "{ o = 1 }"), "must be a positive integer"),
+            ("block source", 'source = "opf/blocks/a.md"', ('["opf/blocks/a.md"]', "{ s = 1 }", "1"),
+             "must be a non-empty string"),
+            ("block id", 'id = "OPF-A"', ('["OPF-A"]', "{ i = 1 }", "1"), "is not of the form"),
+            ("target-row path", 'path = "GEMINI.md"', ('["GEMINI.md"]', "{ p = 1 }"), "must be a string"),
+            ("target-row layout", 'layout = "composed"', ('["composed"]', "{ l = 1 }"),
+             "must be a string"),
+            ("retired-blocks", "retired-blocks = []", ("{}", "[{}]", "[1]"), None),
         )
-        for field, old, values in type_cases:
+        for field, old, values, rule in type_cases:
             if old not in composed_reg:
                 failures.append("T12 {}: fixture mutation did not apply".format(field))
             key = old.split(" = ", 1)[0]
@@ -363,6 +387,9 @@ def self_test_main():
                     if key not in out:
                         failures.append("{}: the refusal does not name the field {}: {}".format(
                             label, key, out.strip()))
+                    if rule is not None and rule not in out:
+                        failures.append("{}: the refusal does not state the type rule {!r}: {}".format(
+                            label, rule, out.strip()))
         root = tree(None, agents=golden)
         expect("T12 registry absent", root, True, 2)
         expect("T12 registry absent", root, False, 2)
@@ -536,30 +563,250 @@ def self_test_main():
         expect("T20 legacy marker-like body, rewrite", root, False, 0)
 
         # T21. A write keeps the mode, leaves no temporary file, and a failed rename changes nothing.
-        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-        os.chmod(root / AGENTS_REL, 0o640)
-        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
-        expect("T21 rewrite", root, False, 0, unchanged=False)
-        if read(root / AGENTS_REL) == legacy_golden:
-            failures.append("T21: the rewrite did not change AGENTS.md")
-        if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o640:
-            failures.append("T21: the rewrite did not keep the target's mode")
-        if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
-            failures.append("T21: the write left a stray file: {}".format(sorted(p.name for p in root.iterdir())))
-        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
-        real_replace = ac.os.replace
-
-        def failing_replace(_src, _dst):
-            raise OSError("injected rename failure")
-
-        ac.os.replace = failing_replace
+        #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
+        #      temporary file's creation mode (0o666 before the umask) can never supply, so a dropped
+        #      fchmod cannot pass under ANY ambient umask.
+        saved_umask = os.umask(0o022)
         try:
-            expect("T21 failed rename", root, False, 2)
+            root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+            os.chmod(root / AGENTS_REL, 0o751)
+            (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+            expect("T21 rewrite", root, False, 0, unchanged=False)
+            if read(root / AGENTS_REL) == legacy_golden:
+                failures.append("T21: the rewrite did not change AGENTS.md")
+            if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o751:
+                failures.append("T21: the rewrite did not keep the target's mode")
+            if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+                failures.append("T21: the write left a stray file: {}".format(sorted(p.name for p in root.iterdir())))
+            (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
+            real_replace = ac.os.replace
+
+            def failing_replace(*_a, **_k):
+                raise OSError("injected rename failure")
+
+            ac.os.replace = failing_replace
+            try:
+                expect("T21 failed rename", root, False, 2)
+            finally:
+                ac.os.replace = real_replace
+            if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+                failures.append("T21: a failed rename left a temporary file: {}".format(
+                    sorted(p.name for p in root.iterdir())))
         finally:
-            ac.os.replace = real_replace
-        if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
-            failures.append("T21: a failed rename left a temporary file: {}".format(
-                sorted(p.name for p in root.iterdir())))
+            os.umask(saved_umask)
+
+        # T22. A parent directory swapped for a symlink AFTER the write-side walk cannot redirect the
+        #      write: the temporary create and the rename go through the directory descriptor the walk
+        #      opened, so the bytes land in the original directory and nothing outside the tree changes.
+        #      The swap runs inside the first token_hex call, which _write_target makes only after
+        #      _target_dir_fd has judged the whole path; reverting to path-based writes makes this
+        #      vector fail (the swapped parent would redirect the temporary file outside the tree).
+        copilot_rel = ".github/copilot-instructions.md"
+        copilot_only = [(copilot_rel, ("# Copilot", "", "Stand-in header.", ""))]
+        root = tree(ac.registry_text(), blocks=())
+        expect("T22 first write", root, False, 0, targets=copilot_only, unchanged=False)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        lair = tmp / "t22-outside"
+        (lair / "gh").mkdir(parents=True)
+        (lair / "gh" / "copilot-instructions.md").write_bytes(b"OUTSIDE\n")
+        real_token_hex = ac.secrets.token_hex
+        swapped = []
+
+        def swapping_token_hex(n):
+            if not swapped:
+                swapped.append(True)
+                (root / ".github").rename(root / "gh-held")
+                os.symlink(lair / "gh", root / ".github")
+            return real_token_hex(n)
+
+        ac.secrets.token_hex = swapping_token_hex
+        try:
+            expect("T22 write with the parent swapped mid-run", root, False, 0, targets=copilot_only,
+                   unchanged=False)
+        finally:
+            ac.secrets.token_hex = real_token_hex
+        if not swapped:
+            failures.append("T22: the swap hook did not run")
+        if ((lair / "gh" / "copilot-instructions.md").read_bytes() != b"OUTSIDE\n"
+                or sorted(p.name for p in (lair / "gh").iterdir()) != ["copilot-instructions.md"]):
+            failures.append("T22: the swapped parent redirected the write outside the tree")
+        held = read(root / "gh-held" / "copilot-instructions.md")
+        if held is None or b"New text." not in held:
+            failures.append("T22: the write did not land in the directory the descriptor held")
+
+        # T23. The same swap after the read-side walk: the open goes through the held descriptor, so the
+        #      bytes read are the real target's and --check stays clean; a path-based re-open would read
+        #      the planted outside file and report drift.
+        root = tree(ac.registry_text(), blocks=())
+        expect("T23 first write", root, False, 0, targets=copilot_only, unchanged=False)
+        lair = tmp / "t23-outside"
+        (lair / "gh").mkdir(parents=True)
+        (lair / "gh" / "copilot-instructions.md").write_bytes(b"OUTSIDE\n")
+        real_walk = ac._target_dir_fd
+        swapped = []
+
+        def read_swap_walk(*a, **k):
+            result = real_walk(*a, **k)
+            if not swapped:
+                swapped.append(True)
+                (root / ".github").rename(root / "gh-held")
+                os.symlink(lair / "gh", root / ".github")
+            return result
+
+        ac._target_dir_fd = read_swap_walk
+        try:
+            expect("T23 --check with the parent swapped mid-run", root, True, 0, targets=copilot_only,
+                   unchanged=False)
+        finally:
+            ac._target_dir_fd = real_walk
+        if not swapped:
+            failures.append("T23: the swap hook did not run")
+        if (lair / "gh" / "copilot-instructions.md").read_bytes() != b"OUTSIDE\n":
+            failures.append("T23: the outside file was touched by a read")
+
+        # T24. The target itself swapped for a symlink after the walk's stat: the no-follow open refuses
+        #      (exit 2) in both modes; without O_NOFOLLOW the planted bytes would read back as mere
+        #      drift (exit 1), never 2.
+        planted = tmp / "t24-outside.md"
+        planted.write_bytes(b"outside line\n")
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        for check in (True, False):
+            (root / AGENTS_REL).unlink(missing_ok=True)
+            (root / AGENTS_REL).write_bytes(legacy_golden)
+            swapped = []
+
+            def late_symlink(*a, **k):
+                result = real_walk(*a, **k)
+                if not swapped:
+                    swapped.append(True)
+                    (root / AGENTS_REL).unlink()
+                    os.symlink(planted, root / AGENTS_REL)
+                return result
+
+            ac._target_dir_fd = late_symlink
+            try:
+                out = expect("T24 target swapped for a symlink after the walk", root, check, 2,
+                             unchanged=False)
+            finally:
+                ac._target_dir_fd = real_walk
+            if "symlink" not in out:
+                failures.append("T24: the refusal does not name the symlink: {}".format(out.strip()))
+            if planted.read_bytes() != b"outside line\n":
+                failures.append("T24: the outside file was changed")
+
+        # T25. The target swapped for a FIFO after the walk's stat: the fstat re-check on the opened
+        #      descriptor refuses (exit 2); without it the non-blocking read would return empty bytes
+        #      and report mere drift.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        swapped = []
+
+        def late_fifo(*a, **k):
+            result = real_walk(*a, **k)
+            if not swapped:
+                swapped.append(True)
+                (root / AGENTS_REL).unlink()
+                os.mkfifo(root / AGENTS_REL)
+            return result
+
+        ac._target_dir_fd = late_fifo
+        try:
+            out = expect("T25 target swapped for a FIFO after the walk", root, True, 2, unchanged=False)
+        finally:
+            ac._target_dir_fd = real_walk
+        if "not a regular file" not in out:
+            failures.append("T25: the refusal does not say the target is not a regular file: {}".format(
+                out.strip()))
+
+        # T26. A symlink planted where mkdir was about to make a missing parent: mkdir loses the race
+        #      (FileExistsError) and the no-follow re-open judges the winner, refusing the symlink, so
+        #      nothing is created outside the tree.
+        root = tree(ac.registry_text(), blocks=())
+        lair = tmp / "t26-outside"
+        lair.mkdir()
+        real_mkdir = ac.os.mkdir
+        planted_racing = []
+
+        def racing_mkdir(path, *a, **k):
+            if k.get("dir_fd") is not None:
+                planted_racing.append(True)
+                os.symlink(lair, path, dir_fd=k["dir_fd"])
+                raise FileExistsError(17, "File exists", path)
+            return real_mkdir(path, *a, **k)
+
+        ac.os.mkdir = racing_mkdir
+        try:
+            out = expect("T26 a symlink planted against mkdir", root, False, 2, targets=copilot_only)
+        finally:
+            ac.os.mkdir = real_mkdir
+        if not planted_racing:
+            failures.append("T26: the planted-symlink hook did not run")
+        if "symlink" not in out:
+            failures.append("T26: the refusal does not name the symlink: {}".format(out.strip()))
+        if sorted(lair.iterdir()):
+            failures.append("T26: the planted symlink redirected a write outside the tree")
+
+        # T27. A pre-existing file at a colliding temporary name is never deleted: with every candidate
+        #      name colliding the write refuses (exit 2) and the file survives; with one collision the
+        #      write retries a fresh name, succeeds, and the file still survives.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        fixed = "0" * 16
+        squat = root / ".{}.{}.tmp".format(AGENTS_REL, fixed)
+        squat.write_bytes(b"not ours\n")
+        ac.secrets.token_hex = lambda n: fixed
+        try:
+            expect("T27 every temporary name colliding", root, False, 2)
+        finally:
+            ac.secrets.token_hex = real_token_hex
+        if read(squat) != b"not ours\n":
+            failures.append("T27: a pre-existing colliding file was deleted or rewritten on refusal")
+        collide_calls = [0]
+
+        def collide_once(n):
+            collide_calls[0] += 1
+            return fixed if collide_calls[0] == 1 else real_token_hex(n)
+
+        ac.secrets.token_hex = collide_once
+        try:
+            expect("T27 one collision then a fresh name", root, False, 0, unchanged=False)
+        finally:
+            ac.secrets.token_hex = real_token_hex
+        if read(squat) != b"not ours\n":
+            failures.append("T27: the retry deleted the pre-existing colliding file")
+        if read(root / AGENTS_REL) == legacy_golden:
+            failures.append("T27: the retried write did not update AGENTS.md")
+        squat.unlink(missing_ok=True)  # missing_ok: a faulty engine may have deleted it; T27 already failed then
+
+        # T28. An existing target without write permission is refused (exit 2) with its bytes and mode
+        #      kept and no temporary file made, as the plain overwrite before descriptors was. Skipped
+        #      where the runner can write a mode-0444 file anyway (root/DAC bypass), observed via
+        #      os.access, as conformance.py's unreadable-dir cases do.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        os.chmod(root / AGENTS_REL, 0o444)
+        if not os.access(root / AGENTS_REL, os.W_OK):
+            expect("T28 read-only target", root, False, 2)
+            if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o444:
+                failures.append("T28: the refusal changed the target's mode")
+            if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
+                failures.append("T28: the refusal left a temporary file: {}".format(
+                    sorted(p.name for p in root.iterdir())))
+        os.chmod(root / AGENTS_REL, 0o644)
+
+        # T29. A platform without dir_fd support refuses (exit 2) in both modes rather than fall back to
+        #      a path-based read or write.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        real_supports = ac.os.supports_dir_fd
+        ac.os.supports_dir_fd = frozenset()
+        try:
+            out = expect("T29 no dir_fd support", root, True, 2)
+            expect("T29 no dir_fd support", root, False, 2)
+        finally:
+            ac.os.supports_dir_fd = real_supports
+        if "directory descriptor" not in out:
+            failures.append("T29: the refusal does not explain the missing capability: {}".format(
+                out.strip()))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -578,7 +825,11 @@ def self_test_main():
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
           "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
           "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the mode "
-          "and leaves no temporary file, even when the rename fails.")
+          "(under a pinned umask) and leaves no temporary file, even when the rename fails; a parent "
+          "swapped for a symlink after the walk redirects neither a write nor a read; a symlink or a "
+          "FIFO swapped in at the target is refused, as is a symlink planted against mkdir; a colliding "
+          "temporary name is retried and the colliding file kept; a read-only target is refused; and a "
+          "platform without dir_fd support is refused.")
     return 0
 
 

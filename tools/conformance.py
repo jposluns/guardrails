@@ -226,7 +226,7 @@ def _adapter_drift(root, corpus, adapter):
     parts = "/".join(adapter["parts"])
     # Probe by READING, not Path.exists(): on Python 3.12 exists() returns False on EACCES (an unreadable
     # .github/ parent for the nested copilot surface) rather than raising, which would mask a present-but-
-    # unreadable surface as a false NOT APPLICABLE. read_text distinguishes FileNotFoundError (the adopter
+    # unreadable surface as a false NOT APPLICABLE. read_bytes distinguishes FileNotFoundError (the adopter
     # did not install this surface -> NA) from any other OSError (present but unreadable -> MALFORMED,
     # fail closed), independent of the Python version.
     try:

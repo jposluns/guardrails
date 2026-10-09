@@ -28,10 +28,14 @@ delete the target file, which shows in the diff, and regenerate. --check never c
 its verdict: it compares the full desired bytes with the raw bytes on disk (so a CRLF conversion is
 drift), and the guard only adds a diagnosis.
 
-Target paths. A target is never read or written through a symlink: a symlink at the target, or at any
-directory between the root and it, and a target that is not a regular file, are exit 2 in both modes.
-A write goes to a new temporary file in the target's own directory (keeping an existing target's mode)
-and is renamed over the target, so the target holds either its old bytes or its new bytes.
+Target paths. A target is never read or written through a symlink: every directory between the root
+and the target is opened beneath the previous directory's descriptor (os.open with O_DIRECTORY and
+O_NOFOLLOW and dir_fd), the target itself is opened beneath the final descriptor with O_NOFOLLOW, and a
+symlink or non-regular file anywhere along that path, even one swapped in while a run is in flight, is
+exit 2 in both modes. A write goes to a new temporary file created exclusively beside the target through
+the same descriptor (keeping an existing target's permission mode) and os.replace renames it over the
+target through that descriptor, so the target holds either its old bytes or its new bytes. A platform
+without dir_fd support is exit 2 in both modes: there is no path-based fallback.
 
 No rule corpus. An absent or unreachable .aiqt/core/rules/ is exit 2 in both modes with nothing written
 or deleted: the generators never delete a target. To retire an adapter, review it and delete it by hand.
@@ -43,15 +47,24 @@ Exit convention (run): 0 in sync or written; 1 drift (--check); 2 a missing, mal
 registry, block source, corpus or target, a symlinked or non-regular target, or a write-mode refusal.
 
 DISCLOSED RESIDUALS. The digest is not a security boundary: anyone who can edit a block and its digest,
-or the sources, registry and generator together, passes the guard; diff review is the control. Writes
-are not locked: the path checks run before the rename, so a concurrent process that swaps a directory
-for a symlink between the check and the rename is not defended against, and the targets of one run are
-renamed one at a time, not as a set. A run killed mid-write can leave its temporary file (a dot-prefixed
-name ending in .tmp) beside the target; the target itself is intact. A legacy target still loses a hand
-edit on regeneration unless it holds a marker-like line; --check still catches the edit in CI. A change
-to a generator's header is refused for a composed target that already carries the old header; delete and
-regenerate after reviewing it.
+or the sources, registry and generator together, passes the guard; diff review is the control. Target
+reads and writes resolve beneath directory descriptors, so a directory swapped for a symlink mid-run
+cannot redirect them; what remains is narrower: the repository root itself is still opened by path once
+per target operation, and the registry and block sources are judged by a per-component lstat walk before
+they are read by path, so an attacker who can replace the repository root, or who can race a registry or
+block-source read, is out of scope (either one could edit those inputs directly, and diff review is the
+control there too). The targets of one run are renamed one at a time, not as a set. A successful write
+keeps only the target's permission mode: owner, group, ACLs and extended attributes are not preserved
+(the renamed file takes the writer's defaults). An existing target this user cannot write (no write
+permission) is refused (exit 2), as the plain overwrite before descriptors was. A run killed mid-write
+can leave its temporary file (a dot-prefixed name ending in .tmp) beside the target; the target itself
+is intact, and a later run never deletes a temporary file it did not itself create (a colliding name is
+retried, bounded, with a fresh random token). A legacy target still loses a hand edit on regeneration
+unless it holds a marker-like line; --check still catches the edit in CI. A change to a generator's
+header is refused for a composed target that already carries the old header; delete and regenerate after
+reviewing it.
 """
+import errno
 import hashlib
 import os
 import re
@@ -448,78 +461,211 @@ def guard(current, composed, registry):
     return None
 
 
-def _target_lstat(root, rel):
-    """(path, lstat) of target rel under root, judged one component at a time with os.lstat, so nothing
-    is followed: a symlink at the target or at any directory between root and it, a non-directory where a
-    directory belongs, and a target that is not a regular file are each a ComposeError. lstat is None when
-    the target (or a directory above it) is absent; any other stat failure propagates as OSError, so an
-    unreadable ancestor fails closed rather than reading as absent."""
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Exactly ONE os.close; if it
+    raises, the number counts as released (close(2) on Linux releases it early, even when the close then
+    reports EINTR or EIO, and a retry can close another thread's reused descriptor: man 2 close), so it
+    is never probed or closed again, and the ORIGINAL close error propagates unchanged. The same body as
+    tools/check_release_cut.py's copy of opf/tools/_journal._close_fd_propagating."""
+    os.close(fd)
+
+
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being
+    handled in, the CALLING frame, the same single close still runs (one os.close, the number released
+    either way and never touched again) but its close error is dropped so the ORIGINAL exception keeps
+    propagating; on the normal path this is exactly _close_fd_propagating, so a close error still fails
+    closed. The same body as tools/check_release_cut.py's copy of opf/tools/_journal._close_fd_yielding."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
+# The dir_fd capability probe, bound at import so it reflects the platform, not a later rebinding of an
+# os attribute (the self-test wraps os.mkdir). os.rename, not os.replace, is the member to probe:
+# os.supports_dir_fd lists the renameat capability under rename, and os.replace shares it.
+_DIR_FD_REQUIRES = (os.open, os.stat, os.mkdir, os.unlink, os.rename)
+
+
+def _require_dir_fd():
+    """Refuse (ComposeError, which run() maps to exit 2) where descriptor-relative resolution is
+    unavailable: without dir_fd on open/stat/mkdir/unlink/rename plus O_DIRECTORY and O_NOFOLLOW there
+    is no way to pin a directory against a concurrent swap, and this engine never falls back to a
+    path-based target lookup."""
+    if (any(fn not in os.supports_dir_fd for fn in _DIR_FD_REQUIRES)
+            or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW")):
+        raise ComposeError(
+            "this platform cannot resolve a target beneath a directory descriptor (os.open, os.stat, "
+            "os.mkdir, os.unlink and os.rename with dir_fd, plus O_DIRECTORY and O_NOFOLLOW, are "
+            "required); a target is never read or written through a swappable path, so nothing was read "
+            "or written")
+
+
+def _symlink_refusal(rel, upto):
+    return ComposeError("target {}: {} is a symlink; a target is never read or written through a "
+                        "symlink".format(rel, upto))
+
+
+def _open_dir_component(dir_fd, part, rel, upto):
+    """One directory component opened beneath dir_fd with O_DIRECTORY|O_NOFOLLOW: a symlink here is
+    refused (ELOOP, or ENOTDIR when O_DIRECTORY judges the link first), and so is a non-directory; a
+    no-follow stat only picks which message names the refusal that already happened. FileNotFoundError
+    propagates for the caller to decide: absent is legal on a read, and mkdir ground on a write."""
+    try:
+        return os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        if exc.errno not in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+            raise
+        try:
+            st = os.stat(part, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            raise ComposeError("target {}: {} is a symlink or not a directory; a target is never read "
+                               "or written through it".format(rel, upto)) from None
+        if stat.S_ISLNK(st.st_mode):
+            raise _symlink_refusal(rel, upto) from None
+        raise ComposeError("target {}: {} is not a directory".format(rel, upto)) from None
+
+
+def _target_dir_fd(root, rel, make_dirs):
+    """(directory descriptor, final name, lstat) of target rel under root. Every directory between root
+    and the target is opened beneath the previous one's descriptor (O_DIRECTORY|O_NOFOLLOW), so a
+    symlink anywhere along the path, even one swapped in while the run is in flight, is a ComposeError,
+    never followed; with make_dirs a missing directory is made with mkdir beneath the same descriptor
+    and then opened the same no-follow way, so a symlink planted against the mkdir is refused too. The
+    lstat (os.stat with follow_symlinks=False, beneath the descriptor) is None when the target is
+    absent; a symlink or non-regular file at the final name is a ComposeError. Returns (None, name,
+    None) when a directory above the target is absent and make_dirs is false. The caller closes the
+    returned descriptor; on every other path this function closes it itself, exactly once."""
+    _require_dir_fd()
     _check_rel(rel, "target")
     parts = rel.split("/")
-    path = Path(root)
-    for i, part in enumerate(parts):
-        path = path / part
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    handed = False
+    try:
+        for i, part in enumerate(parts[:-1]):
+            upto = "/".join(parts[:i + 1])
+            try:
+                child = _open_dir_component(directory, part, rel, upto)
+            except FileNotFoundError:
+                if not make_dirs:
+                    return None, parts[-1], None
+                try:
+                    os.mkdir(part, dir_fd=directory)
+                except FileExistsError:
+                    pass  # raced in by another process; the no-follow open below judges the winner
+                child = _open_dir_component(directory, part, rel, upto)
+            parent, directory = directory, child  # held first: a raising close cannot strand child
+            _close_fd_propagating(parent)
         try:
-            st = os.lstat(path)
+            st = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
-            return Path(root).joinpath(*parts), None
-        if stat.S_ISLNK(st.st_mode):
-            raise ComposeError("target {}: {} is a symlink; a target is never read or written through a "
-                               "symlink".format(rel, "/".join(parts[:i + 1])))
-        if i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode):
-            raise ComposeError("target {}: {} is not a directory".format(rel, "/".join(parts[:i + 1])))
-    if not stat.S_ISREG(st.st_mode):
-        raise ComposeError("target {} is not a regular file".format(rel))
-    return path, st
-
-
-def _nofollow(path, flags):
-    """open() opener: never follow a symlink at the final component, and never block on a FIFO swapped
-    in after the lstat."""
-    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+            st = None
+        if st is not None:
+            if stat.S_ISLNK(st.st_mode):
+                raise _symlink_refusal(rel, rel)
+            if not stat.S_ISREG(st.st_mode):
+                raise ComposeError("target {} is not a regular file".format(rel))
+        handed = True
+        return directory, parts[-1], st
+    finally:
+        if not handed:
+            _close_fd_yielding(directory)
 
 
 def _read_target(root, rel):
-    """The current bytes of target rel under root, or None when it is absent; never through a symlink."""
-    path, st = _target_lstat(root, rel)
-    if st is None:
+    """The current bytes of target rel under root, or None when it (or a directory above it) is absent.
+    The final component is opened beneath the directory descriptor from _target_dir_fd with O_NOFOLLOW
+    (a symlink swapped in after the stat is refused, never followed) and O_NONBLOCK (a FIFO swapped in
+    cannot block the open), and the open descriptor is fstat-checked to still be a regular file. The
+    file object is made with closefd=False, so the finally's close is the one close of fd on every
+    path."""
+    directory, name, st = _target_dir_fd(root, rel, make_dirs=False)
+    if directory is None:
         return None
-    with open(path, "rb", opener=_nofollow) as fh:
-        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-            raise ComposeError("target {} is not a regular file".format(rel))
-        return fh.read()
+    try:
+        if st is None:
+            return None
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise _symlink_refusal(rel, rel) from None
+            raise
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    raise ComposeError("target {} is not a regular file".format(rel))
+                return fh.read()
+        finally:
+            _close_fd_yielding(fd)
+    finally:
+        _close_fd_yielding(directory)
+
+
+# How many fresh random temporary names a write tries when a name collides. The loop only ever runs
+# past its first lap when a file at the 64-random-bit candidate name already exists, and a colliding
+# file is never deleted: it is someone else's.
+_TMP_TRIES = 16
 
 
 def _write_target(root, rel, data):
-    """Write data to target rel under root. Missing directories are made one level at a time, the whole
-    path is judged again by _target_lstat (so a symlink there is refused, never followed), then data goes
-    to a new temporary file (exclusive create) in the target's directory, which takes the existing
-    target's mode, and os.replace renames it over the target; the temporary file is removed on any
-    failure."""
-    parts = rel.split("/")
-    parent = Path(root)
-    for part in parts[:-1]:
-        parent = parent / part
-        try:
-            os.mkdir(parent)
-        except FileExistsError:
-            pass  # judged below: a symlink or a non-directory here is refused
-    path, st = _target_lstat(root, rel)
-    tmp = parent / ".{}.{}.tmp".format(parts[-1], secrets.token_hex(8))
+    """Write data to target rel under root, atomically and never through a path a concurrent process
+    can swap: the target's directory descriptor comes from _target_dir_fd (missing directories made
+    beneath the held descriptor), an existing target is probed for write permission beneath it (a
+    read-only target refuses with the PermissionError a plain overwrite raised), data goes to a new
+    temporary file (O_CREAT|O_EXCL|O_NOFOLLOW beneath the descriptor; a colliding name is retried with
+    a fresh random token up to _TMP_TRIES times) which takes the existing target's permission mode via
+    fchmod, and os.replace renames it over the target through the same descriptor. On failure only a
+    temporary file this call itself created is removed; a pre-existing file at a colliding name is
+    never touched. The temporary file object is made with closefd=False, so the finally's close is the
+    one close of tfd on every path."""
+    directory, name, st = _target_dir_fd(root, rel, make_dirs=True)
     try:
-        with open(tmp, "xb") as fh:
-            if st is not None:
-                os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+        if st is not None:
+            # The refusal a plain open-for-write gave before descriptors: an existing target without
+            # write permission is PermissionError (exit 2), before any temporary file exists.
+            probe = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            _close_fd_propagating(probe)
+        tmp = tfd = None
+        for _ in range(_TMP_TRIES):
+            candidate = ".{}.{}.tmp".format(name, secrets.token_hex(8))
+            try:
+                tfd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                              0o666, dir_fd=directory)
+            except FileExistsError:
+                continue  # someone else's file; leave it alone and try a fresh name
+            tmp = candidate
+            break
+        if tmp is None:
+            raise ComposeError("target {}: {} random temporary names beside it already hold files; "
+                               "none were deleted (they are not this run's)".format(rel, _TMP_TRIES))
         try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+            try:
+                with os.fdopen(tfd, "wb", closefd=False) as fh:
+                    if st is not None:
+                        os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+                    fh.write(data)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            finally:
+                _close_fd_yielding(tfd)
+            os.replace(tmp, name, src_dir_fd=directory, dst_dir_fd=directory)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=directory)
+            except OSError:
+                pass  # the write failure wins; a leftover temporary file is a disclosed residual
+            raise
+    finally:
+        _close_fd_yielding(directory)
 
 
 def run(root, check, targets, regen, corpus_bodies):
