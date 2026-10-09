@@ -178,16 +178,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `27d9960c8f2d91c81b4739262e595db8e8ba79ca2f925a7c91b116c1a89efda0` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `ab2aacd1032e93f48e0f4152df9395bea4ac55415f1ad289bdec984d1343c6c8` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `c1a1cd408fe270eec70e492bf9f24248c5977ecb2cd8514f7541680265ec1dff` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `edd10e09426057803f21de3813eae0930c945a31285faa0502f22a23bf8d602b` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `bdd9767f0855fc339d043c0e49a745f7a75e09500ba74907c5b6084b2abfb589` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `9a2a426ea9b0515d444dab490df36b672483e6023f668244bff08c78f19d014e` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `9bed114321ea6c9c5233af271252dcf5e08dae223ea7c349722a185697f8a85a` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `953b2c706f061501a6601beabba31b0b07bea4beda63d94f3648756c370b4dcf` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `06e401a05c5bb1487b7346b4e0c1f45aee5dc715ba4592f363394143bf05ed45` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `3e4bb20ad03887066c5a21b01875338b81cc4979b8d1f97bb292903348281f4c` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `f39daa3c12d2db2b5e94c8267a598493deee3313dadf823a64990a7cf7936525` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `43dd819ce060b3dcc3ddfcda5d2668428ea348cfd98cd8eb401b58c36c80c304` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `ed04d6263e2b1fe8616cfdd8f29c7fd9c0bf6eb0a708a35ed11f1aaf7a383f39` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `69e716e891da003b26ba639767fd65c18137cfc9ddb76e9d479ca1b4e7acc7b2` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `f4f80fce1e0b4606664ab9766ce5607d32403bd1fe693e9afdd3d72be92ad85a` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `09ee1f583e1ddc4ac0a4543fc9f218a3118e3c86a7b938375d6273f46f16d091` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `cdd066118b2494d767cf71f13c79d2b6766c3ed537cfc705055c2abd96242a7f` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `9327111eb5127108325152d8b271e75bd2522f611a341ed8cc3aaa333376ec01` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `6384590dffae1102e51fba1f7a3717b7310d0cd35301f3988af3a1756aa1a657` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `9bdf751607511347c756d7661e45b03dded692fed646e075b175f2426987c30c` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -280,13 +280,12 @@ fails and report it; do not work around a failed check.
      `PreCompact`, `UserPromptSubmit`, and `Stop`), and `rerun-pass-check.py` (`PostToolUse`,
      `PostToolUseFailure`, `UserPromptSubmit`, and `Stop`) the exit is 1, a non-blocking error, so no
      reminder or note is added and every stop goes ahead unchecked (exit 2 would block the stop, and the
-     hook's own block cap would never run, since the hook stops before its loop guard runs). Those exits
-     need the line to reach standard error and standard error to flush when Python shuts down: with
-     standard error closed, each hook currently exits 1 instead, and when the write fails, or succeeds
-     but that shutdown flush fails, it currently exits 120. Either is a non-blocking error on every one
-     of these events, so the six `PreToolUse` hooks then allow every tool call unchecked. An interpreter
-     that cannot start the hook fails before its guard runs, with Python's
-     own error instead of that line: an interpreter that predates the `-I` option rejects it and exits 2,
+     hook's own block cap would never run, since the hook stops before its loop guard runs). These exits,
+     like a hook's other exits, hold while the hook's output (its diagnostic on standard error, and what
+     it prints on standard output) can be written and flushed. A failing output stream can change the exit
+     status and can lose output, a decision included; a separate fix in progress addresses this. An
+     interpreter that cannot start the hook fails before its guard runs, with Python's own error instead
+     of that line: an interpreter that predates the `-I` option rejects it and exits 2,
      and one that accepts `-I` but predates f-strings cannot compile the three clock hooks and
      `char-policy-write.py`, which use them, and exits 1. Exit 1 is a non-blocking error on these hooks'
      events, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop` blocks the

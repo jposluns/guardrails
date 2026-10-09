@@ -21,13 +21,11 @@ diagnostic or result that cannot be printed or flushed. The execution set is rec
 manifest only when no check recorded a harness error, because an unevaluated check would also be
 reported missing. Bad arguments, a Python older than 3.14 that can start this file, a missing
 tomllib, and a refused arming of the execution-report finalizer are refused before any check runs, so
-they exit 2 while their error line can be written to stderr and the interpreter can then flush stderr
-at shutdown. With stderr closed the floor guard's and the missing-tomllib refusals currently exit 1,
-which reads as an assertion failure, while a bad-argument refusal still exits 2 (its line goes to
-stdout); when the write fails, or succeeds and the shutdown flush of stderr fails, each of these
-three currently exits 120. An older interpreter that cannot start this file fails with Python's own
-error first, and that exit is Python's: 1 for a compile failure, which reads as an assertion failure,
-or 2 for an interpreter predating -I when run with it.
+they exit 2. These exits hold while the tool's output (its diagnostic on stderr, and what it prints on
+stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+output; a separate fix in progress addresses this. An older interpreter that cannot start this file
+fails with Python's own error first, and that exit is Python's: 1 for a compile failure, which reads as
+an assertion failure, or 2 for an interpreter predating -I when run with it.
 
 Reporting can never escape or change the rule (under --execution-report, a refusal of the report
 finalizer, described below, ends the run with 2 after reporting). An uncaught exception is recorded

@@ -163,15 +163,11 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
-These exits hold on every interpreter that can start this file, the floor guard's exits on an older one
-included, only while stderr takes the line each of them writes there and the interpreter can then flush
-stderr at shutdown. main()'s fail-closed exit 2 on its own error paths (an unknown mode, a bad argv
-count, an unreadable payload, a handler crash) still holds with stderr closed at startup, since print()
-then writes its line to stdout; but when that write to stderr fails, or succeeds and the shutdown flush
-of stderr fails, the run currently ends with status 120, a non-blocking error, so a PreToolUse call then
-goes ahead unchecked. The PYTHON-FLOOR comment below gives the floor guard's exits under the same
-conditions and the exit of an interpreter that cannot start this file, which fails first with Python's
-own exit.
+These exits, and the floor guard's on an older interpreter that can start this file, hold while the
+hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A
+failing output stream can change the exit status and can lose output, a decision included; a separate fix
+in progress addresses this. The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of
+an interpreter that cannot start this file, which fails first with Python's own exit.
 """
 import sys
 
@@ -180,12 +176,7 @@ import sys
 # HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
 # such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
 # mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
-# Both forms write the refusal line to stderr first, and the exits above hold only while stderr takes that
-# line and the interpreter can then flush stderr at shutdown. With stderr closed at startup the guard
-# currently exits 1 (main()'s error paths still exit 2 there, their line going to stdout); when the write
-# fails, or succeeds and the shutdown flush of stderr fails, the guard currently exits 120, and so do main()'s
-# error paths. Either way a PreToolUse call then goes ahead unchecked, and a fail-open mode, though it still
-# never blocks, may lose its warning.
+# Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
 # (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals, and 3.4 also rejects its starred items
@@ -284,7 +275,8 @@ def _allow():
 
 
 def _deny(reason, banner):
-    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform."""
+    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform, under the output
+    condition the module docstring states."""
     return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
                                        "permissionDecision": "deny",
                                        "permissionDecisionReason": reason},

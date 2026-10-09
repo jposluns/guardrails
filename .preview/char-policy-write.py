@@ -11,14 +11,14 @@ WHAT IT DOES
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
     PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: 0,
     with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python 3.14
-    that can start the hook, armed or not, while its error line can be written to stderr and stderr flushed
-    at shutdown (it currently exits 1 with stderr closed, and 120 when that write fails or succeeds and the
-    shutdown flush fails; either allows the call); one that cannot start it exits with Python's own status
-    first (DECISION). The verdict is deny, a note or silence: this hook never asks. Once armed (its root
-    set), it allows every call it cannot evaluate with a note naming why, a malformed call among them, and
-    it allows silently only a tool other than Write, Edit or MultiEdit and a well-formed call (see
-    DECISION) that it evaluates and finds clean, whose target is outside the root or the policy's scope, or
-    whose root holds no policy file.
+    that can start the hook, armed or not; one that cannot start it exits with Python's own status first
+    (DECISION). These exits hold while the hook's output (its diagnostic on stderr, and what it prints on
+    stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+    output, a decision included; a separate fix in progress addresses this. The verdict is deny, a note or
+    silence: this hook never asks. Once armed (its root set), it allows every call it cannot evaluate with a
+    note naming why, a malformed call among them, and it allows silently only a tool other than Write, Edit
+    or MultiEdit and a well-formed call (see DECISION) that it evaluates and finds clean, whose target is
+    outside the root or the policy's scope, or whose root holds no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
@@ -95,11 +95,8 @@ DECISION
       interpreter older than Python 3.14 that can start the hook, the guard at the top of this file reads
       no input, writes one line beginning `error: char-policy-write.py requires Python 3.14 or newer` to
       stderr and exits 2, which PreToolUse treats as a deny, so every such matching Write, Edit and
-      MultiEdit call is denied until Python is upgraded or the hook's entry is removed. That holds only
-      while the guard's write to stderr succeeds and the interpreter can then flush stderr at shutdown:
-      with stderr closed the guard currently exits 1, and when that write fails (a full device or a broken
-      pipe, say), or succeeds and the shutdown flush of stderr fails, it currently exits 120; either
-      status allows the call unchecked. An older interpreter that cannot start the hook never reaches the
+      MultiEdit call is denied until Python is upgraded or the hook's entry is removed, under the output
+      condition WHAT IT DOES states. An older interpreter that cannot start the hook never reaches the
       guard and fails with Python's own error first: one that predates the -I option exits 2, which still
       denies every such matching call, and one that accepts -I but cannot compile this file (Python 3.4
       and 3.5 cannot: it uses f-strings, and 3.4 also rejects its starred items in list displays) exits 1,

@@ -18,10 +18,10 @@ WHAT IT DOES
     and this file's absolute path. Output: nothing (allow), ONE line holding the standard PreToolUse deny object, or
     ONE line holding a note (a systemMessage with no permissionDecision, so the permission flow is unchanged). Exit
     status: 0, with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python
-    3.14 that can start the hook, while its error line can be written to stderr and stderr flushed at shutdown (it
-    currently exits 1 with stderr closed, and 120 when that write fails or succeeds and the shutdown flush fails;
-    either allows the call); one that cannot start it exits with Python's own status first (THREAT MODEL). This
-    hook never asks.
+    3.14 that can start the hook; one that cannot start it exits with Python's own status first (THREAT MODEL).
+    These exits hold while the hook's output (its diagnostic on stderr, and what it prints on stdout) can be
+    written and flushed. A failing output stream can change the exit status and can lose output, a decision
+    included; a separate fix in progress addresses this. This hook never asks.
 
     LITERAL. A bare word, a '...' string, or a "..." string whose value is non-empty, does not start with `-`, and
     uses only the characters A-Z, a-z, 0-9 and _ . / : @ % = , -. Such a value holds no blank, newline, quote or
@@ -128,21 +128,18 @@ THREAT MODEL
     guard at the top of this file reads no input, writes one line beginning
     `error: pattern-self-match.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as a
     deny, so every Bash call the launch line hands to Python is denied until Python is upgraded or the hook's entry
-    is removed. That holds only while the guard's write to stderr succeeds and the interpreter can then flush stderr
-    at shutdown: with stderr closed the guard currently exits 1, and when that write fails (a full device or a
-    broken pipe, say), or succeeds and the shutdown flush of stderr fails, it currently exits 120; either status
-    allows the call unchecked. An older interpreter that cannot start the hook never reaches the guard and fails
-    with Python's own error first. For this hook that is only one that predates the -I option, and it exits 2, which
-    still denies every Bash call the launch line hands to Python: this file is meant to hold no f-string or other
-    syntax newer than Python 3.4, so that any interpreter that accepts -I reaches the guard. The self-test checks
-    for f-strings, parses the file with the parser's 3.4 grammar setting, and scans the syntax tree and tokens for
-    these newer forms that grammar setting accepts: a starred item in a display or subscript ([*a], x[*a], return
-    *a, b), {**a}, f(*a, b), f(**a, **b), a trailing comma after a starred parameter or argument (lambda *a,: 0
-    too), a decorator that is not a dotted name or a call of one (@a[0].b, @(a)), a parenthesized with (with (a as
-    b, c as d):), and continue inside finally. A newer form outside these checks would go unnoticed, and an older
-    interpreter would then fail to compile the file and exit 1, which PreToolUse treats as non-blocking.
-    .preview/README.md (Installing a hook, step 4) describes those cases and its launch line, which skips the hook,
-    so the call goes ahead, when a standard stream is a directory.
+    is removed, under the output condition WHAT IT DOES states. An older interpreter that cannot start the hook
+    never reaches the guard and fails with Python's own error first. For this hook that is only one that predates
+    the -I option, and it exits 2, which still denies every Bash call the launch line hands to Python: this file is
+    meant to hold no f-string or other syntax newer than Python 3.4, so that any interpreter that accepts -I reaches
+    the guard. The self-test checks for f-strings, parses the file with the parser's 3.4 grammar setting, and scans
+    the syntax tree and tokens for these newer forms that grammar setting accepts: a starred item in a display or
+    subscript ([*a], x[*a], return *a, b), {**a}, f(*a, b), f(**a, **b), a trailing comma after a starred parameter
+    or argument (lambda *a,: 0 too), a decorator that is not a dotted name or a call of one (@a[0].b, @(a)), a
+    parenthesized with (with (a as b, c as d):), and continue inside finally. A newer form outside these checks
+    would go unnoticed, and an older interpreter would then fail to compile the file and exit 1, which PreToolUse
+    treats as non-blocking. .preview/README.md (Installing a hook, step 4) describes those cases and its launch
+    line, which skips the hook, so the call goes ahead, when a standard stream is a directory.
     The hook writes nothing to stdout in exactly these cases: a verification worker process (a worker kill-switch
     variable; legacy spellings are also honoured), where it writes one line to stderr saying it skipped, whatever
     its argv other than a lone `--self-test`, and reads nothing; a JSON
