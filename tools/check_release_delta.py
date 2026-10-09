@@ -44,6 +44,10 @@ tools/check_release_delta.py from that materialization under -I -B with a fresh 
 routes every branch from COMMITTED records and judges the post-release branch over committed objects
 exclusively, while the genesis and delta branches judge the checkout by design. The launched file
 itself is checkout code: an attacker who controls it controls the launch (the disclosed residual).
+The stage-2 child and each nested validator child also write a completion record that stage 1 (or
+this gate) requires beside exit 0. The record detects an omitted, truncated or foreign-pid result;
+it cannot authenticate that the child ran its checks, because the child writes it (the second
+disclosed residual; see _stage2_arm_result).
 
 Exit: 0 clean / genesis / NOT APPLICABLE legs; 1 a real finding (an under-claimed bump, a rowless
 change, an unconsumed or wrong row, a register incompleteness); 2 malformed or unreadable input
@@ -93,6 +97,11 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 # tool, no routing record) participates in the verdict. A launch without -P/-I additionally leaves the
 # few stdlib imports above this block shadowable by files planted beside this one; CI launches with
 # -I, which keeps the script directory off sys.path.
+#
+# DISCLOSED RESIDUAL (the completion record, PR #397 QA round p1): stage 1 accepts a zero child exit
+# only beside the child's complete record bound to its pid. That detects a child that fails to
+# complete (an omitted, truncated or foreign-pid record); it does not authenticate the committed
+# child's code, which can write a well-formed record without running the dispatch.
 
 def _stage1_git(repo, args, input_bytes=None, c_locale=False):
     """The stage-1 pinned git funnel: the inherited GIT_* environment scrubbed; replace objects,
@@ -341,31 +350,47 @@ def _stage1_read_capture(path):
 
 
 def _stage2_arm_result():
-    """The stage-2 child half of the fail-closed contract (security-seci-fail-closed; the
-    same child contract the merge-train unit runners follow, inlined here): when stage 1
+    """The stage-2 child half of the fail-closed contract (security-seci-fail-closed; the child
+    contract, defined here and applied to the nested validators by _CHILD_RECORD_STUB): when stage 1
     named a result path (AIQT_RELEASE_DELTA_STAGE2_RESULT), register the result writer with atexit
     FIRST, before any checkout import below runs or registers cleanup, so atexit's LIFO order runs
     it LAST, after every later-registered cleanup of this child (another exit handler registered
     before it is itself a fault). The result is ONE line, `release-delta-stage2 <code> <pid>`,
-    written only once the stage-2 dispatch SETTLED a verdict code; a committed copy that exits
-    without settling one (a bare SystemExit(0) in loaded code, a replaced dispatch) or whose
-    shutdown ends the process first writes NO complete result, and stage 1 refuses the pass. The
-    pid is this writer's own, so a stale or foreign record never matches.
+    which the writer produces only when a verdict code was set in the state this returns (the
+    stage-2 dispatch sets it); a committed copy that exits without setting one (a bare
+    SystemExit(0) in loaded code, a replaced dispatch) or whose shutdown ends the process first
+    writes NO complete result, and stage 1 refuses the pass. The pid is this writer's own, so a
+    stale record, or one carrying another process's pid, never matches.
+
+    What the record does NOT prove (PR #397 QA round p1, codex MEDIUM): it detects an omitted,
+    truncated or malformed result and one bound to a foreign pid, so it catches a committed copy
+    that FAILS to complete. It cannot authenticate that the dispatch ran: the child writes it, and
+    the child runs committed code that stage 1 does not control. A committed copy that writes
+    `release-delta-stage2 0 <its own pid>` and the boundary line itself, then exits 0, passes
+    without judging anything (the disclosed residual of this record; rejecting such a fabricated
+    record needs verification outside the child).
 
     The writer makes the result TRULY LAST (merge train 3 QA round 2, codex and claude MAJORs: a
     builtin cleanup hook that raises prints a frameless 'Exception ignored' report with no
     traceback header, and a finalizer ran in interpreter finalization AFTER the record): it
     collects the cyclic garbage until a pass frees nothing (bounded, past which it fails closed),
     so pending finalizers run before the result; flushes the streams; writes the boundary line
-    `release-delta-stage2-boundary <pid>` to the error stream as its LAST byte; writes the result;
-    and ends the process ITSELF with os._exit, so no interpreter finalization runs after it. An
-    audit hook armed here sees every `sys.unraisablehook` and `sys.excepthook` event (CPython
-    raises them before it calls whatever hook is installed, so a silenced hook or a replaced
-    stream cannot hide the fault), and threading.excepthook is wrapped (a thread fault raises no
-    audit event); any such fault, a reporting hook replaced, or a stream that cannot be flushed
-    makes the result and the exit 2, with a named line on the error stream. Stage 1 requires the
-    error stream to hold EXACTLY the boundary line on a pass: the gate's own diagnostics go to a
-    separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other byte is a fault.
+    `release-delta-stage2-boundary <pid>` to the error stream (its LAST byte on a pass); writes the
+    result; and ends the process ITSELF with os._exit, so no interpreter finalization runs after
+    it. An audit hook armed here sees every `sys.unraisablehook` and `sys.excepthook` event
+    (CPython raises them before it calls whatever hook is installed, so a silenced hook or a
+    replaced stream cannot hide the fault), and threading.excepthook is wrapped (a thread fault
+    raises no audit event); any such fault, a reporting hook replaced, or a stream that cannot be
+    flushed makes the result and the exit 2, with a named line on the error stream. The fault and
+    hook checks run again AFTER the record is written (PR #397 QA round p1, codex MAJOR): opening
+    the result file raises an audit event, and a hook run there can fault or replace a reporting
+    hook after the first checks. A fault found then turns the exit to 2 and overwrites the record
+    in place with code 2, and stage 1 refuses a success record beside a nonzero exit. Only
+    os.close and os._exit follow the second check; a fault another thread of the child raises in
+    that window is not seen, which is inside the residual above (code the child runs). Stage 1
+    requires the error stream to hold EXACTLY the boundary line on a pass: the gate's own
+    diagnostics go to a separate capture (AIQT_RELEASE_DELTA_STAGE2_DIAG, see main), so any other
+    byte is a fault.
     Returns the mutable state the dispatch settles, or None when no result path is named (a
     hand-run stage 2, every other mode)."""
     path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_RESULT")
@@ -387,6 +412,11 @@ def _stage2_arm_result():
         faults.append("threading.excepthook")
         thread_hook(args)
 
+    def _check_hooks():
+        if (threading.excepthook is not _thread_fault or sys.excepthook is not reporting[0]
+                or sys.unraisablehook is not reporting[1]):
+            faults.append("a fault-reporting hook was replaced")
+
     def _write_result():
         if state["code"] is None:
             return
@@ -396,9 +426,7 @@ def _stage2_arm_result():
                 break
         else:
             faults.append("garbage collection still freed objects after 100 passes")
-        if (threading.excepthook is not _thread_fault or sys.excepthook is not reporting[0]
-                or sys.unraisablehook is not reporting[1]):
-            faults.append("a fault-reporting hook was replaced")
+        _check_hooks()
         try:
             sys.stdout.flush()
             sys.stderr.flush()
@@ -406,14 +434,32 @@ def _stage2_arm_result():
             faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
         if faults:
             code = 2
+        seen = len(faults)
         try:
             if faults:
                 os.write(2, "error: stage-2 cleanup fault ({}); fail-closed "
                          "(security-seci-fail-closed)\n".format(
                              ", ".join(sorted(set(faults)))).encode("utf-8", "replace"))
             os.write(2, "release-delta-stage2-boundary {}\n".format(os.getpid()).encode("ascii"))
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write("release-delta-stage2 {} {}\n".format(code, os.getpid()))
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)
+            try:
+                os.write(fd, "release-delta-stage2 {} {}\n".format(code, os.getpid()).encode(
+                    "ascii"))
+                # The second check (PR #397 QA round p1, codex MAJOR): the open above raised an
+                # audit event, and a hook run there may have faulted or replaced a reporting
+                # hook. A late fault overwrites the success record in place (code 2 has the
+                # same length, so no stale byte stays) and makes the exit 2.
+                _check_hooks()
+                if code == 0 and len(faults) != seen:
+                    code = 2
+                    os.write(2, "error: stage-2 fault during the result write ({}); fail-closed "
+                             "(security-seci-fail-closed)\n".format(
+                                 ", ".join(sorted(set(faults[seen:])))).encode("utf-8",
+                                                                              "replace"))
+                    os.pwrite(fd, "release-delta-stage2 2 {}\n".format(os.getpid()).encode(
+                        "ascii"), 0)
+            finally:
+                os.close(fd)
         except OSError:
             code = 2
         os._exit(code)
@@ -511,7 +557,11 @@ def _stage1_main():
         # only a stderr traceback, and one that is a bare SystemExit(0) exits 0 having judged
         # nothing). The captures live in stage 1's fresh private directory and are read back
         # through the non-blocking fstat-checked reader, so the committed child code cannot
-        # park stage 1 on a swapped special file.
+        # park stage 1 on a swapped special file. A success record beside a NONZERO exit is
+        # refused by name (PR #397 QA round p1, codex MAJOR: a fault during the result write).
+        # The record detects an omitted, truncated or foreign-pid result; it does not
+        # authenticate the committed child, which can write a well-formed record without
+        # running the dispatch (the disclosed residual, _stage2_arm_result).
         result_path = os.path.join(tmp, "stage2-result")
         err_path = os.path.join(tmp, "stage2-stderr")
         diag_path = os.path.join(tmp, "stage2-diagnostics")
@@ -540,9 +590,17 @@ def _stage1_main():
             if piece:
                 sys.stderr.buffer.write(piece)
         sys.stderr.buffer.flush()
-        if child_rc != 0:
-            return child_rc
         record = _stage1_read_capture(result_path)
+        if child_rc != 0:
+            if record is not None and record.startswith(b"release-delta-stage2 0 "):
+                # PR #397 QA round p1 (codex MAJOR): a success record beside a nonzero exit is
+                # a fault during or after the result write, never a pass and never the code.
+                print("error: stage-1 re-execution: the committed gate exited {} but its stage-2 "
+                      "result records a pass ({}); a success record beside a nonzero exit is "
+                      "never a verdict (security-seci-fail-closed); fail-closed".format(
+                          child_rc, repr(record[:120])), file=sys.stderr)
+                return 2
+            return child_rc
         if record != "release-delta-stage2 0 {}\n".format(child.pid).encode("ascii"):
             print("error: stage-1 re-execution: the committed gate exited 0 but wrote no "
                   "complete stage-2 result bound to its own exit code and pid ({}); a zero "
@@ -1189,7 +1247,8 @@ def _renderer_freshness(root, label):
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
     if rc != 0:
         raise GateError("{} renderer declaration is stale or a closure is incomplete "
-                        "(gen_renderers.py --check rc={})".format(label, rc))
+                        "(gen_renderers.py --check rc={}{})".format(
+                            label, rc, "; " + fault if fault else ""))
     if fault is not None:
         raise GateError("{} renderer freshness (gen_renderers.py --check) {} "
                         "(security-seci-fail-closed); fail-closed".format(label, fault))
@@ -2037,7 +2096,11 @@ def _child_pycache_x():
 # then the script's own arguments. It registers its result writer FIRST (so it runs LAST), arms the
 # fault audit hook and the thread-fault wrapper, runs the script as __main__, and the writer collects
 # the cyclic garbage, flushes, writes `release-delta-child <code> <pid>` and ends the child with
-# os._exit, so nothing of interpreter finalization runs after the result.
+# os._exit, so nothing of interpreter finalization runs after the result. The fault and hook checks
+# run again after the record is written (PR #397 QA round p1, codex MAJOR: the open raises an audit
+# event a hook can fault in); a late fault overwrites the record in place with code 2 and exits 2.
+# The record cannot authenticate the validator's code, which can write a well-formed record itself
+# (the residual _stage2_arm_result discloses).
 _CHILD_RECORD_STUB = (
     "import atexit, gc, os, runpy, sys, threading\n"
     "script, result = sys.argv[1], sys.argv[2]\n"
@@ -2048,6 +2111,10 @@ _CHILD_RECORD_STUB = (
     "def thread_fault(args):\n"
     "    faults.append('threading.excepthook')\n"
     "    thread_hook(args)\n"
+    "def check_hooks():\n"
+    "    if (threading.excepthook is not thread_fault or sys.excepthook is not reporting[0]\n"
+    "            or sys.unraisablehook is not reporting[1]):\n"
+    "        faults.append('a fault-reporting hook was replaced')\n"
     "def record():\n"
     "    if not state:\n"
     "        return\n"
@@ -2057,9 +2124,7 @@ _CHILD_RECORD_STUB = (
     "            break\n"
     "    else:\n"
     "        faults.append('garbage collection never settled')\n"
-    "    if (threading.excepthook is not thread_fault or sys.excepthook is not reporting[0]\n"
-    "            or sys.unraisablehook is not reporting[1]):\n"
-    "        faults.append('a fault-reporting hook was replaced')\n"
+    "    check_hooks()\n"
     "    try:\n"
     "        sys.stdout.flush()\n"
     "        sys.stderr.flush()\n"
@@ -2069,8 +2134,23 @@ _CHILD_RECORD_STUB = (
     "        code = 2\n"
     "        os.write(2, ('release-delta child fault: ' + ', '.join(sorted(set(faults)))\n"
     "                     + chr(10)).encode())\n"
-    "    with open(result, 'w', encoding='utf-8') as handle:\n"
-    "        handle.write('release-delta-child ' + str(code) + ' ' + str(os.getpid()) + chr(10))\n"
+    "    seen = len(faults)\n"
+    "    try:\n"
+    "        fd = os.open(result, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o600)\n"
+    "        try:\n"
+    "            os.write(fd, ('release-delta-child ' + str(code) + ' ' + str(os.getpid())\n"
+    "                          + chr(10)).encode())\n"
+    "            check_hooks()\n"
+    "            if code == 0 and len(faults) != seen:\n"
+    "                code = 2\n"
+    "                os.write(2, ('release-delta child fault during the result write: '\n"
+    "                             + ', '.join(sorted(set(faults[seen:]))) + chr(10)).encode())\n"
+    "                os.pwrite(fd, ('release-delta-child 2 ' + str(os.getpid())\n"
+    "                               + chr(10)).encode(), 0)\n"
+    "        finally:\n"
+    "            os.close(fd)\n"
+    "    except OSError:\n"
+    "        code = 2\n"
     "    os._exit(code)\n"
     "atexit.register(record)\n"
     "if getattr(atexit, '_ncallbacks', lambda: 1)() != 1:\n"
@@ -2094,9 +2174,10 @@ def _run_recorded_child(script_path, args):
     fault): `fault` is None, or names why a ZERO exit is still no pass (security-seci-fail-closed):
     no complete result bound to the child's own exit code and pid (an early os._exit, a cleanup that
     ended the process first), or any byte on its error stream (a traceback, a frameless 'Exception
-    ignored' report, a thread fault; the validators print nothing there on a pass). The result
-    lives in a fresh private directory and is read back through the non-blocking fstat-checked
-    reader. A launch failure raises OSError for the caller to name."""
+    ignored' report, a thread fault; the validators print nothing there on a pass), or, beside a
+    NONZERO exit, a result that records a pass (a fault during or after the result write; PR #397
+    QA round p1). The result lives in a fresh private directory and is read back through the
+    non-blocking fstat-checked reader. A launch failure raises OSError for the caller to name."""
     import shutil
     import tempfile
     private = tempfile.mkdtemp(prefix="aiqt-release-delta-child-")
@@ -2118,6 +2199,9 @@ def _run_recorded_child(script_path, args):
         elif err:
             fault = ("exited 0 but its error stream is not empty ({!r}); a fault there, cleanup "
                      "included, is never a pass".format(err[:200].decode("utf-8", "replace")))
+    elif record is not None and record.startswith(b"release-delta-child 0 "):
+        fault = ("exited {} but its result records a pass ({!r}); a success record beside a "
+                 "nonzero exit is never a verdict".format(child.returncode, record[:80]))
     return child.returncode, out, err, fault
 
 
@@ -2149,7 +2233,7 @@ def _validate_via_tool(root, script, args, what, tools_root=None):
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
     if rc != 0:
-        diag = (err or out).decode("utf-8", "replace").strip()[:400]
+        diag = fault or (err or out).decode("utf-8", "replace").strip()[:400]
         raise GateError("{}: {} rc={} ({})".format(what, script, rc, diag))
     if fault is not None:
         raise GateError("{}: {} {} (security-seci-fail-closed); fail-closed".format(
@@ -4941,6 +5025,29 @@ def _post_release_e2e(tmp, failures, only=None):
             armed7s = ("import os\nimport sys\n" + _inspect7s.getsource(_stage2_arm_result)
                        + "\n_state7s = _stage2_arm_result()\n")
             settle7s = "_state7s['code'] = 0\n"
+            # PR #397 QA round p1 (codex MAJOR): an audit hook installed AFTER the writer is armed
+            # faults while the result file is opened, under a redirected stream, so nothing
+            # reaches the error stream and only the writer's second check can refuse it.
+            late7s = ("import contextlib, io\n"
+                      "_r7s = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                      "class _Late7s:\n"
+                      "    def __del__(self):\n"
+                      "        raise RuntimeError('QA late finalizer')\n"
+                      "def _late7s(event, args):\n"
+                      "    if event == 'open' and args and args[0] == _r7s:\n"
+                      "        with contextlib.redirect_stderr(io.StringIO()):\n"
+                      "            _o7s = _Late7s()\n"
+                      "            del _o7s\n"
+                      "sys.addaudithook(_late7s)\n")
+            # Hand-written records (no writer armed): the pid binding and the refusal of a
+            # success record beside a nonzero exit are each the only catcher of their case.
+            forged7s = ("import os\n"
+                        "_r7s = os.environ['AIQT_RELEASE_DELTA_STAGE2_RESULT']\n"
+                        "os.write(2, ('release-delta-stage2-boundary ' + str(os.getpid())\n"
+                        "             + chr(10)).encode())\n"
+                        "with open(_r7s, 'w', encoding='utf-8') as _h7s:\n"
+                        "    _h7s.write('release-delta-stage2 0 ' + {} + chr(10))\n"
+                        "os._exit({})\n")
             for tag7s, body7s, want7s in (
                     ("shutdown-fault", "import atexit\n"
                      "def _fault():\n"
@@ -4960,7 +5067,31 @@ def _post_release_e2e(tmp, failures, only=None):
                      "with contextlib.redirect_stderr(io.StringIO()):\n"
                      "    _t7s = threading.Thread(target=lambda: 1 / 0)\n"
                      "    _t7s.start()\n"
-                     "    _t7s.join()\n" + settle7s, 2)):
+                     "    _t7s.join()\n" + settle7s, 2),
+                    # PR #397 QA round p1 (codex MAJOR; claude MEDIUM-1 and MINOR-1): each case
+                    # below is refused by exactly one guard, so removing that guard turns the
+                    # case into exit 0.
+                    ("armed late fault during the result write", armed7s + late7s + settle7s, 2),
+                    ("armed late fault clean control", armed7s + late7s.replace(
+                        "args[0] == _r7s", "args[0] == _r7s + '.never'") + settle7s, 0),
+                    ("armed unraisable fault under redirected diagnostics", armed7s
+                     + "import contextlib, io\n"
+                     "class _QA7u:\n"
+                     "    __del__ = os.remove\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _qa7u = _QA7u()\n"
+                     "    del _qa7u\n" + settle7s, 2),
+                    ("armed replaced thread hook hiding a thread fault", armed7s
+                     + "import threading\n"
+                     "threading.excepthook = lambda _a: None\n"
+                     "_t7r = threading.Thread(target=lambda: 1 / 0)\n"
+                     "_t7r.start()\n"
+                     "_t7r.join()\n" + settle7s, 2),
+                    ("exit handler registered before the writer", "import atexit\n"
+                     "atexit.register(int)\n" + armed7s + settle7s, 2),
+                    ("record bound to another pid", forged7s.format("'1'", 0), 2),
+                    ("success record beside a nonzero exit",
+                     forged7s.format("str(os.getpid())", 1), 2)):
                 mal7 = tmp / ("r7-stage2-" + tag7s.replace(" ", "-"))
                 (mal7 / "tools").mkdir(parents=True)
                 gate7 = mal7 / "tools" / "check_release_delta.py"
@@ -4989,12 +5120,35 @@ def _post_release_e2e(tmp, failures, only=None):
                                             label7s, tag7s, proc7s.returncode,
                                             out7s.strip()[-300:]))
                     continue
-                if proc7s.returncode != 2 or "stage-2" not in out7s:
+                if proc7s.returncode != 2 or "stage-2" not in out7s or (
+                        tag7s == "success record beside a nonzero exit"
+                        and "records a pass" not in out7s):
                     failures.append("{} [{}]: expected exit 2 naming the stage-2 contract (a "
                                     "zero child exit with no complete result or a faulted "
                                     "error stream is never a pass), got rc={}: {}".format(
                                         label7s, tag7s, proc7s.returncode,
                                         out7s.strip()[-300:]))
+
+            # What a late fault leaves behind (PR #397 QA round p1, codex MAJOR): stage 1 deletes
+            # its captures, so the armed late-fault body runs directly here and its record must
+            # carry code 2, never the success record written before the second check.
+            direct7s = tmp / "r7-stage2-direct-late.py"
+            record7s = tmp / "r7-stage2-direct-late.result"
+            direct7s.write_text(armed7s + late7s + settle7s, encoding="utf-8")
+            try:
+                proc7d = subprocess.run([sys.executable, "-I", "-B", str(direct7s)],
+                                        capture_output=True, timeout=120,
+                                        env=dict(env, AIQT_RELEASE_DELTA_STAGE2_RESULT=str(
+                                            record7s)))
+                rec7d = record7s.read_bytes() if record7s.is_file() else b""
+            except (OSError, subprocess.TimeoutExpired) as exc7d:
+                proc7d, rec7d = None, "not run ({})".format(exc7d).encode("utf-8")
+            if (proc7d is None or proc7d.returncode != 2
+                    or not rec7d.startswith(b"release-delta-stage2 2 ")):
+                failures.append("{} [late fault record, run directly]: expected rc=2 and a "
+                                "code-2 record (got rc={}, record={!r})".format(
+                                    label7s, None if proc7d is None else proc7d.returncode,
+                                    rec7d[:80]))
 
         # ---- merge train 3 QA round 2 (codex and claude MAJORs): the nested validator children
         # (_renderer_freshness, _validate_via_tool) judged only the exit code, so a validator
@@ -5018,7 +5172,45 @@ def _post_release_e2e(tmp, failures, only=None):
                      True),
                     ("early silent exit", "import os\nos._exit(0)\n", True),
                     ("stray error-stream byte", "import os\n"
-                     "os.write(2, b'QA stray byte' + bytes([10]))\n", True)):
+                     "os.write(2, b'QA stray byte' + bytes([10]))\n", True),
+                    # PR #397 QA round p1 (codex MAJOR; claude MEDIUM-2 and MINOR-1): each case
+                    # below is refused by exactly one guard of the record stub. The validator
+                    # finds the stub's result path as the argument after its own path.
+                    ("late fault during the result write", "import contextlib, io, sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "class _Late:\n"
+                     "    def __del__(self):\n"
+                     "        raise RuntimeError('QA nested late finalizer')\n"
+                     "def _late(event, args):\n"
+                     "    if event == 'open' and args and args[0] == _r:\n"
+                     "        with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "            _o = _Late()\n"
+                     "            del _o\n"
+                     "sys.addaudithook(_late)\n", True),
+                    ("late fault clean control", "import sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "sys.addaudithook(lambda event, args: event == 'open' and args\n"
+                     "                 and args[0] == _r and None)\n", False),
+                    ("unraisable fault under a redirected stream", "import contextlib, io, os\n"
+                     "class _Q:\n"
+                     "    __del__ = os.remove\n"
+                     "with contextlib.redirect_stderr(io.StringIO()):\n"
+                     "    _q = _Q()\n"
+                     "    del _q\n", True),
+                    ("cyclic finalizer fault with automatic collection off", "import gc, os\n"
+                     "gc.disable()\n"
+                     "class _C:\n"
+                     "    __del__ = os.remove\n"
+                     "_c = _C()\n_c.self = _c\ndel _c\n", True),
+                    ("replaced thread hook hiding a thread fault", "import threading\n"
+                     "threading.excepthook = lambda _a: None\n"
+                     "_t = threading.Thread(target=lambda: 1 / 0)\n_t.start()\n_t.join()\n",
+                     True),
+                    ("record bound to another pid", "import os, sys\n"
+                     "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                     "with open(_r, 'w', encoding='utf-8') as _h:\n"
+                     "    _h.write('release-delta-child 0 1' + chr(10))\n"
+                     "os._exit(0)\n", True)):
                 script7n = "qa-nested-{}.py".format(tag7n.replace(" ", "-"))
                 (nest7 / "tools" / script7n).write_text(body7n, encoding="utf-8")
                 (nest7 / "tools" / "gen_renderers.py").write_text(body7n, encoding="utf-8")
@@ -5040,6 +5232,60 @@ def _post_release_e2e(tmp, failures, only=None):
                         failures.append("{} [{} via {}]: a clean validator must pass (no "
                                         "over-rejection), got: {}".format(
                                             label7n, tag7n, leg7n, raised7n[:300]))
+            # A success record beside a nonzero exit: the nonzero exit already fails both legs,
+            # so _run_recorded_child's own fault is asserted directly (PR #397 QA round p1).
+            script7z = nest7 / "tools" / "qa-nested-success-record-nonzero.py"
+            script7z.write_text("import os, sys\n"
+                                "_r = sys.orig_argv[sys.orig_argv.index(__file__) + 1]\n"
+                                "with open(_r, 'w', encoding='utf-8') as _h:\n"
+                                "    _h.write('release-delta-child 0 ' + str(os.getpid())\n"
+                                "             + chr(10))\n"
+                                "os._exit(1)\n", encoding="utf-8")
+            try:
+                rc7z, _o7z, _e7z, fault7z = _run_recorded_child(script7z, [])
+            except OSError as exc7z:
+                rc7z, fault7z = None, "launch failed ({})".format(exc7z)
+            if rc7z != 1 or fault7z is None or "records a pass" not in fault7z:
+                failures.append("{} [success record beside a nonzero exit]: expected rc=1 with a "
+                                "fault naming the success record (got rc={}, fault={!r})".format(
+                                    label7n, rc7z, fault7z))
+            # An exit handler registered before the stub's own writer is reachable only by code
+            # that runs before the stub, so the stub runs from a file under a launcher that
+            # registers one first (through runpy, as the stub runs a validator); control first.
+            stub7x = nest7 / "qa-record-stub.py"
+            stub7x.write_text(_CHILD_RECORD_STUB, encoding="utf-8")
+            result7x = nest7 / "qa-record-stub-result"
+            clean7x = nest7 / "tools" / "qa-nested-clean-control.py"
+            # The same launcher also pins what a late fault leaves behind: a code-2 record, never
+            # the success record written before the second check.
+            late7x = nest7 / "tools" / "qa-nested-late-fault-during-the-result-write.py"
+            for tag7x, pre7x, script7x, want7x, needle7x in (
+                    ("control", "", clean7x, 0, b""),
+                    ("pre-registered", "atexit.register(int)\n", clean7x, 2,
+                     b"an exit handler was registered"),
+                    ("late fault record", "", late7x, 2, b"during the result write")):
+                if result7x.exists():
+                    result7x.unlink()
+                try:
+                    proc7x = subprocess.run(
+                        [sys.executable, "-I", "-B", "-c", "import atexit, runpy, sys\n" + pre7x
+                         + "sys.argv = sys.argv[1:]\n"
+                         "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+                         str(stub7x), str(script7x), str(result7x)],
+                        capture_output=True, timeout=120)
+                except (OSError, subprocess.TimeoutExpired) as exc7x:
+                    failures.append("fixture setup ({} [exit handler before the writer]): {}"
+                                    .format(label7n, exc7x))
+                    break
+                rec7x = result7x.read_bytes() if result7x.is_file() else b""
+                if (proc7x.returncode != want7x
+                        or not rec7x.startswith("release-delta-child {} ".format(
+                            want7x).encode("ascii"))
+                        or needle7x not in proc7x.stderr):
+                    failures.append("{} [stub run from a file, {}]: expected rc={} and a code-{} "
+                                    "record (got rc={}, record={!r}, stderr={!r})".format(
+                                        label7n, tag7x, want7x, want7x, proc7x.returncode,
+                                        rec7x[:80], proc7x.stderr[:200]))
 
 
     # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
