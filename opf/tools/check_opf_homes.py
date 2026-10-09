@@ -26,31 +26,49 @@ the lint reads the registry marker, not the meaning, so a requirement wrongly ma
 stays green; review of registry changes catches that.
 
 The default entry also guards the informative sections: a heading that says "(informative)" or
-whose body declares itself informative (Appendix E), and every descendant heading beneath it at
-any level, is red where its title or its body carries an uppercase requirement keyword (MUST,
-SHALL, REQUIRED, SHOULD, MAY, RECOMMENDED, OPTIONAL) outside the one exempt quotation form, a
-code span holding exactly the keyword preceded by "the keyword" or "the term"; a keyword in any
-other form there, a bare code span or a fenced block included, is a finding (the guard fails
-closed). A keyword is read where no letter, digit or underscore adjoins it, or where an
-underscore run adjoins it with no letter or digit beyond the run, as CommonMark requires before
-an underscore can open or close emphasis: _MUST_ and __MUST__ are read, MUST_DO and x_MUST_y
-(rendered as written) are not, and an unpaired run (_MUST alone) is read, an over-fire. It is
-read again with character references decoded, and again joined: with plain link and image
-targets removed (below), each underscore run CommonMark could read as emphasis removed, each
-emphasis, strikethrough, code-span, bracket and backslash character removed, character
-references decoded, invisible characters dropped (format, nonspacing and enclosing marks,
-unassigned, private-use, surrogate, control characters other than whitespace, and the Hangul
-fillers) and compatibility forms folded (NFKC). So MU**ST**, [MU](/u)ST, [MU][r]ST, &#77;UST,
-M&shy;UST, MU with a combining grapheme joiner before ST, and fullwidth or mathematical MUST
-are read too; a removed character that renders visibly (MU!ST) over-fires. An informative
-section also fails closed, with a finding that names the form and asks for plain text or a
-move out of the section, on inline syntax it does not read: a "](" or "][" that opens no plain
-target (a destination with no space, parenthesis, quote, angle bracket or backslash, optionally
-a title in double or single quotes holding none of those; or a reference label with no bracket
-or backslash), so nested or escaped parentheses and quoted parentheses are findings; and a "<"
-followed by a letter, "/", "!" or "?" other than a URI autolink, since inline HTML can hide or
-reorder text, in a code span or fenced block too. Residual: a keyword spelt with look-alike
-letters of another script (Cyrillic or Greek) is not read; review catches that.
+whose body declares itself informative ("This appendix is informative", or section or
+subsection, as Appendix E does), and every descendant heading beneath it at any level, is red
+where its title or its body carries an uppercase requirement keyword (MUST, SHALL, REQUIRED,
+SHOULD, MAY, RECOMMENDED, OPTIONAL) outside the one exempt quotation form, a code span holding
+exactly the keyword preceded by "the keyword" or "the term"; a keyword in any other form there,
+a bare code span or a fenced block included, is a finding (the guard fails closed). A keyword is
+read where no letter, digit or underscore adjoins it, or where an underscore run adjoins it with
+no letter or digit beyond the run, as CommonMark requires before an underscore can open or close
+emphasis: _MUST_ and __MUST__ are read, MUST_DO and x_MUST_y (rendered as written) are not, and
+an unpaired run (_MUST alone) is read, an over-fire. It is read again with character references
+decoded, and in two normalized forms. Joined: plain link and image targets removed (below), each
+underscore run CommonMark could read as emphasis removed, and each emphasis, strikethrough,
+code-span, bracket and backslash character removed. Kept: the same underscore runs and each
+emphasis, strikethrough and code-span character removed, with brackets, targets and backslashes
+kept, since a "](" or "][" that opens no link shows its text. Each normalized form then has its
+character references decoded, its invisible characters dropped (format, nonspacing and enclosing
+marks, unassigned, private-use, surrogate, control characters other than whitespace, and the
+Hangul fillers) and its compatibility forms folded (NFKC), once as it stands and once with each
+superscript, subscript or circled form read as a space, since a footnote mark ends a word. So
+MU**ST**, [MU](/u)ST, [MU][r]ST, x](M**U**ST), [x][M**U**ST], &#77;UST, M&shy;UST, MU with a
+combining grapheme joiner before ST, MUST followed by a superscript 1, and fullwidth or
+mathematical MUST are read too; a removed character that renders visibly (MU!ST) over-fires.
+An informative marker is read the same way: a heading title or body is informative where any
+of those forms, also with inline HTML tags removed, holds "(informative)" (spaces allowed inside
+the parentheses) or the declaration, in any letter case and with any whitespace run, a line
+break included, read as one space. So Z (&#105;nformative), Z (informa**tive**) and a
+declaration split across lines mark their sections; reading more forms only marks more sections
+informative, so the guard scans more. A heading title anywhere that holds inline syntax the
+guard does not read (below) is a finding, since it could hide a marker. An informative section
+also fails closed, with a finding that names the form and asks for plain text or a move out of
+the section, on inline syntax it does not read: a "](" or "][" that opens no plain target (a
+destination with no space, parenthesis, quote, angle bracket or backslash, optionally a title in
+double or single quotes holding no quote, parenthesis or backslash, spaces and angle brackets
+allowed; or a reference label with no bracket or backslash), so nested or escaped parentheses
+and quoted parentheses are findings; and a "<" followed by a letter, "/", "!" or "?" other than
+a URI autolink, since inline HTML can hide or reorder text, in a code span or fenced block too.
+That finding names a "<" that may open inline HTML, since plain text of that shape (a<b, a code
+span holding Vec<u8>, an email autolink) is refused too, an over-fire. Residuals: a keyword
+spelt with look-alike letters of another script (Cyrillic or Greek) is not read; a keyword
+adjoined by a letter or digit in another compatibility form is read as one word with it; a body
+declaration whose word "informative" is split by inline HTML that hides text (a hidden element)
+or by a link target the guard does not read is not read as a declaration, and a declaration in
+other words is not read; review catches those.
 
 Headings are read by CommonMark's block algorithm over block quotes and list items; lines end
 at LF, CR LF or CR only, and a tab advances to the next multiple of 4 columns. A block quote
@@ -1111,7 +1129,12 @@ def keyword_findings(contract=None):
 # is read too, an over-fire.
 _INFORMATIVE_KEYWORD = re.compile(
     r"(?<!\w)_*(MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)_*(?!\w)")
-_INFORMATIVE_MARK = re.compile(r"\bThis (?:appendix|section|subsection) is informative\b")
+# An informative marker, matched in each reading form of a heading title (_INFORMATIVE_TITLE)
+# or a body (_INFORMATIVE_MARK) in any letter case, any whitespace run (a line break included)
+# read as one space (_says_informative).
+_INFORMATIVE_TITLE = re.compile(r"\(\s*informative\s*\)", re.IGNORECASE)
+_INFORMATIVE_MARK = re.compile(
+    r"\bthis\s+(?:appendix|section|subsection)\s+is\s+informative\b", re.IGNORECASE)
 # The one exempt quotation form: a code span holding exactly one keyword, preceded by
 # "the keyword" or "the term" (sentence case allowed). Every other uppercase occurrence in an
 # informative section, inside any other code span or a fenced block included, is a finding.
@@ -1122,51 +1145,93 @@ _INFORMATIVE_QUOTED = re.compile(
 # run CommonMark could read as emphasis (no letter or digit on one side of it), a link or image
 # target in its plain form, then each emphasis, strikethrough, code-span, bracket and
 # backslash character. A plain target is "](", a destination with no space, parenthesis,
-# quote, angle bracket or backslash, optionally a title in double or single quotes holding
-# none of those, then ")"; or "][", a reference label with no bracket or backslash, then "]".
-# Every other "](" or "][" in an informative section is a finding (_LINK_SYNTAX), as is inline
-# HTML other than a URI autolink (_AUTOLINK), since a tag can hide or reorder text.
+# quote, angle bracket or backslash, optionally a title in double or single quotes holding no
+# quote, parenthesis or backslash (spaces and angle brackets allowed), then ")"; or "][", a
+# reference label with no bracket or backslash, then "]". Every other "](" or "][" in an
+# informative section is a finding (_LINK_SYNTAX), as is a "<" that may open inline HTML other
+# than a URI autolink (_AUTOLINK), since a tag can hide or reorder text. The kept form removes
+# only the emphasis, strikethrough and code-span characters (_INLINE_EMPHASIS), since a "](" or
+# "][" that opens no link shows its text, target included.
 _INLINE_TARGET = re.compile(
     r"\]\(\s*[^\s()<>\"'\\]*(?:\s+(?:\"[^\"'()\\]*\"|'[^\"'()\\]*'))?\s*\)|\]\[[^\[\]\\]*\]")
 _LINK_SYNTAX = re.compile(r"\][(\[]")
 _AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*>")
 _INLINE_UNDERSCORE = re.compile(r"(?<!\w)_+|_+(?!\w)")
 _INLINE_MARKUP = re.compile(r"[*~`\[\]!\\]")
+_INLINE_EMPHASIS = re.compile(r"[*~`]")
+# An inline HTML tag, removed only where an informative marker is read (_says_informative).
+_INLINE_TAG = re.compile(r"<[A-Za-z/!?][^<>]*>")
 # Characters that render invisibly or only modify the character before them: format,
 # nonspacing and enclosing marks, unassigned, private-use and surrogate code points, control
 # characters other than whitespace, and the Hangul fillers.
 _INVISIBLE_CATEGORIES = frozenset(("Cf", "Mn", "Me", "Cn", "Co", "Cs"))
 _INVISIBLE_FILLERS = "\u115f\u1160\u3164\uffa0"
+_ASCII_CONTROL = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+# Compatibility forms read as a space in the split fold (_folded): a footnote mark ends a word.
+_WORD_ENDING_FORMS = ("<super>", "<sub>", "<circle>")
 
 
 def _visible(text):
+    if text.isascii():
+        return _ASCII_CONTROL.sub("", text)
     return "".join(ch for ch in text if not (
         unicodedata.category(ch) in _INVISIBLE_CATEGORIES or ch in _INVISIBLE_FILLERS
         or (unicodedata.category(ch) == "Cc" and ch not in "\t\n\r\x0b\x0c")))
 
 
+def _folded(text):
+    # text with its character references decoded and invisible characters dropped, then
+    # folded (NFKC) twice: as it stands, and split, with each superscript, subscript or circled
+    # form read as a space (_WORD_ENDING_FORMS), so MUST followed by a footnote mark is read.
+    text = _visible(html.unescape(text))
+    split = text if text.isascii() else "".join(
+        " " if unicodedata.decomposition(ch).startswith(_WORD_ENDING_FORMS) else ch for ch in text)
+    return [_visible(unicodedata.normalize("NFKC", form)) for form in (text, split)]
+
+
+def _reading_forms(text):
+    # The forms of text the guard reads: as written, with its character references decoded,
+    # and two normalized forms, each folded (_folded). joined: its plain link targets and
+    # inline markup removed (_INLINE_UNDERSCORE judged on the text as written, then
+    # _INLINE_TARGET and _INLINE_MARKUP). kept: the same underscore runs and only the
+    # emphasis, strikethrough and code-span characters removed (_INLINE_EMPHASIS), brackets,
+    # link targets and backslashes kept, since a "](" or "][" that opens no link shows them.
+    plain = _INLINE_UNDERSCORE.sub("", text)
+    joined = _INLINE_MARKUP.sub("", _INLINE_TARGET.sub("", plain))
+    forms = [text, html.unescape(text)] + _folded(joined) + _folded(_INLINE_EMPHASIS.sub("", plain))
+    return list(dict.fromkeys(forms))
+
+
 def _informative_keywords(text):
-    # The keywords the text carries as written, with its character references decoded, and
-    # joined: with its plain link targets and inline markup removed (_INLINE_UNDERSCORE judged
-    # on the text as written, then _INLINE_TARGET and _INLINE_MARKUP), its character
-    # references decoded, its invisible characters dropped and compatibility forms folded
-    # (NFKC). Reading more forms only adds findings; the forms the guard cannot read are
-    # findings of their own (informative_findings).
-    joined = _INLINE_MARKUP.sub("", _INLINE_TARGET.sub("", _INLINE_UNDERSCORE.sub("", text)))
-    joined = _visible(unicodedata.normalize("NFKC", _visible(html.unescape(joined))))
-    return {word for form in (text, html.unescape(text), joined)
-            for word in _INFORMATIVE_KEYWORD.findall(form)}
+    # The keywords text carries in any of its reading forms (_reading_forms). Reading more
+    # forms only adds findings; the forms the guard cannot read are findings of their own
+    # (informative_findings).
+    return {word for form in _reading_forms(text) for word in _INFORMATIVE_KEYWORD.findall(form)}
+
+
+def _says_informative(text, mark):
+    # Whether text marks itself informative (mark is _INFORMATIVE_TITLE for a heading title,
+    # _INFORMATIVE_MARK for a body): in any reading form, also with inline HTML tags removed
+    # (_INLINE_TAG). So a marker written with character references, split by markup,
+    # invisible characters, a tag or a line break, or in compatibility forms, is read as the
+    # page shows it; reading more forms only marks more sections informative, so the guard
+    # scans more.
+    forms = _reading_forms(text)
+    forms += [_INLINE_TAG.sub("", form) for form in forms if "<" in form]
+    return any(mark.search(form) for form in forms)
 
 
 def _inline_unread(text):
     # The inline syntax in text that the guard does not read: each "](" or "][" that opens no
-    # plain link target, and each "<" opening inline HTML (a letter, "/", "!" or "?" after it)
-    # other than a URI autolink, even in a code span or fenced block.
+    # plain link target, and each "<" that may open inline HTML (a letter, "/", "!" or "?"
+    # after it) other than a URI autolink, even in a code span or fenced block; plain text
+    # shaped like a tag (a<b) is named the same way, an over-fire.
     def shown(at):
         return repr(text[at:].split("\n", 1)[0][:40])
     out = ["a link or image target " + shown(m.start()) for m in _LINK_SYNTAX.finditer(text)
            if not _INLINE_TARGET.match(text, m.start())]
-    out.extend("inline HTML " + shown(m.start()) for m in _HTML_START.finditer(text)
+    out.extend('a "<" that may open inline HTML ' + shown(m.start())
+               for m in _HTML_START.finditer(text)
                if not _AUTOLINK.match(text, m.start()))
     return out
 
@@ -1247,14 +1312,17 @@ def _heading_bounds(text):
     # no block continues the open paragraph (lazily where containers stay unmatched) or opens
     # one. A heading in no container bounds a section; one inside a list item or block quote,
     # or a setext heading under a paragraph that opens like a reference definition, bounds
-    # nothing and is kept only where its title says "(informative)". A line Markdown renderers
-    # read differently is not read: a ">" at 4 or more columns inside a block quote, a lazy
-    # block-shaped line at 4 or more columns, a paragraph opening like a reference definition,
-    # a list marker with digits other than ASCII 0-9, and a non-blank line inside or opening a
-    # block quote or list item with a tab before its content.
+    # nothing and is kept only where its title says "(informative)" (_says_informative). A line
+    # Markdown renderers read differently is not read: a ">" at 4 or more columns inside a
+    # block quote, a lazy block-shaped line at 4 or more columns, a paragraph opening like a
+    # reference definition, a list marker with digits other than ASCII 0-9, and a non-blank
+    # line inside or opening a block quote or list item with a tab before its content. Every
+    # heading whose title holds inline syntax the guard does not read (_inline_unread) is
+    # listed too, since that syntax could hide an "(informative)" marker.
     headings = []
     html_lines = []
     unread = []  # (line, reason) for each line that Markdown renderers read differently
+    titles = []  # (line, form) for each heading title holding inline syntax the guard skips
     containers = []  # open block quotes (None) and list items ([content column, holds a block])
     para = None  # [start, texts] of the innermost container's open paragraph
     fence = None  # (delimiter character, opening run length) of the innermost open fence
@@ -1264,13 +1332,15 @@ def _heading_bounds(text):
             unread.append((number, reason))
 
     def marked(end, level, title, start):
-        if "(informative)" in title.lower():
+        titles.extend((number, form) for form in _inline_unread(title))
+        if _says_informative(title, _INFORMATIVE_TITLE):
             headings.append((end, level, title, start))
 
     def heading(end, level, title, start):
         if containers:
             marked(end, level, title, start)
         else:
+            titles.extend((number, form) for form in _inline_unread(title))
             headings.append((end, level, title, start))
 
     def holds(matched):
@@ -1409,12 +1479,13 @@ def _heading_bounds(text):
             if _REFERENCE_DEF.match(rest):
                 # Renderers differ on the lines after a reference definition, so it is not read.
                 not_read(number, _UNREAD_REFERENCE)
-    return headings, html_lines, unread
+    return headings, html_lines, unread, titles
 
 
 def _informative_sections(text):
     # A heading is informative where it says "(informative)" or its own body (to the next
-    # heading at any level) declares itself informative (_INFORMATIVE_MARK), and informative
+    # heading at any level) declares itself informative (_INFORMATIVE_MARK), each read after
+    # the normalization the keyword scan uses (_says_informative), and informative
     # status is inherited by every descendant heading at any deeper level, until the next
     # heading at the same or a shallower level. Returns (title, own body) pairs; the
     # guard scans the title with the body, so a keyword in a heading cannot hide.
@@ -1426,7 +1497,8 @@ def _informative_sections(text):
         body = text[end:body_end]
         if informative_level is not None and level <= informative_level:
             informative_level = None
-        own = "(informative)" in title.lower() or _INFORMATIVE_MARK.search(body)
+        own = (_says_informative(title, _INFORMATIVE_TITLE)
+               or _says_informative(body, _INFORMATIVE_MARK))
         if own and informative_level is None:
             informative_level = level
         if own or informative_level is not None:
@@ -1446,14 +1518,18 @@ def informative_findings(text):
     # green; review catches that.
     # A raw HTML block is a finding wherever it opens outside fenced or indented code: the guard
     # reads no HTML (a heading there, or a section boundary it hides, stays unseen), so it fails
-    # closed; so is each line that Markdown renderers read differently (_heading_bounds), and,
-    # in an informative section, each link target or inline HTML it does not read
-    # (_inline_unread).
-    _headings, html_lines, unread = _heading_bounds(text)
+    # closed; so is each line that Markdown renderers read differently (_heading_bounds), each
+    # heading title anywhere holding inline syntax the guard does not read, which could hide an
+    # "(informative)" marker, and, in an informative section, each link target or "<" that may
+    # open inline HTML it does not read (_inline_unread).
+    _headings, html_lines, unread, titles = _heading_bounds(text)
     findings = ["spec informative guard: raw HTML block at line {} is not read".format(n)
                 for n in html_lines]
     findings.extend("spec informative guard: line {} is read differently by Markdown "
                     "renderers and is not read: {}".format(n, why) for n, why in unread)
+    findings.extend("spec informative guard: heading at line {} carries {}, which the guard does"
+                    " not read and which could hide an \"(informative)\" marker; write the title"
+                    " plainly".format(n, form) for n, form in titles)
     sections = _informative_sections(text)
     if not any(title.startswith("Appendix E") for title, _ in sections):
         findings.append("spec informative guard: Appendix E not marked informative")
@@ -3986,7 +4062,18 @@ def _self_test_vectors():
                            ("grapheme-joiner-reference", "MU&#x34F;ST"),
                            ("hangul-filler", "MU\u3164ST"), ("control-character", "MU\x01ST"),
                            ("fullwidth", "\uff2d\uff35\uff33\uff34"),
-                           ("mathematical-bold", "\U0001d40c\U0001d414\U0001d412\U0001d413")):
+                           ("mathematical-bold", "\U0001d40c\U0001d414\U0001d412\U0001d413"),
+                           ("link-shaped-target", "x](M**U**ST)"),
+                           ("link-shaped-reference", "[x][M**U**ST]"),
+                           ("link-shaped-code-span", "x](MU`S`T)"),
+                           ("link-shaped-title", 'x](/u "M**U**ST")'),
+                           ("link-shaped-escaped", "\\](M**U**ST)"),
+                           ("link-shaped-zero-width", "[x][MU\u200bST]"),
+                           ("enclosing-mark", "MU\u20ddST"), ("unassigned", "MU\ufdd0ST"),
+                           ("private-use", "MU\ue000ST"), ("surrogate", "MU\ud800ST"),
+                           ("superscript-digit", "MUST\u00b9"),
+                           ("superscript-reference", "MUST&sup1;"),
+                           ("circled-digit", "MUST\u2460")):
         planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
                                + " share each record.", 1)
         check("spec-informative-inline-red-" + name, lambda m=planted: any(
@@ -4006,10 +4093,15 @@ def _self_test_vectors():
                            ("plain-link-single-quoted", "[a guide](/u 'Guide')"),
                            ("plain-reference", "[a guide][ref]"),
                            ("autolink", "<https://example.org/a_b>"),
-                           ("less-than", "a < b and c <= d")):
+                           ("less-than", "a < b and c <= d"),
+                           ("link-title-space", '[here](/x "two words")'),
+                           ("link-title-angle-brackets", '[here](/x "a>b" ) and [it](/y "a < b")'),
+                           ("link-shaped-lowercase", "x](m**u**st)"),
+                           ("superscript-longer-word", "MUSTER\u00b9")):
         check("spec-informative-inline-green-" + name, lambda m=text.replace(
             informative_anchor, informative_anchor + " A checker " + plant_kw + " share.", 1):
               not informative_findings(m))
+    tag = 'a "<" that may open inline HTML'
     for name, plant_kw, form in (
             ("link-nested-parentheses", "[MU](/a(b(c)))ST", "a link or image target"),
             ("link-title-nested-parentheses", '[MU](/a "a(b(c))")ST', "a link or image target"),
@@ -4018,12 +4110,15 @@ def _self_test_vectors():
             ("link-parenthesized-title", "MU[](/u (a\\)b))ST", "a link or image target"),
             ("link-angle-destination", "[MU](<a b>)ST", "a link or image target"),
             ("reference-escaped-label", "[MU][a\\]b]ST", "a link or image target"),
-            ("html-split-tag", 'MU<span title=">">ST', "inline HTML"),
-            ("html-split-comment", "MU<!-- x -->ST", "inline HTML"),
-            ("html-comment-holding-gt", "MU<!-- a > b -->ST", "inline HTML"),
-            ("html-empty-comment", "MU<!-->ST", "inline HTML"),
-            ("html-hidden-text", "MU<span hidden>x</span>ST", "inline HTML"),
-            ("html-in-code-span", "`<b>`", "inline HTML")):
+            ("link-title-backslash", 'MU[](/u "a\\b")ST', "a link or image target"),
+            ("link-title-mixed-quote", "MU[](/u 'a\"b')ST", "a link or image target"),
+            ("html-split-tag", 'MU<span title=">">ST', tag),
+            ("html-split-comment", "MU<!-- x -->ST", tag),
+            ("html-comment-holding-gt", "MU<!-- a > b -->ST", tag),
+            ("html-empty-comment", "MU<!-->ST", tag),
+            ("html-hidden-text", "MU<span hidden>x</span>ST", tag),
+            ("html-in-code-span", "`<b>`", tag),
+            ("less-than-letter", "where a<b holds", tag)):
         planted = text.replace(informative_anchor, informative_anchor + " A checker " + plant_kw
                                + " share each record.", 1)
         check("spec-informative-inline-unread-red-" + name, lambda m=planted, w=form: any(
@@ -4063,6 +4158,59 @@ def _self_test_vectors():
                           ("tab-blank-in-list", "- a\n\t\n  b\n")):
         check("spec-informative-unread-green-" + name,
               lambda m=normative + planted: not informative_findings(m))
+    # Marker vectors. A heading title or body is informative where its marker reads so after
+    # the normalization the keyword scan uses (character references decoded, markup and
+    # invisible characters removed, compatibility forms folded), with inline HTML tags
+    # removed, in any letter case and with any whitespace run read as one space; a heading title
+    # anywhere holding inline syntax the guard does not read is a finding of its own. Each
+    # red vector is green without the behaviour it names; each green vector is an ordinary
+    # heading or body that marks nothing.
+    notes = normative + "## Z notes\n\n"
+    for name, planted in (
+            ("heading-reference", normative + "## Z (&#105;nformative)" + plant),
+            ("heading-hex-reference", normative + "## Z (&#x69;nformative)" + plant),
+            ("heading-strong", normative + "## Z (informa**tive**)" + plant),
+            ("heading-underscore", normative + "## Z (_informative_)" + plant),
+            ("heading-code-span", normative + "## Z (`informative`)" + plant),
+            ("heading-zero-width", normative + "## Z (informa\u200btive)" + plant),
+            ("heading-fullwidth-parentheses", normative + "## Z \uff08informative\uff09" + plant),
+            ("heading-split-link", normative + "## Z (inform[at](/u)ive)" + plant),
+            ("heading-escaped-parentheses", normative + "## Z \\(informative\\)" + plant),
+            ("heading-inner-spaces", normative + "## Z ( informative )" + plant),
+            ("setext-reference", normative + "Z (&#105;nformative)\n---" + plant),
+            ("list-heading-reference", normative
+             + "- ## Z (&#105;nformative)\n\n  A checker MUST obey.\n"),
+            ("quote-heading-strong", normative
+             + "> ## Z (informa**tive**)\n>\n> A checker MUST obey.\n"),
+            ("body-reference", notes + "This section is &#105;nformative." + plant),
+            ("body-strong", notes + "This section is informa**tive**." + plant),
+            ("body-zero-width", notes + "This section is informa\u200btive." + plant),
+            ("body-line-break", notes + "This section\nis informative." + plant),
+            ("body-lowercase", notes + "Note that this section is informative." + plant),
+            ("body-tag-split", notes + "This section is informa<b></b>tive." + plant)):
+        check("spec-informative-marker-red-" + name, lambda m=planted: any(
+            "carries requirement keyword MUST" in f for f in informative_findings(m)))
+    for name, planted in (
+            ("title-hidden-html", normative + "## Z (informa<span hidden>x</span>tive)" + plant),
+            ("title-unread-link", normative + "## Z (inform[at](/u(x))ive)" + plant),
+            ("title-html-in-list", normative + "- ## Z (informa<b hidden>x</b>tive)\n"),
+            ("title-html-setext", normative + "Z <b hidden>(informative)</b>\n---" + plant)):
+        check("spec-informative-marker-title-red-" + name, lambda m=planted: any(
+            f.startswith("spec informative guard: heading at line ") and "could hide" in f
+            for f in informative_findings(m)))
+    for name, planted in (
+            ("heading-word", normative + "## Informative references" + stays),
+            ("heading-word-in-parentheses", normative + "## Z (see the informative note)" + stays),
+            ("heading-normative", normative + "## Z (normative)" + stays),
+            ("heading-informed", normative + "## Z (informed)" + stays),
+            ("heading-strong-word", normative + "## Z **notes**" + stays),
+            ("heading-plain-link", normative + "## Z [a guide](/u)" + stays),
+            ("heading-autolink", normative + "## Z <https://example.org/a>" + stays),
+            ("list-heading-word", normative + "- ## Z informative notes\n\n  The gate MUST stay.\n"),
+            ("body-informed", notes + "This section is informed by Appendix E." + stays),
+            ("body-guidance", notes + "Appendix E gives informative guidance." + stays),
+            ("body-other-subject", notes + "That section is informative." + stays)):
+        check("spec-informative-marker-green-" + name, lambda m=planted: not informative_findings(m))
     # The default entry runs the informative guard: over a spec with a planted violation,
     # main([]) is red with the guard's own finding, so unwiring informative_findings from
     # main() is a named failure here; the unmodified baseline stays green with no output.
