@@ -24,8 +24,11 @@ Exit convention (matches the repo's gates):
      that ran and failed exits 1 even when other members could not be evaluated; both are listed.
   2  malformed input or a harness error (fail-closed), with no member failing: opf/ absent/unreadable,
      the scratch directory could not be allocated, copy failed, a subset script missing from the copy,
-     the interpreter could not be launched (reported as HARNESS ERROR), or a subset member KILLED at
-     its time bound (reported as TIMEOUT). Each is cannot-evaluate: the member never ran to
+     the interpreter could not be launched, or a subset member KILLED at
+     its time bound. Each cannot-evaluate row is reported with a FIXED reason code (TIMEOUT,
+     HARNESS ERROR missing-script, HARNESS ERROR interpreter-launch-refused) and fixed repair
+     guidance, so distinct harness failures stay distinguishable without printing a runtime
+     value. Each is cannot-evaluate: the member never ran to
      completion, so closure was neither observed nor refuted, and it is never reported as a closure
      finding.
 
@@ -56,14 +59,19 @@ D-428-CLOSED-DIAGNOSTICS): every refutation, cannot-evaluate, harness failure, p
 write of this module emits only fixed literal text and identifiers drawn from closed vocabularies
 this module defines (case ids and labels, member and script names from the declared roster,
 report field names, fixed reason codes, integer counts and return codes; the _cv/_cvs/_n gates
-check membership at run time and emit a fixed marker for any other token), so a runtime value is
+check membership at run time and emit a fixed marker for any other token; a registered module
+literal must be bound exactly once, at module level, and never rebound or shadowed), so a runtime value is
 never formatted into output: where a diagnostic must say which value was wrong, it names the
 field and the check that failed, never the value, and a path is named by its role (the
 repository, the given root, the scratch directory), never printed, so no comparison of expected
 text against a diagnostic can depend on the host's environment values. closure/closed-sites pins
 the rule in this file's AST (every output call and exception constructor, keyword arguments
-included, passes only closed text; each recognized writer form carries a flip that fails when its
-recognizer is removed); _check_env_canaries drives the refusal, wrong-report and launch paths
+included, passes only closed text; so do exit calls, sys.exit, exit and quit, whose non-int exit
+value the interpreter prints, and assert messages; an import that would bind a writer, a stream,
+an exit or a warn name to another name is refused, as is a write through writelines, a stream's
+buffer or a dunder stream alias; each recognized writer form carries a flip that fails when its
+recognizer is removed, and each refused rebinding or shadowing form of a registered text name
+carries a flip too); _check_env_canaries drives the refusal, wrong-report and launch paths
 with a canary, scanning each sub-check's diagnostics and every captured stream on the return, the
 exception and the termination path alike; closure/host-independence re-runs the affected cases in
 a child whose USER, LOGNAME and HOME value appears in its TMPDIR path, requires PASS with no
@@ -79,18 +87,24 @@ _preflight_exit re-raises on purpose) is outside the module's control and carrie
 and raw exception text; the entry point (main through sys.exit at the last line) does NOT catch
 it. _self_test_exit relays text that reaches it only as str() of exceptions this module raised
 and of leg messages built at closed construction sites (the walk checks every construction site;
-the relay and the other permitted sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its
-reason). The walk does not see a raise of a bare name (re-raising formats nothing), a BUILT
+the relay, the entry point's sys.exit(main()) relay of an integer exit, and the other permitted
+sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its reason). The walk does not see a
+raise of a bare name (re-raising formats nothing), a BUILT
 exception whose class name is neither a builtin exception's nor this module's, or a write through
 a descriptor or an API it does not list; an exception's __cause__ chain holds the original
 exception objects, which this module never prints but a traceback would; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
 the offending keys are deliberately not printed. The canonical Python floor guard that opens this
-file (tools/check_python_floor.py GUARD_TEMPLATE) is the one site outside the closed rule: below the
+file (tools/check_python_floor.py GUARD_TEMPLATE) is the one site exempted outside
+_CLOSED_SITE_EXCEPTIONS: below the
 floor it writes its fixed refusal formatted with the interpreter's version and sys.executable, and
 exits 2 before anything else runs. closure/closed-sites exempts that one write by its position and
-exact shape (_floor_guard) and, through flips, refutes an exemption that would cover a write in any
-other position or shape. Not
+exact shape (_floor_guard) and, through one flip per tested shape condition (each declaring the
+count the exemption may remove in its flip module) plus the preamble controls, refutes an
+exemption that would cover a write in any other position or tested shape; the structural length
+bounds of the preamble (a module too short to hold the guard) and the qualname component of the
+site filter in _unexempted_violations are held jointly with the position flips (guard-in-def,
+guard-second-copy), not by a flip of their own. Not
 checked: that the process exits with main()'s return (the last line of this file;
 _check_entry_points calls main() directly), and that run() removes its scratch directory afterwards (a
 run that leaves its copy behind still verifies).
@@ -140,12 +154,16 @@ from _gen_common import repo_root  # noqa: E402
 # that is not from such a vocabulary is never formatted into output: where a diagnostic needs to
 # say which value was wrong, it names the field and the check that failed, never the value; a path
 # is named by its role (the repository, the given root, the scratch directory), never printed.
-# closure/closed-sites pins the rule in this file's AST: every output call and every exception
-# constructor passes each argument as a string or int constant, a module literal registered in
-# _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those.
+# closure/closed-sites pins the rule in this file's AST: every output call, every exception
+# constructor, every exit call (sys.exit, exit, quit) and every assert message passes each
+# argument as a string or int constant, a module literal registered in
+# _CLOSED_TEXT_NAMES (bound exactly once at module level and never rebound or shadowed),
+# a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those; an import that
+# would bind a writer or an exit to another name is refused.
 # The gates check membership at run time: a token outside its vocabulary is replaced by a fixed
-# marker naming the vocabulary, so no runtime value can ride through them. The one site outside the
-# rule is the canonical Python floor guard that opens this file (tools/check_python_floor.py
+# marker naming the vocabulary, so no runtime value can ride through them. The one site exempted
+# outside _CLOSED_SITE_EXCEPTIONS is the canonical Python floor guard that opens this file
+# (tools/check_python_floor.py
 # GUARD_TEMPLATE, which that gate requires verbatim): below the floor it writes its fixed refusal
 # with the interpreter's version and sys.executable, before anything else runs. closure/closed-sites
 # exempts that single write by its position and exact shape (_floor_guard), nothing else.
@@ -159,7 +177,9 @@ _EXCEPTION_NAMES = frozenset(
 ) | frozenset(("_CannotEvaluate", "_HarnessFailure", "TimeoutExpired", "NoneType"))
 
 # Module-level string literals an output call or an exception constructor may pass by name
-# (closure/closed-sites): each must be bound at module level to one string literal.
+# (closure/closed-sites): each must be bound exactly once, at module level, to one string
+# literal, and never rebound or shadowed anywhere in this file (_registered_name_faults; the
+# check refuses the file otherwise, so a bare load of the name can only read that literal).
 _CLOSED_TEXT_NAMES = ("_PIN_MARKER", "_INJECT_MARKER", "_STUB_SCRATCH", "_FLIP_EVIDENCE",
                       "_NEG_SCRATCH_ERROR", "_NEG_COPY_ERROR", "_NEG_DECODE_ERROR")
 
@@ -182,8 +202,10 @@ def _cv(kind, token):
         allowed = frozenset(part for label, check in _PREFLIGHT_CASES
                             for part in (label, check.__name__) if part is not None)
     elif kind == "flip":
-        allowed = frozenset(flip for flip, _snippet in _CLOSED_FLIPS) | frozenset(
-            row[0] for row in _FLOOR_GUARD_FLIPS)
+        allowed = (frozenset(flip for flip, _snippet in _CLOSED_FLIPS)
+                   | frozenset(row[0] for row in _FLOOR_GUARD_FLIPS)
+                   | frozenset(flip for flip, _snippet in _BINDING_FLIPS)
+                   | frozenset(row[0] for row in _FLOOR_GUARD_CONTROLS))
     elif kind in ("pin-label", "site", "site-key", "indirection-key"):
         rows = _ATTRIBUTION_PINS
         if kind == "pin-label":
@@ -392,9 +414,22 @@ def _materialize(opf_src, dest):
     return dest / "opf"
 
 
-# The cannot-evaluate labels _run_one returns in place of None (the member never ran to completion).
+# The cannot-evaluate labels _run_one returns in place of None (the member never ran to
+# completion). Each is a FIXED reason code (ruling D-428): run() prints the code and its fixed
+# repair guidance, so distinct harness failures stay distinguishable without a runtime value.
 _TIMEOUT = "TIMEOUT"
-_HARNESS = "HARNESS ERROR"
+_HARNESS_MISSING = "HARNESS ERROR missing-script"
+_HARNESS_LAUNCH = "HARNESS ERROR interpreter-launch-refused"
+
+# Fixed repair guidance per cannot-evaluate reason code, printed only through the "repair" gate.
+_REPAIR_GUIDANCE = {
+    _TIMEOUT: "the member was killed at its kill bound; if it is healthy but slow, raise its "
+              "_MEMBER_TIMEOUT_S row, then re-run this gate",
+    _HARNESS_MISSING: "the member's script was not found in the materialized copy; restore it "
+                      "under opf/tools/ in the repository, then re-run this gate",
+    _HARNESS_LAUNCH: "the interpreter could not be launched for the member; check sys.executable "
+                     "and the host's process limits, then re-run this gate",
+}
 
 
 def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, separate_streams=False):
@@ -402,16 +437,17 @@ def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, 
     seconds. Returns (rc, text, cannot): `text` is the last three lines of the merged output, except
     that with separate_streams a member that ran to completion gives the pair (stdout, stderr) of its
     whole decoded streams, captured apart so that no line can be assembled across them. `cannot` is
-    None when the member ran to completion, _TIMEOUT when it was killed at its bound, or _HARNESS when
-    its script is missing from the copy or the interpreter could not be launched (`text` is then the
-    harness message). A non-None `cannot` is rc 2 and CANNOT-EVALUATE (closure was neither observed
+    None when the member ran to completion, _TIMEOUT when it was killed at its bound, _HARNESS_MISSING
+    when its script is missing from the copy, or _HARNESS_LAUNCH when the interpreter could not be
+    launched (`text` is then the harness detail, which run() never prints, per ruling D-428: run()
+    prints the reason code and its fixed repair guidance instead). A non-None `cannot` is rc 2 and CANNOT-EVALUATE (closure was neither observed
     nor refuted), distinct from a member that ran and failed. cwd is run_dir: run() passes the scratch
     directory holding the copy, and the self-test checks that it lies outside the repository at the
     root and holds only the copy (_check_member_calls, _check_launches), so that only the copied
     opf/tools/ is reachable to `python3 -I`."""
     target = opf_root / "tools" / script
     if not target.is_file():
-        return 2, "missing subset script in the copy: {}".format(target), _HARNESS
+        return 2, "missing subset script in the copy: {}".format(target), _HARNESS_MISSING
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(target), *args],
@@ -422,7 +458,7 @@ def _run_one(opf_root, script, args, run_dir, env, timeout_s=_SUBSET_TIMEOUT_S, 
     except subprocess.TimeoutExpired:
         return 2, "timed out after {}s (cannot evaluate: the member never finished)".format(timeout_s), _TIMEOUT
     except OSError as exc:
-        return 2, "could not launch the interpreter: {}".format(exc), _HARNESS
+        return 2, "could not launch the interpreter: {}".format(exc), _HARNESS_LAUNCH
     if separate_streams:
         return proc.returncode, tuple((data or b"").decode("utf-8", "replace")
                                       for data in (proc.stdout, proc.stderr)), None
@@ -469,10 +505,14 @@ def run(root):
         try:
             results = _run_subset(opf_root, tmp)
         except AssertionError as exc:
-            print("STANDALONE CLOSURE: FAILED (a registration check was refuted)", file=sys.stderr)
+            # Which registration check failed is a closed label of this module (the gate refuses
+            # any other token), so naming it discloses no runtime value (ruling D-428).
+            print("STANDALONE CLOSURE: FAILED (a registration check was refuted: {})".format(
+                _cv("label", str(exc).split(":")[0])), file=sys.stderr)
             return 1
-        cannot = [(name, why, tail) for name, rc, tail, why in results if why is not None]
-        failed = [(name, rc, tail) for name, rc, tail, why in results if rc != 0 and why is None]
+        spec = {name: (script, " ".join(args)) for name, script, args in _SUBSET}
+        cannot = [(name, why) for name, rc, tail, why in results if why is not None]
+        failed = [(name, rc) for name, rc, tail, why in results if rc != 0 and why is None]
         for name, rc, tail, why in results:
             print("  {:32s} {}".format(_cv("member", name),
                                        "{} (cannot evaluate)".format(_cv("reason", why))
@@ -481,16 +521,26 @@ def run(root):
         if failed:
             print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
                   file=sys.stderr)
-            for name, rc, tail in failed:
-                print("  {} (rc={})".format(_cv("member", name), _n(rc)), file=sys.stderr)
+            for name, rc in failed:
+                # The member's own output is captured and never echoed (ruling D-428); this fixed
+                # line names the member's script and arguments from the declared roster, so the
+                # user can re-run the member in isolation and read its output directly.
+                print("  {} (rc={}): reproduce in isolation: copy opf/ alone into an empty "
+                      "scratch directory and run: python3 -I -B opf/tools/{} {}".format(
+                          _cv("member", name), _n(rc), _cv("script", spec[name][0]),
+                          _cv("args", spec[name][1])), file=sys.stderr)
         if cannot:
             # A member killed at its bound, missing from the copy, or not launchable is
             # CANNOT-EVALUATE (exit 2), never a closure finding: the member did not run to
-            # completion, so this run observed neither closure nor its absence.
+            # completion, so this run observed neither closure nor its absence. Each row carries
+            # its fixed reason code and fixed repair guidance (ruling D-428: no runtime value).
             print("STANDALONE CLOSURE: CANNOT EVALUATE (a subset member did not run to completion):",
                   file=sys.stderr)
-            for name, why, tail in cannot:
-                print("  {} [{}]".format(_cv("member", name), _cv("reason", why)), file=sys.stderr)
+            for name, why in cannot:
+                print("  {} [{}]: {}".format(
+                    _cv("member", name), _cv("reason", why),
+                    _cv("repair", _REPAIR_GUIDANCE.get(
+                        why, "no fixed repair guidance for this reason"))), file=sys.stderr)
         # Failure-first: a member that ran and failed is a definite closure break whatever else could
         # not be evaluated, so it decides the exit; cannot-evaluate (2) only when nothing failed.
         if failed:
@@ -940,7 +990,8 @@ _CLOSED_LABELS = (
     "closure/env-canary-scratch", "closure/env-canary-streams", "closure/evidence-streams",
     "closure/failure-first", "closure/failure-first-listing", "closure/harness-cannot-evaluate",
     "closure/harness-exit", "closure/harness-launch", "closure/harness-line",
-    "closure/harness-missing-script", "closure/harness-scratch", "closure/holds-code",
+    "closure/harness-missing-script", "closure/harness-reason", "closure/harness-scratch",
+    "closure/holds-code",
     "closure/host-independence", "closure/host-independence-disclosure", "closure/host-independence-drift",
     "closure/host-independence-red", "closure/host-independence-scratch", "closure/member",
     "closure/member-bound-lookup", "closure/member-boundary", "closure/member-calls",
@@ -970,7 +1021,10 @@ _CLOSED_VOCABULARIES = dict((
     ("script", frozenset(row[1] for row in _DECLARED_ROSTER) | frozenset(("opf.py",))),
     ("probe", frozenset(("split.py", "carriage.py", "evidence.py", "evidence-zero.py", "sleeper.py",
                          "no_such_member.py"))),
-    ("reason", frozenset((_TIMEOUT, _HARNESS))),
+    ("reason", frozenset((_TIMEOUT, _HARNESS_MISSING, _HARNESS_LAUNCH))),
+    ("repair", frozenset(_REPAIR_GUIDANCE.values())
+     | frozenset(("no fixed repair guidance for this reason",))),
+    ("args", frozenset(" ".join(row[2]) for row in _DECLARED_ROSTER)),
     ("verdict", frozenset(("ok", "fail", "cannot", "caught"))),
     ("fault", frozenset(("an environment that is not a dict",
                          "an environment report that is not a list of names and a Boolean",
@@ -1307,7 +1361,7 @@ def _check_harness_mapping(root):
 
         def missing_script():
             rc, _text, why = _run_one(tmp, "no_such_member.py", [], tmp, _isolated_env())
-            if (rc, why) != (2, _HARNESS):
+            if (rc, why) != (2, _HARNESS_MISSING):
                 raise AssertionError("closure/harness-missing-script: rc {} with cannot label {}".format(
                     _n(rc), _cv("reason", why)))
         _attributed("closure/harness-missing-script", missing_script)
@@ -1334,7 +1388,7 @@ def _check_harness_mapping(root):
 
         def no_launch():
             rc, text, why = _run_one(tmp, "sleeper.py", [], tmp, _isolated_env())
-            if (rc, why) != (2, _HARNESS) or "could not launch the interpreter" not in text:
+            if (rc, why) != (2, _HARNESS_LAUNCH) or "could not launch the interpreter" not in text:
                 raise AssertionError("closure/harness-launch: rc {} with cannot label {}".format(
                     _n(rc), _cv("reason", why)))
         _attributed("closure/harness-launch", no_launch, injected=stubbed(refuse))
@@ -1357,17 +1411,34 @@ def _check_harness_mapping(root):
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
-    outcomes = {"opf-drift-selftest": (2, "could not launch the interpreter: stubbed", _HARNESS)}
-    rc, out, err, _calls = _stubbed_run(root, outcomes)
-    if rc != 2 or "BROKEN" in err:
-        raise AssertionError("closure/harness-exit: run() returned {} for a harness error".format(_n(rc)))
-    if "  {:32s} {}".format("opf-drift-selftest", "HARNESS ERROR (cannot evaluate)") not in out.splitlines():
-        raise AssertionError("closure/harness-line: no HARNESS ERROR (cannot evaluate) line")
+    listings = []
+    for why, stub_text in ((_HARNESS_MISSING, "missing subset script in the copy: stubbed"),
+                           (_HARNESS_LAUNCH, "could not launch the interpreter: stubbed")):
+        outcomes = {"opf-drift-selftest": (2, stub_text, why)}
+        rc, out, err, _calls = _stubbed_run(root, outcomes)
+        if rc != 2 or "BROKEN" in err:
+            raise AssertionError("closure/harness-exit: run() returned {} for a harness error".format(_n(rc)))
+        if "  {:32s} {}".format("opf-drift-selftest",
+                                  _cv("reason", why) + " (cannot evaluate)") not in out.splitlines():
+            raise AssertionError("closure/harness-line: no {} (cannot evaluate) line".format(
+                _cv("reason", why)))
+        rows = [line for line in err.splitlines()
+                if line.startswith("  opf-drift-selftest [" + _cv("reason", why) + "]: ")]
+        if len(rows) != 1:
+            raise AssertionError("closure/harness-reason: the cannot-evaluate listing does not carry "
+                                 "the {} reason code with its repair guidance".format(
+                                     _cv("reason", why)))
+        listings += rows
+    if len(set(listings)) != 2:
+        raise AssertionError("closure/harness-reason: the two harness failures were not told apart "
+                             "in the cannot-evaluate listing")
 
 
 def _check_failure_first(root):
     """run() is failure-first: a member that ran and failed exits 1 even while another member timed
-    out, and both are listed (the break under BROKEN, the timeout under CANNOT EVALUATE)."""
+    out, and both are listed (the break under BROKEN, with its fixed reproduce-in-isolation line
+    naming the member's script and arguments; the timeout under CANNOT EVALUATE, with its fixed
+    reason code)."""
     outcomes = {"opf-drift-selftest": (1, "ImportError: check_versions", None),
                 "opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
     rc, _out, err, _calls = _stubbed_run(root, outcomes)
@@ -1375,8 +1446,10 @@ def _check_failure_first(root):
         raise AssertionError("closure/failure-first: run() returned {} for a failed member beside a "
                              "timed-out one".format(_n(rc)))
     lines = err.splitlines()
-    if ("  opf-drift-selftest (rc=1)" not in lines
-            or "  opf-tooling-selftest [TIMEOUT]" not in lines
+    if (not any(line.startswith("  opf-drift-selftest (rc=1): reproduce in isolation: ")
+                and line.endswith("python3 -I -B opf/tools/check_opf_drift.py --self-test")
+                for line in lines)
+            or not any(line.startswith("  opf-tooling-selftest [TIMEOUT]: ") for line in lines)
             or not any(line.startswith("STANDALONE CLOSURE: BROKEN") for line in lines)
             or not any(line.startswith("STANDALONE CLOSURE: CANNOT EVALUATE") for line in lines)):
         raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
@@ -1390,7 +1463,7 @@ def _check_verdict_tables():
     cases = [
         ((2, "timed out after 1800s", _TIMEOUT), "cannot"),
         ((2, _FLIP_EVIDENCE, _TIMEOUT), "cannot"),
-        ((2, "could not launch the interpreter: x", _HARNESS), "cannot"),
+        ((2, "could not launch the interpreter: x", _HARNESS_LAUNCH), "cannot"),
         ((0, "SELF-TEST PASS", None), "fail"),
         ((1, "Traceback (most recent call last):\nSomeOtherError: unrelated", None), "fail"),
         ((2, "opf: cannot bootstrap: _opf_schema (cannot evaluate)", None), "fail"),
@@ -1459,7 +1532,7 @@ def _check_leg_wiring(root):
         (0, (0, "SELF-TEST PASS", None), 1),
         # Failure-first: a refuted leg exits 1 whichever leg could not be evaluated.
         (1, (2, "timed out after 1800s", _TIMEOUT), 1),
-        (1, (2, "could not launch the interpreter: x", _HARNESS), 1),
+        (1, (2, "could not launch the interpreter: x", _HARNESS_LAUNCH), 1),
         (2, (0, "SELF-TEST PASS", None), 1),
         (2, (1, "Traceback (most recent call last):\nSomeOtherError: unrelated", None), 1),
         # The (stdout, stderr) pair: evidence alone on stderr is caught, split across the two is not.
@@ -2053,11 +2126,35 @@ _CLOSED_SITE_EXCEPTIONS = (
      "fixed text, and the watch relays only the primitive's name and a marker"),
     ("_check_env_canaries.<locals>.noisy.<locals>.probe", "print",
      "prints the raw canary inside a capture on purpose, to prove the capture scan catches it"),
+    ("<module>", "sys.exit",
+     "the entry point relays main()'s integer return as the process exit; an int exit value is "
+     "never formatted into output, and _check_closed_sites refuses a second module-level sys.exit "
+     "site, so this entry covers exactly that one relay"),
 )
 
+# The stream objects whose write/writelines (directly or through .buffer) the walk recognizes.
+_STREAM_HEADS = ("sys.stdout", "sys.stderr", "sys.__stdout__", "sys.__stderr__")
+
+# Exit callees: the interpreter prints a non-int exit value to stderr, so an exit call is an
+# output site (closure/closed-sites) and its value must be closed.
+_EXIT_CALLEES = ("sys.exit", "exit", "quit", "builtins.exit", "builtins.quit")
+
+# Imports that would bind a writer (or a writer's module, or an exit) to another name the walk
+# cannot follow: module name mapped to the refused imported names (None refuses every name).
+_ALIASING_IMPORTS = {
+    "sys": ("stdout", "stderr", "__stdout__", "__stderr__", "exit"),
+    "os": ("write",),
+    "builtins": ("print", "exit", "quit"),
+    "logging": None,
+    "warnings": None,
+}
+
 # Writer attributes a load of which, outside a call's callee position, is an alias the walk
-# cannot classify (closure/closed-sites refuses it).
-_ALIAS_WRITERS = ("sys.stdout.write", "sys.stderr.write", "os.write", "builtins.print")
+# cannot classify (closure/closed-sites refuses it): each stream head's write, writelines and
+# buffer, plus os.write, builtins.print and the dotted exit callees.
+_ALIAS_WRITERS = tuple(head + suffix for head in _STREAM_HEADS
+                       for suffix in (".write", ".writelines", ".buffer")) + (
+    "os.write", "builtins.print", "sys.exit", "builtins.exit", "builtins.quit")
 
 
 def _callee_name(func):
@@ -2075,7 +2172,9 @@ def _callee_name(func):
 
 def _closed_argument(node):
     """True when `node` can evaluate only to closed text (closure/closed-sites): a str or int
-    constant (bool is not), a Name registered in _CLOSED_TEXT_NAMES, a call to a gate (_cv, _cvs,
+    constant (bool is not), a Name registered in _CLOSED_TEXT_NAMES (trusted because
+    _check_closed_sites requires each registered name to be bound exactly once at module level to
+    a string literal and never rebound or shadowed in this file), a call to a gate (_cv, _cvs,
     _n) with positional arguments only (the gate closes them at run time), a .format(...) whose
     receiver and every argument are closed, a + concatenation of closed pieces, or an if/else whose
     both branches are closed (the test only chooses between closed texts, it cannot add one)."""
@@ -2096,6 +2195,62 @@ def _closed_argument(node):
     if isinstance(node, ast.IfExp):
         return _closed_argument(node.body) and _closed_argument(node.orelse)
     return False
+
+
+def _bound_names(node):
+    """Every name `node` binds, syntactically: a Name stored or deleted (an assignment, an
+    augmented, annotated or walrus assignment, a del, a for, with or comprehension target), a
+    parameter, an except name, an import alias, a def or class name, a global or nonlocal
+    declaration, a match capture, or a type parameter. Yields (name, node): comparing the node
+    against a known permitted target tells the one permitted binding apart."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        yield node.id, node
+    elif isinstance(node, ast.arg):
+        yield node.arg, node
+    elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+        yield node.name, node
+    elif isinstance(node, ast.alias):
+        yield (node.asname if node.asname is not None else node.name.split(".")[0]), node
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield node.name, node
+    elif isinstance(node, (ast.Global, ast.Nonlocal)):
+        for name in node.names:
+            yield name, node
+    elif isinstance(node, ast.MatchAs) and node.name is not None:
+        yield node.name, node
+    elif isinstance(node, ast.MatchStar) and node.name is not None:
+        yield node.name, node
+    elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        yield node.rest, node
+    elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+        yield node.name, node
+
+
+def _registered_name_faults(tree, names):
+    """For each of `names`, why it cannot serve as a registered closed-text name over `tree`, as
+    (name, why): the name must be bound EXACTLY ONCE in the whole module, by one module-level
+    assignment of one string literal to the bare name, and never rebound or shadowed anywhere
+    (_bound_names lists the binding forms). The scan is syntactic over every scope on purpose: a
+    shadowing binding is refused even where Python's scoping would keep the module value readable
+    elsewhere, because _closed_argument trusts the bare name and cannot see scopes."""
+    permitted = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            permitted.setdefault(node.targets[0].id, []).append(node.targets[0])
+    faults = []
+    for name in names:
+        targets = permitted.get(name, [])
+        if len(targets) != 1:
+            faults.append((name, "not one module-level string literal"))
+            continue
+        others = [node for bound, node in
+                  (pair for walked in ast.walk(tree) for pair in _bound_names(walked))
+                  if bound == name and node is not targets[0]]
+        if others:
+            faults.append((name, "rebound or shadowed"))
+    return faults
 
 
 # The values the canonical floor guard's refusal formats (tools/check_python_floor.py
@@ -2166,16 +2321,25 @@ def _closed_output_violations(tree):
     """Every output call and exception constructor under `tree` that could carry unclosed text, as
     (qualname, callee, line, why): a print (builtins.print included) whose positional argument, or
     whose keyword other than a file= of sys.stdout or sys.stderr, is not closed (_closed_argument);
-    a sys.stdout.write or sys.stderr.write whose argument is not closed or that passes a keyword;
+    a .write on a _STREAM_HEADS stream whose argument is not closed or that passes a keyword, and
+    any .writelines, or .write or .writelines through .buffer, on one of those streams (refused
+    outright: this module never uses them, and bytes and iterables are not in the closed grammar);
     an os.write whose descriptor is not the constant 1 or 2 or whose data is not closed; any
-    logging or warnings call (this module never logs or warns); a call to a name in
+    logging or warnings call (this module never logs or warns); an _EXIT_CALLEES call (sys.exit,
+    exit, quit) whose argument is not closed (the interpreter prints a non-int exit value to
+    stderr; an int constant or a closed string is permitted); an assert whose message is not
+    closed (the raised AssertionError formats it); a call to a name in
     _EXCEPTION_NAMES (a builtin exception, this module's, or TimeoutExpired), raised or built,
     whose positional or keyword argument is not closed; any other RAISED constructor, checked the
-    same way whatever its name resolves to; and a load of print or of an _ALIAS_WRITERS attribute
-    outside a call's callee position (an alias a later call could write through, which the walk
-    cannot classify). Not seen: a raise of a bare name (re-raising formats nothing; construction
-    is checked wherever a recognized constructor is called), a BUILT exception whose class name is
-    not in _EXCEPTION_NAMES, and a write through a descriptor or an API not listed here."""
+    same way whatever its name resolves to; an import that would bind a writer to another name
+    (_ALIASING_IMPORTS: a `from` import of a stream, write, print, exit or warn name, a star
+    import from such a module, or an `import ... as` of the module itself); and a load of print,
+    exit or quit, or of an _ALIAS_WRITERS attribute, outside a call's callee position (an alias a
+    later call could write through, which the walk cannot classify). Not seen: a raise of a bare
+    name (re-raising formats nothing; construction is checked wherever a recognized constructor is
+    called), a BUILT exception whose class name is not in _EXCEPTION_NAMES, a plain import of a
+    writer module under its own name (its attribute uses are checked at each site), and a write
+    through a descriptor or an API not listed here."""
     callee_funcs = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -2205,9 +2369,13 @@ def _closed_output_violations(tree):
                             wrong.append(kw.value)
                     if wrong:
                         found.append((qualname, name, child.lineno, "unclosed print text"))
-                elif name in ("sys.stdout.write", "sys.stderr.write"):
+                elif any(name == head + ".write" for head in _STREAM_HEADS):
                     if child.keywords or not all(_closed_argument(arg) for arg in child.args):
                         found.append((qualname, name, child.lineno, "unclosed stream write"))
+                elif (any(name.startswith(head + ".") for head in _STREAM_HEADS)
+                        and name.split(".")[-1] in ("write", "writelines")):
+                    found.append((qualname, name, child.lineno,
+                                  "a stream writer the walk cannot classify as closed"))
                 elif name == "os.write":
                     if (child.keywords or len(child.args) != 2
                             or not (isinstance(child.args[0], ast.Constant)
@@ -2217,6 +2385,9 @@ def _closed_output_violations(tree):
                                       "an os.write the walk cannot classify as closed"))
                 elif head in ("logging", "warnings"):
                     found.append((qualname, name, child.lineno, "a logging or warnings call"))
+                elif name in _EXIT_CALLEES:
+                    if not closed_call(child):
+                        found.append((qualname, name, child.lineno, "unclosed exit value"))
                 elif last in _EXCEPTION_NAMES and not closed_call(child):
                     found.append((qualname, name, child.lineno, "unclosed exception text"))
             if (isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call)
@@ -2224,9 +2395,22 @@ def _closed_output_violations(tree):
                     and not closed_call(child.exc)):
                 found.append((qualname, _callee_name(child.exc.func), child.lineno,
                               "unclosed raised-constructor text"))
+            if isinstance(child, ast.Assert) and child.msg is not None and not _closed_argument(child.msg):
+                found.append((qualname, "assert", child.lineno, "unclosed assert message"))
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.name in _ALIASING_IMPORTS and alias.asname is not None:
+                        found.append((qualname, alias.name, child.lineno,
+                                      "an import binding a writer module to another name"))
+            if isinstance(child, ast.ImportFrom) and child.module in _ALIASING_IMPORTS:
+                refused = _ALIASING_IMPORTS[child.module]
+                for alias in child.names:
+                    if refused is None or alias.name == "*" or alias.name in refused:
+                        found.append((qualname, child.module + "." + alias.name, child.lineno,
+                                      "an import binding a writer to another name"))
             if (isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-                    and child.id == "print" and id(child) not in callee_funcs):
-                found.append((qualname, "print", child.lineno, "an aliased writer"))
+                    and child.id in ("print", "exit", "quit") and id(child) not in callee_funcs):
+                found.append((qualname, child.id, child.lineno, "an aliased writer"))
             if (isinstance(child, ast.Attribute) and _callee_name(child) in _ALIAS_WRITERS
                     and id(child) not in callee_funcs):
                 found.append((qualname, _callee_name(child), child.lineno, "an aliased writer"))
@@ -2267,21 +2451,132 @@ _CLOSED_FLIPS = (
     ("aliased-stdout-write", "import sys\nwriter = sys.stdout.write\n"),
     ("aliased-stderr-write", "import sys\nwriter = sys.stderr.write\n"),
     ("aliased-os-write", "import os\nwriter = os.write\n"),
+    ("sys-exit-value", "import sys\nsys.exit(value)\n"),
+    ("exit-value", "exit(value)\n"),
+    ("quit-value", "quit(value)\n"),
+    ("exit-string-concat", "import sys\nsys.exit('error: cannot read ' + str(path))\n"),
+    ("assert-message", "assert flag, value\n"),
+    ("assert-formatted-message", "assert flag, 'missing: 0'.replace('0', str(path))\n"),
+    ("import-sys-alias", "import sys as s\n"),
+    ("from-sys-stderr", "from sys import stderr\n"),
+    ("from-sys-stderr-renamed", "from sys import stderr as err\n"),
+    ("from-os-write", "from os import write\n"),
+    ("from-builtins-print", "from builtins import print\n"),
+    ("from-warnings-warn", "from warnings import warn\n"),
+    ("from-sys-star", "from sys import *\n"),
+    ("from-sys-exit", "from sys import exit\n"),
+    ("stderr-buffer-write", "import sys\nsys.stderr.buffer.write(data)\n"),
+    ("stdout-writelines", "import sys\nsys.stdout.writelines(lines)\n"),
+    ("dunder-stderr-write", "import sys\nsys.__stderr__.write(value)\n"),
+    ("aliased-sys-exit", "import sys\nleave = sys.exit\n"),
+    ("aliased-exit-name", "leave = exit\n"),
+    ("aliased-quit-name", "leave = quit\n"),
+    ("aliased-stderr-buffer", "import sys\nsink = sys.stderr.buffer\n"),
 )
 
-# Flips of the floor-guard exemption, as (name, old, new, module): the module text with "{guard}"
-# replaced by this file's own guard source (the `if` statement) after replacing old with new in it
-# once (no change when old is empty), and "{indented}" by that guard indented one level. Each module
-# must keep an unexempted violation, so the exemption covers the canonical guard's write in its
-# canonical position and shape and nothing else.
+# One snippet per refused rebinding or shadowing form of a registered text name: each must make
+# _registered_name_faults fault _PIN_MARKER, so removing a binding detector fails
+# closure/closed-sites. The control (one module-level literal binding, loads only) must pass.
+_BINDING_FLIPS = (
+    ("binding-missing", "print(_PIN_MARKER)\n"),
+    ("binding-not-literal", "import os\n_PIN_MARKER = str(os.environ)\n"),
+    ("binding-not-one-target", "_PIN_MARKER = _OTHER = 'fixed'\n"),
+    ("binding-second-assignment", "_PIN_MARKER = 'fixed'\n_PIN_MARKER = other\n"),
+    ("binding-augmented", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    _PIN_MARKER += value\n"),
+    ("binding-annotated", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    _PIN_MARKER: str = value\n"),
+    ("binding-parameter", "_PIN_MARKER = 'fixed'\ndef probe(_PIN_MARKER):\n    print(_PIN_MARKER)\n"),
+    ("binding-lambda-parameter", "_PIN_MARKER = 'fixed'\nprobe = lambda _PIN_MARKER: _PIN_MARKER\n"),
+    ("binding-for-target", "_PIN_MARKER = 'fixed'\ndef probe(rows):\n"
+     "    for _PIN_MARKER in rows:\n        print(_PIN_MARKER)\n"),
+    ("binding-with-target", "_PIN_MARKER = 'fixed'\ndef probe(ctx):\n"
+     "    with ctx as _PIN_MARKER:\n        print(_PIN_MARKER)\n"),
+    ("binding-except-name", "_PIN_MARKER = 'fixed'\ndef probe(fn):\n    try:\n        fn()\n"
+     "    except OSError as _PIN_MARKER:\n        print(_PIN_MARKER)\n"),
+    ("binding-walrus", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    print(_PIN_MARKER := value)\n"),
+    ("binding-comprehension", "_PIN_MARKER = 'fixed'\ndef probe(rows):\n"
+     "    return [_PIN_MARKER for _PIN_MARKER in rows]\n"),
+    ("binding-import-alias", "_PIN_MARKER = 'fixed'\nimport json as _PIN_MARKER\n"),
+    ("binding-def-name", "_PIN_MARKER = 'fixed'\ndef _PIN_MARKER():\n    pass\n"),
+    ("binding-class-name", "_PIN_MARKER = 'fixed'\nclass _PIN_MARKER:\n    pass\n"),
+    ("binding-global-declaration", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    global _PIN_MARKER\n"),
+    ("binding-del", "_PIN_MARKER = 'fixed'\ndel _PIN_MARKER\n"),
+    ("binding-nested-assignment", "_PIN_MARKER = 'fixed'\ndef probe(value):\n"
+     "    _PIN_MARKER = value\n    print(_PIN_MARKER)\n"),
+    ("binding-match-capture", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    match value:\n"
+     "        case _PIN_MARKER:\n            print(_PIN_MARKER)\n"),
+)
+
+# The registered-name binding control: one module-level literal binding and loads only must pass.
+_BINDING_CONTROL = "_PIN_MARKER = 'fixed'\nprint(_PIN_MARKER)\n"
+
+# Flips of the floor-guard exemption, as (name, old, new, module, exempted): the module text with
+# "{guard}" replaced by this file's own guard source (the `if` statement) after replacing old with
+# new in it once (no change when old is empty), and "{indented}" by that guard indented one level.
+# Each module must keep an unexempted violation AND the exemption must remove exactly the declared
+# `exempted` count there (0 for a guard made non-canonical; 1 where the flip module also carries
+# the canonical guard), so the exemption covers the canonical guard's write in its canonical
+# position and shape and nothing else, one flip per tested _floor_guard shape condition.
 _FLOOR_GUARD_FLIPS = (
     ("guard-extra-write", "    raise SystemExit(", "    sys.stderr.write(value)\n    raise SystemExit(",
-     "import sys\n{guard}\n"),
-    ("guard-other-values", "sys.executable or", "value or", "import sys\n{guard}\n"),
-    ("guard-not-after-import", "", "", "import sys\nimport os\n{guard}\n"),
-    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n"),
-    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n"),
-    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n"),
+     "import sys\n{guard}\n", 0),
+    ("guard-other-values", "sys.executable or", "value or", "import sys\n{guard}\n", 0),
+    ("guard-not-after-import", "", "", "import sys\nimport os\n{guard}\n", 0),
+    ("guard-head-other-module", "", "", "import os\n{guard}\n", 0),
+    ("guard-import-two-names", "", "", "import sys, os\n{guard}\n", 0),
+    ("guard-import-as", "", "", "import sys as sys\n{guard}\n", 0),
+    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n", 1),
+    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n", 1),
+    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n", 1),
+    ("guard-test-not-compare", "tuple(sys.version_info[:2]) < (3, 14)", "flag",
+     "import sys\n{guard}\n", 0),
+    ("guard-version-expression", "tuple(sys.version_info[:2])", "sys.version_info[:2]",
+     "import sys\n{guard}\n", 0),
+    ("guard-not-less-than", "< (3, 14)", "<= (3, 14)", "import sys\n{guard}\n", 0),
+    ("guard-chained-compare", "< (3, 14):", "< (3, 14) < (4, 0):", "import sys\n{guard}\n", 0),
+    ("guard-floor-not-tuple", "(3, 14):", "floor:", "import sys\n{guard}\n", 0),
+    ("guard-floor-three-parts", "(3, 14)", "(3, 14, 0)", "import sys\n{guard}\n", 0),
+    ("guard-floor-not-int", "(3, 14)", "(3, '14')", "import sys\n{guard}\n", 0),
+    ("guard-format-not-constant",
+     "\"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python "
+     "%d.%d.%d (%s). \"\n        \"Nothing was run (cannot evaluate).\\n\"",
+     "template", "import sys\n{guard}\n", 0),
+    ("guard-write-assigned", "    sys.stderr.write(", "    _refusal = sys.stderr.write(",
+     "import sys\n{guard}\n", 0),
+    ("guard-write-keyword", "interpreter\",)))", "interpreter\",)), flush=True)",
+     "import sys\n{guard}\n", 0),
+    ("guard-write-two-args", "interpreter\",)))", "interpreter\",)), 2)",
+     "import sys\n{guard}\n", 0),
+    ("guard-write-not-mod", "% (tuple(sys.version_info[:3])", "+ (tuple(sys.version_info[:3])",
+     "import sys\n{guard}\n", 0),
+    ("guard-write-plain-name",
+     "\"error: check_opf_standalone_closure.py requires Python 3.14 or newer; this is Python "
+     "%d.%d.%d (%s). \"\n        \"Nothing was run (cannot evaluate).\\n\"\n        "
+     "% (tuple(sys.version_info[:3]) + (sys.executable or \"unknown interpreter\",))",
+     "template", "import sys\n{guard}\n", 0),
+    ("guard-write-stdout", "sys.stderr.write", "sys.stdout.write", "import sys\n{guard}\n", 0),
+    ("guard-raise-bare", "raise SystemExit(2)", "raise SystemExit", "import sys\n{guard}\n", 0),
+    ("guard-exit-call-not-raise", "raise SystemExit(2)", "sys.exit(2)", "import sys\n{guard}\n", 0),
+    ("guard-raise-from", "raise SystemExit(2)", "raise SystemExit(2) from None",
+     "import sys\n{guard}\n", 0),
+    ("guard-raise-other-name", "SystemExit(2)", "GuardExit(2)", "import sys\n{guard}\n", 0),
+    ("guard-raise-keyword", "SystemExit(2)", "SystemExit(2, code=2)", "import sys\n{guard}\n", 0),
+    ("guard-raise-two-args", "SystemExit(2)", "SystemExit(2, 2)", "import sys\n{guard}\n", 0),
+    ("guard-raise-not-int", "SystemExit(2)", "SystemExit(code)", "import sys\n{guard}\n", 0),
+    ("guard-third-statement", "raise SystemExit(2)", "raise SystemExit(2)\n    sys.stderr.flush()",
+     "import sys\n{guard}\n", 0),
+    ("guard-with-else", "    raise SystemExit(2)", "    raise SystemExit(2)\nelse:\n    pass",
+     "import sys\n{guard}\n", 0),
+)
+
+# Positive controls of the exemption, as (name, module): each module holds the canonical guard in
+# a permitted preamble (plain, after a docstring, after a docstring and a __future__ import) and
+# must come back fully exempt (no violation kept, exactly one removed), so the preamble tolerances
+# of _floor_guard cannot be narrowed without failing here.
+_FLOOR_GUARD_CONTROLS = (
+    ("guard-plain", "import sys\n{guard}\n"),
+    ("guard-after-docstring", "\"\"\"module docstring\"\"\"\nimport sys\n{guard}\n"),
+    ("guard-after-future",
+     "\"\"\"module docstring\"\"\"\nfrom __future__ import annotations\nimport sys\n{guard}\n"),
 )
 
 # A snippet of every closed form, which _closed_output_violations must pass untouched.
@@ -2295,25 +2590,38 @@ _CLOSED_CONTROL = (
 
 def _check_closed_sites(_root):
     """Structural pin of the closed-diagnostics rule (ruling D-428), over this file's own AST: every
-    print (builtins.print included), every sys.stdout.write and sys.stderr.write, every os.write to
-    a standard descriptor, every call to an exception class named in _EXCEPTION_NAMES (built or
+    print (builtins.print included), every write or writelines on a _STREAM_HEADS stream (directly
+    or through .buffer), every os.write to
+    a standard descriptor, every exit call (_EXIT_CALLEES: a non-int exit value is printed by the
+    interpreter), every assert message,
+    every call to an exception class named in _EXCEPTION_NAMES (built or
     raised) and every other raised constructor, keyword arguments included, passes each argument as
     closed text (_closed_argument): a string or int constant, a module literal registered in
     _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of
-    those; logging and warnings calls, an os.write the walk cannot classify, and a writer loaded
-    outside a call (an alias) are refused outright. A site failing the rule is refuted naming its
+    those; logging and warnings calls, an os.write or a stream writer the walk cannot classify, an
+    import that would bind a writer or an exit to another name (_ALIASING_IMPORTS), and a writer
+    loaded
+    outside a call (an alias) are refused outright. A registered _CLOSED_TEXT_NAMES name must be
+    bound exactly once, at module level, to one string literal, and never rebound or shadowed
+    anywhere in this file (_registered_name_faults); each refused rebinding or shadowing form
+    carries a flip in _BINDING_FLIPS, and the binding check must pass _BINDING_CONTROL. A site
+    failing the rule is refuted naming its
     qualname, callee and line, unless _CLOSED_SITE_EXCEPTIONS records it with a reason; a stale
-    registry entry is refuted (an exception matching no site, a duplicate, one with no reason, or a
-    _CLOSED_TEXT_NAMES entry that is not one module-level string literal). Each recognized form
+    registry entry is refuted (an exception matching no site, a duplicate, one with no reason, or
+    a registered text name _registered_name_faults faults), and the module-level sys.exit entry
+    (the entry point's relay of main()) may match exactly one site. Each recognized form
     carries a flip in _CLOSED_FLIPS: the walk must flag every flip snippet and pass _CLOSED_CONTROL,
     so removing a recognizer, or widening the closed grammar, fails here. Not seen (residuals,
     stated in the module docstring too): a raise of a bare name, a BUILT exception whose class name
-    is not in _EXCEPTION_NAMES, a write through a descriptor or an API the walk does not list, and
+    is not in _EXCEPTION_NAMES, a plain import of a writer module under its own name, a write
+    through a descriptor or an API the walk does not list, and
     the interpreter's own traceback on an uncaught exception. The canonical Python floor guard
     that opens this file is the one site exempted outside _CLOSED_SITE_EXCEPTIONS: _floor_guard
     must find it, the exemption must remove exactly its one refusal write, and the walk with the
     exemption applied must flag every _FLOOR_GUARD_FLIPS module built from this file's own guard
-    and pass the guard alone, so the exemption cannot widen to another write. A source that cannot
+    (removing there exactly the count the flip declares) and come back fully exempt on every
+    _FLOOR_GUARD_CONTROLS module, so the exemption cannot widen to another write and the preamble
+    tolerances cannot narrow. A source that cannot
     be read is cannot-evaluate."""
     try:
         source = Path(_THIS_FILE).read_text(encoding="utf-8")
@@ -2325,17 +2633,20 @@ def _check_closed_sites(_root):
     if not guard:
         raise AssertionError("closure/closed-sites: this file does not open with the canonical Python "
                              "floor guard in the shape the exemption accepts")
-    literal = set()
-    for node in tree.body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
-            literal.add(node.targets[0].id)
-    stale_names = [name for name in _CLOSED_TEXT_NAMES if name not in literal]
-    if stale_names or len(set(_CLOSED_TEXT_NAMES)) != len(_CLOSED_TEXT_NAMES):
+    faults = _registered_name_faults(tree, _CLOSED_TEXT_NAMES)
+    if faults or len(set(_CLOSED_TEXT_NAMES)) != len(_CLOSED_TEXT_NAMES):
         raise AssertionError("closure/closed-sites: a registered text name is not one module-level "
-                             "string literal, or is registered twice: {}".format(
-                                 _cvs("text-name", stale_names)))
+                             "string literal bound exactly once and never rebound or shadowed, or "
+                             "is registered twice: {}".format(
+                                 _cvs("text-name", [name for name, _why in faults])))
+    for flip, snippet in _BINDING_FLIPS:
+        if not _registered_name_faults(ast.parse(snippet), ("_PIN_MARKER",)):
+            raise AssertionError("closure/closed-sites: the registered-name binding check passed the "
+                                 "{} flip, so a rebound or shadowed registered name would be "
+                                 "trusted".format(_cv("flip", flip)))
+    if _registered_name_faults(ast.parse(_BINDING_CONTROL), ("_PIN_MARKER",)):
+        raise AssertionError("closure/closed-sites: the registered-name binding check refused the "
+                             "control snippet (one module-level literal binding, loads only)")
     matched = dict()
     for qualname, name, reason in _CLOSED_SITE_EXCEPTIONS:
         if (qualname, name) in matched or not reason.strip():
@@ -2359,6 +2670,9 @@ def _check_closed_sites(_root):
     if stale:
         raise AssertionError("closure/closed-sites: a recorded exception matches no site: {}".format(
             "; ".join(stale)))
+    if matched.get(("<module>", "sys.exit"), 0) > 1:
+        raise AssertionError("closure/closed-sites: more than one module-level sys.exit carries "
+                             "unclosed text; only the entry point's relay of main() is recorded")
     for flip, snippet in _CLOSED_FLIPS:
         if not _closed_output_violations(ast.parse(snippet)):
             raise AssertionError("closure/closed-sites: the walk passed the {} flip, so that writer "
@@ -2366,19 +2680,23 @@ def _check_closed_sites(_root):
     if _closed_output_violations(ast.parse(_CLOSED_CONTROL)):
         raise AssertionError("closure/closed-sites: the walk refused the closed control snippet")
     indented = "\n".join("    " + line for line in guard.splitlines())
-    for flip, old, new, module in _FLOOR_GUARD_FLIPS:
+    for flip, old, new, module, exempted in _FLOOR_GUARD_FLIPS:
         flipped = guard.replace(old, new, 1)
         if old and flipped == guard:
             raise AssertionError("closure/closed-sites: the {} flip changed nothing in the guard".format(
                 _cv("flip", flip)))
         text = module.replace("{guard}", flipped).replace("{indented}", indented)
-        if not _unexempted_violations(ast.parse(text))[0]:
+        kept, removed = _unexempted_violations(ast.parse(text))
+        if not kept or removed != exempted:
             raise AssertionError("closure/closed-sites: the floor-guard exemption passed the {} flip, "
+                                 "or removed {} violation(s) instead of the flip's declared {}, "
                                  "so it covers more than the canonical guard's write".format(
-                                     _cv("flip", flip)))
-    if _unexempted_violations(ast.parse("import sys\n" + guard + "\n")) != ([], 1):
-        raise AssertionError("closure/closed-sites: the floor-guard exemption did not cover exactly "
-                             "the canonical guard's one write")
+                                     _cv("flip", flip), _n(removed), _n(exempted)))
+    for control, module in _FLOOR_GUARD_CONTROLS:
+        if _unexempted_violations(ast.parse(module.replace("{guard}", guard))) != ([], 1):
+            raise AssertionError("closure/closed-sites: the floor-guard exemption did not cover exactly "
+                                 "the canonical guard's one write in the {} control".format(
+                                     _cv("flip", control)))
 
 
 def _check_entry_points():
