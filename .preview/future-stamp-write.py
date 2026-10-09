@@ -321,12 +321,17 @@ stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a 
 exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top of this file
 reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or newer` to
 stderr and exits 2, which PreToolUse treats as a deny, so every matching Write, Edit, MultiEdit and Bash call
-is denied until Python is upgraded or the hook's entry is removed. An older interpreter that cannot start the
-hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
-2, which still denies every matching call, and one that accepts -I but cannot compile this file (Python 3.4
-and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so every matching call is allowed
-unchecked; .preview/README.md (Installing a hook, step 4) describes those cases. The payload is read as
-BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
+the launch line hands to Python is denied until Python is upgraded or the hook's entry is removed. That holds
+only while the guard's write to stderr succeeds and the interpreter can then flush stderr at shutdown: with
+stderr closed the guard currently exits 1, and when that write fails (a full device or a broken pipe, say),
+or succeeds and the shutdown flush of stderr fails, it currently exits 120; either status allows the call
+unchecked. An older interpreter that cannot start the hook never reaches the guard and fails with Python's
+own error first: one that predates the -I option exits 2, which still denies every such matching call, and
+one that accepts -I but cannot compile this file (Python 3.4 and 3.5 cannot: it uses f-strings) exits 1, a
+non-blocking error, so every such matching call is allowed unchecked; .preview/README.md (Installing a hook,
+step 4) describes those cases and its launch line, which skips the hook, so the call goes ahead, when a
+standard stream is a directory. The payload is read as BYTES and parsed by json.loads, so its decoding does
+not depend on the process locale. An
 error writing the deny (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
 exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with os._exit(0), so no
 exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1

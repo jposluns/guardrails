@@ -118,10 +118,12 @@
       failure at render or doctor leaves the changes in place for recovery. <code>record</code> uses
       only exit 0 and exit 2.
       These statuses assume an interpreter that meets the reference tooling's Python floor and a
-      writable standard error. An older interpreter stops before any command runs: one that can
-      start the CLI refuses with exit 2 (currently exit 1 if standard error is closed), and one too
-      old to compile it fails with Python's own error and status. If writing to standard error
-      fails, Python can end a run with status 120.
+      standard error that can be written and flushed. An older interpreter stops before any command
+      runs: one that can start the CLI refuses with exit 2 (currently exit 1 if standard error is
+      closed, and 120 if writing the refusal fails or it is written but the flush of standard error
+      at shutdown fails), and one too old to compile it fails with Python's own error and status.
+      If a write to standard error fails, or a write succeeds but the flush of standard error at
+      shutdown fails, Python can end a run with status 120.
       Where a command is aimed at a directory that has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
       <code>absorb</code>) report NOT APPLICABLE and exit 0. The nine commands, documented one by one below, are <code>init</code>,

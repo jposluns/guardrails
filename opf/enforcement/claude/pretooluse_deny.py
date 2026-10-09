@@ -483,7 +483,10 @@ per-platform residual coverage carry the same list):
 
 Offline, stdlib only (json, tomllib, os, re, stat, sys), no subprocess, no network. Launched isolated
 (python3 -I) so a file planted beside it cannot shadow a stdlib import. Exit statuses: 0 (with a deny
-decision or silent allow) and 2 (blocking error) only.
+decision or silent allow) and 2 (blocking error), while standard error can be written and flushed.
+Every exit-2 path, the floor guard's below included, writes its line to standard error first: with
+standard error closed it currently exits 1, and when that write fails, or succeeds and the shutdown
+flush of standard error fails, it currently exits 120. Either lets the tool call proceed unchecked.
 
 PYTHON FLOOR: this hook requires Python 3.14 or newer, the pack floor that .aiqt/core/python-floor.toml
 states and tools/check_python_floor.py enforces; this file is a guarded-surfaces entry there. The guard at
@@ -492,7 +495,9 @@ form and not the aiqt_hooks.py hook form: this hook serves PreToolUse only, wher
 error that lets the tool call proceed, while exit 2 blocks it and feeds standard error back to Claude. So
 an interpreter older than Python 3.14 that can start the hook reads no input, writes one line beginning
 `error: pretooluse_deny.py requires Python 3.14 or newer` to standard error and exits 2: the tool call is
-blocked (cannot evaluate), never waved through. An older interpreter that cannot start the hook (one that
+blocked (cannot evaluate). That holds only under the standard error conditions above: with standard error
+closed the guard currently exits 1, and with a failing write or shutdown flush 120, and the call is then
+waved through. An older interpreter that cannot start the hook (one that
 cannot compile this file, or a launch that fails before the guard runs) never reaches the guard and fails
 with its own error first; that exit status is not set by this hook, and an exit other than 2 lets the
 call proceed, so register the hook with an interpreter at or above the floor (the registration above

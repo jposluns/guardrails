@@ -24,8 +24,10 @@ WHAT IT DOES
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext reminder
     (SessionStart, UserPromptSubmit), a top-level decision "block" object with a reason (Stop), or a top-level
     systemMessage warning (Stop, at the cap or when the count cannot be kept). Exit status: 0, except the
-    floor guard's exit 1 on an interpreter older than Python 3.14 that can start the hook; one that cannot
-    start it exits with Python's own status first (FAILURE DIRECTION).
+    floor guard's exit 1 on an interpreter older than Python 3.14 that can start the hook, which with
+    stderr closed it still gives, but which a failing write of its error line to stderr, or a write that
+    succeeds followed by a failing shutdown flush of stderr, currently turns into 120, also a non-blocking
+    error; one that cannot start it exits with Python's own status first (FAILURE DIRECTION).
 
 LOOP CAP
     The refusal count is kept in the state file, so the cap holds when the platform's stop_hook_active field is
@@ -119,19 +121,21 @@ FAILURE DIRECTION
     UserPromptSubmit event, a Stop with stop_hook_active explicitly false, or a new compaction writes a
     well-formed state. Any error in the hook itself, an unreadable payload, or an unrecognized
     event exits 0 with no output (fail open). The one exception to exit 0 is an interpreter older than
-    Python 3.14 that can start the hook: the guard at the top of this file reads no input, writes one line beginning
-    `error: constraint-reread.py requires Python 3.14 or newer` to stderr and exits 1, which every event this
-    hook uses treats as a non-blocking error: no reminder is added at SessionStart or UserPromptSubmit, no
-    compaction time is recorded at SessionStart or PreCompact, and the stop goes ahead unchecked. It does not
-    exit 2: on a Stop exit 2 blocks the stop, and the guard runs before the loop cap, so this hook's own loop
-    cap would never run (any limit the host itself applies is outside this hook); on UserPromptSubmit exit 2
-    blocks the prompt. An older interpreter that cannot start the hook never reaches the guard and fails with
-    Python's own error first: one that predates the -I option exits 2, which blocks every stop, with this
-    hook's own loop cap never running, and blocks every UserPromptSubmit prompt (SessionStart cannot block,
-    and what the host does with exit 2 on PreCompact is outside this hook); one that accepts -I but cannot
-    compile this file exits 1, a non-blocking error, with the same effect as the guard; .preview/README.md
-    (Installing a hook, step 4) describes those cases. A worker process (AIQT_HOOKS_WORKER=1, or a legacy
-    spelling) is skipped.
+    Python 3.14 that can start the hook: the guard at the top of this file reads no input, writes one line
+    beginning `error: constraint-reread.py requires Python 3.14 or newer` to stderr and exits 1, which every
+    event this hook uses treats as a non-blocking error: no reminder is added at SessionStart or
+    UserPromptSubmit, no compaction time is recorded at SessionStart or PreCompact, and the stop goes ahead
+    unchecked. With stderr closed the guard still exits 1; when that write fails, or succeeds and the
+    interpreter's shutdown flush of stderr fails, it currently exits 120 instead, also a non-blocking error on
+    every event this hook uses, with the same effect. It does not exit 2: on a Stop exit 2 blocks the stop, and
+    the guard runs before the loop cap, so this hook's own loop cap would never run (any limit the host itself
+    applies is outside this hook); on UserPromptSubmit exit 2 blocks the prompt. An older interpreter that
+    cannot start the hook never reaches the guard and fails with Python's own error first: one that predates
+    the -I option exits 2, which blocks every stop, with this hook's own loop cap never running, and blocks
+    every UserPromptSubmit prompt (SessionStart cannot block, and what the host does with exit 2 on PreCompact
+    is outside this hook); one that accepts -I but cannot compile this file exits 1, a non-blocking error, with
+    the same effect as the guard; .preview/README.md (Installing a hook, step 4) describes those cases. A
+    worker process (AIQT_HOOKS_WORKER=1, or a legacy spelling) is skipped.
 
 RESIDUAL COVERAGE
     This hook proves that a re-read ENTRY was written after the compaction, not that the assistant read the

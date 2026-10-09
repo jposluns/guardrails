@@ -14,10 +14,12 @@ Exit codes (normal mode): 0 PASS, 1 FAIL, 2 UNVERIFIABLE/config-error. `--digest
 report-only mode the runner calls: it prints the compact surface digest plus this audit's line and exits 0
 whatever the audit finds (advisory, never gating). In every mode a bad argument or a config error exits 2
 before the mode runs, and so does the floor guard on a Python older than 3.14 that can start this file.
-Each of these exits writes its error line to stderr first: with stderr closed the floor guard currently
-exits 1, and a failing stderr write can end any of them with another status. An older interpreter that
-cannot start this file fails with Python's own error and status first. stdlib only. `--self-test` proves
-PASS on a present roster and UNVERIFIABLE on an absent one (removing the missing-evidence guard fails it).
+Each of these exits writes its error line to stderr first and holds only while that write succeeds and the
+interpreter can then flush stderr at shutdown: with stderr closed the floor guard currently exits 1 (a bad
+argument or a config error still exits 2, its line going to stdout), and when the write fails, or succeeds
+and the shutdown flush of stderr fails, any of them currently exits 120. An older interpreter that cannot
+start this file fails with Python's own error and status first. stdlib only. `--self-test` proves PASS on
+a present roster and UNVERIFIABLE on an absent one (removing the missing-evidence guard fails it).
 """
 import sys
 
