@@ -39,29 +39,29 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`5d38a1aedf8db9461db100ab494a52dc362bd27a` of `jposluns/guardrails`. Read them from the pinned URLs,
+`121f57b37221e2e334fbdb852fad15fa4790c0c0` of `jposluns/guardrails`. Read them from the pinned URLs,
 not from a branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `448a28194bdf4c075419f48397e283b0ae0d2bcedb195000f0cb8d659cbb298b` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `63f14967a15c1f165cef348c06619ddc3b128b44cc61fd5a144fdcf7ebc4be96` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `69f62d00fa86a2d19576717df0356ddcbd1c56367586199250b28d370f90b16a` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/5d38a1aedf8db9461db100ab494a52dc362bd27a/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/5d38a1aedf8db9461db100ab494a52dc362bd27a/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -86,9 +86,11 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
-  fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
-  and completion), which a fresh start does not perform, so there are no import prompts to run.
+  `version = "0.3.0"`) lists one member, `flow/SKILL.md`, an operating-loop skill for an assistant
+  that is not an import prompt and that this prompt does not use. The pack has two roles in the
+  specification, and this fresh start needs neither. Its prompts drive post-adoption import
+  (section 14.1, One approval and completion), which a fresh start does not perform, so there are
+  no import prompts to run.
   Separately, section 14.1 says every `opf.adoption.plan/v2` plan MUST bind "the version and digest
   of the prompt pack". This prompt reads section 14 as not requiring an adoption plan for a scaffold
   with nothing to disposition (open point 14); if the maintainer rules otherwise, the plan binds the
