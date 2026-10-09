@@ -163,6 +163,9 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+These exits hold on every interpreter that can start this file, the floor guard's exits on an older one
+included; one that cannot start this file fails first with Python's own exit, as the PYTHON-FLOOR comment
+below describes.
 """
 import sys
 
@@ -173,13 +176,14 @@ import sys
 # mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
-# (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals) stops with a SyntaxError and exits 1, a
-# non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
-# hook entry passes exits 2 on every event the plugin hooks.json registers. That denies each PreToolUse
-# call a registered matcher selects; blocks every UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says
-# an error must never do; blocks every Stop, with no cap as above, and every TeammateIdle, the two
-# FAIL_OPEN_EVENTS this file names exit 2 as the block for; on PostToolUse its tool has already run but the
-# recorder records nothing; and SessionStart cannot block at all.
+# (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals, and 3.4 also rejects its starred items
+# in list displays) stops with a SyntaxError and exits 1, a non-blocking error, so a PreToolUse call goes
+# ahead unchecked; one that predates the -I option every hook entry passes exits 2 on every event the plugin
+# hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
+# UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
+# no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
+# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
+# all.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 

@@ -9,21 +9,23 @@ WHAT IT DOES
     their names, the advice and the scope all come from the policy file.
 
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
-    PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: always
-    0; the decision travels in the JSON. The verdict is deny, a note or silence: this hook never asks. Once
-    armed (its root set), it allows every call it cannot evaluate with a note naming why, a malformed call
-    among them, and it allows silently only a tool other than Write, Edit or MultiEdit and a well-formed call
-    (see DECISION) that it evaluates and finds clean, whose target is outside the root or the policy's scope,
-    or whose root holds no policy file.
+    PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: 0,
+    with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python 3.14
+    that can start the hook, armed or not; one that cannot start it exits with Python's own status first
+    (DECISION). The verdict is deny, a note or silence: this hook never asks. Once armed (its root set), it
+    allows every call it cannot evaluate with a note naming why, a malformed call among them, and it allows
+    silently only a tool other than Write, Edit or MultiEdit and a well-formed call (see DECISION) that it
+    evaluates and finds clean, whose target is outside the root or the policy's scope, or whose root holds
+    no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
-    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently. Set but
-    relative, holding a control character, or naming a path that does not exist or is not a directory, it
-    checks nothing and says so in a note on every call; so does an armed hook launched with any command-line
-    argument other than --self-test alone. The policy file is <root>/.aiqt/char-policy.json; absent, the hook
-    allows a well-formed call silently and notes a malformed one (the gate then applies its built-in default
-    policy, which this hook does not copy).
+    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently (the
+    floor guard still runs first: DECISION). Set but relative, holding a control character, or naming a path
+    that does not exist or is not a directory, it checks nothing and says so in a note on every call; so does
+    an armed hook launched with any command-line argument other than --self-test alone. The policy file is
+    <root>/.aiqt/char-policy.json; absent, the hook allows a well-formed call silently and notes a malformed
+    one (the gate then applies its built-in default policy, which this hook does not copy).
 
 POLICY FILE
     {"version": 1, "id": <name>, "chars": {<one code point>: <name>, ...}, "advice": <optional text>,
@@ -86,6 +88,16 @@ POLICY FILE
     from the reviewed one; whoever makes an edit can record the new hashes in the same change.
 
 DECISION
+    - The floor guard runs first, armed or not. On an interpreter older than Python 3.14 that can start the
+      hook, the guard at the top of this file reads no input, writes one line beginning
+      `error: char-policy-write.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse
+      treats as a deny, so every matching Write, Edit and MultiEdit call is denied until Python is upgraded
+      or the hook's entry is removed. An older interpreter that cannot start the hook never reaches the
+      guard and fails with Python's own error first: one that predates the -I option exits 2, which still
+      denies every matching call, and one that accepts -I but cannot compile this file (Python 3.4 and 3.5
+      cannot: it uses f-strings, and 3.4 also rejects its starred items in list displays) exits 1, a
+      non-blocking error, so every matching call is allowed unchecked; .preview/README.md (Installing a
+      hook, step 4) describes those cases.
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
       holding a control character, or naming a path that does not exist, cannot be examined or is not a
       directory: allow with a note naming the variable and the reason. Armed, but launched with a
@@ -644,7 +656,8 @@ def _read_payload(fd=0, deadline=None):
 
 def _emit_line(text):
     """Write one line to stdout; on any output failure point descriptor 1 at /dev/null so the interpreter's
-    shutdown flush cannot fail, or end at once with status 0: the hook always exits 0."""
+    shutdown flush cannot fail, or end at once with status 0: past the floor guard, which an interpreter that
+    cannot start the hook never reaches, the hook always exits 0."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -660,9 +673,9 @@ def _emit_line(text):
 
 
 def main(argv):
-    """The hook: always 0. `--self-test` alone runs the self-test instead. A real launch passes sys.argv, a
-    non-empty list of strings; any other argv (a call from other code, a tuple included) is treated like an
-    unknown argument, and its payload is never read."""
+    """The hook, reached only past the floor guard: always 0. `--self-test` alone runs the self-test instead.
+    A real launch passes sys.argv, a non-empty list of strings; any other argv (a call from other code, a
+    tuple included) is treated like an unknown argument, and its payload is never read."""
     readable = isinstance(argv, list) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()

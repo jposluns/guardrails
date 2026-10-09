@@ -11,8 +11,9 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
     python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
-    deny object. Exit status: always 0; the decision travels in the JSON. The verdict is deny or silence: this
-    hook never asks.
+    deny object. Exit status: 0, with the decision in the JSON, except the floor guard's exit 2 on an
+    interpreter older than Python 3.14 that can start the hook; one that cannot start it exits with Python's
+    own status first (THREAT MODEL). The verdict is deny or silence: this hook never asks.
 
     DENY when all of these hold:
       - the command runs in the background: tool_input.run_in_background is exactly true (the tracked
@@ -1404,7 +1405,8 @@ def _decide(payload, env, oracle=None):
 def _emit_line(text):
     """Write one line to stdout and flush it. On any output failure (a closed pipe, a full device, no stdout at
     all) point descriptor 1 at /dev/null, so the interpreter's shutdown flush cannot fail either; if even that
-    rescue fails, end the process at once with status 0 (no retry flush): the hook always exits 0."""
+    rescue fails, end the process at once with status 0 (no retry flush): past the floor guard, which an
+    interpreter that cannot start the hook never reaches, the hook always exits 0."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -1420,8 +1422,8 @@ def _emit_line(text):
 
 
 def main(argv):
-    """The hook: always 0, output only a deny line. `--self-test` alone runs the self-test instead; any other
-    argv returns 0 silently before stdin is read."""
+    """The hook, reached only past the floor guard: always 0, output only a deny line. `--self-test` alone runs
+    the self-test instead; any other argv returns 0 silently before stdin is read."""
     if not isinstance(argv, (list, tuple)) or not all(isinstance(a, str) for a in argv) or not argv:
         return 0  # a bad argv: fail open, reading nothing
     if list(argv[1:]) == ["--self-test"]:

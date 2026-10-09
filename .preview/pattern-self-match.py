@@ -17,7 +17,9 @@ WHAT IT DOES
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with python3
     and this file's absolute path. Output: nothing (allow), ONE line holding the standard PreToolUse deny object, or
     ONE line holding a note (a systemMessage with no permissionDecision, so the permission flow is unchanged). Exit
-    status: always 0; the decision travels in the JSON. This hook never asks.
+    status: 0, with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than
+    Python 3.14 that can start the hook; one that cannot start it exits with Python's own status first
+    (THREAT MODEL). This hook never asks.
 
     LITERAL. A bare word, a '...' string, or a "..." string whose value is non-empty, does not start with `-`, and
     uses only the characters A-Z, a-z, 0-9 and _ . / : @ % = , -. Such a value holds no blank, newline, quote or
@@ -959,7 +961,8 @@ def _emit_line(text, *stream):
     """Write one line to `stream` (default stdout) and flush it. A line meant for stderr is written there or
     dropped (sys.stderr is None when descriptor 2 was closed at startup), never sent to stdout. On any output
     failure point that descriptor at /dev/null, so the interpreter's shutdown flush cannot fail either; if even
-    that rescue fails, end the process at once with status 0: the hook always exits 0."""
+    that rescue fails, end the process at once with status 0: past the floor guard, which an interpreter that
+    cannot start the hook never reaches, the hook always exits 0."""
     s = stream[0] if stream else sys.stdout
     if s is None:
         return
@@ -978,10 +981,10 @@ def _emit_line(text, *stream):
 
 
 def main(argv):
-    """The hook: always 0, output only a deny or note line (a payload it cannot read gets the cannot-evaluate
-    note). `--self-test` alone runs the self-test instead. Otherwise a verification worker process writes only
-    the worker line, to stderr, whatever its argv; any other argv gets the argv note (_NOTE_ARGV). Both return 0
-    before stdin is read."""
+    """The hook, reached only past the floor guard: always 0, output only a deny or note line (a payload it
+    cannot read gets the cannot-evaluate note). `--self-test` alone runs the self-test instead. Otherwise a
+    verification worker process writes only the worker line, to stderr, whatever its argv; any other argv gets
+    the argv note (_NOTE_ARGV). Both return 0 before stdin is read."""
     readable = isinstance(argv, (list, tuple)) and bool(argv) and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()

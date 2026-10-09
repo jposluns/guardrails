@@ -178,16 +178,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `f4ba55614af02379066d27b5e78fa7249892ce0b73c8eef2490f8edad5069b8b` | [char-policy-write.py](char-policy-write.py) |
+| `char-policy-write.py` | `de1123ebbd3d8dd8108e5f8cc4e45b8a20df17656cb47b72b066f19064616d41` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `7ef8c0bc8ca2ff075b5d77dd023dec3bd46ff4938a7ed6d3a203857beb05eff5` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `bbb2e0b1996e072a15eac0c740949dceb7205a5643b0dd0460e604f9ac9cb737` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
+| `pattern-self-match.py` | `1b56964629ac0c4747e6ba609f93fc58d021860c5a34c2d3f26233873e44a1a1` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `02fb872917dedd97b10a543f506278803e583568fa04dc41e0335d2dc6b7010d` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `8c7ebe4a60093d056f802df799197efeb79e50d6f98ab67ef804ac9d932ceac0` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `6120397c4903badc9ce82336f2cdacf1f38a2f82a94fdae2ed4af7e79c11a2a9` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `e93dd2ebeae38778fa9df12b9476a73a9eef6c983512e69b237b2d8462994bf2` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 

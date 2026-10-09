@@ -13,8 +13,9 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
     python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
-    deny object plus a short systemMessage. Exit status: always 0; the decision travels in the JSON. The
-    verdict is deny or silence: this hook never asks.
+    deny object plus a short systemMessage. Exit status: 0, with the decision in the JSON, except the floor
+    guard's exit 2 on an interpreter older than Python 3.14 that can start the hook; one that cannot start it
+    exits with Python's own status first (THREAT MODEL). The verdict is deny or silence: this hook never asks.
 
 CONFIGURATION
     The store is named by the environment variable AIQT_STORE_ROOT or, only when that name is not set at all,
@@ -2031,7 +2032,8 @@ def _decide(payload, env):
 def _emit_line(text):
     """Write one line to stdout and flush it. On any output failure (a closed pipe, a full device, no stdout at
     all) point descriptor 1 at /dev/null, so the interpreter's shutdown flush cannot fail either; if even that
-    rescue fails, end the process at once with status 0 (no retry flush): the hook always exits 0."""
+    rescue fails, end the process at once with status 0 (no retry flush): past the floor guard, which an
+    interpreter that cannot start the hook never reaches, the hook always exits 0."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -2047,7 +2049,8 @@ def _emit_line(text):
 
 
 def main(argv):
-    """The hook: always 0, output only a deny line. `--self-test` alone runs the self-test instead."""
+    """The hook, reached only past the floor guard: always 0, output only a deny line. `--self-test` alone runs
+    the self-test instead."""
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
         return 0  # a bad argv: fail open, reading nothing
     if len(argv) > 1:  # only the plain call and an exact --self-test; any other argv fails open, reading nothing
