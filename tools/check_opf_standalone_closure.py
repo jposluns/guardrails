@@ -60,18 +60,28 @@ write of this module emits only fixed literal text and identifiers drawn from cl
 this module defines (case ids and labels, member and script names from the declared roster,
 report field names, fixed reason codes, integer counts and return codes; the _cv/_cvs/_n gates
 check membership at run time and emit a fixed marker for any other token; a registered module
-literal must be bound exactly once, at module level, and never rebound or shadowed), so a runtime value is
+literal must be bound exactly once, at module level, and never rebound or shadowed, with _patched
+refusing a runtime rebinding of any protected name), so a runtime value is
 never formatted into output: where a diagnostic must say which value was wrong, it names the
 field and the check that failed, never the value, and a path is named by its role (the
 repository, the given root, the scratch directory), never printed, so no comparison of expected
 text against a diagnostic can depend on the host's environment values. closure/closed-sites pins
-the rule in this file's AST (every output call and exception constructor, keyword arguments
-included, passes only closed text; so do exit calls, sys.exit, exit and quit, whose non-int exit
-value the interpreter prints, and assert messages; an import that would bind a writer, a stream,
-an exit or a warn name to another name is refused, as is a write through writelines, a stream's
-buffer or a dunder stream alias; each recognized writer form carries a flip that fails when its
-recognizer is removed, and each refused rebinding or shadowing form of a registered text name
-carries a flip too); _check_env_canaries drives the refusal, wrong-report and launch paths
+the rule in this file's AST as an ALLOWLIST (ratified for train 2 round 32): exactly one closed
+emitter, the module-level _emit (its statements pinned verbatim against _EMITTER_SOURCE), plus
+the canonical floor guard below, may reference an output or exit channel (print, the sys streams
+and dunder streams, sys.exit, os.write, os._exit, exit, quit, SystemExit, warnings, logging,
+traceback, builtins, __builtins__); ANY other reference anywhere in this file, in any context (a
+call, a load, an assignment, an alias, an except clause, a getattr base, an attribute of a
+module alias, a binding of a protected name), is refused, closed text or not; a bare load of sys
+or os outside an attribute access, every star import, any import of a channel module beyond
+plain `import sys` and `import os`, and any reference to importlib or __import__ are refused
+outright; every _emit call passes closed text and a constant err= (code= may be any expression:
+the emitter exits through an int clamp, so the interpreter never prints an exit value of this
+module); exception constructors and assert messages stay denylist-checked wherever they appear,
+since the interpreter prints an uncaught exception's text; each refused form carries a flip that
+fails when its rule is removed, and so does each refused rebinding or shadowing form of a
+registered text name, a gate or the emitter; _patched, the one runtime rebinding surface,
+refuses every protected name); _check_env_canaries drives the refusal, wrong-report and launch paths
 with a canary, scanning each sub-check's diagnostics and every captured stream on the return, the
 exception and the termination path alike; closure/host-independence re-runs the affected cases in
 a child whose USER, LOGNAME and HOME value appears in its TMPDIR path, requires PASS with no
@@ -84,29 +94,34 @@ required keyword, or redirecting a stream is refused before the child runs (_lau
 RESIDUALS the closed design does not cover: the interpreter's own traceback on an uncaught
 exception (a defect of this module, or a BaseException such as KeyboardInterrupt, which
 _preflight_exit re-raises on purpose) is outside the module's control and carries source paths
-and raw exception text; the entry point (main through sys.exit at the last line) does NOT catch
-it. _self_test_exit relays text that reaches it only as str() of exceptions this module raised
-and of leg messages built at closed construction sites (the walk checks every construction site;
-the relay, the entry point's sys.exit(main()) relay of an integer exit, and the other permitted
-sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its reason). The walk does not see a
-raise of a bare name (re-raising formats nothing), a BUILT
-exception whose class name is neither a builtin exception's nor this module's, or a write through
-a descriptor or an API it does not list; an exception's __cause__ chain holds the original
-exception objects, which this module never prints but a traceback would; and where a diagnostic
+and raw exception text; the entry point (main through the emitter's exit at the last line) does
+NOT catch it. _self_test_exit relays text that reaches it only as str() of exceptions this
+module raised and of leg messages built at closed construction sites (the walk checks every
+construction site; that relay and the other permitted unclosed-text sites are recorded in
+_CLOSED_SITE_EXCEPTIONS, each with its reason; a channel reference outside the emitter has no
+such exception). The RESIDUAL of the allowlist is code the interpreter runs outside this file:
+its traceback printer, an exception's __cause__ chain holding the original exception objects
+(never printed by this module, printed by a traceback), and this module's namespace reached at
+run time through an indirection the attribution walk flags for a recorded reason (globals(),
+sys.modules); _patched, the one deliberate mutator, refuses every protected name at run time.
+The walk does not see a raise of a bare name (re-raising formats nothing) or a BUILT exception
+whose class name is neither a builtin exception's nor this module's; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
 the offending keys are deliberately not printed. The canonical Python floor guard that opens this
-file (tools/check_python_floor.py GUARD_TEMPLATE) is the one site exempted outside
-_CLOSED_SITE_EXCEPTIONS: below the
+file (tools/check_python_floor.py GUARD_TEMPLATE) is the one code outside the emitter the
+allowlist exempts: below the
 floor it writes its fixed refusal formatted with the interpreter's version and sys.executable, and
-exits 2 before anything else runs. closure/closed-sites exempts that one write by its position and
+exits 2 before anything else runs. closure/closed-sites exempts exactly the guard's two channel
+references (its refusal write's sys.stderr and its raise's SystemExit) by their position and
 exact shape (_floor_guard) and, through one flip per tested shape condition (each declaring the
 count the exemption may remove in its flip module) plus the preamble controls, refutes an
-exemption that would cover a write in any other position or tested shape; the structural length
+exemption that would cover a reference in any other position or tested shape; the structural length
 bounds of the preamble (a module too short to hold the guard) and the qualname component of the
 site filter in _unexempted_violations are held jointly with the position flips (guard-in-def,
 guard-second-copy), not by a flip of their own. Not
-checked: that the process exits with main()'s return (the last line of this file;
-_check_entry_points calls main() directly), and that run() removes its scratch directory afterwards (a
+checked: that the process exits with main()'s return (the last line of this file relays it
+through the emitter's int clamp; _check_entry_points calls main() directly), and that run()
+removes its scratch directory afterwards (a
 run that leaves its copy behind still verifies).
 When any preflight case was refuted
 the self-test exits 1; when none was refuted but one could not be evaluated, it exits 2. In both of
@@ -128,8 +143,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import ast
-import builtins
 import contextlib
+import errno
 import fcntl
 import functools
 import hashlib
@@ -147,39 +162,53 @@ from tempfile import gettempdir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 
-# CLOSED DIAGNOSTICS (ruling D-428). Every refutation, cannot-evaluate, harness failure, print
-# and stream write of this module emits only fixed literal text and identifiers drawn from closed
+# CLOSED DIAGNOSTICS (ruling D-428). Every refutation, cannot-evaluate, harness failure and
+# stream write of this module emits only fixed literal text and identifiers drawn from closed
 # vocabularies this module defines: case ids and labels, member and script names from the declared
 # roster, report field names, fixed reason codes, integer counts and return codes. A runtime value
 # that is not from such a vocabulary is never formatted into output: where a diagnostic needs to
 # say which value was wrong, it names the field and the check that failed, never the value; a path
 # is named by its role (the repository, the given root, the scratch directory), never printed.
-# closure/closed-sites pins the rule in this file's AST: every output call, every exception
-# constructor, every exit call (sys.exit, exit, quit) and every assert message passes each
-# argument as a string or int constant, a module literal registered in
-# _CLOSED_TEXT_NAMES (bound exactly once at module level and never rebound or shadowed),
-# a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those; an import that
-# would bind a writer or an exit to another name is refused.
+# closure/closed-sites pins the rule in this file's AST as an ALLOWLIST: only the one
+# module-level emitter _emit (pinned verbatim against _EMITTER_SOURCE) and the canonical Python
+# floor guard that opens this file (tools/check_python_floor.py GUARD_TEMPLATE, which that gate
+# requires verbatim; below the floor it writes its fixed refusal with the interpreter's version
+# and sys.executable, before anything else runs, and closure/closed-sites exempts exactly its two
+# channel references by position and exact shape, _floor_guard, nothing else) may reference an
+# output or exit channel; any other reference, alias, binding or import of one is refused, closed
+# text or not. Every _emit call passes each text argument as a string or int constant, a module
+# literal registered in _CLOSED_TEXT_NAMES (bound exactly once at module level and never rebound
+# or shadowed), a _cv/_cvs/_n gate call, or a format, concatenation or conditional of those;
+# exception constructors and assert messages are checked the same way wherever they appear.
 # The gates check membership at run time: a token outside its vocabulary is replaced by a fixed
-# marker naming the vocabulary, so no runtime value can ride through them. The one site exempted
-# outside _CLOSED_SITE_EXCEPTIONS is the canonical Python floor guard that opens this file
-# (tools/check_python_floor.py
-# GUARD_TEMPLATE, which that gate requires verbatim): below the floor it writes its fixed refusal
-# with the interpreter's version and sys.executable, before anything else runs. closure/closed-sites
-# exempts that single write by its position and exact shape (_floor_guard), nothing else.
+# marker naming the vocabulary, so no runtime value can ride through them. The permitted
+# unclosed-text sites are recorded in _CLOSED_SITE_EXCEPTIONS, each with its reason.
 
 # The names of builtin exception classes, this module's own, and NoneType: the closed vocabulary a
 # diagnostic naming an exception's type draws from, and the class names whose constructor calls
-# closure/closed-sites checks. Computed from builtins at import, so no runtime value is a member.
-_EXCEPTION_NAMES = frozenset(
-    name for name in dir(builtins)
-    if isinstance(getattr(builtins, name), type) and issubclass(getattr(builtins, name), BaseException)
-) | frozenset(("_CannotEvaluate", "_HarnessFailure", "TimeoutExpired", "NoneType"))
+# closure/closed-sites checks. Computed at import by walking BaseException's subclass tree for the
+# classes the builtins module defines (never by importing builtins, whose name the closed-sites
+# allowlist reserves to the emitter), plus the two builtins ALIASES of OSError, which the subclass
+# walk cannot see because each carries OSError's own __name__; no runtime value is a member.
+def _builtin_exception_names():
+    """Every builtin exception class's name, from BaseException's subclass tree at call time."""
+    names, queue = set(("BaseException",)), [BaseException]
+    while queue:
+        for sub in queue.pop().__subclasses__():
+            if sub.__module__ == "builtins" and sub.__name__ not in names:
+                names.add(sub.__name__)
+                queue.append(sub)
+    return frozenset(names)
+
+
+_EXCEPTION_NAMES = _builtin_exception_names() | frozenset(
+    ("IOError", "EnvironmentError", "_CannotEvaluate", "_HarnessFailure", "TimeoutExpired", "NoneType"))
 
 # Module-level string literals an output call or an exception constructor may pass by name
 # (closure/closed-sites): each must be bound exactly once, at module level, to one string
 # literal, and never rebound or shadowed anywhere in this file (_registered_name_faults; the
-# check refuses the file otherwise, so a bare load of the name can only read that literal).
+# check refuses the file otherwise, and _patched refuses rebinding one at run time, so a bare
+# load of the name can only read that literal).
 _CLOSED_TEXT_NAMES = ("_PIN_MARKER", "_INJECT_MARKER", "_STUB_SCRATCH", "_FLIP_EVIDENCE",
                       "_NEG_SCRATCH_ERROR", "_NEG_COPY_ERROR", "_NEG_DECODE_ERROR")
 
@@ -190,12 +219,62 @@ _INJECT_MARKER = "injected harness failure (stubbed)"
 # The message of the OSError _no_scratch raises: relayed like _INJECT_MARKER.
 _STUB_SCRATCH = "no scratch directory (stubbed)"
 
+# The CHANNEL names (closure/closed-sites allowlist): every builtin or module name through which
+# this process could write to a stream or set its exit status. Outside the one emitter below (and
+# the canonical floor guard, exempted by position and shape), ANY reference to one of these names
+# is refused, closed text or not: a call, a load, a store, an alias, an except clause alike.
+_CHANNEL_NAMES = ("print", "exit", "quit", "SystemExit", "warnings", "logging",
+                  "traceback", "builtins", "__builtins__")
+
+# The output and exit attributes of the two writer modules this file may import plainly. Any
+# reference to one of them outside the emitter is refused; every other attribute (sys.argv,
+# os.environ) stays free.
+_CHANNEL_ATTRS = dict(sys=("stdout", "stderr", "__stdout__", "__stderr__", "exit"),
+                      os=("write", "_exit"))
+
+# The modules whose import surface is restricted: only plain `import sys` and `import os` are
+# permitted; an asname, a dotted form, a from-import or a star import of any of them is refused.
+_CHANNEL_MODULES = ("sys", "os", "builtins", "warnings", "logging", "traceback")
+
+# Dynamic importers: a reference to either name, or an import of importlib, is refused outright,
+# since a dynamic import could rebind or reach a channel under a name the walk cannot follow.
+_DYNAMIC_IMPORT_NAMES = ("importlib", "__import__")
+
+# The closed-text gates and the emitter: trusted by spelling at every call site, so each must be
+# bound exactly once, by its module-level def, and never rebound or shadowed anywhere
+# (_function_name_faults).
+_GATE_NAMES = ("_emit", "_cv", "_cvs", "_n")
+
+# Every name no stub may rebind (_patched refuses them at run time) and no binding, import alias
+# or from-import may target (closure/closed-sites): the channel names, the writer modules, the
+# dynamic importers, the gates and the emitter, and the registered text literals.
+_PROTECTED_NAMES = (frozenset(_CHANNEL_NAMES) | frozenset(_CHANNEL_MODULES)
+                    | frozenset(_DYNAMIC_IMPORT_NAMES) | frozenset(_GATE_NAMES)
+                    | frozenset(_CLOSED_TEXT_NAMES))
+
+
+def _emit(text=None, err=False, code=None):
+    """The one closed emitter (closure/closed-sites, ruling D-428): every stream write and every
+    process exit of this module goes through this function, whose statements are pinned verbatim
+    against _EMITTER_SOURCE. `text`, when given, is written to stderr when `err` is true and to
+    stdout otherwise, with one newline appended; the walk requires the text argument at every call
+    site to be closed (_closed_argument), so only closed text can reach a stream. `code`, when
+    given, leaves the process: a value that is exactly an int (bool is not) is the exit status,
+    and any other value exits 2, so the interpreter never prints an exit value of this module,
+    which is why a call site may pass any expression as `code` (the entry point passes main())."""
+    stream = sys.stderr if err else sys.stdout
+    if text is not None:
+        stream.write(text + "\n")
+    if code is not None:
+        sys.exit(code if type(code) is int else 2)
+
 
 def _cv(kind, token):
     """`token` when it is a str member of the closed vocabulary `kind`; otherwise the fixed marker
     naming the vocabulary (the token itself is then never returned, so a runtime value cannot ride
     through). The static vocabularies live in _CLOSED_VOCABULARIES; "case", "flip" and the
     attribution kinds are read from the live tables (_PREFLIGHT_CASES, _CLOSED_FLIPS, _FLOOR_GUARD_FLIPS,
+    _BINDING_FLIPS, _GATE_BINDING_FLIPS, _EMITTER_FLIPS,
     _ATTRIBUTION_PINS, _ATTRIBUTION_EXCLUSIONS, _ATTRIBUTION_INDIRECTIONS), so a stubbed table's
     names are members while it is patched in."""
     if kind == "case":
@@ -205,6 +284,8 @@ def _cv(kind, token):
         allowed = (frozenset(flip for flip, _snippet in _CLOSED_FLIPS)
                    | frozenset(row[0] for row in _FLOOR_GUARD_FLIPS)
                    | frozenset(flip for flip, _snippet in _BINDING_FLIPS)
+                   | frozenset(flip for flip, _snippet in _GATE_BINDING_FLIPS)
+                   | frozenset(row[0] for row in _EMITTER_FLIPS)
                    | frozenset(row[0] for row in _FLOOR_GUARD_CONTROLS))
     elif kind in ("pin-label", "site", "site-key", "indirection-key"):
         rows = _ATTRIBUTION_PINS
@@ -309,7 +390,7 @@ def _check_pack_manifest_registration(subset):
 
 def _pack_manifest_registration_self_test():
     _attributed("closure/pack-manifest-registration", lambda: _check_pack_manifest_registration(_SUBSET))
-    print("PASS closure/pack-manifest-registration")
+    _emit("PASS closure/pack-manifest-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
@@ -321,7 +402,7 @@ def _pack_manifest_registration_self_test():
             raise
     else:
         raise AssertionError("closure/pack-manifest-registration-not-red")
-    print("RED closure-registration -> closure/pack-manifest-registration")
+    _emit("RED closure-registration -> closure/pack-manifest-registration")
 
 
 def _check_adopt_observe_registration(subset):
@@ -339,7 +420,7 @@ def _check_adopt_observe_registration(subset):
 
 def _adopt_observe_registration_self_test():
     _attributed("closure/adopt-observe-registration", lambda: _check_adopt_observe_registration(_SUBSET))
-    print("PASS closure/adopt-observe-registration")
+    _emit("PASS closure/adopt-observe-registration")
     # Mutate the real roster, independently of the shell-runner deletion.
     # No digest or generated-manifest check participates in the verdict.
     changed = list(_SUBSET)
@@ -351,7 +432,7 @@ def _adopt_observe_registration_self_test():
             raise
     else:
         raise AssertionError("closure/adopt-observe-registration-not-red")
-    print("RED closure-registration -> closure/adopt-observe-registration")
+    _emit("RED closure-registration -> closure/adopt-observe-registration")
 
 
 def _check_member_timeout_rows(subset, table):
@@ -369,7 +450,7 @@ def _check_member_timeout_rows(subset, table):
 
 def _member_timeout_rows_self_test():
     _attributed("closure/member-timeout-rows", lambda: _check_member_timeout_rows(_SUBSET, _MEMBER_TIMEOUT_S))
-    print("PASS closure/member-timeout-rows")
+    _emit("PASS closure/member-timeout-rows")
     # Mutate a COPY of the real table: a row naming no member must go red.
     changed = dict(_MEMBER_TIMEOUT_S)
     changed["no-such-member"] = 60
@@ -380,7 +461,7 @@ def _member_timeout_rows_self_test():
             raise
     else:
         raise AssertionError("closure/member-timeout-rows-not-red")
-    print("RED closure-registration -> closure/member-timeout-rows")
+    _emit("RED closure-registration -> closure/member-timeout-rows")
     # A bound that is not a positive int (bool is refused even though it subclasses int) must go red.
     for index, bad in enumerate((0, -60, 1800.0, True, "1800")):
         changed = dict(_MEMBER_TIMEOUT_S)
@@ -392,7 +473,7 @@ def _member_timeout_rows_self_test():
                 raise
         else:
             raise AssertionError("closure/member-timeout-rows-bad-bound-not-red: case " + _n(index))
-        print("RED closure-registration -> closure/member-timeout-rows bound case " + _n(index))
+        _emit("RED closure-registration -> closure/member-timeout-rows bound case " + _n(index))
 
 
 def _isolated_env():
@@ -424,7 +505,8 @@ _HARNESS_LAUNCH = "HARNESS ERROR interpreter-launch-refused"
 # Fixed repair guidance per cannot-evaluate reason code, printed only through the "repair" gate.
 _REPAIR_GUIDANCE = {
     _TIMEOUT: "the member was killed at its kill bound; if it is healthy but slow, raise its "
-              "_MEMBER_TIMEOUT_S row, then re-run this gate",
+              "_MEMBER_TIMEOUT_S row (or add one: a member without a row uses the "
+              "_SUBSET_TIMEOUT_S default), then re-run this gate",
     _HARNESS_MISSING: "the member's script was not found in the materialized copy; restore it "
                       "under opf/tools/ in the repository, then re-run this gate",
     _HARNESS_LAUNCH: "the interpreter could not be launched for the member; check sys.executable "
@@ -485,69 +567,72 @@ def run(root):
     left closure unevaluated), fail-closed."""
     opf_src = Path(root) / "opf"
     if not (opf_src.is_dir() and (opf_src / "tools" / "opf.py").is_file()):
-        print("error: opf/ subtree not found under the given root (cannot evaluate closure)",
-              file=sys.stderr)
+        _emit("error: opf/ subtree not found under the given root (cannot evaluate closure)",
+              err=True)
         return 2
     tmp = None
     try:
         try:
             tmp = Path(tempfile.mkdtemp(prefix="opf-closure-"))
         except OSError as exc:
-            print("error: could not allocate a scratch directory for the isolated opf/ copy "
-                  "(cannot evaluate closure)", file=sys.stderr)
+            _emit("error: could not allocate a scratch directory for the isolated opf/ copy "
+                  "(cannot evaluate closure; cause {})".format(
+                      _cv("errno", errno.errorcode.get(exc.errno, "unknown errno"))), err=True)
             return 2
         try:
             opf_root = _materialize(opf_src, tmp)
         except OSError as exc:
-            print("error: could not materialize the isolated opf/ copy (cannot evaluate closure)",
-                  file=sys.stderr)
+            _emit("error: could not materialize the isolated opf/ copy (cannot evaluate closure; "
+                  "cause {})".format(_cv("errno", errno.errorcode.get(exc.errno, "unknown errno"))),
+                  err=True)
             return 2
         try:
             results = _run_subset(opf_root, tmp)
         except AssertionError as exc:
             # Which registration check failed is a closed label of this module (the gate refuses
             # any other token), so naming it discloses no runtime value (ruling D-428).
-            print("STANDALONE CLOSURE: FAILED (a registration check was refuted: {})".format(
-                _cv("label", str(exc).split(":")[0])), file=sys.stderr)
+            _emit("STANDALONE CLOSURE: FAILED (a registration check was refuted: {})".format(
+                _cv("label", str(exc).split(":")[0])), err=True)
             return 1
         spec = {name: (script, " ".join(args)) for name, script, args in _SUBSET}
         cannot = [(name, why) for name, rc, tail, why in results if why is not None]
         failed = [(name, rc) for name, rc, tail, why in results if rc != 0 and why is None]
         for name, rc, tail, why in results:
-            print("  {:32s} {}".format(_cv("member", name),
+            _emit("  {:32s} {}".format(_cv("member", name),
                                        "{} (cannot evaluate)".format(_cv("reason", why))
                                        if why is not None
                                        else ("OK" if rc == 0 else "FAILED rc=" + _n(rc))))
         if failed:
-            print("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
-                  file=sys.stderr)
+            _emit("STANDALONE CLOSURE: BROKEN (the isolated opf/ subtree does not verify itself):",
+                  err=True)
             for name, rc in failed:
                 # The member's own output is captured and never echoed (ruling D-428); this fixed
                 # line names the member's script and arguments from the declared roster, so the
                 # user can re-run the member in isolation and read its output directly.
-                print("  {} (rc={}): reproduce in isolation: copy opf/ alone into an empty "
-                      "scratch directory and run: python3 -I -B opf/tools/{} {}".format(
+                _emit("  {} (rc={}): reproduce in isolation: copy opf/ alone into an empty "
+                      "scratch directory, clear GIT_ and PYTHON variables from the environment, "
+                      "and run under Python 3.14 or newer: python3 -I -B opf/tools/{}{}".format(
                           _cv("member", name), _n(rc), _cv("script", spec[name][0]),
-                          _cv("args", spec[name][1])), file=sys.stderr)
+                          " " + _cv("args", spec[name][1]) if spec[name][1] else ""), err=True)
         if cannot:
             # A member killed at its bound, missing from the copy, or not launchable is
             # CANNOT-EVALUATE (exit 2), never a closure finding: the member did not run to
             # completion, so this run observed neither closure nor its absence. Each row carries
             # its fixed reason code and fixed repair guidance (ruling D-428: no runtime value).
-            print("STANDALONE CLOSURE: CANNOT EVALUATE (a subset member did not run to completion):",
-                  file=sys.stderr)
+            _emit("STANDALONE CLOSURE: CANNOT EVALUATE (a subset member did not run to completion):",
+                  err=True)
             for name, why in cannot:
-                print("  {} [{}]: {}".format(
+                _emit("  {} [{}]: {}".format(
                     _cv("member", name), _cv("reason", why),
                     _cv("repair", _REPAIR_GUIDANCE.get(
-                        why, "no fixed repair guidance for this reason"))), file=sys.stderr)
+                        why, "no fixed repair guidance for this reason"))), err=True)
         # Failure-first: a member that ran and failed is a definite closure break whatever else could
         # not be evaluated, so it decides the exit; cannot-evaluate (2) only when nothing failed.
         if failed:
             return 1
         if cannot:
             return 2
-        print("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
+        _emit("STANDALONE CLOSURE: OK (opf/ verifies itself with no AIQT tree reachable)")
         return 0
     finally:
         if tmp is not None:
@@ -671,20 +756,28 @@ def _closure_legs(root):
 def _self_test_exit(failures, cannot):
     """The self-test verdict: 1 when a leg was refuted, else 2 when a leg could not be evaluated, else 0."""
     for f in failures:
-        print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
+        _emit("SELF-TEST FAIL: {}".format(f), err=True)
     for c in cannot:
-        print("SELF-TEST CANNOT EVALUATE: {}".format(c), file=sys.stderr)
+        _emit("SELF-TEST CANNOT EVALUATE: {}".format(c), err=True)
     if failures:
         return 1
     if cannot:
         return 2
-    print("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is caught.")
+    _emit("SELF-TEST PASS: standalone closure holds for opf/, and a re-introduced upward edge is caught.")
     return 0
 
 
 @contextlib.contextmanager
 def _patched(**values):
-    """Rebind module globals for the duration of a stubbed case, restoring them on every path."""
+    """Rebind module globals for the duration of a stubbed case, restoring them on every path.
+    Refuses a _PROTECTED_NAMES key before touching anything (closure/closed-sites pins the refusal
+    with probes): a stub that could rebind a channel, a writer module, a dynamic importer, a gate,
+    the emitter or a registered text literal would put a runtime value behind a name the static
+    walk trusts by spelling."""
+    refused = sorted(set(values) & _PROTECTED_NAMES)
+    if refused:
+        raise AssertionError("closure/patched-protected: a stub tried to rebind a protected "
+                             "name: " + _cvs("protected-name", refused))
     g = globals()
     saved = {name: g[name] for name in values}
     g.update(values)
@@ -1040,6 +1133,9 @@ _CLOSED_VOCABULARIES = dict((
     ("primitive", frozenset(("scratch allocation", "copy", "fixture write", "copied store read",
                              "flip write", "store read", "child process"))),
     ("text-name", frozenset(_CLOSED_TEXT_NAMES)),
+    ("gate-name", frozenset(_GATE_NAMES)),
+    ("protected-name", _PROTECTED_NAMES),
+    ("errno", frozenset(errno.errorcode.values()) | frozenset(("unknown errno",))),
 ))
 
 
@@ -1422,12 +1518,13 @@ def _check_harness_mapping(root):
                                   _cv("reason", why) + " (cannot evaluate)") not in out.splitlines():
             raise AssertionError("closure/harness-line: no {} (cannot evaluate) line".format(
                 _cv("reason", why)))
-        rows = [line for line in err.splitlines()
-                if line.startswith("  opf-drift-selftest [" + _cv("reason", why) + "]: ")]
+        want_row = "  {} [{}]: {}".format(_cv("member", "opf-drift-selftest"), _cv("reason", why),
+                                          _cv("repair", _REPAIR_GUIDANCE[why]))
+        rows = [line for line in err.splitlines() if line == want_row]
         if len(rows) != 1:
             raise AssertionError("closure/harness-reason: the cannot-evaluate listing does not carry "
-                                 "the {} reason code with its repair guidance".format(
-                                     _cv("reason", why)))
+                                 "exactly the {} reason code line with its full fixed repair "
+                                 "guidance".format(_cv("reason", why)))
         listings += rows
     if len(set(listings)) != 2:
         raise AssertionError("closure/harness-reason: the two harness failures were not told apart "
@@ -1438,7 +1535,9 @@ def _check_failure_first(root):
     """run() is failure-first: a member that ran and failed exits 1 even while another member timed
     out, and both are listed (the break under BROKEN, with its fixed reproduce-in-isolation line
     naming the member's script and arguments; the timeout under CANNOT EVALUATE, with its fixed
-    reason code)."""
+    reason code). And a refuted registration check (the bound-table check stubbed to raise, with
+    the copy stubbed hollow since no member runs) exits 1 with the fixed FAILED line naming the
+    refuted check's label through the label gate, covering run()'s registration branch."""
     outcomes = {"opf-drift-selftest": (1, "ImportError: check_versions", None),
                 "opf-tooling-selftest": (2, "timed out after 1800s", _TIMEOUT)}
     rc, _out, err, _calls = _stubbed_run(root, outcomes)
@@ -1453,6 +1552,15 @@ def _check_failure_first(root):
             or not any(line.startswith("STANDALONE CLOSURE: BROKEN") for line in lines)
             or not any(line.startswith("STANDALONE CLOSURE: CANNOT EVALUATE") for line in lines)):
         raise AssertionError("closure/failure-first-listing: the break and the timeout are not both listed")
+
+    def refuted_registration():
+        rc, _out, err = _captured(run, root)
+        if rc != 1 or ("STANDALONE CLOSURE: FAILED (a registration check was refuted: "
+                       "closure/member-timeout-rows)") not in err.splitlines():
+            raise AssertionError("closure/failure-first: a refuted registration check did not exit 1 "
+                                 "with the FAILED line naming its label")
+    _attributed("closure/failure-first", refuted_registration, injected=dict(
+        _check_member_timeout_rows=_refuted_rows, _materialize=_hollow_copy))
 
 
 def _check_verdict_tables():
@@ -1612,6 +1720,16 @@ def _no_scratch(*_args, **_kwargs):
 
 def _broken_copy(_src, _dest):
     raise OSError("copy refused (stubbed)")
+
+
+def _hollow_copy(_src, dest):
+    """A copy stand-in for cases that refute run() before any member would need the copy."""
+    return dest / "opf"
+
+
+def _refuted_rows(_subset, _table):
+    """A registration-check stand-in that is refuted, driving run()'s refuted-registration exit."""
+    raise AssertionError("closure/member-timeout-rows: refuted (stubbed)")
 
 
 def _check_scratch_and_copy_errors(root):
@@ -2090,7 +2208,7 @@ def _check_env_canaries(root):
 
             def noisy(exc_type):
                 def probe():
-                    print(value)
+                    _emit(value)
                     raise exc_type("closure/env-canary-noise: synthetic refusal (stubbed)")
                 return probe
             for exc_type in (AssertionError, _CannotEvaluate):
@@ -2108,10 +2226,13 @@ def _check_env_canaries(root):
 
 
 # The sites closure/closed-sites permits although their arguments are not closed, as (the
-# qualname of the code holding the site, the callee's dotted name, the recorded reason). An entry
-# matching no site, a duplicate entry, or one with no reason is stale (a refutation).
+# qualname of the code holding the site, the callee's dotted name, the recorded reason). These
+# record UNCLOSED TEXT at an emitter call or an exception constructor only; a channel reference
+# outside the emitter has no exception here (the allowlist admits exactly the emitter and the
+# floor guard). An entry matching no site, a duplicate entry, or one with no reason is stale (a
+# refutation).
 _CLOSED_SITE_EXCEPTIONS = (
-    ("_self_test_exit", "print",
+    ("_self_test_exit", "_emit",
      "relays refutation and cannot-evaluate text that reaches it only as str() of exceptions this "
      "module raised and of leg messages built at closed sites; every construction site is checked "
      "by this walk, so the relayed text is closed by construction"),
@@ -2124,37 +2245,37 @@ _CLOSED_SITE_EXCEPTIONS = (
     ("_check_harness_mapping.<locals>.expire", "subprocess.TimeoutExpired",
      "a stubbed child kill whose arguments are a fixture command and bound: _run_one maps it to "
      "fixed text, and the watch relays only the primitive's name and a marker"),
-    ("_check_env_canaries.<locals>.noisy.<locals>.probe", "print",
-     "prints the raw canary inside a capture on purpose, to prove the capture scan catches it"),
-    ("<module>", "sys.exit",
-     "the entry point relays main()'s integer return as the process exit; an int exit value is "
-     "never formatted into output, and _check_closed_sites refuses a second module-level sys.exit "
-     "site, so this entry covers exactly that one relay"),
+    ("_check_env_canaries.<locals>.noisy.<locals>.probe", "_emit",
+     "emits the raw canary inside a capture on purpose, to prove the capture scan catches it"),
 )
 
-# The stream objects whose write/writelines (directly or through .buffer) the walk recognizes.
-_STREAM_HEADS = ("sys.stdout", "sys.stderr", "sys.__stdout__", "sys.__stderr__")
+# The emitter's statements, pinned verbatim: _check_closed_sites requires this file's one
+# module-level _emit def to match this source exactly (its docstring aside, compared by AST
+# dump), so the emitter cannot grow a statement, a parameter, a decorator, a different stream
+# pick or a weaker exit clamp without failing there (_EMITTER_FLIPS each break one condition).
+_EMITTER_SOURCE = (
+    "def _emit(text=None, err=False, code=None):\n"
+    "    stream = sys.stderr if err else sys.stdout\n"
+    "    if text is not None:\n"
+    '        stream.write(text + "\\n")\n'
+    "    if code is not None:\n"
+    "        sys.exit(code if type(code) is int else 2)\n")
 
-# Exit callees: the interpreter prints a non-int exit value to stderr, so an exit call is an
-# output site (closure/closed-sites) and its value must be closed.
-_EXIT_CALLEES = ("sys.exit", "exit", "quit", "builtins.exit", "builtins.quit")
 
-# Imports that would bind a writer (or a writer's module, or an exit) to another name the walk
-# cannot follow: module name mapped to the refused imported names (None refuses every name).
-_ALIASING_IMPORTS = {
-    "sys": ("stdout", "stderr", "__stdout__", "__stderr__", "exit"),
-    "os": ("write",),
-    "builtins": ("print", "exit", "quit"),
-    "logging": None,
-    "warnings": None,
-}
-
-# Writer attributes a load of which, outside a call's callee position, is an alias the walk
-# cannot classify (closure/closed-sites refuses it): each stream head's write, writelines and
-# buffer, plus os.write, builtins.print and the dotted exit callees.
-_ALIAS_WRITERS = tuple(head + suffix for head in _STREAM_HEADS
-                       for suffix in (".write", ".writelines", ".buffer")) + (
-    "os.write", "builtins.print", "sys.exit", "builtins.exit", "builtins.quit")
+def _emitter_matches(node):
+    """True when `node` is a def of the one closed emitter in exactly the _EMITTER_SOURCE shape:
+    the same name, signature and statements by AST dump (a leading docstring is dropped first),
+    with no decorator, no return annotation and no type parameters."""
+    want = ast.parse(_EMITTER_SOURCE).body[0]
+    if not isinstance(node, ast.FunctionDef) or node.name != "_emit":
+        return False
+    body = list(node.body)
+    if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    return (not node.decorator_list and node.returns is None and not node.type_params
+            and ast.dump(node.args) == ast.dump(want.args)
+            and [ast.dump(part) for part in body] == [ast.dump(part) for part in want.body])
 
 
 def _callee_name(func):
@@ -2253,6 +2374,21 @@ def _registered_name_faults(tree, names):
     return faults
 
 
+def _function_name_faults(tree, names):
+    """For each of `names`, why it cannot serve as a trusted gate or emitter name over `tree`, as
+    (name, why): the name must be bound exactly once in the whole module, by one module-level def
+    of that name, and never rebound or shadowed anywhere (_bound_names lists the binding forms),
+    because _closed_argument and the walk trust these names by spelling and cannot see scopes."""
+    faults = []
+    for name in names:
+        bindings = [node for walked in ast.walk(tree) for bound, node in _bound_names(walked)
+                    if bound == name]
+        defs = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name]
+        if len(defs) != 1 or bindings != defs:
+            faults.append((name, "not exactly one module-level def, or rebound or shadowed"))
+    return faults
+
+
 # The values the canonical floor guard's refusal formats (tools/check_python_floor.py
 # GUARD_TEMPLATE): the interpreter's version and sys.executable, nothing else.
 _FLOOR_GUARD_VALUES = 'tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)'
@@ -2307,88 +2443,162 @@ def _floor_guard(tree):
 
 
 def _unexempted_violations(tree):
-    """_closed_output_violations(tree) less the canonical floor guard's refusal write (_floor_guard),
-    with the number of violations that exemption removed (the guard's write is one sys.stderr.write
-    call at module level, so a count other than 1 means the exemption is stale or too wide)."""
+    """_closed_output_violations(tree) less the canonical floor guard's two channel references
+    (_floor_guard: its refusal write's sys.stderr and its raise's SystemExit, each matched by
+    qualname, token and line), with the number of violations that exemption removed (the guard
+    holds exactly those two references, so a count other than 2 means the exemption is stale or
+    too wide)."""
     guard = _floor_guard(tree)
     found = _closed_output_violations(tree)
-    kept = [site for site in found
-            if guard is None or site[:3] != ("<module>", "sys.stderr.write", guard.body[0].lineno)]
+    exempt = () if guard is None else (("<module>", "sys.stderr", guard.body[0].lineno),
+                                       ("<module>", "SystemExit", guard.body[1].lineno))
+    kept = [site for site in found if site[:3] not in exempt]
     return kept, len(found) - len(kept)
 
 
 def _closed_output_violations(tree):
-    """Every output call and exception constructor under `tree` that could carry unclosed text, as
-    (qualname, callee, line, why): a print (builtins.print included) whose positional argument, or
-    whose keyword other than a file= of sys.stdout or sys.stderr, is not closed (_closed_argument);
-    a .write on a _STREAM_HEADS stream whose argument is not closed or that passes a keyword, and
-    any .writelines, or .write or .writelines through .buffer, on one of those streams (refused
-    outright: this module never uses them, and bytes and iterables are not in the closed grammar);
-    an os.write whose descriptor is not the constant 1 or 2 or whose data is not closed; any
-    logging or warnings call (this module never logs or warns); an _EXIT_CALLEES call (sys.exit,
-    exit, quit) whose argument is not closed (the interpreter prints a non-int exit value to
-    stderr; an int constant or a closed string is permitted); an assert whose message is not
-    closed (the raised AssertionError formats it); a call to a name in
-    _EXCEPTION_NAMES (a builtin exception, this module's, or TimeoutExpired), raised or built,
-    whose positional or keyword argument is not closed; any other RAISED constructor, checked the
-    same way whatever its name resolves to; an import that would bind a writer to another name
-    (_ALIASING_IMPORTS: a `from` import of a stream, write, print, exit or warn name, a star
-    import from such a module, or an `import ... as` of the module itself); and a load of print,
-    exit or quit, or of an _ALIAS_WRITERS attribute, outside a call's callee position (an alias a
-    later call could write through, which the walk cannot classify). Not seen: a raise of a bare
-    name (re-raising formats nothing; construction is checked wherever a recognized constructor is
-    called), a BUILT exception whose class name is not in _EXCEPTION_NAMES, a plain import of a
-    writer module under its own name (its attribute uses are checked at each site), and a write
-    through a descriptor or an API not listed here."""
-    callee_funcs = set()
+    """Every channel reference, emitter call, exception constructor and assert under `tree` that
+    the closed-diagnostics ALLOWLIST refuses, as (qualname, token, line, why). Only the one
+    module-level def named _emit (whose statements _check_closed_sites pins verbatim against
+    _EMITTER_SOURCE) may reference a channel; the canonical floor guard's two references are
+    exempted by position and shape in _unexempted_violations; everywhere else:
+    any reference to a _CHANNEL_NAMES name (print, exit, quit, SystemExit, warnings, logging,
+    traceback, builtins, __builtins__), in any context (a call, a load, a store, a delete, an
+    except clause, an argument) is refused, closed text or not; a bare sys or os outside an
+    attribute access (an assigned alias, a call or getattr argument, a store: an alias the walk
+    cannot follow) is refused; a _CHANNEL_ATTRS attribute of sys or os (the streams, the dunder
+    streams, sys.exit, os.write, os._exit) is refused wherever it appears; any reference to a
+    _DYNAMIC_IMPORT_NAMES name, or an import of importlib, is refused (a dynamic import could
+    rebind or reach a channel unseen); only plain `import sys` and `import os` are permitted over
+    _CHANNEL_MODULES (an asname, a dotted form or a from-import of such a module is refused), an
+    import binding ANY _PROTECTED_NAMES name is refused, and so is EVERY star import, whatever
+    the module (its bindings cannot be followed); any other binding of a protected name (a
+    parameter, an except name, a def or class name, a match capture, a global or nonlocal
+    declaration) is refused, except the gates' and the emitter's own module-level defs; a load of
+    _emit outside a call's callee position (an alias a later call could write through unchecked)
+    is refused; and every _emit call must pass closed text (_closed_argument) as its at most one
+    positional or text= argument, a True or False constant as err=, and no other keyword and no
+    starred argument; code= may be any expression, because the emitter exits through an int
+    clamp, so the interpreter never prints an exit value of this module. Exception constructors
+    stay checked wherever they appear, the emitter included (the interpreter prints an uncaught
+    exception's text): a call to a name in _EXCEPTION_NAMES, built or raised, whose positional or
+    keyword argument is not closed; any other RAISED constructor, checked the same way; and an
+    assert whose message is not closed. Not seen (residuals, stated in the module docstring too):
+    what the interpreter itself runs outside this file (its traceback on an uncaught exception,
+    with the raw text of the __cause__ chain), a raise of a bare name (re-raising formats
+    nothing; construction is checked at every recognized constructor), a BUILT exception whose
+    class name is not in _EXCEPTION_NAMES, and a runtime mutation of this module's namespace
+    through an indirection (globals(), sys.modules): every such load the attribution walk sees
+    needs a recorded reason, and _patched, the one deliberate mutator, refuses every protected
+    name at run time."""
+    emitter_defs = [node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_emit"]
+    exempt_nodes = set()
+    for emitter in emitter_defs:
+        for node in ast.walk(emitter):
+            exempt_nodes.add(id(node))
+    callee_funcs, attribute_bases = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             callee_funcs.add(id(node.func))
+        if isinstance(node, ast.Attribute):
+            attribute_bases.add(id(node.value))
     found = []
 
     def closed_call(child):
         return (all(_closed_argument(arg) for arg in child.args)
                 and all(kw.arg is not None and _closed_argument(kw.value) for kw in child.keywords))
 
-    def walk(node, qualname, prefix):
+    def emit_fault(child):
+        if len(child.args) > 1 or any(isinstance(arg, ast.Starred) for arg in child.args):
+            return "more than one positional emitter argument, or a starred one"
+        wrong = [arg for arg in child.args if not _closed_argument(arg)]
+        for kw in child.keywords:
+            if kw.arg == "code":
+                continue
+            if kw.arg == "err":
+                if not (isinstance(kw.value, ast.Constant) and type(kw.value.value) is bool):
+                    wrong.append(kw.value)
+            elif kw.arg != "text" or not _closed_argument(kw.value):
+                wrong.append(kw.value)
+        return "unclosed emitter text, or an emitter keyword outside text, err and code" if wrong else None
+
+    def walk(node, qualname, prefix, exempt):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                if not exempt:
+                    for bound, bnode in _bound_names(child):
+                        if (bound in _PROTECTED_NAMES
+                                and not (isinstance(bnode, ast.FunctionDef) and bound in _GATE_NAMES
+                                         and any(bnode is top for top in tree.body))):
+                            found.append((qualname, bound, child.lineno,
+                                          "a binding of a protected name"))
                 own = prefix + ("<lambda>" if isinstance(child, ast.Lambda) else child.name)
-                walk(child, own, own + ("." if isinstance(child, ast.ClassDef) else ".<locals>."))
+                walk(child, own, own + ("." if isinstance(child, ast.ClassDef) else ".<locals>."),
+                     exempt or id(child) in exempt_nodes)
                 continue
+            if not exempt:
+                if isinstance(child, ast.Name) and child.id in _CHANNEL_NAMES:
+                    found.append((qualname, child.id, child.lineno,
+                                  "a channel name outside the emitter"))
+                if (isinstance(child, ast.Name) and child.id in ("sys", "os")
+                        and not (isinstance(child.ctx, ast.Load) and id(child) in attribute_bases)):
+                    found.append((qualname, child.id, child.lineno,
+                                  "a bare writer-module name (an alias the walk cannot follow)"))
+                if (isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name)
+                        and child.attr in _CHANNEL_ATTRS.get(child.value.id, ())):
+                    found.append((qualname, child.value.id + "." + child.attr, child.lineno,
+                                  "a channel attribute outside the emitter"))
+                if isinstance(child, ast.Name) and child.id in _DYNAMIC_IMPORT_NAMES:
+                    found.append((qualname, child.id, child.lineno, "a dynamic import"))
+                if isinstance(child, ast.Import):
+                    for alias in child.names:
+                        bound = alias.asname if alias.asname is not None else alias.name.split(".")[0]
+                        if alias.name.split(".")[0] in _DYNAMIC_IMPORT_NAMES:
+                            found.append((qualname, alias.name, child.lineno, "a dynamic import"))
+                        elif alias.name.split(".")[0] in _CHANNEL_MODULES:
+                            if alias.asname is not None or alias.name not in ("sys", "os"):
+                                found.append((qualname, alias.name, child.lineno,
+                                              "an import of a writer module beyond plain sys or os"))
+                        elif bound in _PROTECTED_NAMES:
+                            found.append((qualname, bound, child.lineno,
+                                          "an import binding a protected name"))
+                if isinstance(child, ast.ImportFrom):
+                    module_head = (child.module or "").split(".")[0]
+                    if any(alias.name == "*" for alias in child.names):
+                        found.append((qualname, (child.module or ".") + ".*", child.lineno,
+                                      "a star import (bindings the walk cannot follow)"))
+                    elif module_head in _CHANNEL_MODULES + _DYNAMIC_IMPORT_NAMES:
+                        for alias in child.names:
+                            found.append((qualname, module_head + "." + alias.name, child.lineno,
+                                          "a from-import of a writer module"))
+                    else:
+                        for alias in child.names:
+                            bound = alias.asname if alias.asname is not None else alias.name
+                            if bound in _PROTECTED_NAMES:
+                                found.append((qualname, bound, child.lineno,
+                                              "an import binding a protected name"))
+                for bound, bnode in _bound_names(child):
+                    if bound not in _PROTECTED_NAMES or isinstance(bnode, ast.alias):
+                        continue
+                    if isinstance(bnode, ast.Name) and bound not in _GATE_NAMES:
+                        continue
+                    if (isinstance(bnode, ast.FunctionDef) and bound in _GATE_NAMES
+                            and any(bnode is top for top in tree.body)):
+                        continue
+                    found.append((qualname, bound, child.lineno, "a binding of a protected name"))
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                        and child.func.id == "_emit"):
+                    why = emit_fault(child)
+                    if why:
+                        found.append((qualname, "_emit", child.lineno, why))
+                if (isinstance(child, ast.Name) and child.id == "_emit"
+                        and isinstance(child.ctx, ast.Load) and id(child) not in callee_funcs):
+                    found.append((qualname, "_emit", child.lineno,
+                                  "the emitter loaded outside a call (an alias)"))
             if isinstance(child, ast.Call):
                 name = _callee_name(child.func)
-                head, last = name.split(".")[0], name.split(".")[-1]
-                if name in ("print", "builtins.print"):
-                    wrong = [arg for arg in child.args if not _closed_argument(arg)]
-                    for kw in child.keywords:
-                        if kw.arg == "file":
-                            if _callee_name(kw.value) not in ("sys.stdout", "sys.stderr"):
-                                wrong.append(kw.value)
-                        elif kw.arg is None or not _closed_argument(kw.value):
-                            wrong.append(kw.value)
-                    if wrong:
-                        found.append((qualname, name, child.lineno, "unclosed print text"))
-                elif any(name == head + ".write" for head in _STREAM_HEADS):
-                    if child.keywords or not all(_closed_argument(arg) for arg in child.args):
-                        found.append((qualname, name, child.lineno, "unclosed stream write"))
-                elif (any(name.startswith(head + ".") for head in _STREAM_HEADS)
-                        and name.split(".")[-1] in ("write", "writelines")):
-                    found.append((qualname, name, child.lineno,
-                                  "a stream writer the walk cannot classify as closed"))
-                elif name == "os.write":
-                    if (child.keywords or len(child.args) != 2
-                            or not (isinstance(child.args[0], ast.Constant)
-                                    and child.args[0].value in (1, 2))
-                            or not _closed_argument(child.args[1])):
-                        found.append((qualname, name, child.lineno,
-                                      "an os.write the walk cannot classify as closed"))
-                elif head in ("logging", "warnings"):
-                    found.append((qualname, name, child.lineno, "a logging or warnings call"))
-                elif name in _EXIT_CALLEES:
-                    if not closed_call(child):
-                        found.append((qualname, name, child.lineno, "unclosed exit value"))
-                elif last in _EXCEPTION_NAMES and not closed_call(child):
+                if name.split(".")[-1] in _EXCEPTION_NAMES and not closed_call(child):
                     found.append((qualname, name, child.lineno, "unclosed exception text"))
             if (isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call)
                     and _callee_name(child.exc.func).split(".")[-1] not in _EXCEPTION_NAMES
@@ -2397,81 +2607,107 @@ def _closed_output_violations(tree):
                               "unclosed raised-constructor text"))
             if isinstance(child, ast.Assert) and child.msg is not None and not _closed_argument(child.msg):
                 found.append((qualname, "assert", child.lineno, "unclosed assert message"))
-            if isinstance(child, ast.Import):
-                for alias in child.names:
-                    if alias.name in _ALIASING_IMPORTS and alias.asname is not None:
-                        found.append((qualname, alias.name, child.lineno,
-                                      "an import binding a writer module to another name"))
-            if isinstance(child, ast.ImportFrom) and child.module in _ALIASING_IMPORTS:
-                refused = _ALIASING_IMPORTS[child.module]
-                for alias in child.names:
-                    if refused is None or alias.name == "*" or alias.name in refused:
-                        found.append((qualname, child.module + "." + alias.name, child.lineno,
-                                      "an import binding a writer to another name"))
-            if (isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-                    and child.id in ("print", "exit", "quit") and id(child) not in callee_funcs):
-                found.append((qualname, child.id, child.lineno, "an aliased writer"))
-            if (isinstance(child, ast.Attribute) and _callee_name(child) in _ALIAS_WRITERS
-                    and id(child) not in callee_funcs):
-                found.append((qualname, _callee_name(child), child.lineno, "an aliased writer"))
-            walk(child, qualname, prefix)
+            walk(child, qualname, prefix, exempt)
 
-    walk(tree, "<module>", "")
+    walk(tree, "<module>", "", False)
     return found
 
 
-# One snippet per recognized writer or constructor form: each must be flagged by
-# _closed_output_violations, so removing a recognizer fails closure/closed-sites.
+# One snippet per refused form of the allowlist and per kept denylist rule: each must be flagged
+# by _closed_output_violations, so removing a recognizer or a table entry fails
+# closure/closed-sites. The channel, writer-module, import and binding rows cover every name and
+# attribute the allowlist reserves, one row per table entry, and the emitter rows cover each
+# argument rule at an _emit call.
 _CLOSED_FLIPS = (
     ("print", "print(value)\n"),
+    ("print-closed-text", "print('fixed')\n"),
     ("print-star", "print(*values)\n"),
-    ("builtins-print", "import builtins\nbuiltins.print(value)\n"),
     ("print-keyword", "print(1, end=value)\n"),
     ("print-file", "print(1, file=handle)\n"),
+    ("builtins-print", "import builtins\nbuiltins.print(value)\n"),
+    ("dunder-builtins-print", "__builtins__.print(value)\n"),
     ("stdout-write", "import sys\nsys.stdout.write(value)\n"),
     ("stderr-write", "import sys\nsys.stderr.write(value)\n"),
-    ("os-write-1", "import os\nos.write(1, value)\n"),
-    ("os-write-2", "import os\nos.write(2, value)\n"),
-    ("os-write-other", "import os\nos.write(fd, b'x')\n"),
-    ("logging", "import logging\nlogging.error(1)\n"),
-    ("warnings", "import warnings\nwarnings.warn(1)\n"),
+    ("dunder-stdout-write", "import sys\nsys.__stdout__.write(value)\n"),
+    ("dunder-stderr-write", "import sys\nsys.__stderr__.write(value)\n"),
+    ("stdout-assigned", "import sys\nstream = sys.stdout\n"),
+    ("stderr-assigned", "import sys\nstream = sys.stderr\n"),
+    ("stderr-buffer-write", "import sys\nsys.stderr.buffer.write(data)\n"),
+    ("stdout-writelines", "import sys\nsys.stdout.writelines(lines)\n"),
+    ("os-write", "import os\nos.write(1, value)\n"),
+    ("os-exit", "import os\nos._exit(2)\n"),
+    ("aliased-os-write", "import os\nwriter = os.write\n"),
+    ("sys-module-alias", "import sys\ns = sys\n"),
+    ("os-module-alias", "import os\no = os\n"),
+    ("sys-as-argument", "import sys\nprobe(sys)\n"),
+    ("getattr-stream", "import sys\nwriter = getattr(sys, name)\n"),
+    ("sys-rebound", "sys = stub\n"),
+    ("sys-exit-call", "import sys\nsys.exit(value)\n"),
+    ("entry-sys-exit", "import sys\nsys.exit(main())\n"),
+    ("aliased-sys-exit", "import sys\nleave = sys.exit\n"),
+    ("exit-value", "exit(value)\n"),
+    ("quit-value", "quit(value)\n"),
+    ("aliased-exit-name", "leave = exit\n"),
+    ("aliased-quit-name", "leave = quit\n"),
+    ("exit-string-concat", "import sys\nsys.exit('error: cannot read ' + str(path))\n"),
+    ("systemexit-built", "exc = SystemExit(value)\n"),
+    ("systemexit-raised", "raise SystemExit(2)\n"),
+    ("systemexit-caught", "try:\n    probe()\nexcept SystemExit:\n    pass\n"),
+    ("warnings-call", "import warnings\nwarnings.warn(1)\n"),
+    ("logging-call", "import logging\nlogging.error(1)\n"),
+    ("traceback-call", "import traceback\ntraceback.print_exc()\n"),
+    ("import-warnings", "import warnings\n"),
+    ("import-logging", "import logging\n"),
+    ("import-traceback", "import traceback\n"),
+    ("import-builtins", "import builtins\n"),
+    ("import-sys-alias", "import sys as s\n"),
+    ("import-os-alias", "import os as o\n"),
+    ("import-os-dotted", "import os.path\n"),
+    ("from-sys-any", "from sys import argv\n"),
+    ("from-sys-stderr-renamed", "from sys import stderr as err\n"),
+    ("from-os-any", "from os import environ\n"),
+    ("from-builtins-print", "from builtins import print\n"),
+    ("from-warnings-warn", "from warnings import warn\n"),
+    ("from-sys-star", "from sys import *\n"),
+    ("star-import-any", "from json import *\n"),
+    ("import-as-channel", "import json as print\n"),
+    ("from-import-channel", "from json import dumps as quit\n"),
+    ("importlib-import", "import importlib\n"),
+    ("importlib-reference", "module = importlib.import_module(name)\n"),
+    ("dunder-import", "module = __import__('sys')\n"),
+    ("channel-parameter", "def probe(print):\n    pass\n"),
+    ("channel-def-name", "def exit(value):\n    pass\n"),
+    ("channel-except-name", "try:\n    probe()\nexcept OSError as print:\n    pass\n"),
+    ("channel-global", "def probe():\n    global print\n    print = stub\n"),
+    ("channel-match-capture", "def probe(value):\n    match value:\n"
+     "        case [*print]:\n            pass\n"),
+    ("emit-unclosed-text", "_emit(value)\n"),
+    ("emit-star", "_emit(*values)\n"),
+    ("emit-double-star", "_emit(**values)\n"),
+    ("emit-keyword-unclosed", "_emit(text=value)\n"),
+    ("emit-err-not-constant", "_emit('x', err=flag)\n"),
+    ("emit-err-not-bool", "_emit('x', err=1)\n"),
+    ("emit-unknown-keyword", "_emit('x', flush=True)\n"),
+    ("emit-two-positionals", "_emit('x', True)\n"),
+    ("emit-aliased", "writer = _emit\n"),
+    ("emit-rebound", "_emit = stub\n"),
+    ("emit-parameter", "def probe(_emit):\n    pass\n"),
+    ("emit-nested-def", "def probe():\n    def _emit(text):\n        pass\n"),
+    ("gate-shadow-parameter", "def probe(_n, value):\n    _emit(_n(value))\n"),
+    ("gate-rebound-assignment", "_cv = stub\n"),
+    ("fstring", "raise AssertionError(f'x and more')\n"),
+    ("percent", "raise AssertionError('x: %s' % value)\n"),
+    ("str-of-value", "raise AssertionError(str(value))\n"),
+    ("format-of-value", "raise AssertionError('x {}'.format(value))\n"),
     ("raised-positional", "raise AssertionError(value)\n"),
     ("raised-keyword", "raise Wrapped(message=value)\n"),
     ("raised-star", "raise AssertionError(*values)\n"),
     ("raised-double-star", "raise Wrapped(**values)\n"),
     ("built-constructor", "exc = AssertionError(value)\n"),
     ("built-keyword", "exc = OSError(filename=value)\n"),
-    ("fstring", "raise AssertionError(f'x and more')\n"),
-    ("percent", "raise AssertionError('x: %s' % value)\n"),
-    ("str-of-value", "raise AssertionError(str(value))\n"),
-    ("format-of-value", "raise AssertionError('x {}'.format(value))\n"),
-    ("gate-keyword", "print(_cv('member', token=value))\n"),
-    ("aliased-print", "writer = print\n"),
-    ("aliased-builtins-print", "import builtins\nwriter = builtins.print\n"),
-    ("aliased-stdout-write", "import sys\nwriter = sys.stdout.write\n"),
-    ("aliased-stderr-write", "import sys\nwriter = sys.stderr.write\n"),
-    ("aliased-os-write", "import os\nwriter = os.write\n"),
-    ("sys-exit-value", "import sys\nsys.exit(value)\n"),
-    ("exit-value", "exit(value)\n"),
-    ("quit-value", "quit(value)\n"),
-    ("exit-string-concat", "import sys\nsys.exit('error: cannot read ' + str(path))\n"),
+    ("gate-keyword", "_emit(_cv('member', token=value))\n"),
     ("assert-message", "assert flag, value\n"),
     ("assert-formatted-message", "assert flag, 'missing: 0'.replace('0', str(path))\n"),
-    ("import-sys-alias", "import sys as s\n"),
-    ("from-sys-stderr", "from sys import stderr\n"),
-    ("from-sys-stderr-renamed", "from sys import stderr as err\n"),
-    ("from-os-write", "from os import write\n"),
-    ("from-builtins-print", "from builtins import print\n"),
-    ("from-warnings-warn", "from warnings import warn\n"),
-    ("from-sys-star", "from sys import *\n"),
-    ("from-sys-exit", "from sys import exit\n"),
-    ("stderr-buffer-write", "import sys\nsys.stderr.buffer.write(data)\n"),
-    ("stdout-writelines", "import sys\nsys.stdout.writelines(lines)\n"),
-    ("dunder-stderr-write", "import sys\nsys.__stderr__.write(value)\n"),
-    ("aliased-sys-exit", "import sys\nleave = sys.exit\n"),
-    ("aliased-exit-name", "leave = exit\n"),
-    ("aliased-quit-name", "leave = quit\n"),
-    ("aliased-stderr-buffer", "import sys\nsink = sys.stderr.buffer\n"),
 )
 
 # One snippet per refused rebinding or shadowing form of a registered text name: each must make
@@ -2504,17 +2740,58 @@ _BINDING_FLIPS = (
      "    _PIN_MARKER = value\n    print(_PIN_MARKER)\n"),
     ("binding-match-capture", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    match value:\n"
      "        case _PIN_MARKER:\n            print(_PIN_MARKER)\n"),
+    ("binding-nonlocal", "_PIN_MARKER = 'fixed'\ndef probe():\n    nonlocal _PIN_MARKER\n"),
+    ("binding-match-star", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    match value:\n"
+     "        case [*_PIN_MARKER]:\n            pass\n"),
+    ("binding-match-mapping-rest", "_PIN_MARKER = 'fixed'\ndef probe(value):\n    match value:\n"
+     "        case {**_PIN_MARKER}:\n            pass\n"),
+    ("binding-type-parameter", "_PIN_MARKER = 'fixed'\ndef probe[_PIN_MARKER]():\n    pass\n"),
 )
 
 # The registered-name binding control: one module-level literal binding and loads only must pass.
 _BINDING_CONTROL = "_PIN_MARKER = 'fixed'\nprint(_PIN_MARKER)\n"
 
+# One snippet per refused rebinding or shadowing form of a gate or emitter name: each must make
+# _function_name_faults fault _n, so removing a detector or the def requirement fails
+# closure/closed-sites. The control (one module-level def, loads only) must pass.
+_GATE_BINDING_FLIPS = (
+    ("gate-missing", "def probe():\n    pass\n"),
+    ("gate-parameter", "def _n(value):\n    return '1'\ndef probe(_n):\n    pass\n"),
+    ("gate-reassigned", "def _n(value):\n    return '1'\n_n = probe\n"),
+    ("gate-nested-def", "def _n(value):\n    return '1'\ndef probe():\n    def _n(value):\n        pass\n"),
+    ("gate-import-alias", "def _n(value):\n    return '1'\nimport json as _n\n"),
+    ("gate-lambda", "_n = lambda value: value\n"),
+    ("gate-class", "class _n:\n    pass\n"),
+    ("gate-two-defs", "def _n(value):\n    return '1'\ndef _n(value):\n    return '2'\n"),
+)
+
+# The gate-binding control: one module-level def of the gate, loads only, must pass.
+_GATE_BINDING_CONTROL = "def _n(value):\n    return '1'\ndef probe(value):\n    return _n(value)\n"
+
+# Flips of the emitter shape pin, as (name, old, new): _EMITTER_SOURCE with old replaced by new
+# once must NOT satisfy _emitter_matches, so each condition the matcher tests (the statement
+# list, the stream pick, the int clamp and its exactness, the signature, a decorator, the name)
+# is discriminating.
+_EMITTER_FLIPS = (
+    ("emitter-extra-statement", "    if code is not None:", "    stream.flush()\n    if code is not None:"),
+    ("emitter-swapped-streams", "sys.stderr if err else sys.stdout", "sys.stdout if err else sys.stderr"),
+    ("emitter-no-clamp", "sys.exit(code if type(code) is int else 2)", "sys.exit(code)"),
+    ("emitter-isinstance-clamp", "type(code) is int", "isinstance(code, int)"),
+    ("emitter-str-of-text", "(text + ", "(str(text) + "),
+    ("emitter-extra-parameter", "text=None, err=False, code=None", "text=None, err=False, code=None, **extra"),
+    ("emitter-write-on-exit", "    if code is not None:\n        sys.exit",
+     "    if code is not None:\n        stream.write(str(code))\n        sys.exit"),
+    ("emitter-decorated", "def _emit", "@staticmethod\ndef _emit"),
+    ("emitter-renamed", "def _emit", "def _emitter"),
+)
+
 # Flips of the floor-guard exemption, as (name, old, new, module, exempted): the module text with
 # "{guard}" replaced by this file's own guard source (the `if` statement) after replacing old with
 # new in it once (no change when old is empty), and "{indented}" by that guard indented one level.
 # Each module must keep an unexempted violation AND the exemption must remove exactly the declared
-# `exempted` count there (0 for a guard made non-canonical; 1 where the flip module also carries
-# the canonical guard), so the exemption covers the canonical guard's write in its canonical
+# `exempted` count there (0 for a guard made non-canonical; 2 where the flip module also carries
+# the canonical guard, whose refusal write and exit raise are its two exempted channel
+# references), so the exemption covers the canonical guard's two references in their canonical
 # position and shape and nothing else, one flip per tested _floor_guard shape condition.
 _FLOOR_GUARD_FLIPS = (
     ("guard-extra-write", "    raise SystemExit(", "    sys.stderr.write(value)\n    raise SystemExit(",
@@ -2524,9 +2801,9 @@ _FLOOR_GUARD_FLIPS = (
     ("guard-head-other-module", "", "", "import os\n{guard}\n", 0),
     ("guard-import-two-names", "", "", "import sys, os\n{guard}\n", 0),
     ("guard-import-as", "", "", "import sys as sys\n{guard}\n", 0),
-    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n", 1),
-    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n", 1),
-    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n", 1),
+    ("guard-second-copy", "", "", "import sys\n{guard}\n{guard}\n", 2),
+    ("guard-in-def", "", "", "import sys\n{guard}\ndef f():\n{indented}\n", 2),
+    ("guard-then-write", "", "", "import sys\n{guard}\nsys.stderr.write(value)\n", 2),
     ("guard-test-not-compare", "tuple(sys.version_info[:2]) < (3, 14)", "flag",
      "import sys\n{guard}\n", 0),
     ("guard-version-expression", "tuple(sys.version_info[:2])", "sys.version_info[:2]",
@@ -2562,6 +2839,8 @@ _FLOOR_GUARD_FLIPS = (
     ("guard-raise-keyword", "SystemExit(2)", "SystemExit(2, code=2)", "import sys\n{guard}\n", 0),
     ("guard-raise-two-args", "SystemExit(2)", "SystemExit(2, 2)", "import sys\n{guard}\n", 0),
     ("guard-raise-not-int", "SystemExit(2)", "SystemExit(code)", "import sys\n{guard}\n", 0),
+    ("guard-raise-string-int", "SystemExit(2)", "SystemExit('2')", "import sys\n{guard}\n", 0),
+    ("guard-raise-bool", "SystemExit(2)", "SystemExit(True)", "import sys\n{guard}\n", 0),
     ("guard-third-statement", "raise SystemExit(2)", "raise SystemExit(2)\n    sys.stderr.flush()",
      "import sys\n{guard}\n", 0),
     ("guard-with-else", "    raise SystemExit(2)", "    raise SystemExit(2)\nelse:\n    pass",
@@ -2570,8 +2849,8 @@ _FLOOR_GUARD_FLIPS = (
 
 # Positive controls of the exemption, as (name, module): each module holds the canonical guard in
 # a permitted preamble (plain, after a docstring, after a docstring and a __future__ import) and
-# must come back fully exempt (no violation kept, exactly one removed), so the preamble tolerances
-# of _floor_guard cannot be narrowed without failing here.
+# must come back fully exempt (no violation kept, exactly the guard's two references removed), so
+# the preamble tolerances of _floor_guard cannot be narrowed without failing here.
 _FLOOR_GUARD_CONTROLS = (
     ("guard-plain", "import sys\n{guard}\n"),
     ("guard-after-docstring", "\"\"\"module docstring\"\"\"\nimport sys\n{guard}\n"),
@@ -2579,50 +2858,48 @@ _FLOOR_GUARD_CONTROLS = (
      "\"\"\"module docstring\"\"\"\nfrom __future__ import annotations\nimport sys\n{guard}\n"),
 )
 
-# A snippet of every closed form, which _closed_output_violations must pass untouched.
+# A snippet of every closed form, which _closed_output_violations must pass untouched: closed
+# emitter calls on both streams, a free sys and os attribute, an exit relay through code=, and a
+# closed exception constructor.
 _CLOSED_CONTROL = (
     "import sys\n"
-    "print('fixed', 2, _PIN_MARKER)\n"
-    "print('a: {}'.format(_cv('member', name)), file=sys.stderr)\n"
-    "sys.stderr.write('x ' + _n(count) + ('a' if flag else 'b'))\n"
+    "import os\n"
+    "_emit('fixed')\n"
+    "_emit('a: {}'.format(_cv('member', name)), err=True)\n"
+    "_emit('x ' + _n(count) + ('a' if flag else 'b'), err=False)\n"
+    "_emit('b: ' + _PIN_MARKER)\n"
+    "_emit(code=main())\n"
+    "_emit('done', code=0)\n"
+    "version = sys.version_info\n"
+    "home = os.environ.get('HOME')\n"
     "raise AssertionError('{} and {}'.format(_cvs('member', names), _n(3)))\n")
 
 
 def _check_closed_sites(_root):
-    """Structural pin of the closed-diagnostics rule (ruling D-428), over this file's own AST: every
-    print (builtins.print included), every write or writelines on a _STREAM_HEADS stream (directly
-    or through .buffer), every os.write to
-    a standard descriptor, every exit call (_EXIT_CALLEES: a non-int exit value is printed by the
-    interpreter), every assert message,
-    every call to an exception class named in _EXCEPTION_NAMES (built or
-    raised) and every other raised constructor, keyword arguments included, passes each argument as
-    closed text (_closed_argument): a string or int constant, a module literal registered in
-    _CLOSED_TEXT_NAMES, a _cv/_cvs/_n gate call, or a format, concatenation or conditional of
-    those; logging and warnings calls, an os.write or a stream writer the walk cannot classify, an
-    import that would bind a writer or an exit to another name (_ALIASING_IMPORTS), and a writer
-    loaded
-    outside a call (an alias) are refused outright. A registered _CLOSED_TEXT_NAMES name must be
-    bound exactly once, at module level, to one string literal, and never rebound or shadowed
-    anywhere in this file (_registered_name_faults); each refused rebinding or shadowing form
-    carries a flip in _BINDING_FLIPS, and the binding check must pass _BINDING_CONTROL. A site
-    failing the rule is refuted naming its
-    qualname, callee and line, unless _CLOSED_SITE_EXCEPTIONS records it with a reason; a stale
-    registry entry is refuted (an exception matching no site, a duplicate, one with no reason, or
-    a registered text name _registered_name_faults faults), and the module-level sys.exit entry
-    (the entry point's relay of main()) may match exactly one site. Each recognized form
-    carries a flip in _CLOSED_FLIPS: the walk must flag every flip snippet and pass _CLOSED_CONTROL,
-    so removing a recognizer, or widening the closed grammar, fails here. Not seen (residuals,
-    stated in the module docstring too): a raise of a bare name, a BUILT exception whose class name
-    is not in _EXCEPTION_NAMES, a plain import of a writer module under its own name, a write
-    through a descriptor or an API the walk does not list, and
-    the interpreter's own traceback on an uncaught exception. The canonical Python floor guard
-    that opens this file is the one site exempted outside _CLOSED_SITE_EXCEPTIONS: _floor_guard
-    must find it, the exemption must remove exactly its one refusal write, and the walk with the
-    exemption applied must flag every _FLOOR_GUARD_FLIPS module built from this file's own guard
-    (removing there exactly the count the flip declares) and come back fully exempt on every
-    _FLOOR_GUARD_CONTROLS module, so the exemption cannot widen to another write and the preamble
-    tolerances cannot narrow. A source that cannot
-    be read is cannot-evaluate."""
+    """Structural pin of the closed-diagnostics rule (ruling D-428) as an ALLOWLIST over this
+    file's own AST (see _closed_output_violations for the rules): exactly one module-level _emit
+    def, matching _EMITTER_SOURCE verbatim (a docstring aside), and the canonical floor guard are
+    the only code that may reference an output or exit channel; every other reference, alias,
+    binding, import or star import of one is refused, and every _emit call, exception constructor
+    and assert passes closed text (_closed_argument), unless _CLOSED_SITE_EXCEPTIONS records the
+    unclosed-text site with a reason. A registered _CLOSED_TEXT_NAMES name must be bound exactly
+    once, at module level, to one string literal, never rebound or shadowed
+    (_registered_name_faults; one flip per refused form in _BINDING_FLIPS, and the check must
+    pass _BINDING_CONTROL); each gate and the emitter must be bound exactly once by its
+    module-level def (_function_name_faults, with _GATE_BINDING_FLIPS and _GATE_BINDING_CONTROL);
+    the emitter shape pin must refuse every _EMITTER_FLIPS mutation of _EMITTER_SOURCE and accept
+    it unchanged, with and without a docstring; the floor-guard exemption must remove exactly the
+    guard's two channel references, flag every _FLOOR_GUARD_FLIPS module built from this file's
+    own guard (removing exactly the declared count there) and come back fully exempt on every
+    _FLOOR_GUARD_CONTROLS module; the walk must flag every _CLOSED_FLIPS snippet and pass
+    _CLOSED_CONTROL; a site failing a rule is refuted naming its qualname, token and line; a
+    stale registry entry (an exception matching no site, a duplicate, or one with no reason) is
+    refuted. At run time it also pins the emitter and the patch guard: _emit must write a probe
+    line to exactly the selected stream, must leave through SystemExit with an int code passed
+    through and any other code clamped to 2 with nothing written, and _patched must refuse every
+    probed protected name while passing an unprotected control. Residuals are stated in
+    _closed_output_violations and the module docstring. A source that cannot be read is
+    cannot-evaluate."""
     try:
         source = Path(_THIS_FILE).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -2647,6 +2924,35 @@ def _check_closed_sites(_root):
     if _registered_name_faults(ast.parse(_BINDING_CONTROL), ("_PIN_MARKER",)):
         raise AssertionError("closure/closed-sites: the registered-name binding check refused the "
                              "control snippet (one module-level literal binding, loads only)")
+    gate_faults = _function_name_faults(tree, _GATE_NAMES)
+    if gate_faults or len(set(_GATE_NAMES)) != len(_GATE_NAMES):
+        raise AssertionError("closure/closed-sites: a gate or the emitter is not bound exactly once "
+                             "by its module-level def, is rebound or shadowed, or is listed twice: "
+                             "{}".format(_cvs("gate-name", [name for name, _why in gate_faults])))
+    for flip, snippet in _GATE_BINDING_FLIPS:
+        if not _function_name_faults(ast.parse(snippet), ("_n",)):
+            raise AssertionError("closure/closed-sites: the gate-binding check passed the {} flip, "
+                                 "so a rebound or shadowed gate would be trusted".format(
+                                     _cv("flip", flip)))
+    if _function_name_faults(ast.parse(_GATE_BINDING_CONTROL), ("_n",)):
+        raise AssertionError("closure/closed-sites: the gate-binding check refused the control "
+                             "snippet (one module-level def, loads only)")
+    emitters = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_emit"]
+    if len(emitters) != 1 or not _emitter_matches(emitters[0]):
+        raise AssertionError("closure/closed-sites: this file does not hold exactly one module-level "
+                             "_emit def matching _EMITTER_SOURCE (the pinned emitter shape)")
+    for flip, old, new in _EMITTER_FLIPS:
+        flipped = _EMITTER_SOURCE.replace(old, new, 1)
+        if flipped == _EMITTER_SOURCE:
+            raise AssertionError("closure/closed-sites: the {} flip changed nothing in the emitter "
+                                 "source".format(_cv("flip", flip)))
+        if _emitter_matches(ast.parse(flipped).body[0]):
+            raise AssertionError("closure/closed-sites: the emitter shape pin passed the {} flip, so "
+                                 "the emitter could change shape unseen".format(_cv("flip", flip)))
+    for control in (_EMITTER_SOURCE,
+                    _EMITTER_SOURCE.replace("):", '):\n    """a docstring"""', 1)):
+        if not _emitter_matches(ast.parse(control).body[0]):
+            raise AssertionError("closure/closed-sites: the emitter shape pin refused its own control")
     matched = dict()
     for qualname, name, reason in _CLOSED_SITE_EXCEPTIONS:
         if (qualname, name) in matched or not reason.strip():
@@ -2655,48 +2961,77 @@ def _check_closed_sites(_root):
         matched[qualname, name] = 0
     unclosed = []
     violations, exempted = _unexempted_violations(tree)
-    if exempted != 1:
+    if exempted != 2:
         raise AssertionError("closure/closed-sites: the floor-guard exemption removed {} violation(s), "
-                             "not exactly the guard's one refusal write".format(_n(exempted)))
+                             "not exactly the guard's refusal write and its exit raise".format(
+                                 _n(exempted)))
     for qualname, name, lineno, why in violations:
         if (qualname, name) in matched:
             matched[qualname, name] += 1
         else:
             unclosed.append("{} {} (line {}): {}".format(qualname, name, lineno, why))
     if unclosed:
-        raise AssertionError("closure/closed-sites: an output call or exception constructor can carry "
-                             "unclosed text: {}".format("; ".join(unclosed)))
+        raise AssertionError("closure/closed-sites: a channel reference outside the emitter, or an "
+                             "output or constructor site carrying unclosed text: {}".format(
+                                 "; ".join(unclosed)))
     stale = ["{} {}".format(*key) for key, count in matched.items() if count == 0]
     if stale:
         raise AssertionError("closure/closed-sites: a recorded exception matches no site: {}".format(
             "; ".join(stale)))
-    if matched.get(("<module>", "sys.exit"), 0) > 1:
-        raise AssertionError("closure/closed-sites: more than one module-level sys.exit carries "
-                             "unclosed text; only the entry point's relay of main() is recorded")
     for flip, snippet in _CLOSED_FLIPS:
         if not _closed_output_violations(ast.parse(snippet)):
-            raise AssertionError("closure/closed-sites: the walk passed the {} flip, so that writer "
+            raise AssertionError("closure/closed-sites: the walk passed the {} flip, so that refused "
                                  "form is no longer recognized".format(_cv("flip", flip)))
     if _closed_output_violations(ast.parse(_CLOSED_CONTROL)):
         raise AssertionError("closure/closed-sites: the walk refused the closed control snippet")
-    indented = "\n".join("    " + line for line in guard.splitlines())
+    indented = '\n'.join("    " + line for line in guard.splitlines())
     for flip, old, new, module, exempted in _FLOOR_GUARD_FLIPS:
         flipped = guard.replace(old, new, 1)
         if old and flipped == guard:
             raise AssertionError("closure/closed-sites: the {} flip changed nothing in the guard".format(
                 _cv("flip", flip)))
-        text = module.replace("{guard}", flipped).replace("{indented}", indented)
+        text = module.replace('{guard}', flipped).replace('{indented}', indented)
         kept, removed = _unexempted_violations(ast.parse(text))
         if not kept or removed != exempted:
             raise AssertionError("closure/closed-sites: the floor-guard exemption passed the {} flip, "
                                  "or removed {} violation(s) instead of the flip's declared {}, "
-                                 "so it covers more than the canonical guard's write".format(
+                                 "so it covers more than the canonical guard's references".format(
                                      _cv("flip", flip), _n(removed), _n(exempted)))
     for control, module in _FLOOR_GUARD_CONTROLS:
-        if _unexempted_violations(ast.parse(module.replace("{guard}", guard))) != ([], 1):
+        if _unexempted_violations(ast.parse(module.replace('{guard}', guard))) != ([], 2):
             raise AssertionError("closure/closed-sites: the floor-guard exemption did not cover exactly "
-                                 "the canonical guard's one write in the {} control".format(
+                                 "the canonical guard's two references in the {} control".format(
                                      _cv("flip", control)))
+    _result, probe_out, probe_err = _captured(lambda: _emit("closure/closed-sites emitter probe"))
+    if (probe_out, probe_err) != ("closure/closed-sites emitter probe\n", ""):
+        raise AssertionError("closure/closed-sites: the emitter did not write the probe line to "
+                             "stdout alone")
+    _result, probe_out, probe_err = _captured(lambda: _emit("closure/closed-sites emitter probe",
+                                                            err=True))
+    if (probe_out, probe_err) != ("", "closure/closed-sites emitter probe\n"):
+        raise AssertionError("closure/closed-sites: the emitter did not write the probe line to "
+                             "stderr alone")
+    for leave_code, want_code in ((7, 7), (True, 2), ("closure/closed-sites clamp probe (not an int)", 2)):
+        seen = []
+        try:
+            _captured(lambda code=leave_code: _emit(code=code))
+        except Exception:
+            raise
+        except BaseException as leave:
+            seen.append((type(leave).__name__, leave.code))
+        if seen != [("SystemExit", want_code)] or _CAPTURE_LOG[-1] != ("", ""):
+            raise AssertionError("closure/closed-sites: the emitter did not leave through SystemExit "
+                                 "with the int-clamped code and nothing written")
+    for protected in ("_PIN_MARKER", "print", "sys", "_emit"):
+        try:
+            with _patched(**dict(((protected, None),))):
+                raise AssertionError("closure/closed-sites: _patched rebound the {} protected "
+                                     "name".format(_cv("protected-name", protected)))
+        except AssertionError as refusal:
+            if not str(refusal).startswith("closure/patched-protected: "):
+                raise
+    with _patched(_SUBSET_TIMEOUT_S=_SUBSET_TIMEOUT_S):
+        pass
 
 
 def _check_entry_points():
@@ -2705,8 +3040,10 @@ def _check_entry_points():
     _self_test_exit judges the legs). self_test_main returns the preflight's 1 or 2 as is and never
     runs the legs; when the preflight returns None it runs the legs over the same root and exits by
     them, failure-first (0 when both held, 1 on a refutation whatever else could not be evaluated, 2
-    on cannot-evaluate alone). main runs self_test_main under --self-test, and otherwise run() over
-    the repository root, returning its exit. Pure: no scratch directory and no opf/ subtree."""
+    on cannot-evaluate alone). main runs self_test_main under --self-test and otherwise run() over
+    the repository root, returning its exit; it reads the arguments through _cli_args, stubbed
+    here, so no case rebinds the sys module (closure/closed-sites refuses a bare load of sys
+    outside an attribute access). Pure: no scratch directory and no opf/ subtree."""
     root = Path("entry-point-root (stubbed)")
     for pre, legs, want in ((1, None, 1), (2, None, 2), (None, ([], []), 0), (None, (["refuted"], []), 1),
                             (None, ([], ["cannot"]), 2), (None, (["refuted"], ["cannot"]), 1)):
@@ -2731,7 +3068,7 @@ def _check_entry_points():
             if rc != want or seen != expected:
                 raise AssertionError("closure/entry-main: an argv row gave the wrong exit or call order")
         _attributed("closure/entry-main", entry, injected=dict(
-            sys=_Overlay(sys, argv=argv), repo_root=lambda: root,
+            _cli_args=lambda argv=argv: argv[1:], repo_root=lambda: root,
             self_test_main=lambda seen=seen: seen.append(("self-test",)) or 7,
             run=lambda where, seen=seen: seen.append(("run", where)) or 5))
 
@@ -2864,7 +3201,9 @@ def _check_preflight_collection():
     latter naming the case (by its label, or by its function's name when the label is None) and the
     exception; only an AssertionError is a refutation; the exit is failure-first over everything
     collected. A KeyboardInterrupt or SystemExit stops the collection: it re-raises and no later case
-    runs. Each _preflight_exit call goes through _attributed. Pure: no scratch directory and no opf/
+    runs (the collection catches Exception alone, so every BaseException outside it re-raises; the
+    probe drives KeyboardInterrupt and GeneratorExit, because SystemExit is a channel name the
+    closed-sites allowlist reserves to the emitter). Each _preflight_exit call goes through _attributed. Pure: no scratch directory and no opf/
     subtree."""
     ran = []
 
@@ -2906,7 +3245,7 @@ def _check_preflight_collection():
                 or refuted != (["SELF-TEST FAIL: closure/stubbed-refutation"] if want_rc == 1 else [])):
             raise AssertionError("closure/preflight-collection: a collection row gave the wrong exit, "
                                  "case order or lines ({} given)".format(_n(rc)))
-    for stop in (KeyboardInterrupt, SystemExit):
+    for stop in (KeyboardInterrupt, GeneratorExit):
         def _stop_case(_root, stop=stop):
             raise stop("stubbed")
         del ran[:]
@@ -3117,7 +3456,7 @@ def _red_one(root, check, label):
             raise
     else:
         raise AssertionError(_cv("label", label) + "-not-red")
-    print("RED closure-bound-lookup -> " + _cv("label", label))
+    _emit("RED closure-bound-lookup -> " + _cv("label", label))
 
 
 def _rootless(fn):
@@ -3532,8 +3871,8 @@ def _derived_sites():
     a call through it reaches the code under test at that excluded site, which carries no pin, so
     each load of a wrapper needs a recorded reason), or a name an annotation loads (see _site_walk).
     Its key is "<co_qualname> <token>#<k>".
-    The closed-text gates _cv, _cvs and _n are left out of the targets on purpose (see the comment
-    at the targets set): they format diagnostic text on every raise and print and call no code
+    The closed-text gates _cv, _cvs and _n, and the emitter _emit (_GATE_NAMES), are left out of
+    the targets on purpose (see the comment at the targets set): they format diagnostic text on every raise and print and call no code
     under test, and closure/closed-sites pins their coverage structurally. Returns (spans, reach, flagged): spans maps every site key in any top-level definition to
     (qualname, dispatch); reach maps each case's function name to the set of site keys it reaches;
     flagged maps each indirection key any case reaches to the text of the source line holding it
@@ -3575,12 +3914,13 @@ def _derived_sites():
             raise AssertionError("closure/attribution-walk: a case has no module-level definition: "
                                  "{}".format(_cv("case", function.__name__)))
         cases.append(function.__name__)
-    # The closed-text gates _cv, _cvs and _n format diagnostic text on every raise and print
-    # (closure/closed-sites pins that every formatted diagnostic goes through them, a constant, or
-    # a registered literal) and call no code under test; attributing their calls would make every
-    # diagnostic a derived site, so they are left out of the targets on purpose (their bodies are
-    # still walked like any helper's, and _check_env_canaries observes their effect).
-    targets = frozenset(production | set(cases)) - frozenset(("_cv", "_cvs", "_n"))
+    # The closed-text gates _cv, _cvs and _n, and the emitter _emit, format or write diagnostic
+    # text on every raise and emission (closure/closed-sites pins that every diagnostic goes
+    # through them, a constant, or a registered literal, and pins the emitter's statements
+    # verbatim) and call no code under test; attributing their calls would make every diagnostic
+    # a derived site, so they are left out of the targets on purpose (their bodies are still
+    # walked like any helper's, and _check_env_canaries observes their effect).
+    targets = frozenset(production | set(cases)) - frozenset(_GATE_NAMES)
     lines = source.splitlines()
     spans, keys, flag_keys, follows = {}, {}, {}, {}
     for name in defs:
@@ -3794,6 +4134,8 @@ _ATTRIBUTION_PINS = (
      "harness-cannot-evaluate", _check_harness_mapping, False, "run", None, 1, "crash", "closure/stubbed-run"),
     ("_stubbed_run.<locals>.<lambda> run#1",
      "failure-first", _check_failure_first, False, "run", None, 1, "crash", "closure/stubbed-run"),
+    ("_check_failure_first.<locals>.refuted_registration run#1",
+     "failure-first", _check_failure_first, False, "run", None, 2, "crash", "closure/failure-first"),
     ("_check_leg_wiring.<locals>.wired _closure_legs#1",
      "self-test-leg-wiring", _check_leg_wiring, False, "_closure_legs", None, 1, "none", "closure/self-test-exit"),
     ("_check_leg_wiring.<locals>.wired _self_test_exit#1",
@@ -4145,7 +4487,7 @@ def _preflight_exit(root):
                 _cv("exception", type(exc).__name__)))
             continue
         if label is not None:
-            print("PASS " + _cv("case", label))
+            _emit("PASS " + _cv("case", label))
     if not failures and not cannot:
         return None
     return _self_test_exit(failures, cannot)
@@ -4174,11 +4516,18 @@ def self_test_main():
     return _self_test_exit(*_closure_legs(root))
 
 
+def _cli_args():
+    """The process arguments after the script name, read in one place so the entry cases can stub
+    the read (closure/closed-sites refuses a bare load of the sys module outside an attribute
+    access, so no case rebinds sys to stub argv)."""
+    return sys.argv[1:]
+
+
 def main():
-    if "--self-test" in sys.argv[1:]:
+    if "--self-test" in _cli_args():
         return self_test_main()
     return run(repo_root())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _emit(code=main())
