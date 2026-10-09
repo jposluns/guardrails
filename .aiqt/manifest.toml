@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aefe696c4d33e202c14fecdd07d7d28c556c205252023668eca0e473240ff7a2"
+tree-sha256 = "88be13cb9ccf54ce559d72dd01316168091f10ab71503e15aac4c7b67e7f2655"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,8 +31,8 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 295095
-sha256 = "fdbe93c8ac71500cdb949b6821e9f0908f3b179d32e58a73cf402749acc4020f"
+bytes = 295200
+sha256 = "25b5b8e708bd18502783b363c5b8c697d81fdbc2c5e77deef0295090e522565e"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -3271,8 +3271,8 @@ sha256 = "779c0b288bcd5f573fd05c535023d52bd0fc3449c07ef91f55f2ba1d26cf0bb3"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 110470
-sha256 = "8afa46be21c496beab1e0a64d7eacae79364883200fbf274faca89a9e282b312"
+bytes = 122349
+sha256 = "a177703e17a11d9676f2843acdcc46d176b473c394611057dc2dc0138afe0098"
 
 [[sources]]
 path = "tools/check_crosswalk.py"

@@ -2002,7 +2002,7 @@ corpus-id = "kltwat"
 source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
 start-line = 18
 end-line = 20
-canonical-text = "before\nconcluding that a contended resource is starving a caller, establish that the caller actually outlived\nits own configured budget rather than being killed under it."
+canonical-text = "and before\nconcluding that a contended resource is starving a caller, establish that the caller actually outlived\nits own configured budget rather than being killed under it."
 source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
@@ -5387,7 +5387,7 @@ corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 27
 end-line = 31
-canonical-text = "so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
+canonical-text = "The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
 source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
@@ -5504,16 +5504,16 @@ corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
 start-line = 21
 end-line = 22
-canonical-text = "A pending notification or single-shot alarm is preserved, not consumed\nor discarded"
+canonical-text = "A pending notification or single-shot alarm is preserved, not consumed\nor discarded, and a caller deadline that came due during the window is delivered, not dropped."
 source-digest = "62886e96c50d5d0728ef077f52115ef4806fd0eb1887e78270191451b970a3fc"
 
 [[clause]]
 clause-id = "tmrrst.5"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 22
+start-line = 21
 end-line = 22
-canonical-text = "a caller deadline that came due during the window is delivered, not dropped."
+canonical-text = "A pending notification or single-shot alarm is preserved, not consumed\nor discarded, and a caller deadline that came due during the window is delivered, not dropped."
 source-digest = "62886e96c50d5d0728ef077f52115ef4806fd0eb1887e78270191451b970a3fc"
 
 [[clause]]
