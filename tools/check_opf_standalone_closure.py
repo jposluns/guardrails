@@ -66,22 +66,35 @@ never formatted into output: where a diagnostic must say which value was wrong, 
 field and the check that failed, never the value, and a path is named by its role (the
 repository, the given root, the scratch directory), never printed, so no comparison of expected
 text against a diagnostic can depend on the host's environment values. closure/closed-sites pins
-the rule in this file's AST as an ALLOWLIST (ratified for train 2 round 32): exactly one closed
-emitter, the module-level _emit (its statements pinned verbatim against _EMITTER_SOURCE), plus
-the canonical floor guard below, may reference an output or exit channel (print, the sys streams
-and dunder streams, sys.exit, os.write, os._exit, exit, quit, SystemExit, warnings, logging,
-traceback, builtins, __builtins__); ANY other reference anywhere in this file, in any context (a
-call, a load, an assignment, an alias, an except clause, a getattr base, an attribute of a
-module alias, a binding of a protected name), is refused, closed text or not; a bare load of sys
-or os outside an attribute access, every star import, any import of a channel module beyond
-plain `import sys` and `import os`, and any reference to importlib or __import__ are refused
-outright; every _emit call passes closed text and a constant err= (code= may be any expression:
-the emitter exits through an int clamp, so the interpreter never prints an exit value of this
-module); exception constructors and assert messages stay denylist-checked wherever they appear,
-since the interpreter prints an uncaught exception's text; each refused form carries a flip that
-fails when its rule is removed, and so does each refused rebinding or shadowing form of a
-registered text name, a gate or the emitter; _patched, the one runtime rebinding surface,
-refuses every protected name); _check_env_canaries drives the refusal, wrong-report and launch paths
+the rule in this file's AST as an ALLOWLIST (ratified for train 2 round 32; made a real
+enumeration for round 33): exactly one closed emitter, the module-level _emit (its statements
+pinned verbatim against _EMITTER_SOURCE), plus the canonical floor guard below, may reference an
+output or exit channel (print, the sys streams and dunder streams, sys.exit, os.write, os._exit,
+exit, quit, SystemExit, warnings, logging, traceback, builtins, __builtins__). Everywhere else the
+file is held to enumerations: _MODULE_ATTRS lists every module this file imports and, for each,
+the exact dotted attribute paths it may reference, so any attribute chain rooted in an imported
+module name that is not enumerated (os.sys, sys.modules, sys.displayhook, json.dump,
+subprocess.Popen, io.open) is refused in any context, and a bare module name outside an attribute
+access is refused as an alias the walk cannot follow; _FROM_IMPORT_ALLOW lists the only permitted
+from-imports; every other import (an unlisted module, an asname, a dotted form, every star
+import, importlib, __import__) is refused; eval, exec, compile, globals, vars, locals, input,
+help and breakpoint are refused by name anywhere; __dict__, __builtins__, modules and fdopen are
+refused as attribute names on any base; getattr, setattr and delattr are refused with a
+non-literal or refused-literal name and may not be aliased; open, io.FileIO and os.fdopen are
+refused on an int-constant descriptor number; any binding of a name the emitter's int clamp or a
+gate depends on (type, int, str, isinstance, frozenset) is refused in every binding form; an
+attribute or subscript store rooted at a gate or a gate table is refused; a decorated def of a
+gate is refused (the gate decorator allowlist is empty on purpose); every _emit call passes
+closed text and a constant err= (code= may be any expression: the emitter exits through an int
+clamp, so the interpreter never prints an exit value of this module); exception constructors and
+assert messages stay checked wherever they appear, since the interpreter prints an uncaught
+exception's text; each refused form carries a flip that fails when its rule is removed, and
+_check_closed_sites requires _PROTECTED_PROBES, an independent spelling-out of every protected
+name, to equal _PROTECTED_NAMES and probes _patched with each, so a dropped table row fails even
+where another rule overlaps it; the deliberate introspection sites of the test machinery itself
+(globals in _patched, _nth_call and _derived_sites, dynamic getattr in _Overlay and _nth_call,
+__dict__ in _Overlay and _holds_code, the module captures in _launch_recorder and
+_failing_harness) are each recorded in _CLOSED_SITE_EXCEPTIONS with a reason; _check_env_canaries drives the refusal, wrong-report and launch paths
 with a canary, scanning each sub-check's diagnostics and every captured stream on the return, the
 exception and the termination path alike; closure/host-independence re-runs the affected cases in
 a child whose USER, LOGNAME and HOME value appears in its TMPDIR path, requires PASS with no
@@ -99,11 +112,25 @@ NOT catch it. _self_test_exit relays text that reaches it only as str() of excep
 module raised and of leg messages built at closed construction sites (the walk checks every
 construction site; that relay and the other permitted unclosed-text sites are recorded in
 _CLOSED_SITE_EXCEPTIONS, each with its reason; a channel reference outside the emitter has no
-such exception). The RESIDUAL of the allowlist is code the interpreter runs outside this file:
-its traceback printer, an exception's __cause__ chain holding the original exception objects
-(never printed by this module, printed by a traceback), and this module's namespace reached at
-run time through an indirection the attribution walk flags for a recorded reason (globals(),
-sys.modules); _patched, the one deliberate mutator, refuses every protected name at run time.
+such exception). The RESIDUALS of the allowlist, stated plainly: (1) the pin guards against ACCIDENTAL edits,
+not against a hostile author of this file, who could edit the enumerations, the recorded
+exceptions and the check itself in one commit; review of the diff, not this gate, is the control
+for that. (2) Anything the interpreter does OUTSIDE this file is disclosed, not caught:
+sitecustomize and usercustomize, a patched or hostile stdlib, an audit hook, a logging handler
+another module configured, the interpreter's own traceback printer on an uncaught exception
+(with the raw text of the __cause__ chain), and this module's namespace reached at run time from
+another module. (3) An enumerated attribute is allowed, not proven harmless: subprocess.run is
+enumerated because this gate launches children, and a launch that does not capture its streams
+writes to the inherited ones (_launch_recorder and _check_launches pin the launch keywords of
+the launches this module makes); io.FileIO is enumerated for the descriptor probe, whose
+descriptor is a non-constant expression the int-constant rule cannot see; sys._getframe, and
+Path with write_text and open, are enumerated introspection and file surfaces. (4) A value that
+has left a module (a subscript item, a call result) is an ordinary object whose attributes are
+not enumerated; the refused attribute names and builtins close the known routes back into a
+namespace. (5) At run time a hostile stub could still mutate what no rule protects (a gate's
+__code__, a table reached through a container); _patched, the one deliberate mutator, refuses
+every protected name, _CLOSED_VOCABULARIES is a read-only mapping proxy, and the static store
+rules refuse the spelled forms.
 The walk does not see a raise of a bare name (re-raising formats nothing) or a BUILT exception
 whose class name is neither a builtin exception's nor this module's; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
@@ -232,17 +259,110 @@ _CHANNEL_NAMES = ("print", "exit", "quit", "SystemExit", "warnings", "logging",
 _CHANNEL_ATTRS = dict(sys=("stdout", "stderr", "__stdout__", "__stderr__", "exit"),
                       os=("write", "_exit"))
 
-# The modules whose import surface is restricted: only plain `import sys` and `import os` are
-# permitted; an asname, a dotted form, a from-import or a star import of any of them is refused.
-_CHANNEL_MODULES = ("sys", "os", "builtins", "warnings", "logging", "traceback")
+# The two writer modules this file may import plainly; no stub may rebind either at run time
+# (_patched, through _PROTECTED_NAMES). The other channel-bearing module names (builtins,
+# warnings, logging, traceback) are _CHANNEL_NAMES rows: every reference to one is refused
+# outright, so they need no separate module row here. The import rules themselves live in
+# _MODULE_ATTRS and _FROM_IMPORT_ALLOW below: only a plain `import M` of an enumerated module,
+# and only the enumerated from-imports, are permitted; every other import is refused.
+_CHANNEL_MODULES = ("sys", "os")
 
 # Dynamic importers: a reference to either name, or an import of importlib, is refused outright,
 # since a dynamic import could rebind or reach a channel under a name the walk cannot follow.
 _DYNAMIC_IMPORT_NAMES = ("importlib", "__import__")
 
-# The closed-text gates and the emitter: trusted by spelling at every call site, so each must be
-# bound exactly once, by its module-level def, and never rebound or shadowed anywhere
-# (_function_name_faults).
+# The REAL allowlist of module references (closure/closed-sites, train 2 round 33): every module
+# this file imports and, for each, the exact dotted attribute paths the file may reference. An
+# attribute chain rooted in one of these module names (however deep, through attributes alone)
+# whose dotted path is neither an enumerated entry nor a prefix of one is refused wherever it
+# appears. sys's and os's output and exit attributes are deliberately NOT here (_CHANNEL_ATTRS
+# reserves them to the one emitter and the exempted floor guard), so the emitter is the only
+# code of this file that may reference an output-capable module attribute. A bare reference to
+# any of these module names outside an attribute access is refused (an alias the walk cannot
+# follow), and an import of any module outside this enumeration, with an asname, or in dotted
+# form is refused outright.
+_MODULE_ATTRS = dict(
+    ast=frozenset((
+        "Add", "Assert", "Assign", "AsyncFunctionDef", "Attribute", "BinOp", "Call", "ClassDef",
+        "Compare", "Constant", "Del", "ExceptHandler", "Expr", "FunctionDef", "GeneratorExp",
+        "Global", "If", "IfExp", "Import", "ImportFrom", "Lambda", "Load", "Lt", "MatchAs",
+        "MatchMapping", "MatchStar", "Mod", "Name", "Nonlocal", "ParamSpec", "Raise", "Starred",
+        "Store", "Subscript", "Tuple", "TypeVar", "TypeVarTuple", "alias", "arg", "dump",
+        "get_source_segment", "iter_child_nodes", "parse", "walk")),
+    contextlib=frozenset(("contextmanager", "redirect_stderr", "redirect_stdout")),
+    errno=frozenset(("EACCES", "ENOSPC", "errorcode.get", "errorcode.values")),
+    fcntl=frozenset(("F_DUPFD", "fcntl")),
+    functools=frozenset(("partial",)),
+    hashlib=frozenset(("sha256",)),
+    io=frozenset(("FileIO", "StringIO")),
+    json=frozenset(("dumps", "loads")),
+    os=frozenset(("dup2", "environ.get", "environ.items", "environ.pop", "environ.update",
+                  "listdir", "set_inheritable")),
+    shutil=frozenset(("copytree", "ignore_patterns", "rmtree")),
+    signal=frozenset(("SIGKILL",)),
+    subprocess=frozenset(("DEVNULL", "PIPE", "STDOUT", "TimeoutExpired", "run")),
+    sys=frozenset(("_getframe", "argv", "executable", "path.insert", "version_info")),
+    tempfile=frozenset(("mkdtemp",)),
+    types=frozenset(("BuiltinFunctionType", "FunctionType", "MappingProxyType", "MethodType",
+                     "ModuleType", "SimpleNamespace")),
+)
+# The from-imports this file may hold, exactly (module, name), each bound under its own name
+# (no asname); every other from-import is refused. The ("__future__", "annotations") row is
+# held for the floor-guard preamble controls (_FLOOR_GUARD_CONTROLS), which parse a module that
+# may open with it. What the three real rows bind is a stated residual: Path (whose instances
+# carry write_text and open), gettempdir and repo_root are not output channels of this process
+# by themselves, and a reference that writes through one is caught only where it spells a name
+# a rule refuses.
+_FROM_IMPORT_ALLOW = frozenset((("pathlib", "Path"), ("tempfile", "gettempdir"),
+                                ("_gen_common", "repo_root"), ("__future__", "annotations")))
+
+# Introspection and input builtins refused by name anywhere in this file, in any context: each
+# can reach a namespace, build or run code, or write to a stream without spelling a channel
+# name. The deliberate introspection sites of the test machinery itself (_patched, _nth_call,
+# _derived_sites, _Overlay, _holds_code, _launch_recorder, _failing_harness) are each recorded
+# in _CLOSED_SITE_EXCEPTIONS with a reason.
+_REFUSED_BUILTIN_NAMES = ("eval", "exec", "compile", "globals", "vars", "locals", "input",
+                          "help", "breakpoint")
+
+# Attribute names refused on ANY base expression, however it was built: each is a namespace or
+# descriptor door (sys.modules, a __dict__, a __builtins__, os.fdopen) that the module
+# enumeration alone cannot close once a value has left a module.
+_REFUSED_ATTRS = ("__dict__", "__builtins__", "modules", "fdopen")
+
+# The attribute accessors: a call with a non-literal name argument, with no name argument, or
+# with a literal name that is itself refused (a _REFUSED_ATTRS name, a channel attribute, a
+# channel or protected name) is refused, and so is a load of an accessor outside a call's
+# callee position (an alias the walk cannot follow).
+_ATTR_ACCESSOR_NAMES = ("getattr", "setattr", "delattr")
+
+# A call to open, io.FileIO or os.fdopen whose first argument is an int constant is a handle on
+# a numbered descriptor (1 and 2 are this process's streams): refused. A descriptor built as a
+# non-constant expression (the descriptor probe in _check_env_canaries dups one with fcntl) is
+# a stated residual of this rule, held by that probe's own launch checks.
+_DESCRIPTOR_OPEN_NAMES = ("open", "FileIO", "fdopen")
+
+# Builtin names the emitter's int clamp and the gates' membership checks depend on: any binding
+# of one anywhere in this file, in any _bound_names form (an assignment, a global or nonlocal
+# declaration, a parameter, an import alias, a def), is refused by closure/closed-sites, and
+# _patched refuses rebinding one at run time, so `int = str` cannot turn the emitter's clamp
+# into a string exit.
+_GATE_DEPENDENCY_NAMES = ("int", "str", "type", "isinstance", "frozenset")
+
+# The tables the gates read at run time: a subscript or attribute store rooted at a gate name
+# or at one of these names, anywhere in this file, is refused (a widened vocabulary or a
+# replaced gate __code__ would let a runtime value ride through a gate the walk trusts by
+# spelling), and _CLOSED_VOCABULARIES is additionally wrapped read-only at run time. A runtime
+# widening by a hostile stub is out of scope: the pin guards against accidental edits, not a
+# hostile author (see the module docstring's residuals).
+_GATE_TABLE_NAMES = ("_CLOSED_VOCABULARIES", "_PREFLIGHT_CASES", "_CLOSED_FLIPS",
+                     "_FLOOR_GUARD_FLIPS", "_BINDING_FLIPS", "_GATE_BINDING_FLIPS",
+                     "_EMITTER_FLIPS", "_FLOOR_GUARD_CONTROLS", "_ATTRIBUTION_PINS",
+                     "_ATTRIBUTION_EXCLUSIONS", "_ATTRIBUTION_INDIRECTIONS")
+
+# The closed-text gates and the emitter: trusted by spelling at every call site, so each must
+# be bound exactly once, by its module-level def with NO decorator (the gate decorator
+# allowlist is empty on purpose: a decorator could replace a trusted gate's behavior under its
+# trusted name), and never rebound or shadowed anywhere (_function_name_faults).
 _GATE_NAMES = ("_emit", "_cv", "_cvs", "_n")
 
 # Every name no stub may rebind (_patched refuses them at run time) and no binding, import alias
@@ -250,7 +370,19 @@ _GATE_NAMES = ("_emit", "_cv", "_cvs", "_n")
 # dynamic importers, the gates and the emitter, and the registered text literals.
 _PROTECTED_NAMES = (frozenset(_CHANNEL_NAMES) | frozenset(_CHANNEL_MODULES)
                     | frozenset(_DYNAMIC_IMPORT_NAMES) | frozenset(_GATE_NAMES)
-                    | frozenset(_CLOSED_TEXT_NAMES))
+                    | frozenset(_CLOSED_TEXT_NAMES) | frozenset(_GATE_DEPENDENCY_NAMES)
+                    | frozenset(("_CLOSED_VOCABULARIES",)))
+
+# Every protected name written out ONCE MORE, independently of the tables that feed
+# _PROTECTED_NAMES: _check_closed_sites requires this tuple to equal _PROTECTED_NAMES exactly
+# and probes _patched with every entry, so dropping a name from any contributing table fails
+# the self-test even where a static walk rule overlaps it.
+_PROTECTED_PROBES = (
+    "print", "exit", "quit", "SystemExit", "warnings", "logging", "traceback", "builtins",
+    "__builtins__", "sys", "os", "importlib", "__import__", "_emit", "_cv", "_cvs", "_n",
+    "_PIN_MARKER", "_INJECT_MARKER", "_STUB_SCRATCH", "_FLIP_EVIDENCE", "_NEG_SCRATCH_ERROR",
+    "_NEG_COPY_ERROR", "_NEG_DECODE_ERROR", "int", "str", "type", "isinstance", "frozenset",
+    "_CLOSED_VOCABULARIES")
 
 
 def _emit(text=None, err=False, code=None):
@@ -1074,7 +1206,7 @@ _CLOSED_LABELS = (
     "closure/attribution-stale-indirection", "closure/attribution-stale-pin",
     "closure/attribution-unpinned", "closure/attribution-walk", "closure/boundary-failed",
     "closure/boundary-negative", "closure/boundary-run", "closure/boundary-run-env",
-    "closure/boundary-scratch", "closure/closed-sites", "closure/copy-before-members", "closure/copy-run",
+    "closure/boundary-scratch", "closure/closed-sites", "closure/copy-before-members", "closure/copy-run", "closure/copy-run-full",
     "closure/declared-roster", "closure/entry-main", "closure/entry-points", "closure/entry-self-test",
     "closure/env-canaries", "closure/env-canary", "closure/env-canary-descriptors",
     "closure/env-canary-descriptors-kwargs", "closure/env-canary-kwargs", "closure/env-canary-launch",
@@ -1100,7 +1232,7 @@ _CLOSED_LABELS = (
     "closure/preflight-absent-subtree", "closure/preflight-collection", "closure/preflight-error",
     "closure/preflight-failure-first", "closure/preflight-stop", "closure/red-bound-lookup",
     "closure/run-one-timeout", "closure/scratch-and-copy-cannot-evaluate", "closure/scratch-harness",
-    "closure/scratch-run", "closure/self-test-exit", "closure/self-test-leg-verdicts",
+    "closure/scratch-run", "closure/scratch-run-denied", "closure/self-test-exit", "closure/self-test-leg-verdicts",
     "closure/self-test-leg-wiring", "closure/stubbed-label", "closure/stubbed-refutation",
     "closure/stubbed-run", "closure/stubbed-sentinel", "closure/timeout-attribution",
     "closure/timeout-cannot-evaluate", "closure/timeout-exit", "closure/timeout-line",
@@ -1108,7 +1240,7 @@ _CLOSED_LABELS = (
     "closure/undecodable-fixture-cannot-evaluate", "closure/undecodable-scratch",
     "closure/undecodable-wiring",
 )
-_CLOSED_VOCABULARIES = dict((
+_CLOSED_VOCABULARIES = types.MappingProxyType(dict((
     ("label", frozenset(_CLOSED_LABELS)),
     ("member", frozenset(row[0] for row in _DECLARED_ROSTER)),
     ("script", frozenset(row[1] for row in _DECLARED_ROSTER) | frozenset(("opf.py",))),
@@ -1136,7 +1268,7 @@ _CLOSED_VOCABULARIES = dict((
     ("gate-name", frozenset(_GATE_NAMES)),
     ("protected-name", _PROTECTED_NAMES),
     ("errno", frozenset(errno.errorcode.values()) | frozenset(("unknown errno",))),
-))
+)))
 
 
 def _report_mismatches(report, argv, where):
@@ -1722,6 +1854,20 @@ def _broken_copy(_src, _dest):
     raise OSError("copy refused (stubbed)")
 
 
+def _no_scratch_denied(*_args, **_kwargs):
+    """_no_scratch with a symbolic cause: a denied allocation (EACCES)."""
+    exc = OSError(_STUB_SCRATCH)
+    exc.errno = errno.EACCES
+    raise exc
+
+
+def _broken_copy_full(_src, _dest):
+    """_broken_copy with a symbolic cause: a full filesystem (ENOSPC)."""
+    exc = OSError("copy refused (stubbed)")
+    exc.errno = errno.ENOSPC
+    raise exc
+
+
 def _hollow_copy(_src, dest):
     """A copy stand-in for cases that refute run() before any member would need the copy."""
     return dest / "opf"
@@ -1742,7 +1888,9 @@ def _check_scratch_and_copy_errors(root):
     the host's nor an opf/ subtree, so they run before the subtree is required; the run() scratch
     sub-check needs the subtree; the run() copy sub-check needs the subtree and a scratch directory
     of the host's, so it runs last. The negative leg's refused copy needs a scratch directory but no
-    subtree, so it is its own case (_check_negative_copy_error)."""
+    subtree, so it is its own case (_check_negative_copy_error). The denied and full rows drive an
+    EACCES allocation refusal and an ENOSPC copy refusal and require run()'s FULL fixed cause
+    line, so the symbolic errno cause, not only the message prefix, is pinned discriminably."""
     no_scratch = types.SimpleNamespace(mkdtemp=_no_scratch)
     _expect_cannot(_check_harness_mapping, root,
                    "closure/harness-scratch: could not build the harness fixture: " + _STUB_SCRATCH,
@@ -1754,16 +1902,28 @@ def _check_scratch_and_copy_errors(root):
             run=lambda _root: 0, _run_one=_stub_member_runner(calls, {}), tempfile=no_scratch))
 
     _require_subtree(root)
-    for label, refusal, cause in (
-            ("closure/scratch-run", dict(tempfile=no_scratch), "could not allocate a scratch directory"),
-            ("closure/copy-run", dict(_materialize=_broken_copy), "could not materialize the isolated opf/ copy")):
+    scratch_line = ("error: could not allocate a scratch directory for the isolated opf/ copy "
+                    "(cannot evaluate closure; cause {})")
+    copy_line = ("error: could not materialize the isolated opf/ copy (cannot evaluate closure; "
+                 "cause {})")
+    for label, refusal, line in (
+            ("closure/scratch-run", dict(tempfile=no_scratch),
+             scratch_line.format(_cv("errno", "unknown errno"))),
+            ("closure/copy-run", dict(_materialize=_broken_copy),
+             copy_line.format(_cv("errno", "unknown errno"))),
+            ("closure/scratch-run-denied",
+             dict(tempfile=types.SimpleNamespace(mkdtemp=_no_scratch_denied)),
+             scratch_line.format(_cv("errno", "EACCES"))),
+            ("closure/copy-run-full", dict(_materialize=_broken_copy_full),
+             copy_line.format(_cv("errno", "ENOSPC")))):
         calls = []
 
-        def refused(label=label, cause=cause, calls=calls):
+        def refused(label=label, line=line, calls=calls):
             rc, _out, err = _captured(run, root)
-            if rc != 2 or calls or cause not in err:
-                raise AssertionError("{}: run() gave {} with {} member call(s)".format(
-                    _cv("label", label), _n(rc), _n(len(calls))))
+            if rc != 2 or calls or line not in err.splitlines():
+                raise AssertionError("{}: run() gave {} with {} member call(s), or without its "
+                                     "full fixed cause line".format(
+                                         _cv("label", label), _n(rc), _n(len(calls))))
         _attributed(label, refused, injected=dict(refusal, _run_one=_stub_member_runner(calls, {})))
 
 
@@ -2138,7 +2298,7 @@ def _check_env_canaries(root):
             if launches or marker.exists():
                 raise AssertionError("closure/env-canary-kwargs: the child ran with a required keyword missing")
 
-            with open(sink, "r+b") as low, os.fdopen(fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, 3), "r+b") as held:
+            with open(sink, "r+b") as low, io.FileIO(fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, 3), "r+") as held:
                 fd = held.fileno()
                 os.set_inheritable(fd, True)
                 for extra, passed in ((dict(pass_fds=(fd,)), fd), (dict(close_fds=False), fd),
@@ -2247,6 +2407,34 @@ _CLOSED_SITE_EXCEPTIONS = (
      "fixed text, and the watch relays only the primitive's name and a marker"),
     ("_check_env_canaries.<locals>.noisy.<locals>.probe", "_emit",
      "emits the raw canary inside a capture on purpose, to prove the capture scan catches it"),
+    ("_patched", "globals",
+     "the one deliberate runtime mutator: rebinds module globals for a stubbed case and refuses "
+     "every protected name first; the replacement values are the case's own code, walked where "
+     "it is defined"),
+    ("_nth_call", "globals",
+     "reads the global a pin entry names so the entry can patch it; the patch is installed "
+     "through _patched, which refuses every protected name"),
+    ("_nth_call", "getattr",
+     "reads the attribute a pin entry names on the target it patches; the entry's name and "
+     "attribute come from the pinned _ATTRIBUTION_PINS table, not from runtime input"),
+    ("_derived_sites", "globals",
+     "reads this module's own values to find which hold code (_holds_code); it writes nothing "
+     "and calls nothing it finds"),
+    ("_Overlay.__getattr__", "getattr",
+     "reads, by the name Python asked for, an attribute of the wrapped target so unpatched "
+     "attributes pass through; it writes nothing"),
+    ("_Overlay.__init__", "__dict__",
+     "stores the replacement attributes a pin entry passed on the overlay instance itself, "
+     "never on a module or a gate"),
+    ("_holds_code", "getattr",
+     "reads an object's __dict__ by literal name to inspect instance attributes for held code; "
+     "it writes nothing"),
+    ("_launch_recorder", "subprocess",
+     "wraps the subprocess module in an _Overlay so a recorded launch is refused or recorded "
+     "before any child starts; the wrap replaces run alone and reads everything else through"),
+    ("_failing_harness", "tempfile",
+     "captures the tempfile module bound now so the stand-in can delegate to it; the stand-in "
+     "raises only the fixed injected OSError"),
 )
 
 # The emitter's statements, pinned verbatim: _check_closed_sites requires this file's one
@@ -2378,14 +2566,18 @@ def _function_name_faults(tree, names):
     """For each of `names`, why it cannot serve as a trusted gate or emitter name over `tree`, as
     (name, why): the name must be bound exactly once in the whole module, by one module-level def
     of that name, and never rebound or shadowed anywhere (_bound_names lists the binding forms),
-    because _closed_argument and the walk trust these names by spelling and cannot see scopes."""
+    because _closed_argument and the walk trust these names by spelling and cannot see scopes.
+    A def carrying ANY decorator is refused: the gate decorator allowlist is empty on purpose,
+    since a decorator binds the trusted name to whatever the decorator returns."""
     faults = []
     for name in names:
         bindings = [node for walked in ast.walk(tree) for bound, node in _bound_names(walked)
                     if bound == name]
         defs = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name]
-        if len(defs) != 1 or bindings != defs:
-            faults.append((name, "not exactly one module-level def, or rebound or shadowed"))
+        if (len(defs) != 1 or bindings != defs
+                or any(node.decorator_list for node in defs)):
+            faults.append((name, "not exactly one module-level def, rebound, shadowed or "
+                           "decorated (the gate decorator allowlist is empty)"))
     return faults
 
 
@@ -2457,40 +2649,47 @@ def _unexempted_violations(tree):
 
 
 def _closed_output_violations(tree):
-    """Every channel reference, emitter call, exception constructor and assert under `tree` that
-    the closed-diagnostics ALLOWLIST refuses, as (qualname, token, line, why). Only the one
-    module-level def named _emit (whose statements _check_closed_sites pins verbatim against
-    _EMITTER_SOURCE) may reference a channel; the canonical floor guard's two references are
-    exempted by position and shape in _unexempted_violations; everywhere else:
+    """Every reference under `tree` that the closed-diagnostics ALLOWLIST refuses, as (qualname,
+    token, line, why). Only the one module-level def named _emit (whose statements
+    _check_closed_sites pins verbatim against _EMITTER_SOURCE) may reference a channel; the
+    canonical floor guard's two references are exempted by position and shape in
+    _unexempted_violations; everywhere else:
     any reference to a _CHANNEL_NAMES name (print, exit, quit, SystemExit, warnings, logging,
-    traceback, builtins, __builtins__), in any context (a call, a load, a store, a delete, an
-    except clause, an argument) is refused, closed text or not; a bare sys or os outside an
-    attribute access (an assigned alias, a call or getattr argument, a store: an alias the walk
-    cannot follow) is refused; a _CHANNEL_ATTRS attribute of sys or os (the streams, the dunder
-    streams, sys.exit, os.write, os._exit) is refused wherever it appears; any reference to a
-    _DYNAMIC_IMPORT_NAMES name, or an import of importlib, is refused (a dynamic import could
-    rebind or reach a channel unseen); only plain `import sys` and `import os` are permitted over
-    _CHANNEL_MODULES (an asname, a dotted form or a from-import of such a module is refused), an
-    import binding ANY _PROTECTED_NAMES name is refused, and so is EVERY star import, whatever
-    the module (its bindings cannot be followed); any other binding of a protected name (a
-    parameter, an except name, a def or class name, a match capture, a global or nonlocal
-    declaration) is refused, except the gates' and the emitter's own module-level defs; a load of
-    _emit outside a call's callee position (an alias a later call could write through unchecked)
-    is refused; and every _emit call must pass closed text (_closed_argument) as its at most one
+    traceback, builtins, __builtins__), in any context, is refused, closed text or not; a bare
+    reference to ANY _MODULE_ATTRS module name outside an attribute access (an assigned alias, a
+    call or accessor argument, a store) is refused; a _CHANNEL_ATTRS attribute of sys or os (the
+    streams, the dunder streams, sys.exit, os.write, os._exit) is refused wherever it appears;
+    an attribute chain rooted in an imported module name whose dotted path is not enumerated in
+    _MODULE_ATTRS (nor a prefix of an entry) is refused, however deep the chain; an attribute
+    named in _REFUSED_ATTRS (__dict__, __builtins__, modules, fdopen) is refused on any base;
+    any reference to a _DYNAMIC_IMPORT_NAMES or _REFUSED_BUILTIN_NAMES name (importlib,
+    __import__, eval, exec, compile, globals, vars, locals, input, help, breakpoint) is refused;
+    a getattr, setattr or delattr call with a non-literal name, with no name argument, or with a
+    literal name that is itself refused is refused, and so is an accessor loaded outside a
+    call's callee position; a call to open, io.FileIO or os.fdopen with an int-constant first
+    argument (a numbered descriptor) is refused; only a plain `import M` of a module enumerated
+    in _MODULE_ATTRS is permitted (no asname, no dotted form, no star import), and only the
+    exact (module, name) pairs in _FROM_IMPORT_ALLOW may be from-imported, each bound under its
+    own name; an import binding a _PROTECTED_NAMES name is refused; any binding of a
+    _GATE_DEPENDENCY_NAMES name (int, str, type, isinstance, frozenset: the names the emitter's
+    clamp and the gates' checks read) is refused in every _bound_names form; any other binding
+    of a protected name (a parameter, an except name, a def or class name, a match capture, a
+    global or nonlocal declaration) is refused, except the gates' and the emitter's own
+    module-level defs; an attribute or subscript store rooted at a gate name or a
+    _GATE_TABLE_NAMES name is refused; a load of _emit outside a call's callee position is
+    refused; and every _emit call must pass closed text (_closed_argument) as its at most one
     positional or text= argument, a True or False constant as err=, and no other keyword and no
     starred argument; code= may be any expression, because the emitter exits through an int
     clamp, so the interpreter never prints an exit value of this module. Exception constructors
     stay checked wherever they appear, the emitter included (the interpreter prints an uncaught
-    exception's text): a call to a name in _EXCEPTION_NAMES, built or raised, whose positional or
-    keyword argument is not closed; any other RAISED constructor, checked the same way; and an
-    assert whose message is not closed. Not seen (residuals, stated in the module docstring too):
-    what the interpreter itself runs outside this file (its traceback on an uncaught exception,
-    with the raw text of the __cause__ chain), a raise of a bare name (re-raising formats
-    nothing; construction is checked at every recognized constructor), a BUILT exception whose
-    class name is not in _EXCEPTION_NAMES, and a runtime mutation of this module's namespace
-    through an indirection (globals(), sys.modules): every such load the attribution walk sees
-    needs a recorded reason, and _patched, the one deliberate mutator, refuses every protected
-    name at run time."""
+    exception's text): a call to a name in _EXCEPTION_NAMES, built or raised, whose positional
+    or keyword argument is not closed; any other RAISED constructor, checked the same way; and
+    an assert whose message is not closed. The deliberate introspection sites of this module's
+    own machinery are recorded in _CLOSED_SITE_EXCEPTIONS, each with a reason. Residuals are
+    stated in the module docstring: what the interpreter runs outside this file, a value that
+    has left a module, the enumerated but output-capable rows (subprocess.run, io.FileIO), a
+    raise of a bare name (re-raising formats nothing), and a BUILT exception whose class name is
+    not in _EXCEPTION_NAMES."""
     emitter_defs = [node for node in tree.body
                     if isinstance(node, ast.FunctionDef) and node.name == "_emit"]
     exempt_nodes = set()
@@ -2541,44 +2740,96 @@ def _closed_output_violations(tree):
                 if isinstance(child, ast.Name) and child.id in _CHANNEL_NAMES:
                     found.append((qualname, child.id, child.lineno,
                                   "a channel name outside the emitter"))
-                if (isinstance(child, ast.Name) and child.id in ("sys", "os")
+                if (isinstance(child, ast.Name) and child.id in _MODULE_ATTRS
                         and not (isinstance(child.ctx, ast.Load) and id(child) in attribute_bases)):
                     found.append((qualname, child.id, child.lineno,
-                                  "a bare writer-module name (an alias the walk cannot follow)"))
+                                  "a bare module name (an alias the walk cannot follow)"))
                 if (isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name)
                         and child.attr in _CHANNEL_ATTRS.get(child.value.id, ())):
                     found.append((qualname, child.value.id + "." + child.attr, child.lineno,
                                   "a channel attribute outside the emitter"))
+                if isinstance(child, ast.Attribute):
+                    parts, base = [child.attr], child.value
+                    while isinstance(base, ast.Attribute):
+                        parts.append(base.attr)
+                        base = base.value
+                    if (isinstance(base, ast.Name) and base.id in _MODULE_ATTRS
+                            and parts[-1] not in _CHANNEL_ATTRS.get(base.id, ())):
+                        suffix = ".".join(parts[::-1])
+                        if not any(entry == suffix or entry.startswith(suffix + ".")
+                                   for entry in _MODULE_ATTRS[base.id]):
+                            found.append((qualname, base.id + "." + suffix, child.lineno,
+                                          "a module attribute outside the enumerated allowlist"))
+                if isinstance(child, ast.Attribute) and child.attr in _REFUSED_ATTRS:
+                    found.append((qualname, child.attr, child.lineno,
+                                  "a namespace or descriptor attribute refused by name"))
+                if isinstance(child, ast.Name) and child.id in _REFUSED_BUILTIN_NAMES:
+                    found.append((qualname, child.id, child.lineno,
+                                  "an introspection or input builtin refused by name"))
+                if (isinstance(child, ast.Name) and child.id in _ATTR_ACCESSOR_NAMES
+                        and not (isinstance(child.ctx, ast.Load) and id(child) in callee_funcs)):
+                    found.append((qualname, child.id, child.lineno,
+                                  "an attribute accessor outside a call's callee position"))
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                        and child.func.id in _ATTR_ACCESSOR_NAMES):
+                    literal = None
+                    if (len(child.args) > 1 and isinstance(child.args[1], ast.Constant)
+                            and isinstance(child.args[1].value, str)):
+                        literal = child.args[1].value
+                    if (literal is None or literal in _REFUSED_ATTRS or literal in _CHANNEL_NAMES
+                            or literal in _PROTECTED_NAMES
+                            or any(literal in attrs for attrs in _CHANNEL_ATTRS.values())):
+                        found.append((qualname, child.func.id, child.lineno,
+                                      "an attribute accessor with a non-literal or refused name"))
+                if isinstance(child, ast.Call):
+                    opener = _callee_name(child.func)
+                    if (opener.split(".")[-1] in _DESCRIPTOR_OPEN_NAMES and child.args
+                            and isinstance(child.args[0], ast.Constant)
+                            and type(child.args[0].value) is int):
+                        found.append((qualname, opener, child.lineno,
+                                      "an open of a numbered descriptor"))
+                if (isinstance(child, (ast.Attribute, ast.Subscript))
+                        and isinstance(child.ctx, (ast.Store, ast.Del))):
+                    root = child
+                    while isinstance(root, (ast.Attribute, ast.Subscript)):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id in _GATE_NAMES + _GATE_TABLE_NAMES:
+                        found.append((qualname, root.id, child.lineno,
+                                      "an attribute or subscript store on a gate or a gate table"))
                 if isinstance(child, ast.Name) and child.id in _DYNAMIC_IMPORT_NAMES:
                     found.append((qualname, child.id, child.lineno, "a dynamic import"))
                 if isinstance(child, ast.Import):
                     for alias in child.names:
-                        bound = alias.asname if alias.asname is not None else alias.name.split(".")[0]
                         if alias.name.split(".")[0] in _DYNAMIC_IMPORT_NAMES:
                             found.append((qualname, alias.name, child.lineno, "a dynamic import"))
-                        elif alias.name.split(".")[0] in _CHANNEL_MODULES:
-                            if alias.asname is not None or alias.name not in ("sys", "os"):
-                                found.append((qualname, alias.name, child.lineno,
-                                              "an import of a writer module beyond plain sys or os"))
-                        elif bound in _PROTECTED_NAMES:
-                            found.append((qualname, bound, child.lineno,
+                        elif alias.name not in _MODULE_ATTRS or alias.asname is not None:
+                            found.append((qualname, alias.name, child.lineno,
+                                          "an import outside the enumerated module allowlist, "
+                                          "with an asname, or dotted"))
+                        if alias.asname is not None and alias.asname in _PROTECTED_NAMES:
+                            found.append((qualname, alias.asname, child.lineno,
                                           "an import binding a protected name"))
                 if isinstance(child, ast.ImportFrom):
                     module_head = (child.module or "").split(".")[0]
                     if any(alias.name == "*" for alias in child.names):
                         found.append((qualname, (child.module or ".") + ".*", child.lineno,
                                       "a star import (bindings the walk cannot follow)"))
-                    elif module_head in _CHANNEL_MODULES + _DYNAMIC_IMPORT_NAMES:
-                        for alias in child.names:
-                            found.append((qualname, module_head + "." + alias.name, child.lineno,
-                                          "a from-import of a writer module"))
                     else:
                         for alias in child.names:
                             bound = alias.asname if alias.asname is not None else alias.name
+                            if ((child.module, alias.name) not in _FROM_IMPORT_ALLOW
+                                    or alias.asname is not None or child.level != 0):
+                                found.append((qualname, module_head + "." + alias.name,
+                                              child.lineno,
+                                              "a from-import outside the enumerated allowlist"))
                             if bound in _PROTECTED_NAMES:
                                 found.append((qualname, bound, child.lineno,
                                               "an import binding a protected name"))
                 for bound, bnode in _bound_names(child):
+                    if bound in _GATE_DEPENDENCY_NAMES:
+                        found.append((qualname, bound, child.lineno,
+                                      "a binding of a builtin the emitter clamp or a gate "
+                                      "depends on"))
                     if bound not in _PROTECTED_NAMES or isinstance(bnode, ast.alias):
                         continue
                     if isinstance(bnode, ast.Name) and bound not in _GATE_NAMES:
@@ -2613,11 +2864,14 @@ def _closed_output_violations(tree):
     return found
 
 
-# One snippet per refused form of the allowlist and per kept denylist rule: each must be flagged
-# by _closed_output_violations, so removing a recognizer or a table entry fails
-# closure/closed-sites. The channel, writer-module, import and binding rows cover every name and
-# attribute the allowlist reserves, one row per table entry, and the emitter rows cover each
-# argument rule at an _emit call.
+# One snippet per refused form: each must be flagged by _closed_output_violations, so removing
+# a recognizer fails closure/closed-sites. Where rules overlap on purpose (an unlisted writer
+# module is refused by the import enumeration whether or not it also stays a channel name), the
+# deletion of a single protected-name table row is held by the _PROTECTED_PROBES equality check
+# in _check_closed_sites, not by a walk flip. The emitter rows cover each argument rule at an
+# _emit call; the rows from "os-sys-chain" on are the train 2 round-32 reproductions (attribute
+# chains, namespace subscripts, eval/exec strings, input, descriptor opens, accessor forms) and
+# one row per round-33 enumeration rule.
 _CLOSED_FLIPS = (
     ("print", "print(value)\n"),
     ("print-closed-text", "print('fixed')\n"),
@@ -2708,6 +2962,57 @@ _CLOSED_FLIPS = (
     ("gate-keyword", "_emit(_cv('member', token=value))\n"),
     ("assert-message", "assert flag, value\n"),
     ("assert-formatted-message", "assert flag, 'missing: 0'.replace('0', str(path))\n"),
+    ("os-sys-chain", "import os\nos.sys.stderr.write(value)\n"),
+    ("os-sys-exit", "import os\nos.sys.exit(value)\n"),
+    ("sys-modules-subscript", "import sys\nsys.modules['sys'].stderr.write(value)\n"),
+    ("dunder-dict-subscript", "import sys\nsys.__dict__['stderr'].write(value)\n"),
+    ("dunder-builtins-attribute", "ns = module.__builtins__\n"),
+    ("sys-displayhook", "import sys\nsys.displayhook(value)\n"),
+    ("sys-excepthook", "import sys\nhook = sys.excepthook\n"),
+    ("eval-string", "eval('print(value)')\n"),
+    ("exec-string", "exec('print(value)')\n"),
+    ("compile-call", "code = compile(text, 'probe', 'single')\n"),
+    ("globals-subscript", "globals()['table'] = value\n"),
+    ("vars-call", "table = vars(module)\n"),
+    ("locals-call", "table = locals()\n"),
+    ("input-echo", "input(value)\n"),
+    ("help-call", "help(value)\n"),
+    ("breakpoint-call", "breakpoint()\n"),
+    ("getattr-dynamic-name", "reader = getattr(target, name)\n"),
+    ("getattr-refused-literal", "table = getattr(module, '__dict__', None)\n"),
+    ("getattr-aliased", "reader = getattr\n"),
+    ("setattr-dynamic-name", "setattr(target, name, value)\n"),
+    ("delattr-dynamic-name", "delattr(target, name)\n"),
+    ("os-fdopen-descriptor", "import os\nos.fdopen(2, 'w', closefd=False).write(value)\n"),
+    ("open-descriptor", "open(2, 'w', closefd=False).write(value)\n"),
+    ("fileio-descriptor", "import io\nio.FileIO(2, 'w').write(value)\n"),
+    ("module-attr-unlisted", "import json\njson.dump(value, handle)\n"),
+    ("subprocess-popen", "import subprocess\nsubprocess.Popen(command)\n"),
+    ("bare-module-alias", "parser = ast\n"),
+    ("module-rebound", "json = stub\n"),
+    ("import-unlisted-module", "import pprint\n"),
+    ("from-import-unlisted", "from pprint import pformat\n"),
+    ("from-pathlib-unlisted", "from pathlib import PurePath\n"),
+    ("from-import-renamed", "from pathlib import Path as P\n"),
+    ("from-logging-renamed", "from logging import error as report\n"),
+    ("from-traceback-renamed", "from traceback import print_exc as report\n"),
+    ("from-builtins-renamed", "from builtins import print as report\n"),
+    ("warnings-reference", "handler = warnings\n"),
+    ("logging-reference", "handler = logging\n"),
+    ("traceback-reference", "handler = traceback\n"),
+    ("builtins-reference", "handler = builtins\n"),
+    ("built-ioerror", "exc = IOError(value)\n"),
+    ("built-environmenterror", "exc = EnvironmentError(value)\n"),
+    ("dependency-int-store", "int = str\n"),
+    ("dependency-global-int", "def probe(value):\n    global int\n    int = str\n"),
+    ("dependency-str-parameter", "def probe(str):\n    pass\n"),
+    ("dependency-type-rebound", "type = probe\n"),
+    ("dependency-isinstance-rebound", "isinstance = probe\n"),
+    ("dependency-frozenset-import", "import json as frozenset\n"),
+    ("vocabulary-subscript-store", "_CLOSED_VOCABULARIES['reason'] = values\n"),
+    ("vocabulary-attribute-store", "_PREFLIGHT_CASES.rows = values\n"),
+    ("gate-attribute-store", "_cv.__code__ = probe.__code__\n"),
+    ("gate-subscript-store", "_n[0] = probe\n"),
 )
 
 # One snippet per refused rebinding or shadowing form of a registered text name: each must make
@@ -2756,6 +3061,9 @@ _BINDING_CONTROL = "_PIN_MARKER = 'fixed'\nprint(_PIN_MARKER)\n"
 # closure/closed-sites. The control (one module-level def, loads only) must pass.
 _GATE_BINDING_FLIPS = (
     ("gate-missing", "def probe():\n    pass\n"),
+    ("gate-decorated", "@wrapper\ndef _n(value):\n    return '1'\n"),
+    ("gate-decorated-lambda",
+     "@(lambda fn: lambda value: value)\ndef _n(value):\n    return '1'\n"),
     ("gate-parameter", "def _n(value):\n    return '1'\ndef probe(_n):\n    pass\n"),
     ("gate-reassigned", "def _n(value):\n    return '1'\n_n = probe\n"),
     ("gate-nested-def", "def _n(value):\n    return '1'\ndef probe():\n    def _n(value):\n        pass\n"),
@@ -2783,6 +3091,9 @@ _EMITTER_FLIPS = (
      "    if code is not None:\n        stream.write(str(code))\n        sys.exit"),
     ("emitter-decorated", "def _emit", "@staticmethod\ndef _emit"),
     ("emitter-renamed", "def _emit", "def _emitter"),
+    ("emitter-return-annotation", "def _emit(text=None, err=False, code=None):",
+     "def _emit(text=None, err=False, code=None) -> None:"),
+    ("emitter-type-parameter", "def _emit(", "def _emit[T]("),
 )
 
 # Flips of the floor-guard exemption, as (name, old, new, module, exempted): the module text with
@@ -2864,6 +3175,7 @@ _FLOOR_GUARD_CONTROLS = (
 _CLOSED_CONTROL = (
     "import sys\n"
     "import os\n"
+    "import json\n"
     "_emit('fixed')\n"
     "_emit('a: {}'.format(_cv('member', name)), err=True)\n"
     "_emit('x ' + _n(count) + ('a' if flag else 'b'), err=False)\n"
@@ -2872,6 +3184,8 @@ _CLOSED_CONTROL = (
     "_emit('done', code=0)\n"
     "version = sys.version_info\n"
     "home = os.environ.get('HOME')\n"
+    "rows = json.loads(text)\n"
+    "label = getattr(probe, '__name__', 'fixed')\n"
     "raise AssertionError('{} and {}'.format(_cvs('member', names), _n(3)))\n")
 
 
@@ -2886,7 +3200,8 @@ def _check_closed_sites(_root):
     once, at module level, to one string literal, never rebound or shadowed
     (_registered_name_faults; one flip per refused form in _BINDING_FLIPS, and the check must
     pass _BINDING_CONTROL); each gate and the emitter must be bound exactly once by its
-    module-level def (_function_name_faults, with _GATE_BINDING_FLIPS and _GATE_BINDING_CONTROL);
+    module-level def (_function_name_faults, with _GATE_BINDING_FLIPS and _GATE_BINDING_CONTROL), and a gate
+    def carrying any decorator is refused (the decorator allowlist is empty);
     the emitter shape pin must refuse every _EMITTER_FLIPS mutation of _EMITTER_SOURCE and accept
     it unchanged, with and without a docstring; the floor-guard exemption must remove exactly the
     guard's two channel references, flag every _FLOOR_GUARD_FLIPS module built from this file's
@@ -2897,7 +3212,8 @@ def _check_closed_sites(_root):
     refuted. At run time it also pins the emitter and the patch guard: _emit must write a probe
     line to exactly the selected stream, must leave through SystemExit with an int code passed
     through and any other code clamped to 2 with nothing written, and _patched must refuse every
-    probed protected name while passing an unprotected control. Residuals are stated in
+    _PROTECTED_PROBES name, a tuple required to equal _PROTECTED_NAMES exactly (so a dropped
+    protected-name table row fails unprobed), while passing an unprotected control. Residuals are stated in
     _closed_output_violations and the module docstring. A source that cannot be read is
     cannot-evaluate."""
     try:
@@ -3022,7 +3338,12 @@ def _check_closed_sites(_root):
         if seen != [("SystemExit", want_code)] or _CAPTURE_LOG[-1] != ("", ""):
             raise AssertionError("closure/closed-sites: the emitter did not leave through SystemExit "
                                  "with the int-clamped code and nothing written")
-    for protected in ("_PIN_MARKER", "print", "sys", "_emit"):
+    if (frozenset(_PROTECTED_PROBES) != _PROTECTED_NAMES
+            or len(set(_PROTECTED_PROBES)) != len(_PROTECTED_PROBES)):
+        raise AssertionError("closure/closed-sites: _PROTECTED_PROBES does not list every "
+                             "protected name exactly once, so a probe for a protected-name "
+                             "table row could go stale unprobed")
+    for protected in _PROTECTED_PROBES:
         try:
             with _patched(**dict(((protected, None),))):
                 raise AssertionError("closure/closed-sites: _patched rebound the {} protected "
@@ -3200,10 +3521,11 @@ def _check_preflight_collection():
     ordinary exception (here a RuntimeError and a decode failure), is that case's cannot-evaluate, the
     latter naming the case (by its label, or by its function's name when the label is None) and the
     exception; only an AssertionError is a refutation; the exit is failure-first over everything
-    collected. A KeyboardInterrupt or SystemExit stops the collection: it re-raises and no later case
-    runs (the collection catches Exception alone, so every BaseException outside it re-raises; the
-    probe drives KeyboardInterrupt and GeneratorExit, because SystemExit is a channel name the
-    closed-sites allowlist reserves to the emitter). Each _preflight_exit call goes through _attributed. Pure: no scratch directory and no opf/
+    collected. A BaseException that is not an Exception stops the collection: it re-raises and
+    no later case runs. The probe drives KeyboardInterrupt and GeneratorExit; SystemExit is
+    deliberately NOT driven (a channel name the closed-sites allowlist reserves to the emitter),
+    so its stop rests on the collection catching Exception alone, which the two driven types pin
+    only for themselves. Each _preflight_exit call goes through _attributed. Pure: no scratch directory and no opf/
     subtree."""
     ran = []
 
