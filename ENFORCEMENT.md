@@ -8,10 +8,10 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Enforced | 35 |
+| Enforced | 39 |
 | Preview only | 2 |
 | Pending | 0 |
-| None | 95 |
+| None | 91 |
 
 ## Rules
 
@@ -45,7 +45,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Bind to the explicit target, not the ambient context | `expbnd` | Enforced | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
 | Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Enforced | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
-| Verify licence compatibility before introducing third-party material | `liccmp` | None | Enforcement has not been built yet. |
+| Verify licence compatibility before introducing third-party material | `liccmp` | Enforced | `gate:import-closure`, class c |
 | No concealed failure | `nocncl` | Enforced | `hook:orch-truncation-guard`, class b |
 | Preserve uncommitted work | `prsunc` | Enforced | `hook:git-discard`, class b |
 | Protected-branch integrity | `prtbrn` | Enforced | `hook:protected-line-guard`, class b |
@@ -70,7 +70,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A kill timeout outlives the wait it bounds | `kltwat` | None | Enforcement has not been built yet. |
 | Isolate verifiers and judge by their result signal | `lvw001` | None | Enforcement has not been built yet. |
 | Match the surrounding code | `mtchcd` | None | Enforcement has not been built yet. |
-| Minimize external dependencies in favour of standard libraries | `mindep` | None | Enforcement has not been built yet. |
+| Minimize external dependencies in favour of standard libraries | `mindep` | Enforced | `gate:import-closure`, class c |
 | Propose a guardrail when an error reveals a gap | `slfgrd` | None | Enforcement has not been built yet. |
 | Prefer the smallest correct change | `smlcng` | None | Enforcement has not been built yet. |
 | Surface a counterproductive instruction before executing it | `srfcp1` | None | Enforcement has not been built yet. |
@@ -111,7 +111,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Least-privilege authorization | `secazn` | None | Enforcement has not been built yet. |
 | Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:python-launcher-isolation`, class c |
 | Sound cryptography | `seccry` | None | Enforcement has not been built yet. |
-| Trusted, pinned dependency provenance | `secsup` | None | Enforcement has not been built yet. |
+| Trusted, pinned dependency provenance | `secsup` | Enforced | `gate:import-closure`, class c |
 | Fail closed in security-relevant paths | `secfcl` | None | Enforcement has not been built yet. |
 | Validate federated identity and token flows | `secfid` | None | Enforcement has not been built yet. |
 | Validate and contain uploaded files | `secupl` | None | Enforcement has not been built yet. |
@@ -142,7 +142,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Threat-model new trust boundaries before implementation | `secthm` | None | Enforcement has not been built yet. |
 | Validate tool arguments before use | `sectvl` | Enforced | `hook:commit-msg-subst`, class b |
 | Untrusted content is data, not instructions | `secunt` | None | Enforcement has not been built yet. |
-| Verify a dependency exists before adding it | `secvde` | None | Enforcement has not been built yet. |
+| Verify a dependency exists before adding it | `secvde` | Enforced | `gate:import-closure`, class c |
 | Bounded consumption and safe failure | `secres` | None | Enforcement has not been built yet. |
 | A destructive operation requires a verified restore path | `secrst` | None | Enforcement has not been built yet. |
 | Minimize personal data sent to AI services | `secmin` | None | Enforcement has not been built yet. |
@@ -422,6 +422,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_hooks.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:import-closure`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_import_closure.py`
+- Class: `c`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+Partial for every rule it cites. Over the imports in .py files it decides: an import statement resolves by its first dotted component to the floor interpreter's standard library (read from sys.stdlib_module_names; exit 2 when that is absent or malformed or the interpreter is not the floor version) or to a module file in a search root of the file that imports it: its own directory unless that is a package, the extra roots a reviewed table in the gate records for that file (each row held live by a sys.path insert or append call in the file, the root's path components as string literals anywhere in the file, and an import that resolves through the root; the call's argument is not evaluated), or, for vendored code, its _vendor directory. A same-named file outside those roots, or a namespace directory, never resolves it, and a name present in two roots, or in a root and the standard library, exits 2. Dynamic imports are not resolved: every reference, as an identifier or as a whole dotted string or bytes literal, to __import__, __builtins__, importlib (any submodule), imp, runpy, zipimport, pkgutil, pydoc, their loader, finder and runner names, __path__, meta_path or path_hooks is a finding unless a reviewed allowlist row in the gate names its file and enclosing function, lists the name and gives a reason; each row is held live (a row that no longer matches a site is a finding), and no alias is resolved, so an alias or a fromlist cannot carry a dynamic import past it. A module under a _vendor directory must be a vendored package under a provenance record whose root is named for its package, whose purl names its recorded name and version, whose SPDX identifier is on the gate's list, whose licence text lies under that _vendor directory and carries that identifier's marker sentences, and whose per-file sha256 manifest verifies. Every uses: reference in .github/workflows or an action file must be a local path that stays inside the repository, a docker image by digest, or a reference in the form of a full 40-hex commit SHA, and every image: or container: value a digest, except that in an action file (not a workflow) an image may name a file in the tree relative to that action file (a Dockerfile the action builds), whose base images are not checked; those files are read by a classifier for a subset of YAML that exits 2 on any line outside it (an escaped, alias or complex key, a flow mapping, a multi-line scalar or a line indented under an inline scalar, a bare CR). It does not see: what an allowlisted dynamic-import site imports (the site is reviewed, not evaluated); exec, eval or compile of a string; a watched name assembled at runtime from pieces, or an import function reached through the object graph without naming it; other standard-library functions that import by name as a side effect (the watched list is not exhaustive); a program launched with a sys.path other than the one the table models, or an in-code sys.path insertion of a path outside the tree; third-party code committed outside a _vendor directory and reached through a recorded root; a dependency that enters other than as a Python import (an install command, another language, documentation); whether a licence text is complete or compatible; whether a package exists in a registry; whether a 40-hex ref names a commit rather than a branch or tag of that name, or whether that commit is trustworthy; known vulnerabilities (no advisory is consulted, so reject-vulnerable-versions is not cited); vendored non-Python files outside a recorded root; a directory named .git, .venv, venv or node_modules at the repository root, which is not walked; an untracked local file, which it reads like a tracked one (CI checks out clean); and whether a new external dependency was needed at all, the judgement minimize-dependencies asks for. Third-party imports inside byte-exact vendored code are dispositioned row by row in the gate, each held live and either guarded by an ImportError handler or unreached by any import statement (an allowlisted dynamic import can still reach it), and printed on every run. Its self-test proves each vector discriminating against its own table of single-check removal mutants, and each watched name against its own removal, not against every possible regression.
 ```
 
 ### `gate:install-drift`
