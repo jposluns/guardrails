@@ -5,14 +5,23 @@ framework: its edition and the enumerated set of canonical control ids that a ru
 frontmatter is allowed to cite. A rule's `map-<key>` frontmatter may cite a framework only after its
 manifest lands here, so a mapping to an unsourced framework, or to an id that does not exist in the
 pinned edition, cannot ship. Rule-body prose is checked more narrowly: a numbered designator in one of
-the spellings the gate's grammar lists (ISO, ISO/IEC or ISO/IEEE with an optional type or stage code,
-NIST SP with a number or SP with an n-n number, NIST 800-n, NIST AI, NIST IR or NISTIR, FIPS or
-NIST FIPS, or RFC, followed by its number, with NIST joined to its series by whitespace, a dash or a dot
-as in NIST.SP.800-53) must resolve to a manifest or a recorded exclusion. A designator run on into
-letters or digits the grammar does not read, or continued across a line break after a dash, is reported
-as a whole token, never resolved to a shorter identity, and only an exclusion naming the whole token as
-the finding prints it waives it. A framework named in prose without such a number, a body, series or
-stage code outside that list, or a designator broken by markup is not detected; the grammar and its full
+the spellings the gate's grammar lists must resolve to a manifest or a recorded exclusion. The grammar
+reads ISO joined by a slash, a dash or whitespace to any of IEC, IEEE, a deliverable type (TR, TS, PAS)
+or a project-stage abbreviation (AWI, WD, CD, DIS, FDIS, DTR, DTS); NIST SP or NIST Special Publication
+with a number, or SP or Special Publication with an n-n number; NIST 800-n; NIST AI; NIST IR or NISTIR;
+FIPS, NIST FIPS or FIPS PUB; and RFC; each followed by its number. NIST is joined to its series, and
+FIPS to PUB, by whitespace, a dash or a dot (as in NIST.SP.800-53), a body to its number by whitespace,
+a dash, a dot or nothing, and a joining dash or dot may end a line. A designator run on into letters or
+digits the grammar does not read, or into a dash that, after any further dashes, is followed neither by
+a letter nor by whitespace and a non-digit on the same line (a dash that ends a line counts, whatever
+opens the next line), is reported as a whole token, never resolved to a shorter identity, and only an
+exclusion naming the whole token as the finding prints it waives it. Not detected: a framework named in
+prose without such a number; the omissions the gate names, among them the ISO prefixes DPAS, PWI, CDV,
+PDTR, PDTS, TTA, NP and PRF and the IWA and ISO Guide series, a list that is not complete; any other
+body, series, prefix or spelling outside the grammar; and a designator broken by markup or continued
+onto a line opened by anything but whitespace and blockquote markers, such as a comment marker.
+Whitespace, markup or an entity before or in place of a dash, and a dot, colon or slash that ends a
+line, end a designator, so such a spelling can read as a shorter identity. The grammar and its full
 residual are in the docstring of `tools/check_cited_standards.py`.
 
 ## How it is enforced

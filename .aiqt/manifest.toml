@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c4b156f9f40a6e7abccd51bad120c450cb1690784e391aef02870e8d4233b7b1"
+tree-sha256 = "33d26766b6f554a829f6d4f43bf7170bdfd269ea5b192bbddd413efbffd76d5c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 266244
-sha256 = "4297d445fbc129141bf378fbba2a067b2e8cf3cc0e9d6ed221d7330738d6b670"
+bytes = 267078
+sha256 = "f495afd2a569aa499025103fed418d151b226ffd7678ca81615156ff58a5f226"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -826,8 +826,8 @@ sha256 = "3b69d9c573f8ed72b037632b456dfb1fd0d9c1bd350d7fbaa289d31cfd53b1b3"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
-bytes = 6688
-sha256 = "25f1c27b1d9e0032c74b06ca05e6bbc71109a7de5800a14e74f6b809a1226190"
+bytes = 7609
+sha256 = "87cc0a2b58713b0ba2c426e1d42967bfad3d26e65aedf2d0327a95293c4def81"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -3271,8 +3271,8 @@ sha256 = "779c0b288bcd5f573fd05c535023d52bd0fc3449c07ef91f55f2ba1d26cf0bb3"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
-bytes = 53214
-sha256 = "baa7dd245321a0f912d19d31adb5a578e2b68dbf6f16f2979e4501cbf65e694f"
+bytes = 62099
+sha256 = "62b9dd7635c22140f04310fcecfc79699b76754701d66dc1837739a0c92d8220"
 
 [[sources]]
 path = "tools/check_clauses.py"
