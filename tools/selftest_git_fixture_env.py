@@ -2469,11 +2469,15 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # False with the code healthy (round 17), and no earlier flag is bound-free either (an
 # entered-run marker would rest on the pool consuming results in order, a property of the
 # code under test, and would still leave a window between the worker's dequeue and the
-# marker). member_a is definite in a run with no recorded timeout; under any recorded
-# timeout it stands down, and a pool that never ran member a is then fail closed, never a
-# pass: the main thread blocks on member a's pending result until the parent's 300 s bound
-# ends the child (cannot evaluate, no report), or member b's 120 s wait records the
-# "member a observed" bound, which stands the run down;
+# marker). A WRONG member_a IS NEVER DEFINITE: member a takes its "sent" stamp only after
+# a_arrived is set (failed-signal's interrupt is armed by member a too), and a_raises is set
+# in a finally the pool's waiting shutdown joins, so any member_a other than [True, True]
+# leaves the send list empty, the timeliness field False and the completion budget
+# recorded, which stands member_a down; only a right member_a is ever compared. A pool that
+# never ran member a is therefore fail closed, never a pass: the main thread blocks on
+# member a's pending result until the parent's 300 s bound ends the child (cannot
+# evaluate, no report), or member b's 120 s wait records the "member a observed" bound and
+# the budget is reached, which stands the run down;
 # "failed-signal", the same with the lock wrapper armed for the failed-member branch;
 # "failed-handshake", the same with member b never reporting running, so member a's handshake
 # (1 s here) expires and member a raises HandshakeTimeout, never the injected failure. Every
@@ -2979,8 +2983,9 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "if scenario.startswith('failed'):",
     "    # member a's arrival and raise sit BEHIND the positive control's 60 s subprocess",
     "    # bound: a merely slow git leaves both False with the code healthy, so they are",
-    "    # the member_a extra, off the _STATE_EVIDENCE allowlist, definite only in a run",
-    "    # with no recorded timeout. evidence keeps only the branch facts no bound shapes.",
+    "    # the member_a extra, off the _STATE_EVIDENCE allowlist (a wrong member_a always",
+    "    # comes with the completion budget recorded, so it is never definite). evidence",
+    "    # keeps only the branch facts no bound shapes; producer-map pins what it reads.",
     "    extra['member_a'] = [a_arrived.is_set(), a_raises.is_set()]",
     "    extra['evidence'] = [bool(branch_swept)]",
     "    witnessed = len(branch_swept)",
@@ -3368,20 +3373,28 @@ def _handshake_expired(scenario, extra):
 #   so the append IS the fact and no bound sits between the fact and the post-main read;
 #   every bound of the failed scenarios raises INTO the handler that calls the sweep, so a
 #   bound can only make the branch run, never skip it, and the second flag comes from a
-#   direct post-main call. The slow-positive-control record-map vectors pin the mapping:
-#   the 60 s positive-control bound firing leaves both flags at their want (the run is
-#   cannot-evaluate, never a definite mismatch) while a false flag beside the same record
-#   stays definite. Member a's own arrival and raise came OFF this entry (round 17): that
-#   60 s bound sits between member a's worker entering run and those flags, so a merely
-#   slow git leaves them False with the code healthy; they are the "member_a" extra,
-#   definite only in a run with no recorded timeout.
+#   direct post-main call. The slow-positive-control record-map vectors are CLASSIFIER
+#   pins (the mapping, on a hand-written observation): flags at their want beside the
+#   60 s positive-control bound make the run cannot-evaluate, never a definite mismatch,
+#   while a false flag beside the same record stays definite. That the child's flags
+#   ARE at their want then is the producer pin ("producer-map" below). Member a's own
+#   arrival and raise came OFF this entry (round 17): that 60 s bound sits between
+#   member a's worker entering run and those flags, so a merely slow git leaves them
+#   False with the code healthy; they are the "member_a" extra, never definite when
+#   wrong (a wrong member_a leaves the send list empty, so the completion budget is
+#   recorded beside it and it stands down).
+# THE PRODUCER PIN: the "producer-map" entry (_allowlist_producers) pins, read from the
+# child's source, the exact names every write of each entry above reads, closed over
+# their origins, so a producer re-tied to timing (member a's arrival or raise, the send
+# list, a stall) fails definitively in a healthy run too; "producer-oracle" pins that
+# discrimination on mutated copies of the child source.
 # A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
 # hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
 # still poison any field, the allowlist included (a live holder owns the lock; a live
 # monitor can raise), so it replaces the whole observation (_scenario_timeout_record).
 # The record-map pins this tuple's exact membership VERBATIM and the stand-down of every
 # extras key the child writes, so adding any key (late, direct, member_a or a new one) or
-# removing one fails a vector.
+# removing one fails a vector; the producer-map pins what each kept key reads.
 _STATE_EVIDENCE = ("evidence", "lock_free", "restored")
 
 
@@ -3543,9 +3556,11 @@ def _sweep_call_sites(config=None):
     wait=True in its finalbody), AND with no worker wait inside the handler itself before
     the call: shutdown(...) waits unless it carries a literal wait=False, so any shutdown
     call positioned before the sweep call in the handler without that literal refuses the
-    form (the "sweep-oracle" bare and positional probes pin this rule: a bare shutdown()
-    and a positional shutdown(True, ...) each refuse, so a detector counting only a
-    literal wait=True fails them). The except handler's body then runs the kill sweep
+    form (the "sweep-oracle" bare, positional and cancel probes pin this rule: a bare
+    shutdown(), a positional shutdown(True, ...) and shutdown(wait=True,
+    cancel_futures=False) each refuse, so a detector counting only a literal wait=True,
+    or exempting a literal False on any keyword, fails them). The except handler's body
+    then runs the kill sweep
     before any wait for the workers, so the sweep precedes that wait STRUCTURALLY, a
     source-order fact with no
     deadline involved. EVERY other reference (a call outside such a handler, the call moved
@@ -3602,7 +3617,9 @@ def _sweep_call_sites(config=None):
         # positioned before the sweep call, refuses the form (fail closed: the site comes
         # back "unrecognized" and the one-site pin fails definitively). The "bare" and
         # "positional" sweep-oracle probes pin the literal rule: a detector counting only
-        # a literal wait=True accepts both and fails their vectors.
+        # a literal wait=True accepts both and fails their vectors; the "cancel" probe
+        # (wait=True, cancel_futures=False) pins that the exemption reads the wait
+        # keyword itself, so a detector exempting any literal False keyword fails it.
         for inner in ast.walk(handler):
             if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
                     and inner.func.attr == "shutdown"
@@ -3632,6 +3649,190 @@ def _sweep_call_sites(config=None):
                 form = "except-before-wait"
         sites.append((name.lineno - first, form))
     return sorted(sites)
+
+
+# The methods through which a name of the child is taken to gain a value: a call of one of
+# these on the bare name (anywhere in the child, a helper's body included) is one of that
+# name's origins, with its arguments' reads, in _allowlist_producers.
+_PRODUCER_MUTATORS = ("append", "extend", "insert", "add", "update", "setdefault")
+
+
+def _allowlist_producers(source=None):
+    """The producer pin of the _STATE_EVIDENCE allowlist, read from the _CLOSE_PROBE_CHILD
+    source (source, default _CLOSE_PROBE_CHILD) and never run: a dict giving, for each
+    allowlisted extras key, the sorted names its producers READ, and under "unrecognized"
+    every reference to the child's extras dict this oracle cannot classify, as (line, form).
+    The record-map vectors pin the classifier (which fields a recorded timeout keeps); this
+    pins what feeds the kept fields, so a child that ties one of them to timing again (member
+    a's arrival or raise, the send list, a stall) fails "producer-map" definitively even in a
+    healthy run, where no timeout ever exercises the classifier.
+    A producer is every write of an allowlisted key: extra['<key>'] = value (a tuple target
+    is paired element by element), extra['<key>'].<mutator>(args) and extra.update(<key>=
+    value). Its reads are the names loaded in the written value, plus the names loaded in
+    the test of every if, while or conditional expression enclosing the write, closed
+    transitively over each read name's origins in the child: a module-level assignment to
+    the name (paired the same way), a subscript store into it, a _PRODUCER_MUTATORS call on
+    it (each origin with its own enclosing tests, up to the enclosing def), and, for a
+    module-level def, the names its body loads that it does not bind. So a flag gated by
+    member a's arrival, directly, through a guard or inside the sweep wrapper's append,
+    adds a_arrived to the signature and fails the pin; the "producer-oracle" probes pin
+    that discrimination on mutated copies of the child source.
+    EVERY other touch of the extras dict that could write an allowlisted key comes back
+    "unrecognized", never skipped: a subscript with a non-constant key, an allowlisted key
+    read in any other way (an alias), deleted or augmented, a method call other than
+    setdefault, pop, get and update, or one of those naming an allowlisted key or a
+    non-constant key (update with positional or ** arguments included), an attribute not
+    called, a rebinding other than the one binding to {}, and a bare use other than as an
+    element of the report list passed to json.dumps. Raises LookupError, which the caller
+    records as cannot-evaluate, when the source does not parse. Syntactic limits, disclosed:
+    control dependence is read only through those enclosing tests (an early return, a
+    raise, a for loop, a try, a with or a match around or before the write is not), a name
+    bound inside a def is not expanded (its loads are reported as the bare name), and the
+    suite code the child calls is not read (the reads stop at the name suite)."""
+    source = _CLOSE_PROBE_CHILD if source is None else source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise LookupError("the allowlist producer oracle cannot parse the child: {}".format(exc))
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+    def module_scope(node):
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return False
+            ancestor = parents.get(ancestor)
+        return True
+
+    def loads(node):
+        return {name.id for name in ast.walk(node)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)}
+
+    def tests(node):
+        found, below, ancestor = set(), node, parents.get(node)
+        while ancestor is not None and not isinstance(ancestor, defs):
+            if isinstance(ancestor, (ast.If, ast.While, ast.IfExp)) and below is not ancestor.test:
+                found |= loads(ancestor.test)
+            below, ancestor = ancestor, parents.get(ancestor)
+        return found
+
+    def free(function):
+        bound = {arg.arg for arg in ast.walk(function.args) if isinstance(arg, ast.arg)}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+                bound.add(node.id)
+            elif isinstance(node, defs[:2]) and node is not function:
+                bound.add(node.name)
+        return {name for statement in function.body for name in loads(statement)} - bound
+
+    def paired(target, value):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+                return [pair for part, piece in zip(target.elts, value.elts)
+                        for pair in paired(part, piece)]
+            return [pair for part in target.elts for pair in paired(part, value)]
+        if isinstance(target, ast.Starred):
+            return paired(target.value, value)
+        return [(target, value)]
+
+    origins = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+            for target in getattr(node, "targets", None) or [node.target]:
+                for part, value in paired(target, node.value):
+                    if isinstance(part, ast.Name) and module_scope(node):
+                        origins.setdefault(part.id, []).append((value, node))
+                    elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
+                        origins.setdefault(part.value.id, []).append((value, node))
+        elif isinstance(node, defs[:2]) and module_scope(node):
+            origins.setdefault(node.name, []).append((node, node))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.attr in _PRODUCER_MUTATORS):
+            origins.setdefault(node.func.value.id, []).extend(
+                (value, node) for value in node.args + [key.value for key in node.keywords])
+
+    writers = {key: [] for key in _STATE_EVIDENCE}
+    unrecognized, bindings = [], []
+    for name in ast.walk(tree):
+        if not (isinstance(name, ast.Name) and name.id == "extra"):
+            continue
+        parent, form = parents.get(name), None
+        grand = parents.get(parent)
+        if isinstance(name.ctx, ast.Store):
+            statement = grand if isinstance(parent, (ast.Tuple, ast.List)) else parent
+            values = [value for target in getattr(statement, "targets", ())
+                      for part, value in paired(target, statement.value) if part is name]
+            if (values and not bindings and module_scope(statement)
+                    and isinstance(values[0], ast.Dict) and not values[0].keys):
+                bindings.append(name.lineno)
+            else:
+                form = "rebinding"
+        elif isinstance(parent, ast.Subscript) and parent.value is name:
+            key = parent.slice.value if isinstance(parent.slice, ast.Constant) else None
+            if not isinstance(key, str):
+                form = "dynamic key"
+            elif key not in _STATE_EVIDENCE:
+                pass
+            elif isinstance(parent.ctx, ast.Store):
+                statement = (parents.get(grand) if isinstance(grand, (ast.Tuple, ast.List))
+                             else grand)
+                values = [value for target in getattr(statement, "targets", ())
+                          for part, value in paired(target, statement.value) if part is parent]
+                if values:
+                    writers[key].extend(values)
+                else:
+                    form = key + " store"
+            elif (isinstance(parent.ctx, ast.Load) and isinstance(grand, ast.Attribute)
+                    and grand.attr in _PRODUCER_MUTATORS
+                    and isinstance(parents.get(grand), ast.Call)
+                    and parents[grand].func is grand):
+                writers[key].extend(parents[grand].args
+                                    + [keyword.value for keyword in parents[grand].keywords])
+            else:
+                form = key + " reference"
+        elif isinstance(parent, ast.Attribute) and parent.value is name:
+            call = grand if isinstance(grand, ast.Call) and grand.func is parent else None
+            if call is None or parent.attr not in ("setdefault", "pop", "get", "update"):
+                form = "." + parent.attr
+            elif parent.attr == "update":
+                if call.args or any(keyword.arg is None for keyword in call.keywords):
+                    form = ".update arguments"
+                for keyword in call.keywords:
+                    if keyword.arg in _STATE_EVIDENCE:
+                        writers[keyword.arg].append(keyword.value)
+            elif not (call.args and isinstance(call.args[0], ast.Constant)
+                      and isinstance(call.args[0].value, str)
+                      and call.args[0].value not in _STATE_EVIDENCE):
+                form = "." + parent.attr + " key"
+        elif not (isinstance(parent, ast.List) and isinstance(grand, ast.Call)
+                  and isinstance(grand.func, ast.Attribute) and grand.func.attr == "dumps"
+                  and isinstance(grand.func.value, ast.Name) and grand.func.value.id == "json"):
+            form = "bare"
+        if form is not None:
+            unrecognized.append((name.lineno, form))
+
+    def signature(values):
+        seen, pending = set(), set()
+        for value in values:
+            pending |= loads(value) | tests(value)
+        while pending:
+            read = pending.pop()
+            if read in seen:
+                continue
+            seen.add(read)
+            for value, site in origins.get(read, ()):
+                pending |= (free(value) if isinstance(value, defs[:2])
+                            else loads(value) | tests(site))
+        return sorted(seen)
+
+    found = {key: signature(values) for key, values in writers.items()}
+    found["unrecognized"] = sorted(unrecognized)
+    return found
 
 
 def _oracle_down_sites(got, oracle_down):
@@ -3738,9 +3939,10 @@ def _member_close_controls(fixture):
     it and never reading as a definite finding; the definite evidence is non-timing state the
     finished run left, read after main() ended: the outcome, the registry and recorded process
     state, the refusal records, the late-launch records, the "member_a" flags (member a's
-    positive control ran and raised; the positive control's 60 s bound shapes them, so they
-    are definite only in a run with no recorded timeout, and a pool that never ran member a
-    is cannot-evaluate under any timeout, fail closed, never a pass) and the "evidence"
+    positive control ran and raised; the positive control's 60 s bound shapes them, and a
+    wrong member_a is never definite: it leaves the send list empty, so the completion
+    budget is recorded beside it and it stands down, and a pool that never ran member a is
+    cannot-evaluate, fail closed, never a pass) and the "evidence"
     flags (the failed-member branch itself called the kill sweep, witnessed by the sweep
     wrapper from its caller, never by a deadline, and that caller check discriminates: a
     sweep the harness calls after main() is not counted), so a branch that never sweeps
@@ -3750,8 +3952,10 @@ def _member_close_controls(fixture):
     except handler, with no worker wait in the handler before it, before the finally block
     that waits for the workers, a source-order fact with no deadline involved, so the sweep
     moved after the worker wait, or a waiting shutdown placed before it in the handler
-    (only a literal wait=False is exempt: a bare shutdown() and a positional
-    shutdown(True, ...) count as waits, pinned by the bare and positional probes), is
+    (only a literal wait=False is exempt: a bare shutdown(), a positional
+    shutdown(True, ...) and shutdown(wait=True, cancel_futures=False), whose literal False
+    names another keyword, count as waits, pinned by the bare, positional and cancel
+    probes), is
     definite, and the oracle's own discrimination is pinned ("sweep-oracle"); EVERY recorded
     timeout in any scenario (an expired harness handshake, _handshake_expired, whose own
     mapping is pinned there too; a reached code-owned bound in the "missing" extras; an owed
@@ -3763,9 +3967,14 @@ def _member_close_controls(fixture):
     (_stood_down), so a restoration defect, a held lock or a false evidence flag beside any
     timeout stays definite while timing alone never is (the "record-map" entry pins the
     reached-bound, unsent, budget, combined-failure, per-kind, outlive, expiry-pin,
-    stray-bound, late-signal and slow-positive-control mappings, the _STATE_EVIDENCE
-    tuple's exact membership verbatim and the stand-down of every extras key the child
-    writes, and "down-map" the oracle-down stand-down);
+    stray-bound, late-signal and slow-positive-control mappings, all classifier pins on
+    hand-written observations, the _STATE_EVIDENCE tuple's exact membership verbatim and
+    the stand-down of every extras key the child writes; "producer-map" pins the producers
+    themselves, read from the child's source: the names every write of an allowlisted key
+    reads, closed over their origins, so a child tying evidence, lock_free or restored to
+    timing again fails definitively even in a healthy run, and "producer-oracle" that
+    oracle's discrimination on mutated copies of the source; "down-map" pins the
+    oracle-down stand-down);
     config/member-close-unresolved-verdict, "unresolved":
     main() returns 2 with
     the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
@@ -4038,9 +4247,10 @@ def _member_close_controls(fixture):
     # the "member a observed" bound and the empty send list reaches the completion budget;
     # the TimeoutExpired raised INTO the failed-member handler, which swept, so the
     # allowlisted evidence matches its want, member_a stands down on both sides and the
-    # verdict is cannot-evaluate, never a definite mismatch (the producer-to-verdict
-    # vector below), while a false evidence flag beside the same record stays definite
-    # (the flag_down vector above).
+    # verdict is cannot-evaluate, never a definite mismatch (the classifier vector below,
+    # a pin of the mapping on this hand-written observation, not of the child's
+    # producer, which "producer-map" pins), while a false evidence flag beside the same
+    # record stays definite (the flag_down vector above).
     slow_bound = ("TIMEOUT: member-close child (failed): code-owned bound reached: "
                   "member a observed (cannot evaluate)")
     slow_budget = ("TIMEOUT: member-close child (failed): completion budget reached "
@@ -4166,9 +4376,51 @@ def _member_close_controls(fixture):
         slow_down == ("failed",) + (slow_budget,) * 5 + (
             dict(kept_state, evidence=[True, True], stood_down=slow_budget),)
         and slow_recorded == [slow_bound, slow_budget],
-        # Producer-to-verdict: the mirrored want equals the stood-down observation, so a
-        # merely slow positive control is cannot-evaluate, never a definite mismatch.
+        # Classifier pin (the mapping, not the producer): the mirrored want equals the
+        # stood-down observation, so a merely slow positive control whose evidence is at its
+        # want is cannot-evaluate, never a definite mismatch. That the child's evidence IS
+        # at its want under a slow positive control is the producer pin, "producer-map".
         _stood_down_wants([slow_down], [slow_want]) == [slow_down]])
+    # The allowlist's PRODUCER pin, beside the classifier pins above: the names every write
+    # of an allowlisted extras key reads in the child source, closed over their origins
+    # (_allowlist_producers), so a child tying a kept field to timing again fails here even
+    # in a healthy run, where no timeout exercises the classifier. Its own discrimination
+    # ("producer-oracle"): each probe rewrites one statement of the child source and must
+    # change exactly the named entries: evidence tied to member a's arrival (conj), the
+    # round-17 flags re-added (flag), the sweep wrapper's append gated on member a's
+    # arrival (guard), the lock read tied to the measured stalls (lock), a restoration flag
+    # tied to the send list (restored), an allowlisted key written through an alias (alias)
+    # or through ** arguments (star); an anchor no longer in the source is "anchor
+    # missing", never a silently clean probe. ast.parse alone reads each source; no probe
+    # source is executed.
+    producer_probes = (
+        ("conj", "extra['evidence'] = [bool(branch_swept)]",
+         "extra['evidence'] = [a_arrived.is_set() and bool(branch_swept)]"),
+        ("flag", "extra['evidence'] = [bool(branch_swept)]",
+         "extra['evidence'] = [a_arrived.is_set(), a_raises.is_set(), bool(branch_swept)]"),
+        ("guard", "        if frame is not None:\n",
+         "        if frame is not None and a_arrived.is_set():\n"),
+        ("lock", "    free = suite._MEMBERS_LOCK.acquire(0)\n",
+         "    free = suite._MEMBERS_LOCK.acquire(0) and not stalls\n"),
+        ("restored", "    restored.append(False)\n", "    restored.append(bool(sent))\n"),
+        ("alias", "extra['evidence'].append(", "extra.get('evidence').append("),
+        ("star", "    witnessed = len(branch_swept)\n",
+         "    witnessed = len(branch_swept)\n    extra.update(**dict(evidence=[True]))\n"))
+    try:
+        producers = _allowlist_producers()
+        got["producer-map"] = ("producer-map", producers)
+        producer_oracle = []
+        for _, anchor, mutant in producer_probes:
+            if _CLOSE_PROBE_CHILD.count(anchor) != 1:
+                producer_oracle.append("anchor missing")
+                continue
+            probe = _allowlist_producers(_CLOSE_PROBE_CHILD.replace(anchor, mutant))
+            producer_oracle.append(sorted(key for key in probe if probe[key] != producers[key]))
+        got["producer-oracle"] = ("producer-oracle", producer_oracle)
+    except LookupError as exc:
+        producer_down = "TIMEOUT: allowlist producer oracle: {} (cannot evaluate)".format(exc)
+        CANNOT_EVALUATE.append(producer_down)
+        got["producer-map"] = got["producer-oracle"] = producer_down
     # One with-form acquisition per refused-site scenario: a fourth acquisition, a direct acquire
     # call or a form the oracle refuses fails the "close-sites" pin definitively; an oracle that
     # cannot read _close_members at all is recorded as cannot-evaluate, never fail-open, and
@@ -4238,9 +4490,10 @@ def _member_close_controls(fixture):
     # with the call so placed yields its one "except-before-wait" site, the call moved after
     # the wait into the finally block is "unrecognized", a waiting shutdown placed in the
     # handler BEFORE the call is "unrecognized" too, whether it spells wait=True, a bare
-    # shutdown() or a positional shutdown(True, ...) (only a literal wait=False is exempt,
-    # so a detector counting only a literal wait=True fails the bare and positional
-    # probes), a handler whose finally never waits is
+    # shutdown(), a positional shutdown(True, ...) or wait=True beside cancel_futures=False
+    # (only a literal wait=False is exempt, so a detector counting only a literal
+    # wait=True fails the bare and positional probes, and one exempting a literal False
+    # on any keyword fails the cancel probe), a handler whose finally never waits is
     # "unrecognized" (so a neutralised finally-wait detector is loud), and the same body
     # under another name at the SAME recorded line raises LookupError. compile() alone
     # builds the probe functions; no fixture code is executed.
@@ -4263,6 +4516,10 @@ def _member_close_controls(fixture):
                   "        pool.shutdown(True, cancel_futures=True)\n"
                   "        _signal_member_groups()\n        raise\n"
                   "    finally:\n        pool.shutdown(wait=True)\n")
+    cancel = ("    try:\n        pass\n    except BaseException:\n"
+              "        pool.shutdown(wait=True, cancel_futures=False)\n"
+              "        _signal_member_groups()\n        raise\n"
+              "    finally:\n        pool.shutdown(wait=True)\n")
     sweep_oracle = []
     for label, name, body in (("ordered", "_config_results", ordered),
                               ("moved", "_config_results", moved),
@@ -4270,7 +4527,8 @@ def _member_close_controls(fixture):
                               ("waitfirst", "_config_results", waitfirst),
                               ("nowait", "_config_results", nowait),
                               ("bare", "_config_results", bare),
-                              ("positional", "_config_results", positional)):
+                              ("positional", "_config_results", positional),
+                              ("cancel", "_config_results", cancel)):
         source = "def {}():\n".format(name) + body
         path = fixture / "sweep-oracle-{}.py".format(label)
         path.write_text(source, encoding="utf-8")
@@ -4336,11 +4594,25 @@ def _member_close_controls(fixture):
                        member_a=[True, True], evidence=[True, True]),
                 ("handshake-map", [True, True, True, True]),
                 ("record-map", [True] * 26),
+                # Each allowlisted field's producer reads only its traced bound-free source:
+                # evidence the sweep wrapper's branch_swept appends (guarded only by its pure
+                # frame walk, frame), their count before the direct call (witnessed), the
+                # builtins and the failed-scenario test on argv (scenario, sys); lock_free the
+                # lock_free helper's zero-timeout acquire on the registry lock (suite);
+                # restored the getsignal reads and the appended constants (signal).
+                ("producer-map", dict(
+                    evidence=["bool", "branch_swept", "frame", "len", "scenario", "sys",
+                              "witnessed"],
+                    lock_free=["lock_free", "suite"], restored=["restored", "signal"],
+                    unrecognized=[])),
+                ("producer-oracle", [["evidence"], ["evidence"], ["evidence"], ["lock_free"],
+                                     ["restored"], ["evidence", "unrecognized"],
+                                     ["unrecognized"]]),
                 ("sweep-site", ["except-before-wait"]),
                 ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
                                   "LookupError", [(5, "unrecognized")],
                                   [(4, "unrecognized")], [(5, "unrecognized")],
-                                  [(5, "unrecognized")]])]),
+                                  [(5, "unrecognized")], [(5, "unrecognized")]])]),
             ("config/member-close-unresolved-verdict", [
                 expect("unresolved", "returned 2", 1, [], 0, (False, True),
                        released=[[], 0]),
