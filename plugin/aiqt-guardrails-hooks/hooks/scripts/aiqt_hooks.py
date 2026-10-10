@@ -25,7 +25,9 @@ as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
 "permissionDecisionReason": "..."}}; an allow decision is expressed as NO output (exit 0 silent), so
 the user's own permission flow is never bypassed, and a deny decision blocks the tool. exit 2 is a
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
-as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
+as last_assistant_message. The reference also documents a stop_hook_active field in the Stop input,
+true when Claude Code is already continuing as a result of a stop hook; in this file only _orch_build_ctx
+reads it.
 
 NO-ASK POSTURE (maintainer directive): these hooks NEVER return permissionDecision "ask". An unattended
 orchestrator must never stall waiting on a human, so there is no ask constructor at all and every decision
@@ -150,9 +152,10 @@ read-only and offline; it never mutates the repo.
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
-because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
-block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
-diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
+because this layer keeps no loop bound of its own and does not read the stop_hook_active field of the
+Stop input, a hard exit-2 Stop block could re-fire on the forced continuation and wedge the session. The
+hard PREVENTION for console diffs lives in the PreToolUse diff_source layer at the command source; the
+Stop layer only surfaces.
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
 class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
@@ -163,6 +166,11 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+These exits, and the floor guard's on an older interpreter that can start this file, hold while the
+hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A
+failing output stream can change the exit status and can lose output, a decision included; a separate fix
+in progress addresses this. The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of
+an interpreter that cannot start this file, which fails first with Python's own exit.
 """
 import sys
 
@@ -171,14 +179,17 @@ import sys
 # HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
 # such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
 # mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
-# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file exits
-# 1, a non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
-# hook entry passes exits 2 on every event the plugin hooks.json registers. That denies each PreToolUse
-# call a registered matcher selects; blocks every UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says
-# an error must never do; blocks every Stop, with no cap as above, and every TeammateIdle, the two
-# FAIL_OPEN_EVENTS this file names exit 2 as the block for; on PostToolUse its tool has already run but the
-# recorder records nothing; and SessionStart cannot block at all.
+# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
+# (Python 3.4 and 3.5 cannot: it uses underscores in numeric literals, and 3.4 also rejects its starred items
+# in list displays) stops with a SyntaxError and exits 1, a non-blocking error, so a PreToolUse call goes
+# ahead unchecked; one that predates the -I option every hook entry passes exits 2 on every event the plugin
+# hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
+# UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
+# no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
+# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
+# all.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
@@ -229,7 +240,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 #
 # NOTE_CONSTRUCTORS is the declared set of note constructors and DENY_CONSTRUCTORS the declared set of
 # deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
-# deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
+# deny constructor's call). Only the single-return leaf constructors (_allow_note, _context_note, _stop_warn,
 # _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
 # constructor reaches a result only by returning another constructor's call. The hooks self-test
 # (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf builds its
@@ -250,7 +261,7 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # does not model (a note key assembled at run time, a lookup through getattr or globals(), or a patched
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
-    "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
+    "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
     "_orch_stop_family")
@@ -267,7 +278,8 @@ def _allow():
 
 
 def _deny(reason, banner):
-    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform."""
+    """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform, under the output
+    condition the module docstring states."""
     return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
                                        "permissionDecision": "deny",
                                        "permissionDecisionReason": reason},
@@ -285,6 +297,14 @@ def _allow_note(message):
     discard is snapshotted then allowed with this note. There is no ask constructor: the module cannot emit
     permissionDecision "ask" from any path."""
     return (0, {"systemMessage": message}, None)
+
+
+def _context_note(event, context, message):
+    """A clean pass that adds model context (hookSpecificOutput.additionalContext, for an event such as
+    UserPromptSubmit) and ALSO surfaces an informational systemMessage to the operator, who does not see that
+    context. Like _allow_note it carries no permissionDecision and never blocks."""
+    return (0, {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context},
+                "systemMessage": message}, None)
 
 
 def _stop_warn(banner):
@@ -8689,6 +8709,7 @@ _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
 # and their compound forms, are recognized); a present value outside that family is unrecognized and fails
 # closed to this posture rather than silently disarming.
 _ORCH_MODE_ARMED = "unattended"
+_ORCH_MODE_MAX_BYTES = 1 << 20  # _orch_mode_read reads at most this many bytes; a larger mode file fails closed
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
 _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
 # A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
@@ -9208,19 +9229,95 @@ def _orch_write_json(path, obj):
 
 
 def _orch_write_json_atomic(path, obj):
-    """Crash-safe JSON overwrite: write a sibling temp then os.replace (an atomic rename on the same
-    filesystem), so a crash mid-write never leaves a truncated file a reader would treat as malformed.
-    Same best-effort contract as _orch_write_json (returns True on success; the caller decides what a
-    failure means)."""
+    """Crash-safe JSON overwrite, the one writer of turn-state.json, backlog-checkpoint.json,
+    checkpoint-init.marker, attestations-validated.json and forced-exit-surfaced.json. Returns None on success,
+    else a short failure detail the caller names in its output (the caller decides what a failure means).
+    It serializes obj first (a value json cannot encode fails before any file is created), creates the
+    parent directory and opens it ONCE (os.open _ORCH_O_WALK|O_DIRECTORY|O_CLOEXEC: where O_PATH exists the
+    open needs no permission on that directory itself, only search permission on its ancestors, while the
+    later lstat, create, replace and cleanup unlink need search permission on it, the last three write
+    permission too, so a write-and-search-only (0300) state directory saves; where O_PATH
+    is absent the O_RDONLY fallback also needs READ permission on that directory, so there such a directory
+    fails every save, named with its error); every later step is bound to that directory descriptor through
+    dir_fd, so a parent path swapped for a symlink or another directory after the open cannot redirect the
+    save: the prior target's lstat (follow_symlinks=False), the create of the temporary file, the replace and
+    the cleanup unlink all act in the directory opened, and the descriptor is closed exactly once on every
+    path. It creates a temporary file of its own beside the target with
+    os.open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW) under a random name, so a symlink or any other
+    file already at a temporary-like name is never opened, written or removed (an existing name fails the
+    create, and the save fails). It sets that file's permission bits to the existing target's (a regular
+    file at the target), else to 0600, then writes, fsyncs and closes it through that descriptor only and
+    os.replace()s it onto the target, so the target is swapped whole: a reader sees the previous file or the
+    new one, never a part of either. The new file is owned by the writing uid; a symlink at the target is
+    replaced, not followed. On any failure after the create it unlinks only its own temporary file; an
+    unlink that fails leaves that file beside the target, and the returned detail names it by the parent
+    path as given (which, after a swap, may no longer lead to it). A process killed between the create and
+    the replace (a hook timeout, for example) leaves its temporary file, and nothing removes it. Not bound
+    here: the parent path itself is resolved once, at the directory open (a symlink in it at that moment is
+    followed), and a directory moved after the open still receives the save under its new name. Concurrent
+    saves never share a temporary file, so one save cannot write into or remove another's; the last replace
+    wins, so where callers read, modify and save the same file at the same time one update can be lost
+    (read-modify-write is not serialized). The writing uid can itself replace any of these files, so this is
+    crash and collision safety, not a boundary against that uid."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, sort_keys=True)
-        os.replace(tmp, path)
-        return True
-    except (OSError, ValueError):
-        return False
+        blob = json.dumps(obj, sort_keys=True).encode("utf-8")
+        directory, name = os.path.split(path)
+        os.makedirs(directory, exist_ok=True)
+        dirfd = os.open(directory, _ORCH_O_WALK | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, TypeError, ValueError) as exc:
+        return type(exc).__name__
+    try:
+        return _orch_write_json_at(dirfd, directory, name, blob)
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass  # a lookup-only directory descriptor: the save's outcome is settled already
+
+
+def _orch_write_json_at(dirfd, directory, name, blob):
+    """The save of _orch_write_json_atomic (see there), every step bound to the open directory dirfd:
+    None on success, else the failure detail. directory is the parent path as given, used only to name a
+    temporary file left behind."""
+    try:
+        try:
+            prior = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            mode = stat.S_IMODE(prior.st_mode) & 0o777 if stat.S_ISREG(prior.st_mode) else 0o600
+        except FileNotFoundError:
+            mode = 0o600
+        tmp = "{}.{}.tmp".format(name, os.urandom(8).hex())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     0o600, dir_fd=dirfd)
+    except (OSError, TypeError, ValueError, NotImplementedError) as exc:
+        return type(exc).__name__
+    failure = None
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(blob)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except (OSError, ValueError) as exc:
+        failure = type(exc).__name__
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            failure = failure or type(exc).__name__
+    if failure is None:
+        try:
+            os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            return None
+        except (OSError, ValueError, NotImplementedError) as exc:
+            failure = type(exc).__name__
+    try:
+        os.unlink(tmp, dir_fd=dirfd)
+    except FileNotFoundError:
+        pass
+    except (OSError, NotImplementedError) as exc:
+        failure += "; removing its temporary file {} failed with {}, so remove it by hand".format(
+            os.path.join(directory, tmp), type(exc).__name__)
+    return failure
 
 
 def _orch_guard_event(root, kind, decision, detail):
@@ -9261,7 +9358,9 @@ def _orch_warn_tail(*warns):
 
 def _orch_turn_state(root):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
-    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies).
+    In a state directory the hook cannot search, os.path.lexists reports False (EACCES), so the file reads
+    as absent and the result is {} (a fresh turn-state): a counter recorded there is not seen."""
     path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
     try:
         if not os.path.lexists(path):
@@ -9274,14 +9373,15 @@ def _orch_turn_state(root):
 
 
 def _orch_save_turn_state(root, state):
-    sd = _orch_state_dir_for_root(root)
-    try:
-        os.makedirs(sd, exist_ok=True)
-        with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
-            json.dump(state, fh, sort_keys=True)
-        return True
-    except (OSError, ValueError):
-        return False
+    """Save turn-state.json through _orch_write_json_atomic: None on success, else the failure detail the
+    caller names in its output (the caller decides what a failure means). A failed save, mid-write
+    included, leaves the previous turn-state.json (or its absence) in place unchanged, and a reader sees
+    the previous file or the new one, never a part of either. The save needs a writable and searchable
+    state directory (its temporary file is created there), so a writable turn-state.json in a directory
+    the hook cannot write is not saved; where O_PATH is absent the directory must also be readable (see
+    _orch_write_json_atomic). Two saves at once are both published whole, the later replacing the earlier,
+    so one update can be lost (the read-modify-write is not serialized)."""
+    return _orch_write_json_atomic(os.path.join(_orch_state_dir_for_root(root), "turn-state.json"), state)
 
 
 def _orch_mode_classify(value):
@@ -9312,17 +9412,85 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_read(path):
+    """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
+    ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
+    _ORCH_MODE_MAX_BYTES bytes that decodes as strict UTF-8, else ('bad', reason) for every other outcome.
+    The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
+    also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
+    could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
+    at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
+    open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
+    after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
+    as /dev/zero, a directory) is bad without a read. The read asks for at most
+    _ORCH_MODE_MAX_BYTES + 1 bytes in all and a longer file is bad. Any exception on the way (an OSError,
+    a decode error, any other) is bad, named by its type, and the descriptor is closed exactly once. Not
+    bounded here: the path lookup can stall on a hung mount, a regular file on a stalled filesystem can
+    stall the read, and what opening a device node does is up to its driver; the hook timeout bounds each
+    such stall."""
+    try:
+        if "\x00" in path:
+            return ("bad", "the mode path contains a NUL character")
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return ("bad", "the mode path is not strict UTF-8 (a lone surrogate or a surrogate-escaped "
+                       "non-UTF-8 byte), so it is refused, fail-closed, even where the OS could open it")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return ("absent", None)
+    except Exception as exc:
+        return ("bad", "the mode file cannot be opened ({})".format(type(exc).__name__))
+    chunks, total, result = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            result = ("bad", "the mode file is not a regular file")
+        else:
+            while total <= _ORCH_MODE_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_MODE_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > _ORCH_MODE_MAX_BYTES:
+                result = ("bad", "the mode file is larger than the {}-byte bound".format(_ORCH_MODE_MAX_BYTES))
+    except Exception as exc:
+        result = ("bad", "the mode file cannot be read ({})".format(type(exc).__name__))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            result = result or ("bad", "the mode file cannot be closed ({})".format(type(exc).__name__))
+    if result is not None:
+        return result
+    try:
+        return ("ok", b"".join(chunks).decode("utf-8"))  # strict decode
+    except UnicodeDecodeError:
+        return ("bad", "the mode file is not valid UTF-8")
+
+
 def _orch_mode(reg, root):
-    """The operating-mode token from the declared mode record, parsed by ONE sound reader (never an
-    incremental regex-plus-substring scan). The mode file is a SHARED text file: either a state-record file
-    carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
+    """The operating-mode token of _orch_mode_detail (see there), without the read-failure reason."""
+    return _orch_mode_detail(reg, root)[0]
+
+
+def _orch_mode_detail(reg, root):
+    """(mode, reason): the operating-mode token, and the reason the mode file could not be read where it
+    fails closed for that (else None). The token comes from the declared mode record, parsed by ONE sound
+    reader (never an incremental regex-plus-substring scan). The mode file is a SHARED text file: either a
+    state-record file carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
       - None when NO marker is present, preserving the fail-open answer for the ask blocker (the file is
         shared, so prose must NOT arm): an undeclared mode path, a genuinely absent file (FileNotFoundError),
         an empty or whitespace-only file, or prose with no `Operating-mode:` declaration line and no JSON
         marker (including a sentence that merely mentions attended or unattended);
       - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
-        recognized value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable
-        file (an OSError other than FileNotFoundError) or one whose bytes are not valid UTF-8 (strict decode);
+        recognized value, so the guard fails CLOSED rather than silently disarming: every outcome of
+        _orch_mode_read other than not found or a read text (a path with a NUL character or one that is
+        not strict UTF-8, a file that cannot be opened or read (a socket included), one that is not a
+        regular file, one larger than the bound, or one whose bytes are not valid UTF-8), which also returns
+        the reason;
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
@@ -9345,14 +9513,17 @@ def _orch_mode(reg, root):
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            text = fh.read()               # strict decode: invalid UTF-8 raises UnicodeDecodeError
-    except FileNotFoundError:
-        return None                       # no marker file present: unchanged no-marker default (fail open)
-    except (OSError, UnicodeDecodeError):
-        return _ORCH_MODE_ARMED           # present but unreadable or non-UTF-8: fail closed to guards-armed
+        return (None, None)
+    status, text = _orch_mode_read(path)
+    if status == "absent":
+        return (None, None)               # no marker file present: unchanged no-marker default (fail open)
+    if status != "ok":
+        return (_ORCH_MODE_ARMED, text)   # any other read outcome fails closed to guards-armed, with a reason
+    return (_orch_mode_classify_text(text), None)
+
+
+def _orch_mode_classify_text(text):
+    """The mode token of a mode file's decoded text, by the soundness rules of _orch_mode_detail."""
     text = text.lstrip("\ufeff")          # strip a leading byte-order mark ONCE, before every subsequent check
     # DECLARATION (line form): parse each PHYSICAL line so the value never crosses a newline. The FIRST line
     # that matches is the declaration; a present declaration never falls through to the no-marker None (an
@@ -9368,10 +9539,11 @@ def _orch_mode(reg, root):
         return None                       # empty/whitespace-only: no marker present, unchanged (fail open)
     try:
         obj = json.loads(stripped, object_pairs_hook=_orch_reject_duplicate_keys)
-    except ValueError:
-        # Unparseable (malformed, trailing garbage, or duplicate keys): a JSON-SHAPED marker attempt (the
-        # content begins with `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no
-        # declaration and no JSON, the no-marker None (fail open, because the file is shared).
+    except (ValueError, RecursionError):
+        # Unparseable (malformed, trailing garbage, duplicate keys, or nesting too deep to parse, which only
+        # content beginning with `{` or `[` can reach): a JSON-SHAPED marker attempt (the content begins with
+        # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
+        # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
     if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
         classified = _orch_mode_classify(obj["mode"])
@@ -9953,9 +10125,12 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
     COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
-    preview makes no state change. Each guard-events append made here (a bound-forced drop, an unwritable
-    checkpoint, an unwritable init marker) that fails adds its recording-failure warning to the caller's
-    warnings list, which the hook surfaces in its output, so none of the three rows is lost silently.
+    preview makes no state change. A checkpoint or init marker that cannot be written adds a warning naming
+    that write to the caller's warnings list whether or not its guard-events row is written, and each
+    guard-events append made here (a bound-forced drop, an unwritable checkpoint, an unwritable init marker)
+    that fails adds its recording-failure warning too; the hook surfaces the list in its output (the deny
+    reason and banner, the block reason, or a note), so neither failed write nor any of the three rows is
+    lost silently.
 
     FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
@@ -10018,27 +10193,42 @@ def _orch_checkpoint_union(root, payload, record=True, warnings=None):
                        "{} id(s) past the {} bound: {}".format(
                            len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10]))))
     if record:
-        if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
-                                              "ids": union}):
+        # the failed write itself is reported in the hook's output; its guard-events row is a second record
+        # that can succeed or fail on its own, so the warning never depends on that append failing too
+        failed = []
+        unsaved = _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
+                                                 "ids": union})
+        if unsaved is not None:
             events.append(("checkpoint-unwritable", "recorded",
                            "the checkpoint could not be rewritten; the next window compares "
                            "against the prior state"))
+            failed.append("Additionally, the anti-shrinkage checkpoint backlog-checkpoint.json could not be "
+                          "written ({}), so it does not record this window's items: an item that leaves the "
+                          "enumeration, or is demoted, before a later checkpoint write succeeds is not held "
+                          "as vanished or demoted unless an earlier checkpoint already records it; record "
+                          "this window's items manually (nocncl).".format(unsaved))
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
             # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
             # never a silent gap, consistent with the other recorders.
-            if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
+            unsaved = _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()})
+            if unsaved is not None:
                 events.append(("checkpoint-marker-unwritable", "recorded",
                                "the checkpoint-init marker could not be written; a later "
                                "checkpoint deletion would be undetectable this window"))
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
+                failed.append("Additionally, the checkpoint-init marker checkpoint-init.marker could not be "
+                              "written ({}), so this window is held as cannot-evaluate and a later deletion of "
+                              "the checkpoint would go undetected; record it manually (nocncl).".format(unsaved))
         for ev_kind, ev_decision, ev_detail in events:
             warn = _orch_event_warn(root, ev_kind, ev_decision, ev_detail)
             if warn and warnings is not None:
                 warnings.append(warn)
+        if warnings is not None:
+            warnings.extend(failed)
     return injected
 
 
@@ -10104,10 +10294,10 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
 
 
 def _orch_record_denial(root, ts, kind, basis):
-    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
-    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
-    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
+    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns None on a
+    successful persist, else the failure detail of _orch_save_turn_state. The increment base is sanitized
+    so a tampered non-int counter cannot raise here; a STOP-path caller that gets a failure must fail OPEN,
+    since an un-persistable counter never reaches the loop bound and would otherwise re-deny forever."""
     state = dict(ts or {})
     if kind == "schedule_idle":
         prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
@@ -10206,9 +10396,10 @@ def _orch_stop_family(data, event_name, kind):
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
     if verdict == "DENY":
-        if not _orch_record_denial(root, ts, kind, basis):
-            warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
-                    "failing OPEN with findings rather than re-denying. Underlying: " + reason)
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        if unsaved is not None:
+            warn = ("the denial counter could not be persisted ({}), so the loop bound cannot advance; "
+                    "failing OPEN with findings rather than re-denying. Underlying: ".format(unsaved) + reason)
             ev = _orch_event_warn(root, event_name, "allow_unpersistable", warn)
             return _stop_warn("AIQT guardrail ({}): {}{}".format(
                 event_name, warn, _orch_warn_tail(ev, spoof_warn, ctx["record_warn"])))
@@ -10259,16 +10450,25 @@ def _orch_register_wake(root, ts, prompt):
     """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
     returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
     the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
-    because nothing ever wrote wake_digests)."""
+    because nothing ever wrote wake_digests). Returns '' when the digest was written or there is no prompt
+    to register, else the warning the caller appends to its output (the ALLOW stands). The save is atomic, so
+    a failed one leaves the previous turn-state unchanged; the warning still promises no classification of
+    the returning prompt, which reads as timer-originated where turn-state holds a matching digest (an
+    earlier identical wake's) when it arrives, and as genuine human input otherwise."""
     if not isinstance(prompt, str) or not prompt:
-        return
+        return ""
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
     state = dict(ts or {})
     wd = state.get("wake_digests")
     wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
     wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    _orch_save_turn_state(root, state)
+    unsaved = _orch_save_turn_state(root, state)
+    if unsaved is None:
+        return ""
+    return ("Additionally, this wake's prompt digest could not be written to turn-state.json ({}), so how the "
+            "prompt it returns with is classified is uncertain: it may read as genuine human input or as "
+            "timer-originated; record the wake manually (nocncl).".format(unsaved))
 
 
 def orch_yield_tool(data):
@@ -10324,15 +10524,33 @@ def orch_yield_tool(data):
                      "contradicts the measured figure." + tail)
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
-        _orch_record_denial(root, ts, kind, basis)
-        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), spoof_warn,
-                               ctx["record_warn"])
+        # a counter that cannot be saved leaves this deny uncounted; relief on a later call comes only from
+        # what that call reads (its turn-state count, see _orch_build_ctx, or a stop_hook_active field set to
+        # true in its payload, documented in the Stop input and not in the PreToolUse input) or, for a Stop,
+        # from its own deny failing to save, never from this deny. The deny stands and the failure is
+        # reported on it
+        unsaved = _orch_record_denial(root, ts, kind, basis)
+        counter_warn = "" if unsaved is None else (
+            "Additionally, the denial counter could not be written to turn-state.json, so this deny does not "
+            "count toward the {} ({}); {}; record it manually (nocncl).".format(
+                "scheduling cap" if kind == "schedule_idle" else "loop bound", unsaved,
+                "a later call is relieved only when the count it reads from turn-state.json is at or above the "
+                "cap on an unchanged basis, which needs a state directory it can search and a turn-state.json "
+                "it can read" if kind == "schedule_idle" else
+                "a later stop=true call or Stop takes the loop-bound exit only when the count it reads from "
+                "turn-state.json is at or above the bound, that file cannot be read as a JSON object or its "
+                "stop_denials value is malformed (each of which needs a state directory it can search), or that "
+                "call's payload carries stop_hook_active set to true (a field the Claude Code hooks reference "
+                "documents in the Stop input and does not list in the PreToolUse input), and a later Stop the "
+                "decision core denies also allows with findings when its own denial counter cannot be saved"))
+        tail = _orch_warn_tail(_orch_event_warn(root, "yield-tool", "deny", reason), counter_warn,
+                               spoof_warn, ctx["record_warn"])
         return _deny(reason + tail,
                      "AIQT guardrail: denied a {} call past the enumerated backlog.{}".format(tool, tail))
-    if kind == "schedule_idle":
-        # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
-        # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(root, ts, tool_input.get("prompt"))
+    # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
+    # timer-originated (not genuine human input), preserving the loop-guard counters across the wake; a
+    # failed write is reported on every allow path below (the ALLOW stands)
+    wake_warn = _orch_register_wake(root, ts, tool_input.get("prompt")) if kind == "schedule_idle" else ""
     if verdict == "ALLOW_WITH_FINDINGS":
         ev = _orch_event_warn(root, "yield-tool", verdict.lower(), reason)
         msg = "AIQT guardrail: {}".format(reason)
@@ -10346,19 +10564,20 @@ def orch_yield_tool(data):
             extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
             if extra:
                 msg += " " + extra
-        return _allow_note(msg + _orch_warn_tail(ev, spoof_warn, ctx["record_warn"]))
+        return _allow_note(msg + _orch_warn_tail(ev, wake_warn, spoof_warn, ctx["record_warn"]))
     if ctx["escape"]:
         # the operator-escape ALLOW: its guard-events row is the only record that the override was used,
         # so a failed append is surfaced (the ALLOW stands)
-        tail = _orch_warn_tail(_orch_escape_event_warn(root, "yield-tool", reason), spoof_warn,
+        tail = _orch_warn_tail(_orch_escape_event_warn(root, "yield-tool", reason), wake_warn, spoof_warn,
                                ctx["record_warn"])
     else:
         # a clean ALLOW with no escape: its row is the over-fire metric only, best effort, a failed append
         # is not surfaced
         _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
-        tail = _orch_warn_tail(spoof_warn, ctx["record_warn"])
+        tail = _orch_warn_tail(wake_warn, spoof_warn, ctx["record_warn"])
     if tail:
-        # a clean ALLOW whose spoof or checkpoint record FAILED still surfaces it (never a silent None)
+        # a clean ALLOW whose wake digest, spoof or checkpoint record FAILED still surfaces it (never a
+        # silent None)
         return _allow_note("AIQT guardrail:" + tail)
     return _allow()
 
@@ -10370,8 +10589,11 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable, non-UTF-8, a present-but-unrecognized `Operating-mode:` declaration (empty, or not
-    beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
+    is present but unreadable (a socket, refused at the open, included), not a regular file (a FIFO or a
+    device included, opened without waiting), larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path
+    holding a NUL or not strict UTF-8 (each such
+    read outcome names its reason in the deny), a present-but-unrecognized `Operating-mode:` declaration
+    (empty, or not beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
     "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
     declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
     (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
@@ -10388,7 +10610,7 @@ def orch_ask_guard(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
-    mode = _orch_mode(reg, root)
+    mode, unread = _orch_mode_detail(reg, root)
     if mode is None or "unattended" not in mode:
         if mode is None and not _orch_guard_event(
                 root, "ask-guard", "fail-open",
@@ -10418,6 +10640,9 @@ def orch_ask_guard(data):
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
               "the mode record first, then re-issue.")
+    if unread:
+        # a mode file the reader cannot read as text fails closed to unattended; the deny names why
+        reason += " The mode record reads as unattended because {} (it fails closed).".format(unread)
     tail = _orch_warn_tail(_orch_event_warn(
         root, "ask-guard", "deny", "pending key {}{}".format(key, "" if recorded else " (NOT persisted)")))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
@@ -13882,10 +14107,13 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
         return ("deny", "the brief {} declares the unknown target {!r}; use revision, "
                 "working-tree or not-a-review".format(brief, target))
     if target != "revision":
-        _orch_guard_event(reg_dir, "review-dispatch-pin", "allow-declared-target",
-                          "{}: {}".format(brief, target))
+        # the guard-events row is the only record of this departure from revision reconciliation, so a failed
+        # append is reported on the note (the allow stands)
+        warn = _orch_event_warn(reg_dir, "review-dispatch-pin", "allow-declared-target",
+                                "{}: {}".format(brief, target))
         return ("note", "AIQT rule vfxcmt: the brief {} declares target {}, so no revision was "
-                "reconciled; a review of committed work must pin it".format(brief, target))
+                "reconciled; a review of committed work must pin it.{}".format(brief, target,
+                                                                            _orch_warn_tail(warn)))
     ambient = sorted(k for k in os.environ if k in _RDP_AMBIENT_GIT)
     if ambient:
         return ("unverifiable", "the environment sets {}, which moves the repository, index, object store "
@@ -13955,23 +14183,36 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
-        _orch_save_turn_state(root, ts)
-        return _allow()
+        unsaved = _orch_save_turn_state(root, ts)
+        if unsaved is None:
+            return _allow()
+        # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
+        return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
+                           "could not be written ({}), so its time was not stamped and the denial counters were "
+                           "not reset; record it manually (nocncl).".format(unsaved))
     # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
     # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
     wd = list(ts.get("wake_digests") or [])
     if digest in wd:
         wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
     ts["wake_digests"] = wd
-    _orch_save_turn_state(root, ts)
+    unsaved = _orch_save_turn_state(root, ts)
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
         gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)
+    context = ("[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not human input. Measured "
+               "gap since the last genuine human input: {}.".format(gap))
+    if unsaved is not None:
+        # the model reads the context line and the operator the systemMessage; neither promises how a later
+        # prompt with the same text is classified
+        warn = ("turn-state.json could not be written ({}), so consuming this wake's digest failed and how a "
+                "later prompt with the same text is classified is uncertain: it may read as timer-originated "
+                "or as genuine human input; record it manually (nocncl).".format(unsaved))
+        return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
+                             "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": "[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not "
-                             "human input. Measured gap since the last genuine human input: {}."
-                             .format(gap)}}, None)
+        "additionalContext": context}}, None)
 
 
 # The truncation guard's registry-required deny reasons for each scope it denies, as tools/orch_doctor.py
@@ -14367,9 +14608,10 @@ def _orch_validate_attestations(reg, root):
                 os.remove(snap_path)
             except OSError:
                 pass
-        if not _orch_write_json_atomic(snap_path, snap):
-            findings.append("the attestation snapshot could not be written; invalidating any prior "
-                            "snapshot so the yield-time reader holds (never a stale clean pass)")
+        unsaved = _orch_write_json_atomic(snap_path, snap)
+        if unsaved is not None:
+            findings.append("the attestation snapshot could not be written ({}); invalidating any prior "
+                            "snapshot so the yield-time reader holds (never a stale clean pass)".format(unsaved))
             try:
                 os.remove(snap_path)  # a failed OK write must not leave a prior snapshot usable either
             except OSError:
@@ -14431,7 +14673,9 @@ def _orch_forced_exit_findings(sd):
                             ", ".join(str(i) for i in ids[:10]) or "unrecorded"))
     if fresh:
         all_keys = sorted({r.get("key") for r in rows if isinstance(r.get("key"), str)})
-        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})  # at-least-once: a failed advance re-fires
+        # at-least-once: a failed advance re-fires these rows at the next audit, so its failure detail (a
+        # temporary file left by a failed cleanup included) is not reported here
+        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})
     return findings
 
 
@@ -14521,7 +14765,9 @@ def orch_resume_audit(data):
     or its absence is left byte-identical, and an audit with findings still returns its warning naming
     them, which then says the barrier was not persisted (this audit did not arm it) and asks for a manual
     record instead of saying a re-run clears the barrier; a clean audit's failed clear adds no warning,
-    since the PreToolUse barrier notes a barrier left armed (where opening the forced-exit log fails other
+    since the PreToolUse barrier reads a barrier left armed as armed (noted once per arming where its warned
+    flag can be written, otherwise on each mutation outside the record surfaces: one whose warned flag is
+    already set stays armed and silent) and a directory in its place as armed, noted on each such mutation (where opening the forced-exit log fails other
     than as not-found, because the state directory cannot be searched or is not a directory, as with that
     regular file, the forced-exit probe adds its cannot-evaluate finding). The PreToolUse barrier (orch_resume_barrier) reads the file only where
     _orch_registry reads ok; tools/orch_doctor.py --resume-audit writes it through the same helper and
@@ -14567,7 +14813,9 @@ def orch_resume_audit(data):
     except (OSError, ValueError) as exc:
         # never wedge SessionStart: the previous barrier file (or its absence) is left unchanged. A failed
         # ARM is named in the warning below; a clean audit's failed CLEAR stays silent here, because the
-        # PreToolUse barrier reads a barrier still armed (or a directory in its place) as armed and notes it
+        # PreToolUse barrier reads a barrier still armed as armed (noted once per arming where its warned flag
+        # can be written, otherwise on each mutation; one already warned about stays silent) and a directory
+        # in its place as armed (noted on each mutation)
         unwritten = type(exc).__name__
     if findings:
         tail = _orch_warn_tail(_orch_event_warn(root, "resume-audit", "findings",
@@ -14576,10 +14824,16 @@ def orch_resume_audit(data):
             nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
                    "acknowledgement alone does not clear it.")
         else:
-            nxt = ("then re-run 'python3 tools/orch_doctor.py --resume-audit' once the state directory "
-                   "is writable. Additionally, the resume barrier could not be written ({}), so it was "
+            # a directory at the barrier path cannot be replaced by either audit, so it must be removed;
+            # any other failure needs a state directory that can be created and written
+            remedy = ("remove the directory at the barrier path {} (neither audit can replace a directory), "
+                      "then re-run 'python3 tools/orch_doctor.py --resume-audit'".format(barrier_path)
+                      if unwritten == "IsADirectoryError" else
+                      "re-run 'python3 tools/orch_doctor.py --resume-audit' once the state directory can be "
+                      "created and written")
+            nxt = ("then {}. Additionally, the resume barrier could not be written ({}), so it was "
                    "not persisted: this audit did not arm it (any earlier barrier file is left unchanged); "
-                   "record these findings manually (nocncl).".format(unwritten))
+                   "record these findings manually (nocncl).".format(remedy, unwritten))
         return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
                           "observed reality: {}. Correct the record, or for a truncation guard finding "
                           "the condition it names (for example a directory's permissions, or the "
@@ -15634,11 +15888,11 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
-# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
-# emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
-# exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
-# fails closed via exit 2 on error.
+# re-fire on the forced continuation and wedge the session (an error path keeps no loop bound and reads no
+# stop_hook_active field), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a
+# handler crash) it emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is
+# the intended exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse
+# handler fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -15686,9 +15940,9 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
-    # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
-    # still fails closed (exit 2).
+    # wedge the session (an error path keeps no loop bound and reads no stop_hook_active field), so a
+    # bad-argv Stop invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv
+    # PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),

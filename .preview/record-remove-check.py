@@ -13,8 +13,12 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
     python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
-    deny object plus a short systemMessage. Exit status: always 0; the decision travels in the JSON. The
-    verdict is deny or silence: this hook never asks.
+    deny object plus a short systemMessage. Exit status: 0, with the decision in the JSON, except the floor
+    guard's exit 2 on an interpreter older than Python 3.14 that can start the hook; one that cannot start it
+    exits with Python's own status first (THREAT MODEL). These exits hold while the hook's output (its
+    diagnostic on stderr, and what it prints on stdout) can be written and flushed. A failing output stream
+    can change the exit status and can lose output, a decision included; a separate fix in progress addresses
+    this. The verdict is deny or silence: this hook never asks.
 
 CONFIGURATION
     The store is named by the environment variable AIQT_STORE_ROOT or, only when that name is not set at all,
@@ -116,11 +120,13 @@ THREAT MODEL
     The one exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top
     of this file reads no input, writes one line beginning
     `error: record-remove-check.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse
-    treats as a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An
-    older interpreter that cannot start the hook never reaches the guard and fails with Python's own error
-    first. For this hook that is only one that predates the -I option, and it exits 2, which still denies
-    every Bash call: this file uses no syntax newer than Python 3.4, so any interpreter that accepts -I
-    reaches the guard. .preview/README.md (Installing a hook, step 4) describes those cases.
+    treats as a deny, so every Bash call the launch line hands to Python is denied until Python is upgraded or
+    the hook's entry is removed, under the output condition WHAT IT DOES states. An older interpreter that
+    cannot start the hook never reaches the guard and fails with Python's own error first. For this hook that
+    is only one that predates the -I option, and it exits 2, which still denies every Bash call the launch line
+    hands to Python: this file uses no syntax newer than Python 3.4, so any interpreter that accepts -I reaches
+    the guard. .preview/README.md (Installing a hook, step 4) describes those cases and its launch line, which
+    skips the hook, so the call goes ahead, when a standard stream is a directory.
     The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a tool_name other than Bash, for an event other than PreToolUse, for a
@@ -2031,7 +2037,8 @@ def _decide(payload, env):
 def _emit_line(text):
     """Write one line to stdout and flush it. On any output failure (a closed pipe, a full device, no stdout at
     all) point descriptor 1 at /dev/null, so the interpreter's shutdown flush cannot fail either; if even that
-    rescue fails, end the process at once with status 0 (no retry flush): the hook always exits 0."""
+    rescue fails, end the process at once with status 0 (no retry flush): past the floor guard, which an
+    interpreter that cannot start the hook never reaches, the hook always exits 0."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -2047,7 +2054,8 @@ def _emit_line(text):
 
 
 def main(argv):
-    """The hook: always 0, output only a deny line. `--self-test` alone runs the self-test instead."""
+    """The hook, reached only past the floor guard: always 0, output only a deny line. `--self-test` alone runs
+    the self-test instead."""
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(a, str) for a in argv):
         return 0  # a bad argv: fail open, reading nothing
     if len(argv) > 1:  # only the plain call and an exact --self-test; any other argv fails open, reading nothing

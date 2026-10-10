@@ -157,13 +157,19 @@
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
       <code>render --check</code> uses exit 1 for drift; <code>render --write</code> can also exit 1
-      on a finding. The retired <code>import</code> modes always exit 2. Mutating commands can also
+      on a finding. The retired <code>import</code> modes exit 2. Mutating commands can also
       exit 2 on a refusal
       or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
       checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
       <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
       failure at render or doctor leaves the changes in place for recovery. <code>record</code> uses
       only exit 0 and exit 2.
+      These statuses assume an interpreter that meets the reference tooling's Python floor. An older
+      interpreter stops before any command runs: one that can start the CLI refuses with exit 2, and
+      one too old to compile it fails with Python's own error and status. Each status here holds while
+      the CLI's output (its diagnostics on standard error, and what it prints on standard output) can
+      be written and flushed. A failing output stream can change the exit status and can lose output;
+      a separate fix in progress addresses this.
       Where a command is aimed at a directory that has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
       <code>absorb</code>) report NOT APPLICABLE and exit 0. The commands documented one by one below
