@@ -127,9 +127,12 @@ Legs, in order:
                  the canonical refusal or a plain fallback. The canonical refusal is a grammar,
                  matched statement by statement (is_canonical_fallback):
                      if <exc>.name != "<module>":   optional; only in `except ModuleNotFoundError as
-                         raise                      <exc>` or `except ImportError as <exc>`, and only
-                                                    when the try's body is exactly `import <module>`
-                                                    with <module> undotted (the module it guards)
+                         raise                      <exc>` or `except ImportError as <exc>` (a named
+                                                    handler) of a plain try, not a try/except* (its
+                                                    handler receives an ExceptionGroup, which has no
+                                                    .name), and only when the try's body is exactly
+                                                    `import <module>` with <module> undotted (the
+                                                    module it guards)
                      import os                      required: it binds the os that os._exit reads
                      NAME = "<string literal>"      zero or more; NAME is not os, sys, BaseException
                                                     or tuple
@@ -145,9 +148,13 @@ Legs, in order:
                  exactly that try. <message> is a string literal, an f-string whose replacement
                  fields are each a plain {NAME} with no format spec (a conversion such as !r is
                  allowed), a NAME, or a + concatenation of those, each NAME bound by a binding
-                 above. The grammar admits no other call, keyword argument, unpacking, operator or
-                 name, so while os, sys, tuple and BaseException name what they normally do (the
-                 residual below), evaluating the message and the version test calls no user code:
+                 above. The handler's own `as` name, when it has one, is not os, sys, BaseException
+                 or tuple, and the module binds sys by a module-level `import sys` statement that
+                 ends before the try begins (an aliased import, one inside a function, class, branch
+                 or try, and one after the try do not count). The grammar admits no other call,
+                 keyword argument, unpacking, operator or name, so while os, sys, tuple and
+                 BaseException name what they normally do (the residual below), evaluating the
+                 message and the version test calls no user code:
                  neither can end the process, close a stream or raise an error of its own. A plain
                  fallback holds, at import time, no call, raise, try, with, await, yield or assert,
                  no decorated definition and no class with bases or keywords (`NAME = None`, `pass`,
@@ -162,11 +169,16 @@ Legs, in order:
                  lost), a missing os._exit (the handler falls through), a message or version test
                  outside the grammar (a call there can exec a clean exit, close sys.stderr or raise),
                  a re-raise naming another module (the guarded module's own import error is
-                 re-raised, exit 1), a missing `import os` (a NameError, exit 1) and any extra
-                 statement. "Import time" follows _import_time_nodes: a class body runs when its
-                 class statement runs and is scanned, as are a def's decorators and a def's or
-                 lambda's default values; a function or lambda body (a method's included) runs only
-                 when called and is not scanned.
+                 re-raised, exit 1), a re-raise in an unnamed handler, after a from-import or under
+                 except* (it reads None.name, re-raises every import error, or reads the missing
+                 .name of an ExceptionGroup: exit 1), an `as` name that rebinds os, sys,
+                 BaseException or tuple, a sys with no module-level `import sys` before the try (a
+                 NameError: exit 1 in the version split, a diagnostic lost inside the wrapping try
+                 otherwise), a missing `import os` (a NameError, exit 1) and any extra statement.
+                 "Import time" follows _import_time_nodes: a class body runs when its class
+                 statement runs and is scanned, as are a def's decorators and a def's or lambda's
+                 default values; a function or lambda body (a method's included) runs only when
+                 called and is not scanned.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
@@ -241,13 +253,16 @@ a disclosed over-rejection: state the floor without naming older versions. The f
 AST match, a disclosed residual: it judges only a try whose own body holds an import statement, so a
 refusal in another import-time construct (a module-level if, a try around a call such as the MAP_KEYS
 binding in tools/gen_rules.py, whose refusal that tool's self-test pins by execution instead) is not
-judged. It does not resolve names: an os, sys, tuple or BaseException rebound before the handler runs
-(the grammar refuses such a binding only inside the handler), a sys.stderr replaced by an object whose
-write or flush runs its own code (the grammar fixes the calls, not the stream; the wrapping try
-catches what they raise, but one that ends the process is not seen), an operator, attribute,
-subscript or iteration that runs user code in a plain fallback, a metaclass hook of a class whose body
-holds the fallback, and code an imported module runs (the handler's `import os` included) are not
-seen.
+judged. It does not resolve names beyond the bindings it names: an os, sys, tuple or BaseException
+rebound after the module-level `import sys` and before the handler runs, the try's own body included
+(the grammar refuses such a binding only in the handler's body and its `as` clause, and requires that
+an `import sys` precede the try, not that nothing rebinds sys after it), a sys.stderr replaced by an
+object whose write or flush runs its own code (the grammar fixes the calls, not the stream; the
+wrapping try catches what they raise, but one that ends the process is not seen), an implicit
+special-method call that runs user code in a plain fallback (an operator, attribute, subscript or
+iteration, f-string formatting through __format__ or a truth test through __bool__, among others), a
+metaclass hook of a class whose body holds the fallback, and code an imported module runs (the
+handler's `import os` included) are not seen.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
@@ -1384,7 +1399,9 @@ FALLBACK_GUIDANCE = ("refuse only through the canonical grammar: `import os`, th
                      "`if tuple(sys.version_info[:2]) < (<int literals>):` whose if and else branches are "
                      "each that try), then os._exit(2) or os._exit(1), as GUARD_TEMPLATE does; the "
                      "message is a string literal, an f-string or a + concatenation whose parts are "
-                     "string literals and names bound to string literals in the handler")
+                     "string literals and names bound to string literals in the handler; sys is "
+                     "bound by a module-level `import sys` before the try, and the handler's `as` "
+                     "name is not os, sys, BaseException or tuple")
 # The names the canonical grammar reads (the exit's os, the stream's sys, the diagnostic handler's
 # BaseException and the version test's tuple): a message binding may not rebind one of them.
 FALLBACK_SHAPE_NAMES = frozenset(("os", "sys", "BaseException", "tuple"))
@@ -1435,6 +1452,21 @@ def _is_import_os(stmt):
     """True when stmt is exactly `import os`, which binds the name the exit's os._exit reads."""
     return isinstance(stmt, ast.Import) and [(alias.name, alias.asname)
                                              for alias in stmt.names] == [("os", None)]
+
+
+def _is_import_sys(stmt):
+    """True when stmt is exactly `import sys`, which binds the name the diagnostic and the version
+    test read."""
+    return isinstance(stmt, ast.Import) and [(alias.name, alias.asname)
+                                             for alias in stmt.names] == [("sys", None)]
+
+
+def _sys_bound_before(tree, try_node):
+    """True when a module-level statement of tree that ends before try_node begins is exactly
+    `import sys` (_is_import_sys). Module-level statements run in order, and a try nested in one (a
+    class body's) runs while that statement runs, so such an import has bound sys by then. An import
+    in a function, a class, a branch or a try, an aliased one and one after the try do not count."""
+    return any(_is_import_sys(stmt) and stmt.end_lineno < try_node.lineno for stmt in tree.body)
 
 
 def _literal_binding(stmt):
@@ -1530,23 +1562,29 @@ def _is_other_module_reraise(stmt, handler, guarded):
     """True when stmt is exactly `if <exc>.name != "<guarded>": raise` in an
     `except ModuleNotFoundError as <exc>` or `except ImportError as <exc>` handler, with guarded the
     module the fallback guards (_guarded_module): it hands an import error for any other module back
-    unchanged, so only the guarded module's absence refuses."""
-    return isinstance(handler.type, ast.Name) and handler.type.id in ("ModuleNotFoundError", "ImportError") \
+    unchanged, so only the guarded module's absence refuses. An unnamed handler and a None guarded
+    (no single undotted import, or a try/except*, whose handler receives an ExceptionGroup with no
+    .name) never match: the comparison would read None.name, or compare <exc>.name with None."""
+    return guarded is not None and handler.name is not None \
+        and isinstance(handler.type, ast.Name) and handler.type.id in ("ModuleNotFoundError", "ImportError") \
         and isinstance(stmt, ast.If) and _dump(stmt.test) == _dump(ast.parse(
             "{}.name != {!r}".format(handler.name, guarded), mode="eval").body) \
         and len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Raise) and stmt.body[0].exc is None \
         and not stmt.orelse
 
 
-def _canonical_departure(handler, guarded):
+def _canonical_departure(handler, guarded, sys_bound):
     """None when an import-fallback handler's body is exactly the canonical refusal: an optional
     re-raise naming the guarded module (_is_other_module_reraise), `import os`, any literal bindings
     (_literal_binding), the canonical diagnostic over the names they bind (_is_diagnostic), then
     os._exit. Otherwise the line of the first statement that departs from it (the handler's last line
-    when a required statement is missing). Every statement is matched whole, so a re-raise naming
-    another module, a missing `import os`, a message or version test outside the grammar, a re-raise
-    in the diagnostic's handler, a flush before the write, a missing flush, a write to another stream,
-    an extra statement anywhere or a missing os._exit departs."""
+    when a required statement is missing), or the handler's own line when its `as` name is one of
+    FALLBACK_SHAPE_NAMES or sys_bound (_sys_bound_before) is false. Every statement is matched whole,
+    so a re-raise naming another module, a missing `import os`, a message or version test outside the
+    grammar, a re-raise in the diagnostic's handler, a flush before the write, a missing flush, a
+    write to another stream, an extra statement anywhere or a missing os._exit departs."""
+    if handler.name in FALLBACK_SHAPE_NAMES or not sys_bound:
+        return handler.lineno
     body = list(handler.body)
     if body and _is_other_module_reraise(body[0], handler, guarded):
         body = body[1:]
@@ -1566,10 +1604,12 @@ def _canonical_departure(handler, guarded):
     return body[index].lineno if index < len(body) else None
 
 
-def is_canonical_fallback(handler, guarded):
+def is_canonical_fallback(handler, guarded, sys_bound):
     """True when an import-fallback handler's body is exactly the canonical refusal
-    (_canonical_departure); guarded is the module its try imports (_guarded_module)."""
-    return _canonical_departure(handler, guarded) is None
+    (_canonical_departure); guarded is the module its plain try imports (_guarded_module, None for a
+    try/except*) and sys_bound whether a module-level `import sys` precedes the try
+    (_sys_bound_before)."""
+    return _canonical_departure(handler, guarded, sys_bound) is None
 
 
 def _fallback_action(handler):
@@ -1592,10 +1632,10 @@ def _fallback_action(handler):
     return min(found)[::2] if found else None
 
 
-def _fallback_handler_findings(rel, handler, guarded):
+def _fallback_handler_findings(rel, handler, guarded, sys_bound):
     """A finding when one import-fallback handler is neither the canonical refusal
     (is_canonical_fallback) nor a plain fallback that cannot end the process (_fallback_action)."""
-    departure = _canonical_departure(handler, guarded)
+    departure = _canonical_departure(handler, guarded, sys_bound)
     action = None if departure is None else _fallback_action(handler)
     if action is None:
         return []
@@ -1619,9 +1659,10 @@ def fallback_findings(root):
             for node in _import_time_nodes(tree.body):
                 if isinstance(node, (ast.Try, ast.TryStar)) and any(
                         isinstance(item, (ast.Import, ast.ImportFrom)) for item in node.body):
-                    guarded = _guarded_module(node)
+                    guarded = _guarded_module(node) if isinstance(node, ast.Try) else None
+                    sys_bound = _sys_bound_before(tree, node)
                     for handler in node.handlers:
-                        findings.extend(_fallback_handler_findings(rel, handler, guarded))
+                        findings.extend(_fallback_handler_findings(rel, handler, guarded, sys_bound))
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
     return findings
@@ -2418,9 +2459,10 @@ def _self_test_cases(base):
                        "            sys.stderr.flush()\n        except BaseException:\n            pass\n")
 
     def fallback_split(test="tuple(sys.version_info[:2]) < (3, 14)", body=fallback_branch,
-                       orelse="    else:\n" + fallback_branch):
-        """The canonical refusal whose diagnostic is the version split, its if statement on line 7."""
-        return fallback_head + "    import os\n    if " + test + ":\n" + body + orelse + "    os._exit(2)\n"
+                       orelse="    else:\n" + fallback_branch, head=fallback_head):
+        """The canonical refusal whose diagnostic is the version split, its if statement on line 7
+        with the default head."""
+        return head + "    import os\n    if " + test + ":\n" + body + orelse + "    os._exit(2)\n"
 
     def fallback_reraise(reraise="    if exc.name != \"tomllib\":\n        raise\n",
                          handler="except ModuleNotFoundError as exc:", guarded="    import tomllib\n"):
@@ -2557,6 +2599,40 @@ def _self_test_cases(base):
         (fallback_reraise(guarded="    from tomllib import loads\n",
                           reraise="    if exc.name != \"loads\":\n        raise\n"), 6),
         (fallback_reraise(guarded="    import tomllib\n    import json\n"), 7))], [(1, True)] * 14)
+    # The round-4 QA MEDIUM: a re-raise in an unnamed handler reads None.name, one after a from-import
+    # compares exc.name with None (every import error is re-raised), and one under except* reads the
+    # .name an ExceptionGroup lacks; each exits 1 without the diagnostic.
+    check("fallback/reraise-binding-findings", [fallback_case(source, 6) for source in (
+        fallback_reraise(handler="except ModuleNotFoundError:",
+                         reraise="    if None.name != \"tomllib\":\n        raise\n"),
+        fallback_reraise(guarded="    from tomllib import loads\n",
+                         reraise="    if exc.name != None:\n        raise\n"),
+        fallback_reraise(handler="except* ModuleNotFoundError as exc:"))], [(1, True)] * 3)
+
+    def fallback_named(name, prefix="import sys\n\n"):
+        """The head of a fallback whose handler binds name, the handler on line 5 with the default
+        prefix."""
+        return prefix + "try:\n    import tomllib\nexcept ModuleNotFoundError" + name + ":\n"
+
+    # The round-4 QA MINOR 2: the handler's `as` clause rebinds a name the grammar reads (as sys the
+    # diagnostic is never written, or the version split exits 1; as tuple the split exits 1; as
+    # BaseException the wrapping try catches nothing). An `as os` is refused with them, though the
+    # handler's `import os` rebinds os.
+    check("fallback/handler-name-findings", [fallback_case(source, 5) for source in (
+        fallback_refusal(head=fallback_named(" as sys")), fallback_split(head=fallback_named(" as sys")),
+        fallback_split(head=fallback_named(" as tuple")),
+        fallback_refusal(head=fallback_named(" as BaseException")),
+        fallback_refusal(head=fallback_named(" as os")))], [(1, True)] * 5)
+    # The round-4 QA MINOR 3: sys is bound by a module-level `import sys` before the try. With none,
+    # with one after the try, an aliased one or one in a function body, the plain diagnostic's
+    # NameError is swallowed (the diagnostic is lost) and the version split's exits 1.
+    check("fallback/sys-binding-findings", [fallback_case(source, 5) for source in (
+        fallback_refusal(head=fallback_named("", "import json\n\n")),
+        fallback_split(head=fallback_named("", "import json\n\n")),
+        fallback_split(head=fallback_named("", "import json\n\n")) + "\nimport sys\n",
+        fallback_refusal(head=fallback_named("", "import json\n\n")) + "\nimport sys\n",
+        fallback_refusal(head=fallback_named("", "import sys as _sys\n\n")),
+        fallback_refusal(head=fallback_named("", "def load():\n    import sys\n")))], [(1, True)] * 6)
     # A plain fallback holds none of these at import time; each is a finding.
     check("fallback/plain-fallback-action-findings", [
         fallback_case(fallback_head + body, line) for body, line in (
@@ -2596,7 +2672,11 @@ def _self_test_cases(base):
                          after="    os._exit(1)\n"),
         "import sys\n\ntry:\n    import fcntl\nexcept ImportError:\n    fcntl = None\n",
         "import sys\n\ntry:\n    from x import root\nexcept Exception:\n    def root():\n"
-        "        return sys.exit(2)\n")], [(0, False)] * 7)
+        "        return sys.exit(2)\n",
+        "import json\n\ntry:\n    import fcntl\nexcept ImportError as sys:\n    fcntl = None\n",
+        "import sys\n\n\nclass Loader:\n    try:\n        import tomllib\n    except ModuleNotFoundError:\n"
+        + "".join("    " + line + "\n" for line in (fallback_wrapped + "    os._exit(2)\n").splitlines()))],
+        [(0, False)] * 9)
     check("fallback/function-body-not-scanned-passes", fallback_case(
         "import sys\n\n\ndef load():\n    try:\n        import tomllib\n"
         "    except ModuleNotFoundError:\n        sys.stderr.write(\"x\\n\")\n"
