@@ -628,6 +628,7 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
             results = dict(pool.map(run, prepared))
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+    _refuse_member_timeouts(results)
     marker.write_bytes(b"")
     monitor_marker.write_bytes(b"")
     return results
@@ -1296,7 +1297,7 @@ def _config_injection_lane(base):
         (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
         (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
         monitor_marker.write_bytes(b"")
-        rc = _run_config_member((member, "--self-test"), env)
+        rc = _member_rc_or_refuse((member, "--self-test"), env)
         check(fs_rc_id, rc, 0)
         check(fs_marker_id, monitor_marker.read_bytes(), b"")
     (home / ".gitconfig").write_text(malformed, encoding="utf-8")
@@ -1363,16 +1364,81 @@ def _config_injection_lane(base):
     return system_results
 
 
+# The per-member execution bound, sized per the kill-timeout rule: a bound
+# meant to let a member FINISH sits above that member's own end-to-end budget
+# plus a margin, never at it. The slowest registered member (opf/tools/opf.py
+# --self-test) measured 240-300 s alone on a quiet 16-CPU host (loadavg ~8,
+# 2026-10-10); each lane runs members four wide on an already loaded shared
+# host, where the same member overran the old flat 1200 s bound (observed
+# 2026-10-10 at loadavg ~21). 2400 s is >=8x the measured quiet base. The
+# bound stays a LIVENESS bound only: its expiry is never member evidence (see
+# MemberTimeout below), so raising it trades only detection latency.
+_MEMBER_BOUND_SECONDS = 2400
+
+
+class MemberTimeout:
+    """A registered member STILL RUNNING when _MEMBER_BOUND_SECONDS killed it.
+    Recorded as this sentinel and refused by _refuse_member_timeouts as the
+    suite's distinct cannot-evaluate (exit 2, the harness-error exit that
+    check_selftest_execution already treats as 'no verdict'), NEVER as member
+    evidence: an exposure finding must mean a member RAN and showed the wrong
+    behaviour, not that a loaded host kept one from finishing."""
+
+    def __init__(self, member, elapsed):
+        self.member = member
+        self.elapsed = elapsed
+
+    def __repr__(self):
+        return "cannot-evaluate: still running at {:.0f} s (bound {} s)".format(
+            self.elapsed, _MEMBER_BOUND_SECONDS)
+
+
 def _run_config_member(member, env):
+    import time
+    started = time.monotonic()
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
-                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
+                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace",
+                              timeout=_MEMBER_BOUND_SECONDS)
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
                   file=sys.stderr)
         return proc.returncode
+    except subprocess.TimeoutExpired:
+        # Ordered BEFORE the generic SubprocessError arm: a kill at the bound
+        # is scheduling, not evidence. Every other failure (OSError, a signal,
+        # a nonzero exit) stays member evidence and still becomes a finding.
+        return MemberTimeout(member, time.monotonic() - started)
     except (OSError, subprocess.SubprocessError) as exc:
         return str(exc)
+
+
+def _refuse_member_timeouts(results):
+    """FAIL CLOSED, DISTINCTLY, on every member its bound killed: print one
+    line per member with the bound, the elapsed time and the load average,
+    then exit 2 (the suite's cannot-evaluate/harness exit; the execution gate
+    refuses it as 'no verdict'), never compute got-vs-want findings over a
+    lane that holds no verdict for those members (three such false exposure
+    findings observed 2026-10-10 at loadavg ~21)."""
+    rows = sorted((argv, value[0]) for argv, value in results.items()
+                  if isinstance(value[0], MemberTimeout))
+    if not rows:
+        return
+    for argv, sentinel in rows:
+        print("SELF-TEST CANNOT EVALUATE: {} was still running when the {} s "
+              "per-member bound killed it (elapsed {:.0f} s, loadavg {}): this "
+              "lane holds no exposure verdict for it".format(
+                  " ".join(argv), _MEMBER_BOUND_SECONDS, sentinel.elapsed,
+                  os.getloadavg()), file=sys.stderr)
+    sys.exit(2)
+
+
+def _member_rc_or_refuse(member, env):
+    """_run_config_member for a SINGLE direct launch: the same distinct
+    cannot-evaluate refusal on a bound kill, before any check() comparison."""
+    rc = _run_config_member(member, env)
+    _refuse_member_timeouts({member: (rc,)})
+    return rc
 
 
 def _manifest_setup_failures(base):
@@ -1702,6 +1768,15 @@ def _opf_home_lifecycles(config_results):
                     got = (child.returncode, json.loads(child.stdout))
                 except ValueError:
                     got = (child.returncode, child.stdout, child.stderr)
+            except subprocess.TimeoutExpired:
+                # A probe still running at its bound is scheduling, not a
+                # lifecycle verdict: the same distinct cannot-evaluate as
+                # _refuse_member_timeouts, never a problems[] finding.
+                print("SELF-TEST CANNOT EVALUATE: lifecycle probe {}.{} was "
+                      "still running when its 60 s bound killed it (loadavg "
+                      "{}): no lifecycle verdict exists".format(
+                          module, entry, os.getloadavg()), file=sys.stderr)
+                sys.exit(2)
             except (OSError, subprocess.SubprocessError) as exc:
                 got = str(exc)
             results[module, entry] = got
