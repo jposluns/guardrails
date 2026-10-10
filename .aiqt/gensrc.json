@@ -80,7 +80,8 @@
       "regenerate": "python3 tools/gen_first_pin_demo.py",
       "sources": [
         "AGENTS.md",
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": ".aiqt/release/first-pin-demonstration.toml"
     },
@@ -156,7 +157,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_adapters.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": ".github/copilot-instructions.md"
     },
@@ -172,7 +174,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_agents.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": "AGENTS.md"
     },
@@ -214,7 +217,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_adapters.py",
       "sources": [
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        ".aiqt/core/adapter-blocks.toml"
       ],
       "target": "GEMINI.md"
     },

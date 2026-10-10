@@ -157,6 +157,7 @@ run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
+run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "first-pin-demo-selftest" python3 -I -B tools/gen_first_pin_demo.py --self-test
 run_gate "first-pin-demo-drift"    python3 -I -B tools/gen_first_pin_demo.py --check
