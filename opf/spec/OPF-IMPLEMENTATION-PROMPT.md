@@ -1139,6 +1139,16 @@ Build the primitives every later step relies on.
     alone, the command's exit status or the validator's verdict: a passing declaration check
     followed by no store write gives `fail`, and a refusal under a rule outside section 16.1 is not
     `cannot_evaluate` there.
+  - Scope, exclusions and cannot-evaluate results: these are not among the four parts, but section
+    16 says "Every report names its scope, its exclusions, and its cannot-evaluate results", and "A
+    report speaks in `conformant_for_declared_scope`, `nonconformant`, `indeterminate`, or
+    `migration_incomplete`, each qualified by whether it concerns the OPFiles **base** or a named
+    **profile**." So every report the emitter writes, for a run of any command or for a documented
+    run, names the scope that run evaluated, its exclusions and every cannot-evaluate result of that
+    run, and gives each result it states in those tokens, qualified as base or as a named profile.
+    It names an exclusion only as checklist item 19 allows, and for a declared profile your
+    implementation did not evaluate, as section 16 says, "the report names that profile as
+    unevaluated rather than implying whole-store coverage".
   This prompt's choice is that the emitter checks its own output before it writes it, and writes no
   report that carries `not-read` beside `pass` or `fail` or a digest in any other form.
 
@@ -1173,7 +1183,9 @@ Acceptance checks:
   installed, it carries the digest of that copy's bytes as its installed-copy digest and
   `cannot_evaluate`, and still restates the shipped declaration. Given `not-read` beside `pass` or
   `fail`, or a digest in uppercase, in the `sha256:` form or of 63 digits, the emitter writes no
-  report.
+  report. Each report above names its scope, its exclusions and its cannot-evaluate results, and
+  gives each result it states in the section 16 tokens, qualified as base or as a named profile;
+  with the installed copy absent, the cannot-evaluate result of that run is among those it names.
 
 ### Step 2: store resolution
 
@@ -2963,8 +2975,65 @@ not do:
 Whether a scaffold needs an adoption receipt is open point 14: report your ratified reading, and do
 not invent a receipt format.
 
-Then write the conformance report described in the checklist below, with the four parts that your
-step 1 report emitter writes (checklist item 20).
+Then write the conformance report described in the checklist below. It includes the report your
+step 1 report emitter writes for a documented run that the conformance report names, one of the
+reference runs below, with the four parts of checklist item 20; which run it carries is this
+prompt's choice.
+
+Before you claim conformance of a release, make attempts and reference runs of it; this is the
+acceptance step for checklist item 21. Section 16.1 defines them: "An attempt is the documented
+installation of a release, made by one checker in an unaltered execution environment, from the
+bytes the release ships and, for each installed file the release does not ship, from the source its
+documentation directs, followed by two successive documented runs of the runtime check and the
+emitter over that installation." and "A reference run of a release is a run of an attempt whose
+installed copy holds that file's bytes as the release ships them and is readable when the run
+starts." The same paragraph of section 16.1 defines an unaltered execution environment and an
+altered installation, and says "An attempt whose installation or execution environment anything
+else altered is not an attempt and establishes nothing."
+
+Check every attempt and every reference run against the two rules of section 16.1: "A release MUST
+be available: every attempt MUST complete the documented installation and yield two reference runs,
+so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an
+installed copy a documented run cannot read, an installation step an attempt cannot complete, and a
+first run whose writes leave the second run with an installed copy that no longer holds the shipped
+bytes are each a failure of this rule." and "A reference run of a release MUST NOT emit a report
+that deviates from the expected report, and its runtime check MUST NOT authorize any store
+operation where the expected runtime result is `cannot_evaluate` or where its admission check, the
+pre-scan included, refused the store that run resolved." Compare each reference run's report with
+the expected report section 16.1 fixes, whose parts the step 1 report emitter writes, and its
+runtime result with the store writes that run performed.
+
+Section 16.1 also says "Only a checker's own attempts and reference runs are evidence under the two
+rules above: a report of any other run or installation, altered or not, MUST NOT be presented as
+establishing or countering conformance of any release". This prompt's reading is that you, making
+your own attempts, are the checker those rules name. So a run of the step 1 or step 10 report
+checks is evidence under those rules only where it is a run of one of your attempts, and a run over
+a changed, absent or unreadable installed copy is never a reference run, by the definition above.
+
+Report every failure those runs show as section 16.1 requires: "A failure of either rule is shown
+for a checker where one of its own attempts or reference runs shows it, and established for that
+checker where a second of its own attempts or reference runs, made on the same platform and
+version, shows a failure of the same rule and, under the reference-run rule, in the same part, the
+four compared parts of the report and the store and base-result parts below each one part; attempts
+and reference runs that show no failure, however many there are, never counter a shown or
+established failure." It also says "An availability failure is shown by a failed attempt and
+established by a second failed attempt of the same checker on the same platform and version; it
+has no part, so the same-part condition does not apply to it." and "A checker that reports on a
+shown failure MUST report it as established or, where its own evidence has shown it and not
+reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and
+reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
+shown one, as conformance of the release." Of an attempt whose eligibility the checker cannot
+determine, it says "a failure that only such attempts show MUST be reported as unresolved, never as
+established", and of a run for which the checker cannot determine whether it observed every write,
+"a result-part or store-part failure that only those two comparisons of such runs could show MUST be
+reported as unresolved, never as established".
+
+Section 16.1 then says "A release for which a checker's own evidence establishes a failure of
+either rule does not conform to this section, and that checker MUST NOT make a conformance claim for
+it; a conformance claim under this section MUST name the attempts and reference runs it rests on."
+So the conformance claim you write names each attempt and each reference run it rests on; naming
+the platform and version of each is this prompt's choice. A shown failure, established or
+unresolved, fails checklist item 21, so you do not claim conformance.
 
 ## Final conformance checklist
 
@@ -3064,7 +3133,9 @@ maintainer's ruling on an open point, report the ruling with it.
     forms that section fixes, as the step 1 report emitter builds them: the restatement of the
     declaration as the release ships it, each digest as 64 lowercase hexadecimal digits, the
     installed-copy digest `not-read` only beside `cannot_evaluate`, and the runtime result read over
-    the store operations the run performed; the report checks of steps 1 and 10 passed.
+    the store operations the run performed, and every report names its scope, its exclusions and
+    its cannot-evaluate results as step 1 describes (section 16); the report checks of steps 1 and
+    10 passed.
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
     identity included, every command that reads, grades or writes a store, `opf init`,
     `opf upgrade`, `opf record` and the step 13 and step 14 checks included, stops with
@@ -3074,6 +3145,14 @@ maintainer's ruling on an open point, report the ruling with it.
     of its own bytes, they proceed as upgrade-capable, as section 16.1 requires: "An implementation
     whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade
     requirement binds it".
+21. Each release was installed and run as step 15 describes, and its conformance claim names the
+    attempts and reference runs it rests on, as section 16.1 requires: "a conformance claim under
+    this section MUST name the attempts and reference runs it rests on". Every attempt completed
+    the documented installation and yielded two reference runs, no reference run emitted a report
+    that deviates from the expected report or authorized a store operation the reference-run rule
+    forbids, and no attempt or reference run showed a failure of either rule. A shown failure fails
+    this item and is reported as established or unresolved, naming the platform, the version, and
+    the attempts and reference runs behind that state.
 
 ## Out of scope for this prompt
 
