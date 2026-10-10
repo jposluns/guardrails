@@ -14209,11 +14209,19 @@ def _init_echo(line, err=False):
     a name that shadows a rostered external base (builtins and the five pinned
     module imports) at module level or inside a reachable function, any rebinding
     of this emitter or of the renderers, str.__new__ spelled anywhere outside
-    _InitRestoreLine itself, any raise in _cmd_init outside the one handled try
-    unless it raises _InitPriorStoreRefusal (whose constructor renders, so even an
-    escaping traceback shows rendered values), and any _InitRestoreLine or
-    _InitPriorStoreRefusal construction whose template (the remedy template
-    included) is not a string literal or a name bound only to string literals. A
+    _InitRestoreLine itself, any assert statement in any reachable function, any
+    departure of _cmd_init from the pinned last-resort boundary shape and any
+    raise or assert inside it, any raise in _init_main outside the one handled
+    try unless it constructs _InitPriorStoreRefusal with no raise ... from cause
+    (an escaping cause would print raw in a chained traceback; _cmd_init's
+    last-resort boundary now catches whatever escapes, so no traceback is
+    printed at all, and the init suite pins that wrapper's exact bytes), and any
+    _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
+    remedy template included) is not a string literal or a name that the
+    constructing function's OWN scope binds only by plain assignments of string
+    literals, with no nested def, lambda or match capture binding (QA round 10
+    MAJOR 2: the round-9 rule counted a binding a match capture hid from it and
+    a nested-def binding that did not bind the outer read). A
     spelled output route (subprocess.run, os.system, os.write, os.writev, open,
     Path(...).write_text, sys.exit, SystemExit, input, traceback, pprint,
     sys.displayhook, an alias to an out-of-graph helper, an import alias such as
@@ -14257,17 +14265,22 @@ def _init_inert_json(value):
 class _InitRestoreLine(str):
     """One physical line of a prior-store refusal's restore and detail block: a str
     whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
-    literal, or a name every binding of which is a string literal (the route gate
-    refuses any other construction), and EVERY value is rendered through _init_inert
+    literal, or a name the constructing function's own scope binds only by plain
+    assignments of string literals, with no nested def, lambda or match capture
+    binding (the route gate refuses any other construction; QA round 10 MAJOR 2:
+    the round-9 rule counted bindings it could not see or that did not bind the
+    read), and EVERY value is rendered through _init_inert
     before it is formatted in, with no exception and no pass-through of any kind (QA
     round 9, requirement B: the round-8 constructor passed a value of the exact
     _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
     around a raw string); a value already proven bare renders unchanged, so rendering
     it again is the identity, and every bare-word restore command stays
     byte-identical. A line this constructor produced carries a private slot marker
-    set only here, AFTER its values were rendered: the marker is the proof of
-    rendering the refusal constructor and the refusal handler accept, and an
-    instance minted around this constructor (str.__new__) lacks the slot and is
+    set only here, AFTER its values were rendered: the marker proves that the
+    VALUES formatted into the line went through this constructor's renderer (the
+    template's own shape is the route gate's charge, never the marker's), it is
+    what the refusal constructor and the refusal handler accept, and an instance
+    minted around this constructor (str.__new__) lacks the slot and is
     re-rendered wherever it arrives."""
 
     __slots__ = ("_opf_line_rendered",)
@@ -14499,15 +14512,18 @@ def _init_no_prior_store(git, repo, root):
         (one `log` walk over the same escaped glob pathspecs as the main scan, read
         under the shared hardened runner and its output bound, whose overflow refuses
         like every other unreadable answer), so a machine subdirectory deleted WHOLE in
-        an earlier commit is still disclosed. The walk reads --name-status with rename
-        detection, newest first, and its records are parsed from git's NUL-delimited
+        an earlier commit is still disclosed. The walk reads --raw (with --no-abbrev)
+        with rename detection, newest first, and its records are parsed from git's NUL-delimited
         token stream positionally, by record arity, so a byte a committed filename may
         legally hold (QA round 9 codex MEDIUM: the 0x01 header sentinel) never splits
         a record: a header is read only at a record boundary, where every path token
         was already consumed. A structural file whose NEWEST first-parent change at or
         before <commit> renamed it counts at its destination INSTEAD OF its old path
-        only when the rename is exact (similarity 100, so no byte changed in the
-        move), no older first-parent record touched the destination path, and the
+        only when the record's destination blob id EQUALS its source blob id, as the
+        --raw record carries both (git's similarity score of 100 does NOT prove the
+        bytes unchanged: the score is computed over a multiset of line hashes, so
+        reordered lines still score 100 while the blobs differ, QA round 10 MINOR 3),
+        no older first-parent record touched the destination path, and the
         renaming commit's own tree holds no structural file under the source
         subdirectory (one ls-tree probe per rename record, read like every other
         answer here); so a machine subdirectory renamed whole with git mv survives
@@ -14543,8 +14559,8 @@ def _init_no_prior_store(git, repo, root):
             parts = name.split(b"/")
             if len(parts) == 2 and parts[0] and parts[1] in required:
                 stores.add(parts[0])
-        touched = read(["log", "--first-parent", "--format=%x01%H", "--name-status",
-                        "--find-renames", "-z", commit, "--"]
+        touched = read(["log", "--first-parent", "--format=%x01%H", "--raw",
+                        "--no-abbrev", "--find-renames", "-z", commit, "--"]
                        + [":(glob)" + _init_glob_escape(working_rel) + "/*/"
                           + _init_glob_escape(os.fsdecode(want)) for want in required])
         prefix = os.fsencode(working_rel) + b"/"
@@ -14572,11 +14588,14 @@ def _init_no_prior_store(git, repo, root):
         # header (the 0x01-led token the %x01%H format prints) is accepted only at
         # a record boundary, where the arity of every prior record has already
         # consumed its path tokens, and a path token is consumed by arity, never
-        # inspected as a header or status. git prints one newline between a
-        # header's NUL and the commit's first record, so the token at a boundary
-        # may carry one leading newline (and carries ONLY the next header after it
-        # when a listed commit has no records). Any other or unparseable token
-        # shape refuses.
+        # inspected as a header or meta token. Each --raw meta token is
+        # ":<old mode> <new mode> <old blob id> <new blob id> <status>", exactly
+        # five space-separated fields (both blob ids validated like every other
+        # object id here), and the record's path tokens follow by status arity.
+        # git prints one newline between a header's NUL and the commit's first
+        # record, so the token at a boundary may carry one leading newline (and
+        # carries ONLY the next header after it when a listed commit has no
+        # records). Any other or unparseable token shape refuses.
         tokens = touched.out.split(b"\0")
         if tokens and tokens[-1] == b"":
             tokens.pop()
@@ -14594,31 +14613,47 @@ def _init_no_prior_store(git, repo, root):
                 continue
             if not commits:
                 raise RuntimeError(
-                    "git history preflight: --name-status output does not begin "
+                    "git history preflight: --raw output does not begin "
                     "with a commit header ({}); refusing".format(ascii(boundary)))
             records = commits[-1][1]
             paths = commits[-1][2]
-            status = boundary
+            meta = boundary
+            fields = meta.split(b" ")
+            if meta[:1] != b":" or len(fields) != 5:
+                raise RuntimeError(
+                    "git history preflight: unparseable --raw record {}; "
+                    "refusing".format(ascii(meta)))
+            status = fields[4]
+            # The blob ids are validated like every other object id this scan
+            # reads, fail-closed; a rename record releases its source below ONLY
+            # when they are EQUAL and not the all-zero id git uses for an absent
+            # side, because git's similarity score of 100 does not prove the
+            # bytes unchanged (QA round 10 MINOR 3: reordered lines score 100
+            # while the blobs differ).
+            old_blob = oid(fields[2])
+            new_blob = oid(fields[3])
+            same_blob = old_blob == new_blob and set(old_blob) != {"0"}
             if status[:1] in (b"R", b"C"):
                 if index + 2 > len(tokens) - 1:
                     raise RuntimeError(
                         "git history preflight: truncated rename record {}; "
                         "refusing".format(ascii(status)))
-                records.append((status, tokens[index + 1], tokens[index + 2]))
+                records.append((status, tokens[index + 1], tokens[index + 2],
+                                same_blob))
                 paths.add(tokens[index + 1])
                 paths.add(tokens[index + 2])
                 index += 3
             elif status in (b"A", b"M", b"D", b"T"):
                 if index + 1 > len(tokens) - 1:
                     raise RuntimeError(
-                        "git history preflight: truncated --name-status record "
+                        "git history preflight: truncated --raw record "
                         "{}; refusing".format(ascii(status)))
-                records.append((status, None, tokens[index + 1]))
+                records.append((status, None, tokens[index + 1], same_blob))
                 paths.add(tokens[index + 1])
                 index += 2
             else:
                 raise RuntimeError(
-                    "git history preflight: unexpected --name-status status {}; "
+                    "git history preflight: unexpected --raw status {}; "
                     "refusing".format(ascii(status)))
 
         def source_left(commit_id, subdir):
@@ -14638,8 +14673,11 @@ def _init_no_prior_store(git, repo, root):
         # newest change at or before <commit> and decides it. A rename record
         # releases its SOURCE, counting the file at its destination only (QA
         # round 8 MINOR 4: git mv of a machine subdirectory must not read as
-        # PARTIAL), ONLY when the rename is exact (R100: the destination's bytes
-        # are the source's, so nothing was reset in the move), its destination is
+        # PARTIAL), ONLY when the record is R100 AND its destination blob id
+        # EQUALS its source blob id (QA round 10 MINOR 3: the similarity score
+        # is computed over a multiset of line hashes, so reordered lines still
+        # score 100 while the bytes differ; blob identity, never the score, is
+        # what releases the source), its destination is
         # itself a structural store path that NO OLDER first-parent record
         # touched, and the renaming commit's tree holds no structural file under
         # the source subdirectory (source_left); otherwise the source reads as
@@ -14654,7 +14692,7 @@ def _init_no_prior_store(git, repo, root):
         # (a copy does not change the source).
         decided = set()
         for position, commit_entry in enumerate(commits):
-            for status, old_path, new_path in commit_entry[1]:
+            for status, old_path, new_path, same_blob in commit_entry[1]:
                 if old_path is not None:
                     new_parts = structural(new_path)
                     old_parts = structural(old_path)
@@ -14669,7 +14707,8 @@ def _init_no_prior_store(git, repo, root):
                     touched_older = any(
                         new_path in older[2]
                         for older in commits[position + 1:])
-                    if not (status == b"R100" and new_parts is not None
+                    if not (status == b"R100" and same_blob
+                            and new_parts is not None
                             and not touched_older
                             and not source_left(commit_entry[0], old_parts[0])):
                         stores.add(old_parts[0])
@@ -14921,14 +14960,18 @@ def _init_no_prior_store(git, repo, root):
                 "either way is expected to hold both files, and a subdirectory "
                 "holding only other files or only deeper directories is neither "
                 "expected nor named; a structural file counts at its rename "
-                "destination instead of its old path only when the rename is exact "
-                "(similarity 100), no older first-parent record touched the "
-                "destination, and the renaming commit's tree holds no structural "
-                "file under the source subdirectory, so a machine subdirectory "
-                "renamed whole with git mv is complete at its new path, while any "
-                "other pairing git's rename detection reports, for example a store "
-                "deleted beside a similar store created in the same commit, reads "
-                "as a deletion of its source, which stays expected, fail-safe); "
+                "destination instead of its old path only when the recorded "
+                "destination blob id equals the source blob id (an exact "
+                "byte-identical move; git's similarity score of 100 alone does "
+                "not prove that, since reordered lines also score 100), no older "
+                "first-parent record touched the destination, and the renaming "
+                "commit's tree holds no structural file under the source "
+                "subdirectory, so a machine subdirectory renamed whole with git "
+                "mv is complete at its new path, while any other pairing git's "
+                "rename detection reports, for example a store deleted beside a "
+                "similar store created in the same commit, or a pairing whose "
+                "bytes were rearranged, reads as a deletion of its source, which "
+                "stays expected, fail-safe); "
                 "supply each missing path by your own means, or re-adopt with opf "
                 "adopt:")]
             + [_InitRestoreLine("opf init:   missing store path: {}", path)
@@ -15015,13 +15058,16 @@ def _init_observed(root_fd, directories, payloads):
     return rows
 
 
-def _cmd_init(rest):
+def _init_main(rest):
     """Create validated store sources and a pointer, without git writes or rendering.
 
     Preflight is read-only. Publication is create-only and deliberately not transactional: a
     later failure reports observed planned paths and leaves them for review. Enumeration, root
     identity checks, and final rereads do not serialize concurrent writers or directory renames.
     No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    Every failure path prints rendered text through the two handlers below; whatever escapes
+    them, the argument loop's exits included, is caught by _cmd_init's last-resort rendering
+    boundary (QA round 10 MAJOR 1), so no exception leaves opf init as a traceback.
     """
     root = None
     i = 0
@@ -15272,6 +15318,39 @@ def _cmd_init(rest):
     finally:
         if root_fd is not None:
             _opf_store._journal._close_fd_quietly(root_fd)
+
+
+def _cmd_init(rest):
+    """Run _init_main under ONE last-resort rendering boundary (QA round 10 MAJOR 1).
+
+    The round-9 argument loop sat outside the rendering handlers, so an assert, a
+    raise ... from (whose cause a chained traceback prints), or an implicit
+    exception (a subscript's KeyError or IndexError) raised there printed a raw
+    argv value on descriptor 2 inside an escaping Python traceback. _init_main now
+    carries the whole command, its own two rendering handlers included; whatever
+    still escapes it, BaseException included, is caught here and reported through
+    the one emitter with the exception type name and text BOTH rendered through
+    _init_inert, and the report itself is guarded: if printing it fails, nothing
+    more is printed, because a failing print would otherwise raise out of this
+    handler with the original exception chained, and Python prints a chained
+    traceback with every message raw. PROVED BY THIS SHAPE (the route gate pins
+    the shape, the init suite pins these exact bytes): no exception of any kind
+    propagates out of _cmd_init, so opf init never prints a Python traceback (a
+    KeyboardInterrupt, or a mutant's SystemExit, therefore also reports rendered
+    and exits 2 rather than escaping). What a static scan still cannot prove is
+    stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    try:
+        return _init_main(rest)
+    except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary
+        try:
+            _init_echo(
+                "opf init: cannot evaluate: {}({}); exit 2 (reported by the "
+                "last-resort boundary, which prints nothing else)".format(
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))),
+                err=True)
+        except BaseException:  # noqa: BLE001  a failing report must not re-raise
+            pass
+        return EXIT_MALFORMED
 
 
 # --- opf upgrade: the store-schema upgrade to the tooling spec_version (spec 9.2) ---------------------

@@ -89,13 +89,15 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    at or before the named commit; a store found either way is expected to hold both files,
    and a subdirectory holding only other files or only deeper directories is neither
    expected nor named; a structural file counts at its rename destination instead of its
-   old path only when the rename is exact (similarity 100), no older first-parent record
-   touched the destination, and the renaming commit's tree holds no structural file under
-   the source subdirectory, so a machine subdirectory renamed whole with `git mv` is not
-   reported as a PARTIAL restore, while any other pairing git's similarity-based rename
-   detection reports (for example a store deleted beside a similar store created in the
-   same commit) reads as a deletion of its source, which stays expected, fail-safe: the
-   doubtful case is disclosed as missing, never silently absorbed. When the `.working`
+   old path only when the recorded destination blob id equals the source blob id (an exact
+   byte-identical move; git's similarity score of 100 alone does not prove that, since
+   reordered lines also score 100), no older first-parent record touched the destination,
+   and the renaming commit's tree holds no structural file under the source subdirectory,
+   so a machine subdirectory renamed whole with `git mv` is not reported as a PARTIAL
+   restore, while any other pairing git's similarity-based rename detection reports (for
+   example a store deleted beside a similar store created in the same commit, or a pairing
+   whose bytes were rearranged) reads as a deletion of its source, which stays expected,
+   fail-safe: the doubtful case is disclosed as missing, never silently absorbed. When the `.working`
    tree a command restores lacks such an expected
    structural file, the refusal says the restore is PARTIAL and names each missing path,
    in words that state only that observed lack. A command is printed only when the
@@ -113,7 +115,13 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    for pasting into a shell, and readability is deliberately not a goal that widens
    the alphabet: characters one shell merely groups are live syntax in another (bash
    history expansion acts on `!` even inside double quotes; zsh glob qualifiers and
-   fish command substitution execute code). A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   fish command substitution execute code). A failure of `opf init` itself is reported
+   the same way: one last-resort handler catches every exception the command lets
+   escape and prints only the rendered exception type and text, so `opf init` never
+   prints a Python traceback; what the static route gate proves, and the residual it
+   cannot see (introspection reached at runtime through allowed spellings, and the
+   sibling modules the init path calls into), is stated in the tooling docstrings, and
+   the suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.

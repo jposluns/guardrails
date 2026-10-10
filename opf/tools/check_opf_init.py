@@ -146,6 +146,10 @@ _ROUTE_ALLOWED_REFS = dict(
         "line._opf_line_rendered", "str", "str.__new__", "template.format",
     ]),
     _cmd_init=frozenset([
+        "BaseException", "EXIT_MALFORMED", "str", "str-literal.format", "type",
+        "type().__name__",
+    ]),
+    _init_main=frozenset([
         "EXIT_MALFORMED", "EXIT_OK", "Exception", "Path", "RuntimeError",
         "_opf_check.COUNTERS_NAME", "_opf_check.INDEX_SUFFIX",
         "_opf_check.VERSION_NAME", "_opf_check.WORKLOG_NAME",
@@ -260,7 +264,7 @@ _ROUTE_ALLOWED_REFS = dict(
 # below (QA round 9, codex MAJOR 1: from os import writev as ascii bound a
 # writer to a permitted spelling and passed the call gate).
 _ROUTE_EXTERNAL_BASES = frozenset([
-    "AttributeError", "Exception", "FileNotFoundError", "OSError", "Path",
+    "AttributeError", "BaseException", "Exception", "FileNotFoundError", "OSError", "Path",
     "RuntimeError", "UnicodeError", "all", "any", "ascii", "dict", "enumerate",
     "isinstance", "json", "len", "list", "ord", "os", "set", "sorted", "stat",
     "str", "super", "type",
@@ -319,26 +323,46 @@ def _route_unit_params(sub):
 
 
 def _route_literal_bound(unit, name_id):
-    """True when, inside unit, name_id is bound at least once and ONLY by plain
-    assignments of a string literal to plain names, and is no parameter of unit
-    or of any nested def or lambda: such a name provably carries a string
-    literal wherever it is read, so it may serve as a rendering template (QA
-    round 9, requirement B: the remedy templates are branch-selected literals
-    bound to one name)."""
+    """True when unit's OWN scope binds name_id at least once, ONLY by plain
+    assignments of a string literal to plain names, and no nested def, lambda or
+    class binds or receives it at all: only then does every read of the name in
+    unit resolve to one of those literal bindings, so it may serve as a rendering
+    template (QA round 9, requirement B: the remedy templates are branch-selected
+    literals bound to one name). The round-9 rule walked nested defs as if they
+    shared the outer scope and never saw match capture patterns, so a match
+    capture rebinding the name to the subject value, and a literal binding hidden
+    inside a nested def while the outer read resolved to a module global, both
+    passed (QA round 10 MAJOR 2); _route_binding_names now yields match captures
+    (not plain Assigns, so they refuse here), and a binding or parameter inside
+    any nested unit refuses outright. A global or nonlocal declaration of the
+    name is a non-Assign binding and refuses the same way."""
+    if name_id in _route_unit_params(unit):
+        return False
     bindings = 0
-    for sub in ast.walk(unit):
-        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            if name_id in _route_unit_params(sub):
+    stack = [(unit, False)]
+    while stack:
+        node, nested = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            stack.append((child, nested or isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                        ast.ClassDef))))
+        if node is unit:
+            continue
+        bound_here = list(_route_binding_names(node))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            bound_here += _route_unit_params(node)
+        for bound in bound_here:
+            if bound != name_id:
+                continue
+            if nested:
                 return False
-        for bound in _route_binding_names(sub):
-            if bound == name_id:
-                bindings += 1
-                if not (isinstance(sub, ast.Assign)
-                        and all(isinstance(target, ast.Name)
-                                for target in sub.targets)
-                        and isinstance(sub.value, ast.Constant)
-                        and isinstance(sub.value.value, str)):
-                    return False
+            bindings += 1
+            if not (isinstance(node, ast.Assign)
+                    and all(isinstance(target, ast.Name)
+                            for target in node.targets)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                return False
     return bindings > 0
 
 
@@ -366,7 +390,10 @@ def _route_call_spelling(func):
 def _route_binding_names(node):
     """Names a statement or clause BINDS (not reads): assignment targets of every kind
     (plain, annotated, augmented, starred, tuple/list, walrus), loop / with / except /
-    comprehension targets, import aliases, and nested def / class statements. Used for
+    comprehension targets, import aliases, nested def / class statements, and match
+    capture patterns (MatchAs, MatchStar, and a MatchMapping rest; QA round 10 MAJOR
+    2: a case clause rebinds its capture name to the match subject, and the round-9
+    scan never saw it). Used for
     two refusals: a rebinding of a pinned route name anywhere in opf.py, and a
     module-level rebinding of any function on the init call graph."""
     names = []
@@ -390,6 +417,12 @@ def _route_binding_names(node):
         names.append(node.name)
     elif isinstance(node, (ast.Global, ast.Nonlocal)):
         names.extend(node.names)
+    elif isinstance(node, ast.MatchAs) and node.name is not None:
+        names.append(node.name)
+    elif isinstance(node, ast.MatchStar) and node.name is not None:
+        names.append(node.name)
+    elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        names.append(node.rest)
     elif isinstance(node, ast.Delete):
         targets = list(node.targets)
     stack = list(targets)
@@ -431,14 +464,29 @@ def _init_route_violations(source):
     alias or assignment cannot shadow an allowed spelling; any binding of a pinned
     route name (the emitter, the renderers and the two rendering types) anywhere in
     the file; any binding of a reachable definition's name inside a reachable
-    function; any raise in _cmd_init lexically outside the body of the one try
-    whose handlers catch _InitPriorStoreRefusal, unless it raises
-    _InitPriorStoreRefusal itself (whose constructor renders its message, so even
-    an escaping traceback shows rendered values; QA round 9, claude MAJOR 1: a
-    raise before that try printed a raw argv value in the traceback); and any
+    function; any assert statement in any reachable function (QA round 10 MAJOR 1:
+    an assert raises AssertionError carrying its message expression, and the
+    round-9 raise rule never saw ast.Assert); any departure of _cmd_init from the
+    pinned last-resort boundary shape, and any raise or assert inside it (QA
+    round 10 MAJOR 1: no static rule can refuse every implicit exception, a
+    subscript's KeyError or an IndexError included, so _cmd_init must BE the one
+    boundary that catches BaseException and prints only rendered text through the
+    emitter, its own report guarded so a failing print cannot re-raise into a
+    chained traceback; the suite additionally pins the wrapper's exact bytes,
+    which covers the rendering calls this shape rule does not read); any raise in
+    _init_main lexically outside the body of the one try whose handlers catch
+    _InitPriorStoreRefusal, unless it constructs _InitPriorStoreRefusal itself
+    with no raise ... from cause (the constructor renders its message at
+    construction; QA round 9, claude MAJOR 1: a raise before that try printed a
+    raw argv value in the traceback; QA round 10 MAJOR 1: a cause rides the
+    chained traceback raw; either way the last-resort boundary now renders
+    whatever escapes at runtime, and this rule stays as the narrower static pin);
+    and any
     _InitRestoreLine or _InitPriorStoreRefusal construction whose template, or
-    remedy_template keyword, is neither a string literal nor a name bound only to
-    string literals (_route_literal_bound). str.__new__ is rostered for
+    remedy_template keyword, is neither a string literal nor a name that the
+    constructing function's OWN scope binds only by plain assignments of string
+    literals, with no nested def, lambda or match capture binding
+    (_route_literal_bound; QA round 10 MAJOR 2). str.__new__ is rostered for
     _InitRestoreLine alone, so minting an instance of that type anywhere else on
     the graph is a violation. Returns a list of violation descriptions; the suite
     requires it empty on the real source and NON-empty on every seeded mutant, so
@@ -511,37 +559,119 @@ def _init_route_violations(source):
                     "line {}: binding of the pinned route name {}".format(
                         getattr(node, "lineno", 0), name))
 
-    # The raise rule (QA round 9, claude MAJOR 1): inside _cmd_init, a raise that is
-    # not lexically inside the BODY of the one try whose handlers catch
-    # _InitPriorStoreRefusal escapes both rendering handlers and prints a Python
-    # traceback carrying raw values, so every such raise must construct
-    # _InitPriorStoreRefusal itself (its constructor renders at construction, so
-    # even an escaping traceback shows rendered values).
+    # The boundary rule (QA round 10 MAJOR 1): an assert, a raise ... from, and
+    # an implicit exception (a subscript's KeyError, an IndexError) raised in the
+    # round-9 argument loop sat outside both rendering handlers and printed a raw
+    # argv value in an escaping traceback, and no static rule can refuse every
+    # implicit exception. _cmd_init is therefore required to BE the one
+    # last-resort rendering boundary: its whole body is one try whose body only
+    # returns _init_main(rest) and whose ONE handler catches BaseException,
+    # prints through the emitter inside its own BaseException-guarded try (a
+    # failing report must not re-raise: a chained traceback prints the original
+    # message raw) and then returns; no raise and no assert may appear anywhere
+    # in _cmd_init. The suite additionally pins the wrapper's exact bytes, which
+    # covers what this shape rule does not read (the rendering calls inside the
+    # guarded report).
     cmd_unit = top["_cmd_init"]
-    handled_tries = [sub for sub in ast.walk(cmd_unit)
-                     if isinstance(sub, ast.Try)
-                     and any(isinstance(handler.type, ast.Name)
-                             and handler.type.id == "_InitPriorStoreRefusal"
-                             for handler in sub.handlers)]
-    if len(handled_tries) != 1:
+    cmd_body = [stmt for stmt in cmd_unit.body
+                if not (isinstance(stmt, ast.Expr)
+                        and isinstance(stmt.value, ast.Constant)
+                        and isinstance(stmt.value.value, str))]
+
+    def _boundary_guard(handler):
+        # ONE guarded emitter report, then a plain return: the guard's single
+        # handler catches BaseException with a bare pass.
+        if len(handler.body) != 2:
+            return False
+        guard, final = handler.body
+        return (isinstance(guard, ast.Try)
+                and not guard.orelse and not guard.finalbody
+                and len(guard.handlers) == 1
+                and isinstance(guard.handlers[0].type, ast.Name)
+                and guard.handlers[0].type.id == "BaseException"
+                and all(isinstance(sub, ast.Pass)
+                        for sub in guard.handlers[0].body)
+                and all(isinstance(sub, ast.Expr)
+                        and isinstance(sub.value, ast.Call)
+                        and isinstance(sub.value.func, ast.Name)
+                        and sub.value.func.id == _ROUTE_EMITTER
+                        for sub in guard.body)
+                and isinstance(final, ast.Return))
+
+    boundary_ok = (
+        len(cmd_body) == 1 and isinstance(cmd_body[0], ast.Try)
+        and not cmd_body[0].orelse and not cmd_body[0].finalbody
+        and len(cmd_body[0].body) == 1
+        and isinstance(cmd_body[0].body[0], ast.Return)
+        and isinstance(cmd_body[0].body[0].value, ast.Call)
+        and isinstance(cmd_body[0].body[0].value.func, ast.Name)
+        and cmd_body[0].body[0].value.func.id == "_init_main"
+        and len(cmd_body[0].handlers) == 1
+        and isinstance(cmd_body[0].handlers[0].type, ast.Name)
+        and cmd_body[0].handlers[0].type.id == "BaseException"
+        and _boundary_guard(cmd_body[0].handlers[0]))
+    if not boundary_ok:
         violations.append(
-            "_cmd_init: expected exactly one try handling _InitPriorStoreRefusal, "
-            "found {}".format(len(handled_tries)))
+            "_cmd_init: not the pinned last-resort rendering boundary (one try "
+            "returning _init_main(rest), one BaseException handler whose guarded "
+            "emitter report cannot re-raise, then a plain return)")
+    for sub in ast.walk(cmd_unit):
+        if isinstance(sub, (ast.Raise, ast.Assert)):
+            violations.append(
+                "_cmd_init line {}: raise or assert inside the last-resort "
+                "boundary".format(sub.lineno))
+
+    # An assert ANYWHERE on the reachable surface is refused (QA round 10 MAJOR
+    # 1: assert raises AssertionError carrying its message expression, and the
+    # round-9 raise rule only saw ast.Raise).
+    for name in sorted(reachable):
+        for sub in ast.walk(top[name]):
+            if isinstance(sub, ast.Assert):
+                violations.append(
+                    "{} line {}: assert statement on the reachable init "
+                    "surface".format(name, sub.lineno))
+
+    # The raise rule (QA round 9, claude MAJOR 1; QA round 10 MAJOR 1): inside
+    # _init_main, a raise that is not lexically inside the BODY of the one try
+    # whose handlers catch _InitPriorStoreRefusal escapes both of _init_main's
+    # rendering handlers (the last-resort boundary still renders it at runtime;
+    # this rule stays as the narrower static pin), so every such raise must
+    # construct _InitPriorStoreRefusal itself (its constructor renders at
+    # construction) and carry NO raise ... from cause (QA round 10 MAJOR 1: a
+    # cause rides the chained traceback raw).
+    if "_init_main" not in reachable or not isinstance(
+            top.get("_init_main"), ast.FunctionDef):
+        violations.append(
+            "call graph unresolved: _init_main is not a reachable module-level "
+            "function")
     else:
-        inside_try = set()
-        for stmt in handled_tries[0].body:
-            for sub in ast.walk(stmt):
-                inside_try.add(id(sub))
-        for sub in ast.walk(cmd_unit):
-            if isinstance(sub, ast.Raise) and id(sub) not in inside_try:
-                permitted_raise = (
-                    isinstance(sub.exc, ast.Call)
-                    and isinstance(sub.exc.func, ast.Name)
-                    and sub.exc.func.id == "_InitPriorStoreRefusal")
-                if not permitted_raise:
-                    violations.append(
-                        "_cmd_init line {}: raise outside the handled try does not "
-                        "raise _InitPriorStoreRefusal".format(sub.lineno))
+        main_unit = top["_init_main"]
+        handled_tries = [sub for sub in ast.walk(main_unit)
+                         if isinstance(sub, ast.Try)
+                         and any(isinstance(handler.type, ast.Name)
+                                 and handler.type.id == "_InitPriorStoreRefusal"
+                                 for handler in sub.handlers)]
+        if len(handled_tries) != 1:
+            violations.append(
+                "_init_main: expected exactly one try handling "
+                "_InitPriorStoreRefusal, found {}".format(len(handled_tries)))
+        else:
+            inside_try = set()
+            for stmt in handled_tries[0].body:
+                for sub in ast.walk(stmt):
+                    inside_try.add(id(sub))
+            for sub in ast.walk(main_unit):
+                if isinstance(sub, ast.Raise) and id(sub) not in inside_try:
+                    permitted_raise = (
+                        isinstance(sub.exc, ast.Call)
+                        and isinstance(sub.exc.func, ast.Name)
+                        and sub.exc.func.id == "_InitPriorStoreRefusal"
+                        and sub.cause is None)
+                    if not permitted_raise:
+                        violations.append(
+                            "_init_main line {}: raise outside the handled try "
+                            "does not construct a cause-free "
+                            "_InitPriorStoreRefusal".format(sub.lineno))
 
     for name in sorted(reachable):
         if name == _ROUTE_EMITTER:
@@ -1234,15 +1364,19 @@ def _suite_isolated(invoke):
                              "neither "
                              "expected nor named; a structural file counts at its "
                              "rename destination instead of its old path only when "
-                             "the rename is exact (similarity 100), no older "
+                             "the recorded destination blob id equals the source "
+                             "blob id (an exact byte-identical move; git's "
+                             "similarity score of 100 alone does not prove that, "
+                             "since reordered lines also score 100), no older "
                              "first-parent record touched the destination, and the "
                              "renaming commit's tree holds no structural file under "
                              "the source subdirectory, so a machine subdirectory "
                              "renamed whole with git mv is complete at its new path, "
                              "while any other pairing git's rename detection "
                              "reports, for example a store deleted beside a similar "
-                             "store created in the same commit, reads as a deletion "
-                             "of its source, which stays expected, fail-safe); "
+                             "store created in the same commit, or a pairing whose "
+                             "bytes were rearranged, reads as a deletion of its "
+                             "source, which stays expected, fail-safe); "
                              "supply each missing path by your own means, or re-adopt "
                              "with opf "
                              "adopt:"]
@@ -2943,8 +3077,10 @@ def _suite_isolated(invoke):
                           gate_source + newline
                           + "from os import writev as ascii" + newline) != [])
                 # The gate anchor sits after the parser loop and BEFORE the
-                # handled try, so an insertion there escapes both rendering
-                # handlers.
+                # handled try, so an insertion there escapes both of _init_main's
+                # rendering handlers (the last-resort boundary in _cmd_init still
+                # renders whatever escapes at runtime; the rule is the narrower
+                # static pin).
                 check("route gate flags a raise before the handled try (claude "
                       "round-9: the traceback printed a raw argv value)",
                       _init_route_violations(gate_source.replace(
@@ -2952,8 +3088,8 @@ def _suite_isolated(invoke):
                           gate_anchor + newline
                           + "    raise RuntimeError(rest[0])")) != [])
                 check("route gate passes a pre-try raise of the rendering refusal "
-                      "type (its constructor renders, so an escaping traceback "
-                      "shows rendered values)",
+                      "type (its constructor renders, and the last-resort "
+                      "boundary reports whatever escapes, rendered)",
                       _init_route_violations(gate_source.replace(
                           gate_anchor,
                           gate_anchor + newline
@@ -2983,6 +3119,119 @@ def _suite_isolated(invoke):
                           gate_anchor,
                           gate_anchor + newline + "    rows = []" + newline
                           + "    rows.sort()")) != [])
+
+                # QA round 10 MAJOR 1 (claude): the round-9 raise rule never saw
+                # ast.Assert, a raise ... from cause, or an implicit exception,
+                # and the argument loop sat outside both rendering handlers, so
+                # each printed a raw argv value in an escaping traceback. The
+                # gate now refuses assert on the whole reachable surface and a
+                # cause on the one permitted raise shape; the implicit shapes (a
+                # subscript's KeyError, an IndexError) are statically invisible,
+                # a stated residual, and are closed at RUNTIME by the
+                # last-resort boundary, driven in the runtime block below. The
+                # boundary itself is pinned twice: by the gate's shape rule
+                # (held by the narrowed-handler mutant here) and by its exact
+                # bytes.
+                wrapper_pin = (
+                    "    try:" + newline
+                    + "        return _init_main(rest)" + newline
+                    + "    except BaseException as exc:  # noqa: BLE001  the "
+                    "last-resort rendering boundary" + newline
+                    + "        try:" + newline
+                    + "            _init_echo(" + newline
+                    + '                "opf init: cannot evaluate: {}({}); exit '
+                    + "2 (reported by the " + chr(34) + newline
+                    + '                "last-resort boundary, which prints '
+                    + "nothing else)" + chr(34) + ".format(" + newline
+                    + "                    _init_inert(type(exc).__name__), "
+                    "_init_inert(str(exc)))," + newline
+                    + "                err=True)" + newline
+                    + "        except BaseException:  # noqa: BLE001  a failing "
+                    "report must not re-raise" + newline
+                    + "            pass" + newline
+                    + "        return EXIT_MALFORMED" + newline)
+                check("route runtime boundary: the last-resort wrapper's exact "
+                      "bytes are pinned once in the source",
+                      gate_source.count(wrapper_pin) == 1)
+                check("route gate flags a boundary whose handler narrows to "
+                      "Exception (the boundary must catch BaseException)",
+                      _init_route_violations(gate_source.replace(
+                          "    except BaseException as exc:",
+                          "    except Exception as exc:")) != [])
+                parser_anchor = ('            _init_echo("opf init: unrecognized '
+                                 'argument, inert-escaped: {}".format(')
+                check("route gate: the parser anchor is present once",
+                      gate_source.count(parser_anchor) == 1)
+                check("route gate flags an assert in the argument loop (QA "
+                      "round 10 MAJOR 1: AssertionError carries its message "
+                      "expression into the traceback raw)",
+                      _init_route_violations(gate_source.replace(
+                          parser_anchor,
+                          '            assert tok == "--root", tok' + newline
+                          + parser_anchor)) != [])
+                check("route gate flags a pre-try raise ... from (QA round 10 "
+                      "MAJOR 1: the cause rides the chained traceback raw)",
+                      _init_route_violations(gate_source.replace(
+                          parser_anchor,
+                          '            raise _InitPriorStoreRefusal("qa {}", '
+                          "(tok,), []) from RuntimeError(tok)" + newline
+                          + parser_anchor)) != [])
+                journal_anchor = "        journal = _opf_store._journal"
+                check("route gate: the journal anchor is present once",
+                      gate_source.count(journal_anchor) == 1)
+                # QA round 10 MAJOR 2 (claude, a round-9 regression): the
+                # literal-only-bound template rule counted a binding a match
+                # capture hid from it, and a literal binding inside a nested def
+                # that did not bind the outer read, so a raw template passed the
+                # gate and printed raw through the refusal handler. Each mutant
+                # here must be refused; the literal-only control, the real
+                # source's remedy-template shape, must pass.
+                m2_match = ('        qa_t = "{}"' + newline
+                            + "        match root:" + newline
+                            + "            case qa_t:" + newline
+                            + "                pass" + newline)
+                check("route gate flags a match-captured name used as the "
+                      "refusal template (a case clause rebinds the name to the "
+                      "match subject)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline + m2_match
+                          + "        raise _InitPriorStoreRefusal(qa_t, (), [])"
+                          )) != [])
+                check("route gate flags a match-captured name used as a restore "
+                      "line template",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline + m2_match
+                          + '        raise _InitPriorStoreRefusal("qa {}", '
+                          '("x",), [_InitRestoreLine(qa_t)])')) != [])
+                check("route gate flags a template name bound only inside a "
+                      "nested def (the binding does not bind the outer read, "
+                      "which can resolve to a raw module global at runtime)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        def _qa_unused():" + newline
+                          + '            qa_g = "{}"' + newline
+                          + "        raise _InitPriorStoreRefusal(qa_g, (), [])"
+                          )) != [])
+                check("route gate flags a match capture that rebinds the "
+                      "emitter",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        match root:" + newline
+                          + "            case _init_echo:" + newline
+                          + "                pass")) != [])
+                check("route gate passes a literal-only-bound template name in "
+                      "the constructing function's own scope (the real source's "
+                      "remedy-template shape)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_t = "qa"' + newline
+                          + "        raise _InitPriorStoreRefusal(qa_t, (), [])"
+                          )) == [])
 
                 # QA rounds 7 and 8 (requirements A and C): the RUNTIME paste
                 # test, the primary guard. THE EXIT-PATH BY VALUE-CLASS MATRIX:
@@ -3493,6 +3742,52 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR
                       and paste_probe(output, "route-raw-arg") != [])
 
+                # QA round 10 MAJOR 1: the four traceback routes, driven at
+                # RUNTIME through the loaded module's _cmd_init with a hostile
+                # argument. The assert and the raise ... from are ALSO flagged
+                # statically above; the two implicit exceptions (a subscript's
+                # KeyError, an IndexError) are statically invisible, the gate's
+                # stated residual, so the last-resort boundary is their closure.
+                # Each run must exit 2, name the exception type rendered, print
+                # no raw substitution opener, no raw backquote and no Python
+                # traceback, and pass the paste probe; on the round-9 parent
+                # every one of these printed the raw value in a traceback on
+                # descriptor 2.
+                boundary_value = ("v; echo " + paste_marker
+                                  + " #$(touch PASTE-PWNED)`touch PASTE-PWNED`")
+                boundary_mutants = [
+                    ("assert-tok", '            assert tok == "--root", tok',
+                     "AssertionError", True),
+                    ("raise-from",
+                     '            raise _InitPriorStoreRefusal("qa {}", (tok,), '
+                     "[]) from RuntimeError(tok)",
+                     "_InitPriorStoreRefusal", False),
+                    ("implicit-keyerror", "            dict()[tok]",
+                     "KeyError", False),
+                    ("implicit-indexerror", "            rest[9000]",
+                     "IndexError", False),
+                ]
+                for tag, insertion, type_name, carries_value in boundary_mutants:
+                    mutated = gate_source.replace(
+                        parser_anchor, insertion + newline + parser_anchor)
+                    if tag.startswith("implicit-"):
+                        check("route gate passes the " + tag + " boundary "
+                              "mutant (an implicit exception is its stated "
+                              "residual; the boundary is the runtime closure)",
+                              _init_route_violations(mutated) == [])
+                    module = load_mutant("boundary-" + tag, mutated)
+                    rc, output = drive_module_init(module, [boundary_value])
+                    check("route runtime boundary: " + tag + " is caught and "
+                          "rendered by the last-resort boundary, never printed "
+                          "as a traceback",
+                          rc == EXIT_ERROR
+                          and "cannot evaluate: " + type_name in output
+                          and "Traceback" not in output
+                          and "$(" not in output and "`" not in output
+                          and (not carries_value
+                               or inert(boundary_value) in output)
+                          and paste_probe(output, "boundary-" + tag) == [])
+
                 # QA round 9, requirement C: the third driver's capture path,
                 # driven with raw-descriptor and child-process writes from a
                 # loaded mutant (the gate flags its spelled routes, and the
@@ -3723,8 +4018,11 @@ def _suite_isolated(invoke):
                                 "or only deeper directories is neither expected nor "
                                 "named")
                 store_rule_c = ("a structural file counts at its rename destination "
-                                "instead of its old path only when the rename is "
-                                "exact (similarity 100), no older first-parent "
+                                "instead of its old path only when the recorded "
+                                "destination blob id equals the source blob id (an "
+                                "exact byte-identical move; git's similarity score "
+                                "of 100 alone does not prove that, since reordered "
+                                "lines also score 100), no older first-parent "
                                 "record touched the destination, and the renaming "
                                 "commit's tree holds no structural file under the "
                                 "source subdirectory")
@@ -3923,6 +4221,68 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and output == prior_store_output(
                           f2, f2, f2_named, [".opf.toml", ".working"], True,
                           gaps=f2_gaps))
+
+                # QA round 10 MINOR 3 (claude F3): git's similarity score is a
+                # multiset of line hashes, so a renamed counters.toml whose
+                # lines were REORDERED still reports R100 while its bytes (and
+                # its blob id) differ, and the round-9 rule, which trusted the
+                # score, released the source store whose content had changed.
+                # The walk now reads --raw and releases a rename source only
+                # when the record's destination blob id equals the source blob
+                # id, so aa-machine stays expected here and the refusal is
+                # PARTIAL, naming both of its structural files (the manifest
+                # pair IS byte-identical, but a store found either way is
+                # expected to hold both). The R100 premise is asserted from
+                # git's own --raw answer, so a git whose scoring changes fails
+                # the premise rather than silently weakening the vector.
+                # DISCRIMINATOR: the round-9 score-trusting rule released
+                # aa-machine and printed no PARTIAL block; the byte-identical
+                # whole-store git mv stays non-PARTIAL in the renamed-machine
+                # fixture above.
+                f3 = make_git("ancestry-rename-reordered")
+                f3_aa = f3 / working / "aa-machine"
+                f3_aa.mkdir(parents=True)
+                (f3_aa / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                f3_lines = [b"shared%02d = 1\n" % n for n in range(20)]
+                (f3_aa / _opf_check.COUNTERS_NAME).write_bytes(
+                    b"".join(f3_lines) + b"bi = 7\n")
+                (f3 / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(f3, ["--literal-pathspecs", "add", "-A"])
+                git_call(f3, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store"])
+                git_call(f3, ["rm", "-r", "-q", "--", working + "/aa-machine"])
+                f3_bb = f3 / working / "bb-machine"
+                f3_bb.mkdir(parents=True)
+                (f3_bb / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (f3_bb / _opf_check.COUNTERS_NAME).write_bytes(
+                    b"bi = 7\n" + b"".join(reversed(f3_lines)))
+                git_call(f3, ["--literal-pathspecs", "add", "-A"])
+                git_call(f3, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "swap in a reordered store"])
+                f3_named = head_of(f3)
+                f3_raw = git_call(f3, ["log", "--first-parent", "--raw",
+                                       "--no-abbrev", "--find-renames", "-z",
+                                       "--max-count=1", f3_named, "--",
+                                       ":(glob)" + working + "/*/"
+                                       + _opf_check.COUNTERS_NAME])
+                check("ancestry rename-reordered: git itself reports the "
+                      "reordered counters pair as R100 (the fixture premise)",
+                      b" R100\x00" in f3_raw)
+                git_call(f3, ["rm", "-r", "-q", "--",
+                              working, _opf_store.POINTER_REL])
+                git_call(f3, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the store"])
+                rc, output = run(f3)
+                f3_gaps = sorted([
+                    working + "/aa-machine/" + _opf_check.COUNTERS_NAME,
+                    working + "/aa-machine/" + _opf_store.MANIFEST_NAME])
+                check("ancestry rename-reordered: an R100 rename whose blob ids "
+                      "differ stays expected and the refusal is PARTIAL, naming "
+                      "both structural files (fail-safe)",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          f3, f3, f3_named, [".opf.toml", ".working"], True,
+                          gaps=f3_gaps))
 
                 # QA round 8 (requirement A): the fixed narrow alphabet is pinned at
                 # runtime, in the renderer docstring and in OPF-QUICKSTART.md (the
