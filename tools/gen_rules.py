@@ -7,7 +7,8 @@ coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2)
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), and the
+                            MAP_KEYS read refusal exits 2 with empty stdout under each stderr condition
 """
 import sys
 
@@ -324,6 +325,52 @@ A minimal rule so the reconcile has one desired target to read.
 """
 _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 
+# The second invariant: the import-time MAP_KEYS refusal keeps exit 2 and an empty stdout whatever
+# sys.stderr does. A child imports this module with map_keys raising OSError, under a piped stderr
+# (the diagnostic must arrive), a None stderr, a stderr whose write raises and one whose flush raises.
+# The retired print/`raise SystemExit(2)` shape fails three of the four: print to a None stream writes
+# the diagnostic to stdout, and a stream whose write or flush raises turns the exit into 120.
+_MAP_KEYS_CHILD = """import sys
+sys.path.insert(0, sys.argv[1])
+import _standards
+def _refuse(root):
+    raise PermissionError(13, "self-test: unlistable standards directory")
+_standards.map_keys = _refuse
+class _Stream:
+    def write(self, text):
+        if sys.argv[2] == "write-raises":
+            raise OSError(28, "self-test: write failed")
+        return len(text)
+    def flush(self):
+        if sys.argv[2] in ("write-raises", "flush-raises"):
+            raise OSError(28, "self-test: flush failed")
+if sys.argv[2] != "piped":
+    sys.stderr = None if sys.argv[2] == "none" else _Stream()
+import gen_rules
+"""
+_MAP_KEYS_CONDITIONS = ("piped", "none", "write-raises", "flush-raises")
+
+
+def _map_keys_refusal_failures():
+    """One failure line per stderr condition under which the MAP_KEYS refusal does not exit 2 with
+    empty stdout (and, with stderr piped, the diagnostic on stderr)."""
+    import subprocess
+    tools = str(Path(__file__).resolve().parent)
+    failures = []
+    for condition in _MAP_KEYS_CONDITIONS:
+        try:
+            done = subprocess.run([sys.executable, "-I", "-B", "-c", _MAP_KEYS_CHILD, tools, condition],
+                                  capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("MAP_KEYS refusal ({}): the child did not run: {}".format(condition, exc))
+            continue
+        got = (done.returncode, done.stdout, condition != "piped" or b"(fail-closed)" in done.stderr)
+        if got != (2, b"", True):
+            failures.append("MAP_KEYS refusal with stderr {}: expected exit 2, empty stdout and (piped) "
+                            "the diagnostic; got exit {}, stdout {!r}, stderr {!r}".format(
+                                condition, done.returncode, done.stdout[:200], done.stderr[-300:]))
+    return failures
+
 
 def self_test_main():
     import io
@@ -360,6 +407,7 @@ def self_test_main():
             failures.append("invalid-UTF-8 generated target expected exit 2 (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    failures.extend(_map_keys_refusal_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -367,7 +415,9 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm).")
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); the MAP_KEYS read refusal "
+          "exits 2 with empty stdout under {} stderr conditions ({}).".format(
+              len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS)))
     return 0
 
 

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "63af06245766765b54f0e221c88f6aa624e2f5f0ed17553c49f0f1d9333ad63e"
+tree-sha256 = "5a5dbbd317c377a7eb6517a83107dac4b3b8122f5e498d91b997103e1487fb7e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -132,7 +132,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "9207c0b45b80819bb479cb5b3d3e708ec4ffa323a3fd9849a99c92433690a8cf"
+sha256 = "f4125c9020781d2fb73b547d016c626d3050217834106db7e3fdc0102f5bc548"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3186,8 +3186,8 @@ sha256 = "a51b5b4771d43cb1c184ee1233ab9d68cbcec403a9434ad258363c87237d4e97"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 6676
-sha256 = "4e40edbda37e340c2ab1aa50f5808d04e0bbc24a18efa9ea22dba9d80dda77c6"
+bytes = 6742
+sha256 = "81d06fbc504a50f9e8906a434cd57cfe4fe58c781392a2d63a9d19251b6789a4"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3211,8 +3211,8 @@ sha256 = "ca5ea6b83c586c0e111eb4fe5fe9dc7d35c0787b84c0584b04757fe6ff00eb20"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 17368
-sha256 = "dcbb1ed6b7f75c7e8a6f483292d33feb906b68c1c7eb11ac997cbf0dba510ca2"
+bytes = 17434
+sha256 = "5c5bb54f7ed85e661228c3a40518f8083f07e36523b818342e802ae506b0931d"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3376,13 +3376,13 @@ sha256 = "2f51eb3b302390e276ac0b2adc002fd2c184a9cc7e0afdbfc903a30976d06d71"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 167199
-sha256 = "287120a2fdbf31b9202b3e6b3b3dc27729de2f2dfd1292a5005d3e5826a6bd77"
+bytes = 182481
+sha256 = "607cf550919c3c5c7d34729a6c4056b72ab72bf0d1eca09187531db102053ca0"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 70698
-sha256 = "9105f0c1f26b2f1730ec632e6ac9ec61141955c62613cd494a428f18ddb5400d"
+bytes = 70938
+sha256 = "4f777340f5e574c3ee8ca18837cf6e9e2f630273cac350b56bfeed87f7a81f5f"
 
 [[sources]]
 path = "tools/check_record_drift.py"
@@ -3581,8 +3581,8 @@ sha256 = "c59e2c19b2cb65c877d9600bd688f1e6984146f0145dad92cb559aa863978ba2"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 18358
-sha256 = "03b0aee957cf9eb690e5beb30e91f6f0295debe5f2b1e59c179ad6da80d9656f"
+bytes = 21057
+sha256 = "4f87c3e83e3d946b39e9a1af376d719ff2a89ecb085db2bea7e33a9bcfd8b247"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -3666,8 +3666,8 @@ sha256 = "b4e02a2761506e49cdfd31745499ab03c57e31cb89280149bb0bd4a500c17021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 54485
-sha256 = "aed986043592d49155c4fee288d91924e8f67d640ddc20f97f7187622538a797"
+bytes = 54969
+sha256 = "bda62a200d0e20dc245b5f8fa596a57b2562143e955b5ba73d21ef6a3da64c36"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

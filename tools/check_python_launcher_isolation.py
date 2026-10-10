@@ -115,11 +115,13 @@ from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import gen_hooks  # noqa: E402  the generator whose plugin hooks.json path this gate tracks
-except Exception as exc:  # noqa: BLE001  an import failure is a cannot-evaluate, not a traceback
+except Exception:  # noqa: BLE001  an import failure is a cannot-evaluate, not a traceback
+    # The message is a literal, as the fallback grammar in tools/check_python_floor.py requires (it
+    # admits no call, and formatting the exception runs its __str__), so it does not quote the error;
+    # running the generator itself (python3 -I -B tools/gen_hooks.py --check) shows it.
     import os
     try:
-        sys.stderr.write("check_python_launcher_isolation: cannot import gen_hooks ({}); fail-closed\n"
-                         .format(exc))
+        sys.stderr.write("check_python_launcher_isolation: cannot import gen_hooks; fail-closed\n")
         sys.stderr.flush()
     except BaseException:
         pass
