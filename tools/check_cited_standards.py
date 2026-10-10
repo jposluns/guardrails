@@ -11,37 +11,48 @@ covers. A manifest registers the identities this same grammar finds in its own `
 there is no hand-kept alias list to drift.
 
 Grammar (case-insensitive). These spellings, and only these, are discovered:
-  ISO[/IEC][/IEEE][ TR|TS|PAS|DIS|FDIS] n[-part][:yyyy]  identity ISO n[-part]   (organisation, type, year dropped)
+  ISO[/IEC][/IEEE][/type] n[-part][:yyyy]   identity ISO n[-part]             (organisation, type, year dropped)
   [NIST] SP n-n[letter][-n]                 identity NIST SP n-n[LETTER][-n]  (SP 800-53A is not SP 800-53)
   NIST 800-n[letter][-n]                    identity NIST SP 800-n[LETTER][-n]
   NIST SP n                                 identity NIST SP n                (a single number needs NIST)
   NIST AI n-n                               identity NIST AI n-n
   NIST IR n[-n][letter], NISTIR n           identity NIST IR n[-n][LETTER]
-  FIPS [PUB] n[-n]                          identity FIPS n[-n]               (FIPS 140-2 is not FIPS 140-3)
+  [NIST] FIPS [PUB] n[-n]                   identity FIPS n[-n]               (FIPS 140-2 is not FIPS 140-3)
   RFC n                                     identity RFC n
-A type (TR, TS, PAS, DIS, FDIS) follows ISO after a slash or whitespace. Between a body and its number the
-separator is whitespace, one hyphen or dash, one dot, or nothing (RFC3339, ISO-27001, NIST.SP.800-53, SP800-53).
-A hyphen or dash is any of U+002D, U+2010 to U+2015 and U+2212. Wherever the grammar allows whitespace (between
-words, before and after the ISO slash, after the year colon) that whitespace may hold one line break, and a
-Markdown blockquote marker (">") may open the continued line.
+ISO is joined to IEC, IEEE or a type by a slash (whitespace allowed around it), one hyphen or dash, or whitespace,
+and several may follow it (ISO/IEC/IEEE, ISO-IEC, ISO/IEC CD TR). A type is a deliverable type (TR, TS, PAS) or a
+draft stage code (AWI, WD, CD, DIS, FDIS, DTR, DTS). NIST is joined to SP, AI, IR or FIPS, and FIPS to PUB, by
+whitespace, one hyphen or dash, or one dot (NIST.SP.800-53, NIST-AI-100-1, NIST.FIPS.140-3, FIPS-PUB-199), and
+NISTIR also by nothing. Between a body and its number the separator is whitespace, one hyphen or dash, one dot, or
+nothing (RFC3339, ISO-27001, RFC.3339, SP800-53). A hyphen or dash is any of U+002D, U+2010 to U+2015, U+2212,
+U+FE58, U+FE63 and U+FF0D. Wherever the grammar allows whitespace (between words, before and after the ISO slash,
+after the year colon) that whitespace may hold one line break, and Markdown blockquote markers (">") may open the
+continued line. Every spelling here is matched from its first character, so a finding prints the whole designator.
 
 Token boundaries. A designator starts only where the character before it is not a letter or digit, and it runs
 to the end of its token: letters or digits the grammar does not read as a known part (RFC3339Parser,
 SP 800-53Ar5, SP 800-53AB), a dot, colon or slash followed by a digit (ISO 27001/27002), or a dash followed by
-a digit, a line break allowed between them (SP 800-63-3-1, NIST SP 800-<break>53), join it. Such a run is
-reported as token "<text>" and is never resolved to a shorter identity; no manifest registers a token, and only
-an exclusion naming the whole token waives it. An underscore, other punctuation, whitespace, or a hyphen
-followed by a letter ends a token (strict_rfc3339 and RFC 3339-compliant both read RFC 3339).
+a digit, one line break allowed between them and blockquote markers after it (SP 800-63-3-1,
+NIST SP 800-<break>53, ISO 42001-<break>> 2023), join it. Such a run is reported as token "<text>": the matched
+text with each whitespace run or blockquote marker printed as one space, each dash as a hyphen, and its letter
+case kept. It is never resolved to a shorter identity; no manifest registers a token, and only an exclusion naming
+the whole printed text waives it (NIST.SP.800-53r5, not SP.800-53r5). An exclusion may give a token exactly as a
+finding prints it: a space after a dash there stands for the line break. An underscore, other punctuation,
+whitespace, or a hyphen followed by a letter ends a token (strict_rfc3339 and RFC 3339-compliant both read
+RFC 3339).
 
 The corpus is scanned as raw text, code spans and fences included, so backticks are not a bypass. The
 threshold is fixed at one document: a single citation in a single file fails. It is not configurable.
 
 Residual, printed on every run (RESIDUAL below): only the spellings above are discovered. A framework named
 without a number (an OWASP, MITRE or CSA title, "AI RMF", "Google SAIF", "OWASP SCVS") is not seen, nor is a
-designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS), SP with one number and no NIST (SP 1270),
-NIST with a number outside the 800 series and no SP (NIST 1270), a designator broken by markup, an entity or two
-line breaks in one gap (*ISO/IEC* 42001, ISO/IEC&nbsp;42001), or a line break inside a number where the text
-before the break is no designator (SP 800-<break>53, NIST AI 100-<break>1). Prose control ids (CWE-79, LLM01)
+designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS), an ISO series, partner or stage code outside
+the grammar (ISO Guide 73, IWA 14, ISO/SAE 21434, ISO/IEC NP or PRF), a NIST series other than SP, AI, IR and FIPS
+(NIST.CSWP.29), SP with one number and no NIST (SP 1270), NIST with a number outside the 800 series and no SP
+(NIST 1270), an underscore joining words (NIST_SP_800-53; NIST_SP800-53 reads from SP800-53), a designator broken
+by markup, an entity or two line breaks in one gap (*ISO/IEC* 42001, ISO/IEC&nbsp;42001), or a line break inside a
+number where the text before the break is no designator (SP 800-<break>53, NIST AI 100-<break>1). A number joined
+by a character outside the dash list (a soft hyphen) ends at that character. Prose control ids (CWE-79, LLM01)
 are not checked; a prose edition is not compared with the manifest `edition`, and a hyphenated year reads as a
 part (ISO 42001-2023 is its own identity, so it fails). Matching errs toward reporting: it is case-insensitive
 and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339) is reported, never ignored.
@@ -97,53 +108,77 @@ CONFIG_KEYS = {"format-version", "corpus", "exclusion"}
 EXCLUSION_KEYS = {"designator", "paths", "reason"}
 
 RESIDUAL = (
-    "Residual: only the designator spellings in the gate's grammar are discovered: ISO, ISO/IEC, ISO/IEEE (with "
-    "an optional TR, TS, PAS, DIS or FDIS), NIST SP, SP, NIST 800-, NIST AI, NIST IR, NISTIR, FIPS and RFC, each "
-    "followed by its number.",
+    "Residual: only the designator spellings in the gate's grammar are discovered: ISO, ISO/IEC or ISO/IEEE "
+    "(with an optional type TR, TS or PAS or stage code AWI, WD, CD, DIS, FDIS, DTR or DTS), NIST SP with a "
+    "number, SP with an n-n number, NIST 800-n, NIST AI, NIST IR or NISTIR, FIPS or NIST FIPS, and RFC, each "
+    "followed by its number; NIST is joined to its series, and FIPS to PUB, by whitespace, a dash or a dot "
+    "(NIST.SP.800-53).",
     "  Not seen: a framework named without a number (an OWASP, MITRE or CSA title, AI RMF, Google SAIF, "
-    "OWASP SCVS); a designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS); SP with one number and "
-    "no NIST (SP 1270); NIST with a number outside the 800 series and no SP (NIST 1270).",
+    "OWASP SCVS); a designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS); an ISO series, partner "
+    "or stage code outside the grammar (ISO Guide 73, IWA 14, ISO/SAE 21434, ISO/IEC NP or PRF); a NIST series "
+    "other than SP, AI, IR and FIPS (NIST.CSWP.29); SP with one number and no NIST (SP 1270); NIST with a number "
+    "outside the 800 series and no SP (NIST 1270); an underscore joining words (NIST_SP_800-53).",
     "  Not seen: a designator broken by markup or an entity (*ISO/IEC* 42001, ISO/IEC&nbsp;42001), by two line "
     "breaks in one gap, or by a line break inside a number where the text before the break is no designator "
     "(SP 800-<break>53, NIST AI 100-<break>1); after one (NIST SP 800-<break>53) the whole run is a token.",
     "  Prose control ids (CWE-79, LLM01) are not checked.",
     "  A prose edition is not compared with the manifest edition (ISO/IEC 42001:2015 resolves to ISO 42001); a "
     "hyphenated year reads as a part (ISO 42001-2023 is its own identity).",
-    "  A designator run on into letters or digits it does not read (RFC3339Parser, SP 800-53Ar5) is reported as "
-    "a whole token, never resolved to a shorter identity.",
+    "  A designator run on into letters or digits it does not read (RFC3339Parser, SP 800-53Ar5), or into a dash "
+    "and a digit across a line break, blockquote included, is reported as a whole token, never resolved to a "
+    "shorter identity; only an exclusion naming the whole token as printed waives it. A number joined by a "
+    "character outside the dash list (a soft hyphen) ends at that character.",
     "  Matching is case-insensitive and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339) is "
     "reported, never ignored.",
     "  Code spans and fences are scanned, not stripped, so backticks are not a bypass.",
 )
 
-# A gap between words: whitespace holding at most one line break, after which Markdown blockquote markers may
-# open the continued line. GAP needs at least one character, OPT may be empty. NUMSEP sits between a body and its
-# number: a gap, one dash, one dot, or nothing.
-_DASHES = "-\u2010-\u2015\u2212"
+# The dashes: U+002D, the General Punctuation dashes U+2010 to U+2015, U+2212 MINUS SIGN, and the compatibility
+# forms U+FE58 SMALL EM DASH, U+FE63 SMALL HYPHEN-MINUS and U+FF0D FULLWIDTH HYPHEN-MINUS. Each has a vector.
+_DASHES = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
 _DASH = "[" + _DASHES + "]"
-_GAP = r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*(?:>[^\S\n]*)*)"
+# BREAK is one line break, after which Markdown blockquote markers may open the continued line. A gap between words
+# is whitespace holding at most one BREAK. GAP needs at least one character, OPT may be empty. JOIN sits between
+# NIST and its series word, or FIPS and PUB: a gap, one dash or one dot. NUMSEP sits between a body and its
+# number: a JOIN or nothing.
+_BREAK = r"[^\S\n]*\n[^\S\n]*(?:>[^\S\n]*)*"
+_GAP = r"(?:[^\S\n]+|" + _BREAK + ")"
 _OPT = "(?:" + _GAP + ")?"
-_NUMSEP = "(?:" + _GAP + "|" + _DASH + r"|\.)?"
-_TYPE = "(?:TR|TS|PAS|FDIS|DIS)"
-# A designator starts where no letter or digit precedes it. GLUED takes the rest of its token: letters or digits,
-# a dot, colon or slash followed by a digit, or a dash followed by a digit (a line break allowed between them). A
-# non-empty GLUED makes the whole match a token, so a match always ends at a token boundary and never stops short
-# at a shorter identity.
-_PATTERN = re.compile(
-    r"(?<![^\W_])(?:"
-    r"(?P<iso>ISO(?:" + _OPT + "/" + _OPT + "(?:IEC|IEEE|" + _TYPE + "))*(?:" + _GAP + _TYPE + ")?" + _NUMSEP
-    + r"(?P<iso_n>\d+)(?:" + _DASH + r"(?P<iso_part>\d+))?(?::" + _OPT + r"\d{4})?)"
-    r"|(?P<ai>NIST" + _GAP + "AI" + _NUMSEP + r"(?P<ai_a>\d+)" + _DASH + r"(?P<ai_b>\d+))"
-    r"|(?P<sp>(?:(?:NIST" + _GAP + ")?SP" + _NUMSEP + "|NIST" + _NUMSEP + "(?=800" + _DASH + r"\d))"
-    r"(?P<sp_a>\d+)" + _DASH + r"(?P<sp_b>\d+)(?P<sp_x>[A-Z])?(?:" + _DASH + r"(?P<sp_c>\d+))?)"
-    r"|(?P<sp1>NIST" + _GAP + "SP" + _NUMSEP + r"(?P<sp1_a>\d+))"
-    r"|(?P<ir>NIST" + _OPT + "IR" + _NUMSEP + r"(?P<ir_a>\d+)(?:" + _DASH + r"(?P<ir_b>\d+))?(?P<ir_x>[A-Z])?)"
-    r"|(?P<fips>FIPS(?:" + _GAP + "PUB)?" + _NUMSEP + r"(?P<fips_a>\d+)(?:" + _DASH + r"(?P<fips_b>\d+))?)"
-    r"|(?P<rfc>RFC" + _NUMSEP + r"(?P<rfc_n>\d+))"
-    r")(?P<glued>(?:[^\W_]|[.:/](?=\d)|" + _DASH + r"(?:[^\S\n]*\n[^\S\n]*)?(?=\d))*)",
-    re.IGNORECASE)
+_JOIN = "(?:" + _GAP + "|" + _DASH + r"|\.)"
+_NUMSEP = _JOIN + "?"
+# The ISO deliverable types (TR, TS, PAS) and the draft stage codes ISO and ISO/IEC project designators carry (AWI,
+# WD, CD, DIS, FDIS, DTR, DTS). Each has a vector.
+_TYPE = "(?:TR|TS|PAS|AWI|WD|CD|FDIS|DIS|DTR|DTS)"
+
+
+def _compile(glue_gap):
+    """The designator pattern. A designator starts where no letter or digit precedes it. GLUED takes the rest of its
+    token: letters or digits, a dot, colon or slash followed by a digit, or a dash followed by a digit with glue_gap
+    between them. A non-empty GLUED makes the whole match a token, so a match always ends at a token boundary and
+    never stops short at a shorter identity."""
+    return re.compile(
+        r"(?<![^\W_])(?:"
+        r"(?P<iso>ISO(?:(?:" + _OPT + "/" + _OPT + "|" + _DASH + "|" + _GAP + ")(?:IEC|IEEE|" + _TYPE + "))*"
+        + _NUMSEP + r"(?P<iso_n>\d+)(?:" + _DASH + r"(?P<iso_part>\d+))?(?::" + _OPT + r"\d{4})?)"
+        r"|(?P<ai>NIST" + _JOIN + "AI" + _NUMSEP + r"(?P<ai_a>\d+)" + _DASH + r"(?P<ai_b>\d+))"
+        r"|(?P<sp>(?:(?:NIST" + _JOIN + ")?SP" + _NUMSEP + "|NIST" + _NUMSEP + "(?=800" + _DASH + r"\d))"
+        r"(?P<sp_a>\d+)" + _DASH + r"(?P<sp_b>\d+)(?P<sp_x>[A-Z])?(?:" + _DASH + r"(?P<sp_c>\d+))?)"
+        r"|(?P<sp1>NIST" + _JOIN + "SP" + _NUMSEP + r"(?P<sp1_a>\d+))"
+        r"|(?P<ir>NIST" + _JOIN + "?IR" + _NUMSEP + r"(?P<ir_a>\d+)(?:" + _DASH + r"(?P<ir_b>\d+))?(?P<ir_x>[A-Z])?)"
+        r"|(?P<fips>(?:NIST" + _JOIN + ")?FIPS(?:" + _JOIN + "PUB)?" + _NUMSEP + r"(?P<fips_a>\d+)(?:" + _DASH
+        + r"(?P<fips_b>\d+))?)"
+        r"|(?P<rfc>RFC" + _NUMSEP + r"(?P<rfc_n>\d+))"
+        r")(?P<glued>(?:[^\W_]|[.:/](?=\d)|" + _DASH + glue_gap + r"(?=\d))*)",
+        re.IGNORECASE)
+
+
+# The corpus pattern lets one line break, blockquote markers after it, sit between a glued dash and its digit. The
+# exclusion pattern also reads the space a printed token shows in place of that break, so an exclusion can name a
+# token exactly as a finding prints it.
+_PATTERN = _compile("(?:" + _BREAK + ")?")
+_EXCLUSION_PATTERN = _compile("(?:" + _BREAK + r"|[^\S\n]+)?")
 _TOKEN = 'token "'      # the identity prefix of a designator run on into a suffix the grammar does not read
-_ONE_DASH = str.maketrans({ch: "-" for ch in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"})
+_ONE_DASH = str.maketrans({ch: "-" for ch in _DASHES})
 
 
 class CannotEvaluate(Exception):
@@ -193,8 +228,9 @@ def designators(text):
 
 
 def parse_designator(text):
-    """The single identity a whole designator string names, or None if it is not exactly one designator."""
-    m = _PATTERN.fullmatch(text.strip())
+    """The single identity a whole designator string names, or None if it is not exactly one designator. A token
+    is read as a finding prints it."""
+    m = _EXCLUSION_PATTERN.fullmatch(text.strip())
     return _identity(m) if m else None
 
 
@@ -499,6 +535,10 @@ def _unlistable(directory):
     raise PermissionError(13, "Permission denied (injected by the self-test)", str(directory))
 
 
+def _devnull_corpus(_root, _globs):
+    return {"r.md": Path(os.devnull)}
+
+
 def _two_manifests(stem, name, edition="2023"):
     return {"iso-42001": _manifest_text("iso-42001", _BASE_NAME), stem: _manifest_text(stem, name, edition)}
 
@@ -597,7 +637,8 @@ _VECTORS = (
     ("V33 a designator wrapped right after ISO/ fails", 1, None, {"r.md": "This follows ISO/\nIEC 99999:2031.\n"},
      None, lambda o: "ISO 99999: cited in 1" in o and ".aiqt/core/rules/r.md:1: ISO/ IEC 99999:2031" in o),
     ("V34 a designator wrapped into a blockquote continuation line fails", 1, None,
-     {"r.md": "> This follows ISO/IEC\n> 99999 closely.\n"}, None, lambda o: "ISO 99999: cited in 1" in o),
+     {"r.md": "> This follows ISO/IEC\n> 99999 closely.\n"}, None,
+     lambda o: "ISO 99999: cited in 1" in o and ".aiqt/core/rules/r.md:1: ISO/IEC 99999\n" in o),
     ("V35 an underscore is a boundary, so strict_rfc3339 reads RFC 3339 and is reported", 1, None,
      {"r.md": "Call strict_rfc3339 here.\n"}, None, lambda o: "RFC 3339: cited in 1" in o),
     ("V36 a second exclusion of one identity cannot evaluate", 2, None, {"a.md": "RFC 3339.\n"},
@@ -617,6 +658,62 @@ _VECTORS = (
     ("V42 a corpus entry that is not a regular file cannot evaluate", 2, None,
      {"r.md": "Nothing.\n", "s.md": ("socket",)}, None, lambda o: "s.md is not a regular file" in o),
 )
+
+# V43 to V46 hold a dash continued across a line break onto a blockquote line: each registers the shorter identity,
+# so a truncation passes and the vector fails. V47 and V48 hold an exclusion naming a token exactly as printed, V49
+# and V50 that an exclusion naming less than the whole printed text does not waive it, and V51 the regular-file check
+# in read_corpus by outcome: without it /dev/null reads as an empty, clean corpus file.
+_VECTORS += (
+    ("V43 ISO 42001-<break>> 2023 never resolves to the registered ISO 42001", 1, None,
+     {"r.md": "> Follows ISO 42001-\n> 2023 here.\n"}, None,
+     lambda o: 'token "ISO 42001- 2023": cited in 1' in o and ".aiqt/core/rules/r.md:1: ISO 42001- 2023\n" in o),
+    ("V44 NIST SP 800-53-<break>> 1 never resolves to the registered NIST SP 800-53", 1, _SP53,
+     {"r.md": "> Follows NIST SP 800-53-\n>  >  1 here.\n"}, None,
+     lambda o: 'token "NIST SP 800-53- 1": cited in 1' in o),
+    ("V45 NIST SP 800-<break>> 53 never resolves to the registered NIST SP 800", 1,
+     _two_manifests("nist-800", "NIST SP 800 x"), {"r.md": "> Per NIST SP 800-\n> 53.\n"}, None,
+     lambda o: 'token "NIST SP 800- 53": cited in 1' in o),
+    ("V46 RFC 3339-<break>> 1 never resolves to the registered RFC 3339", 1, _RFC,
+     {"r.md": "> Per RFC 3339\u2014\n> 1.\n"}, None, lambda o: 'token "RFC 3339- 1": cited in 1' in o),
+    ("V47 an exclusion naming a wrapped token as printed waives it", 0, None, {"a.md": "> Per ISO 42001-\n> 2023.\n"},
+     _EXCL.format("ISO 42001- 2023", _A, "a wrapped year"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
+    ("V48 an exclusion naming a token in its printed case waives it", 0, None, {"a.md": "Use rfc3339parser.\n"},
+     _EXCL.format("rfc3339parser", _A, "a class name"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
+    ("V49 an exclusion naming SP.800-53r5 does not waive NIST.SP.800-53r5", 1, _SP53,
+     {"a.md": "See NIST.SP.800-53r5.\n"}, _EXCL.format("SP.800-53r5", _A, "r"),
+     lambda o: 'token "NIST.SP.800-53r5": cited in 1' in o and 'stale exclusion: token "SP.800-53r5"' in o),
+    ("V50 an exclusion naming FIPS-140-3x does not waive NIST-FIPS-140-3x", 1, None,
+     {"a.md": "See NIST-FIPS-140-3x.\n"}, _EXCL.format("FIPS-140-3x", _A, "r"),
+     lambda o: 'token "NIST-FIPS-140-3x": cited in 1' in o and 'stale exclusion: token "FIPS-140-3x"' in o),
+    ("V51 a corpus file that is not a regular file cannot evaluate, although it reads as empty", 2, None, None, None,
+     lambda o: "r.md is not a regular file" in o, {"expand_corpus": _devnull_corpus}),
+)
+
+# V52 onward, one per documented spelling: the plain form is discovered from its first character (the finding prints
+# it whole), and its suffixed form is a token that an exclusion naming the whole printed text waives.
+_FORMS = (
+    ("ISO/IEC 99999", "ISO 99999"), ("ISO-IEC 99999", "ISO 99999"), ("ISO/IEC/IEEE 99999", "ISO 99999"),
+    ("ISO 99999", "ISO 99999"), ("ISO99999", "ISO 99999"), ("ISO-99999", "ISO 99999"), ("ISO.99999", "ISO 99999"),
+    ("NIST SP 800-999", "NIST SP 800-999"), ("SP 800-999", "NIST SP 800-999"), ("SP800-999", "NIST SP 800-999"),
+    ("NIST.SP.800-999", "NIST SP 800-999"), ("NIST-SP-800-999", "NIST SP 800-999"),
+    ("NIST 800-999", "NIST SP 800-999"), ("NIST SP 1999", "NIST SP 1999"), ("NIST.SP.1999", "NIST SP 1999"),
+    ("NIST AI 999-1", "NIST AI 999-1"), ("NIST.AI.999-1", "NIST AI 999-1"), ("NIST-AI-999-1", "NIST AI 999-1"),
+    ("NIST IR 9999", "NIST IR 9999"), ("NISTIR 9999", "NIST IR 9999"), ("NIST.IR.9999", "NIST IR 9999"),
+    ("NIST-IR-9999", "NIST IR 9999"), ("FIPS 999-1", "FIPS 999-1"), ("FIPS PUB 999", "FIPS 999"),
+    ("NIST FIPS 999-1", "FIPS 999-1"), ("NIST.FIPS.999-1", "FIPS 999-1"), ("NIST-FIPS-999-1", "FIPS 999-1"),
+    ("FIPS.PUB.999", "FIPS 999"), ("FIPS-PUB-999", "FIPS 999"), ("RFC 9999", "RFC 9999"), ("RFC9999", "RFC 9999"),
+    ("RFC-9999", "RFC 9999"), ("RFC.9999", "RFC 9999"),
+)
+
+
+def _form_vector(number, text, ident):
+    return ("V{} {} is discovered whole and {}r9 is excluded as printed".format(number, text, text), 1, None,
+            {"a.md": "Cites {} here.\nAlso {}r9 there.\n".format(text, text)}, _EXCL.format(text + "r9", _A, "r"),
+            lambda o: ("{}: cited in 1".format(ident) in o and ".aiqt/core/rules/a.md:1: {}\n".format(text) in o
+                       and "FAIL: 1 unresolved standard identity(ies), 0 stale" in o))
+
+
+_VECTORS += tuple(_form_vector(52 + i, text, ident) for i, (text, ident) in enumerate(_FORMS))
 
 _NORMALISATION = (
     ("ISO/IEC 42001:2023", "ISO 42001"),
@@ -665,6 +762,48 @@ _NORMALISATION = (
     ("ISO 42001x", 'token "ISO 42001x"'),
     ("NIST SP 800-\n53", 'token "NIST SP 800- 53"'),
     ("ISO 26262\u2013\n  6", 'token "ISO 26262- 6"'),
+    # the dot separator, the NIST and FIPS joins, and the ISO joins
+    ("RFC.3339", "RFC 3339"),
+    ("NIST.SP.800-53", "NIST SP 800-53"),
+    ("NIST-SP-800-53", "NIST SP 800-53"),
+    ("NIST.SP.1270", "NIST SP 1270"),
+    ("NIST.AI.600-1", "NIST AI 600-1"),
+    ("NIST-AI-100-1", "NIST AI 100-1"),
+    ("NIST.IR.8259", "NIST IR 8259"),
+    ("NIST-IR-8259", "NIST IR 8259"),
+    ("NIST.FIPS.140-3", "FIPS 140-3"),
+    ("NIST FIPS 140-3", "FIPS 140-3"),
+    ("FIPS.PUB.140-2", "FIPS 140-2"),
+    ("FIPS-PUB-199", "FIPS 199"),
+    ("ISO-IEC 27001", "ISO 27001"),
+    ("ISO IEC 27001", "ISO 27001"),
+    # each ISO type and stage code (TR and TS above)
+    ("ISO/PAS 5112", "ISO 5112"),
+    ("ISO/IEC AWI 42005", "ISO 42005"),
+    ("ISO/IEC WD 27090", "ISO 27090"),
+    ("ISO/IEC CD 42006", "ISO 42006"),
+    ("ISO/IEC DIS 42005", "ISO 42005"),
+    ("ISO/FDIS 42005", "ISO 42005"),
+    ("ISO/IEC DTR 5469", "ISO 5469"),
+    ("ISO/IEC DTS 22440", "ISO 22440"),
+    ("ISO/IEC CD TR 5469", "ISO 5469"),
+    # each dash (U+002D, U+2011, U+2013 and U+2212 above)
+    ("NIST SP 800\u201053", "NIST SP 800-53"),
+    ("NIST SP 800\u201253", "NIST SP 800-53"),
+    ("NIST SP 800\u201453", "NIST SP 800-53"),
+    ("NIST SP 800\u201553", "NIST SP 800-53"),
+    ("NIST SP 800\ufe5853", "NIST SP 800-53"),
+    ("NIST SP 800\ufe6353", "NIST SP 800-53"),
+    ("NIST SP 800\uff0d53", "NIST SP 800-53"),
+    ("NIST SP 800\ufe5853r5", 'token "NIST SP 800-53r5"'),
+    ("NIST SP 800\ufe6353r5", 'token "NIST SP 800-53r5"'),
+    ("NIST SP 800\uff0d53r5", 'token "NIST SP 800-53r5"'),
+    # a token, and a token as a finding prints it
+    ("NIST.SP.800-53r5", 'token "NIST.SP.800-53r5"'),
+    ("ISO 42001-\n> 2023", 'token "ISO 42001- 2023"'),
+    ("NIST SP 800-53-\n>  >  1", 'token "NIST SP 800-53- 1"'),
+    ("ISO 42001- 2023", 'token "ISO 42001- 2023"'),
+    ("rfc3339parser", 'token "rfc3339parser"'),
 )
 
 # (text, [identities designators() finds]): an identity ends at a token boundary, a hyphen before a letter ends
@@ -676,11 +815,16 @@ _IN_TEXT = (
     ("see sp 3-4 tokens", ["NIST SP 3-4"]),
     ("map-iso-42001-broad: [6.1]", ["ISO 42001"]),
     ("Use RFC3339Parser, then RFC 3339.", ['token "RFC3339Parser"', "RFC 3339"]),
+    ("Read NIST_SP800-171_rev3 here.", ["NIST SP 800-171"]),
+    ("Per RFC 3339.\n2. Next item", ["RFC 3339"]),
+    ("See 10.6028/NIST.AI.600-1.", ["NIST AI 600-1"]),
 )
 
 _NOT_DESIGNATORS = ("ISO", "ISO/IEC", "SP 800", "NIST", "XRFC 3339", "OWASP Top 10", "CWE-79", "LLM01",
                     "AI 100-1", "ISOLATION 42", "fips", "SP 1270", "NIST 1270", "nist-80053-tight", "rfc-editor",
-                    "ISO/IEC\n\n42001", "SP 800-\n53", "NIST AI 100-\n1", "*ISO/IEC* 42001", "ISO/IEC&nbsp;42001")
+                    "ISO/IEC\n\n42001", "SP 800-\n53", "NIST AI 100-\n1", "*ISO/IEC* 42001", "ISO/IEC&nbsp;42001",
+                    "9RFC 3339", "\u00e9RFC 3339", "NIST 2023-10-01", "NIST.CSWP.29", "NIST_SP_800-53",
+                    "ISO Guide 73", "ISO/SAE 21434", "ISO/IEC TRansparency 42001")
 
 # The roster's numbered manifests, field for field, and the identities they must derive (and no others).
 _ROSTER = (
@@ -700,6 +844,10 @@ def self_test_main():
         got = parse_designator(text)
         if got != expect:
             failures.append("normalise {!r}: expected {!r}, got {!r}".format(text, expect, got))
+    for text, expect in _NORMALISATION:
+        if expect.startswith(_TOKEN) and parse_designator(expect[len(_TOKEN):-1]) != expect:
+            failures.append("token {} printed: exclusion reads {!r}".format(
+                expect, parse_designator(expect[len(_TOKEN):-1])))
     for text, expect in _IN_TEXT:
         got = [ident for ident, _l, _t in designators(text)]
         if got != expect:

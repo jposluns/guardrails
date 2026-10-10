@@ -5,12 +5,15 @@ framework: its edition and the enumerated set of canonical control ids that a ru
 frontmatter is allowed to cite. A rule's `map-<key>` frontmatter may cite a framework only after its
 manifest lands here, so a mapping to an unsourced framework, or to an id that does not exist in the
 pinned edition, cannot ship. Rule-body prose is checked more narrowly: a numbered designator in one of
-the spellings the gate's grammar lists (ISO, ISO/IEC or ISO/IEEE, NIST SP or SP, NIST 800-, NIST AI,
-NIST IR or NISTIR, FIPS or RFC, followed by its number) must resolve to a manifest or a recorded
-exclusion, and one run on into letters or digits the grammar does not read is reported as a whole token,
-never resolved to a shorter identity. A framework named in prose without such a number, a body outside
-that list, or a designator broken by markup is not detected; the grammar and its full residual are in
-the docstring of `tools/check_cited_standards.py`.
+the spellings the gate's grammar lists (ISO, ISO/IEC or ISO/IEEE with an optional type or stage code,
+NIST SP with a number or SP with an n-n number, NIST 800-n, NIST AI, NIST IR or NISTIR, FIPS or
+NIST FIPS, or RFC, followed by its number, with NIST joined to its series by whitespace, a dash or a dot
+as in NIST.SP.800-53) must resolve to a manifest or a recorded exclusion. A designator run on into
+letters or digits the grammar does not read, or continued across a line break after a dash, is reported
+as a whole token, never resolved to a shorter identity, and only an exclusion naming the whole token as
+the finding prints it waives it. A framework named in prose without such a number, a body, series or
+stage code outside that list, or a designator broken by markup is not detected; the grammar and its full
+residual are in the docstring of `tools/check_cited_standards.py`.
 
 ## How it is enforced
 
