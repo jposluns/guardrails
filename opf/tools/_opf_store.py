@@ -3667,7 +3667,9 @@ def self_test():
         # F-JOURNAL-HELD-FD-LISTING: a store subdirectory created AFTER the held .working descriptor
         # was opened is still discovered: _list_real_subdirs reads the listing through a fresh
         # descriptor reopened as "." beneath the held one, never through the held descriptor itself
-        # (a held descriptor's listing can miss every entry created since its open).
+        # (a held descriptor's listing can miss every entry created since its open). FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
         hf_working = base / "heldfd-root" / WORKING_DIRNAME
         hf_working.mkdir(parents=True)
         (hf_working / "early-store").mkdir()
@@ -3679,6 +3681,24 @@ def self_test():
                   hf_names == ["early-store", "late-store"])
         finally:
             os.close(hf_wfd)
+        # The same late subdirectory under _journal._StStaleListing, held from the .working open: the seam
+        # serves the stale view through the held descriptor and any dup of it, and the current view only
+        # through a "." descriptor opened relative to it, so on ANY filesystem _list_real_subdirs must
+        # list through a fresh descriptor.
+        hs_working = base / "heldfd-seam-root" / WORKING_DIRNAME
+        hs_working.mkdir(parents=True)
+        (hs_working / "early-store").mkdir()
+        hs_wfd = os.open(str(hs_working), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with _journal._StStaleListing() as hs_seam:
+                hs_seam.hold(hs_wfd)
+                (hs_working / "late-store").mkdir()       # created AFTER the descriptor was opened
+                hs_names = _guard(lambda: _list_real_subdirs(hs_wfd, WORKING_DIRNAME))
+            check("heldfd-seam-late-store-subdir-listed-through-fresh-descriptor",
+                  hs_names == ["early-store", "late-store"] and hs_seam.views
+                  and "stale" not in hs_seam.views)
+        finally:
+            os.close(hs_wfd)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

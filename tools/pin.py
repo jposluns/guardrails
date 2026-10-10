@@ -1960,7 +1960,9 @@ def self_test():
         # opened still blocks a new pin operation: _blocking_open_journal lists the journal through a
         # FRESH descriptor reopened beneath the held one (a held descriptor's listing can miss entries
         # created since its open). The os.open spy creates the open (INTENT-only) transaction right
-        # after the gate opens the journal fd, inside its own open-to-list window.
+        # after the gate opens the journal fd, inside its own open-to-list window. FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
         hf_root = tmp / "heldfd-gate"
         (hf_root / JOURNAL_REL).mkdir(parents=True)
         hf_rfd = os.open(str(hf_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -1986,6 +1988,31 @@ def self_test():
         check("HELDFD: an open transaction created after the journal fd was opened still blocks "
               "(the gate lists through a fresh descriptor)",
               hf_state["fired"] and hf_blocking is True)
+        # The same late open transaction under _journal._StStaleListing: the journal fd is held from the
+        # gate's own open and the transaction created right after it; the seam serves the stale view
+        # through the held fd and any dup of it, and the current view only through a "." descriptor
+        # opened relative to it, so on ANY filesystem the gate must list through a fresh descriptor.
+        hs_root = tmp / "heldfd-gate-seam"
+        (hs_root / JOURNAL_REL).mkdir(parents=True)
+        hs_rfd = os.open(str(hs_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        hs_seam = _journal._StStaleListing()
+
+        def hs_txn(fd):
+            os.mkdir("late-open-txn", dir_fd=fd)
+            _journal.publish(fd, hs_root / JOURNAL_REL / "late-open-txn", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})
+
+        hs_seam.hold_on_open(lambda path, kwargs: path == hf_jname and kwargs.get("dir_fd") is not None,
+                             hs_txn)
+        try:
+            with hs_seam:
+                hs_blocking = _blocking_open_journal(hs_root, hs_rfd)
+        finally:
+            os.close(hs_rfd)
+        check("HELDFD-SEAM: under the stale-listing seam, an open transaction created after the journal fd "
+              "was opened still blocks (the gate lists through a fresh descriptor)",
+              hs_seam.views and "stale" not in hs_seam.views
+              and hs_blocking is True)
 
         # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))

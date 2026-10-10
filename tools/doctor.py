@@ -557,7 +557,9 @@ def self_test():
         # still reported, because the gate lists the journal through a FRESH descriptor reopened
         # beneath the held one (a held descriptor's listing can miss entries created since its open).
         # The os.open spy creates the open (INTENT-only) transaction right after assert_open_journal
-        # opens the journal fd, inside the gate's own open-to-list window.
+        # opens the journal fd, inside the gate's own open-to-list window. FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
         late = tmp / "late"
         (late / pin.JOURNAL_REL).mkdir(parents=True)
         late_rfd = os.open(str(late), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -582,6 +584,31 @@ def self_test():
             os.close(late_rfd)
         check("a transaction created after the journal open is still reported (fresh-listing reopen)",
               hf_state["fired"] and hf_res.status == FAIL and "late-txn" in hf_res.detail)
+        # The same late transaction under _journal._StStaleListing: the journal fd is held from the
+        # gate's own open and the transaction created right after it; the seam serves the stale view
+        # through the held fd and any dup of it, and the current view only through a "." descriptor
+        # opened relative to it, so on ANY filesystem the gate must list through a fresh descriptor.
+        seam_late = tmp / "late-seam"
+        (seam_late / pin.JOURNAL_REL).mkdir(parents=True)
+        seam_rfd = os.open(str(seam_late), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        seam = _journal._StStaleListing()
+
+        def seam_txn(fd):
+            os.mkdir("late-txn", dir_fd=fd)
+            _journal.publish(fd, seam_late / pin.JOURNAL_REL / "late-txn", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})
+
+        seam.hold_on_open(lambda path, kwargs: path == hf_jname and kwargs.get("dir_fd") is not None,
+                          seam_txn)
+        try:
+            with seam:
+                seam_res = assert_open_journal(seam_rfd, str(seam_late))
+        finally:
+            os.close(seam_rfd)
+        check("under the stale-listing seam, a transaction created after the journal open is reported "
+              "through a fresh listing descriptor",
+              seam.views and "stale" not in seam.views and seam_res.status == FAIL
+              and "late-txn" in seam_res.detail)
 
         # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
