@@ -30,12 +30,19 @@ drift), and the guard only adds a diagnosis.
 
 Target paths. A target is never read or written through a symlink: every directory between the root
 and the target is opened beneath the previous directory's descriptor (os.open with O_DIRECTORY and
-O_NOFOLLOW and dir_fd), the target itself is opened beneath the final descriptor with O_NOFOLLOW, and a
-symlink or non-regular file anywhere along that path, even one swapped in while a run is in flight, is
-exit 2 in both modes. A write goes to a new temporary file created exclusively beside the target through
-the same descriptor (keeping an existing target's permission mode) and os.replace renames it over the
-target through that descriptor, so the target holds either its old bytes or its new bytes. A platform
-without dir_fd support is exit 2 in both modes: there is no path-based fallback.
+O_NOFOLLOW and dir_fd), and the target itself is opened beneath the final descriptor with O_NOFOLLOW and
+O_NONBLOCK, for the read and for the write-permission probe alike, and that descriptor is fstat-checked
+to be a regular file. A symlink or non-regular file met while the path is opened, including one swapped
+in after an earlier check, is exit 2 in both modes. A write goes to a new temporary file created
+exclusively beside the target through the same descriptor (keeping an existing target's permission
+mode) and os.replace renames it over the target through that descriptor, so the target holds either its
+old bytes or its new bytes. Whatever is swapped in at the target name after the write probe is not
+refused but replaced by that rename: a symlink there is itself replaced, never followed, so nothing
+outside the tree is written (a directory there makes the rename fail, exit 2). Each directory is opened
+O_RDONLY, which needs read permission as well as search permission, so a directory between the root and
+a target that this user can search but not read is exit 2 in both modes (the per-component lstat walk
+before descriptors needed search permission only). A platform without dir_fd support is exit 2 in both
+modes: there is no path-based fallback.
 
 No rule corpus. An absent or unreachable .aiqt/core/rules/ is exit 2 in both modes with nothing written
 or deleted: the generators never delete a target. To retire an adapter, review it and delete it by hand.
@@ -44,22 +51,35 @@ Registry fields. Every field is type-checked before it is used, so a wrong type 
 string or integer belongs) is a ComposeError naming the field, never a TypeError.
 
 Exit convention (run): 0 in sync or written; 1 drift (--check); 2 a missing, malformed or unreadable
-registry, block source, corpus or target, a symlinked or non-regular target, or a write-mode refusal.
+registry, block source, corpus or target, a symlinked or non-regular target, a write-mode refusal, or
+a failed write.
 
 DISCLOSED RESIDUALS. The digest is not a security boundary: anyone who can edit a block and its digest,
 or the sources, registry and generator together, passes the guard; diff review is the control. Target
 reads and writes resolve beneath directory descriptors, so a directory swapped for a symlink mid-run
-cannot redirect them; what remains is narrower: the repository root itself is still opened by path once
+cannot redirect them. What remains is narrower. The repository root itself is still opened by path once
 per target operation, and the registry and block sources are judged by a per-component lstat walk before
 they are read by path, so an attacker who can replace the repository root, or who can race a registry or
 block-source read, is out of scope (either one could edit those inputs directly, and diff review is the
-control there too). The targets of one run are renamed one at a time, not as a set. A successful write
-keeps only the target's permission mode: owner, group, ACLs and extended attributes are not preserved
-(the renamed file takes the writer's defaults). An existing target this user cannot write (no write
-permission) is refused (exit 2), as the plain overwrite before descriptors was. A run killed mid-write
-can leave its temporary file (a dot-prefixed name ending in .tmp) beside the target; the target itself
-is intact, and a later run never deletes a temporary file it did not itself create (a colliding name is
-retried, bounded, with a fresh random token). A legacy target still loses a hand edit on regeneration
+control there too). A descriptor pins a directory, not its place in the tree: a directory between the
+root and a target that is renamed out of the tree after the walk opened it still receives the write, at
+its new place (the repository root's own ancestry race, one level down; whoever can rename it could
+write into it directly). The targets of one run are renamed one at a time, not as a set. A successful
+write keeps only the target's permission mode: owner, group, ACLs and extended attributes are not
+preserved (the renamed file takes the writer's defaults). An existing target this user cannot write (no
+write permission) is refused (exit 2), as the plain overwrite before descriptors was. A write that fails
+after its temporary file (a dot-prefixed name ending in .tmp) exists is exit 2 and names that file in
+the refusal; a run interrupted or killed at that point leaves it too. Either way the target is intact
+and the temporary file is left beside it: the engine never deletes a file by name, because another
+process can replace that name between the creation and an unlink, and an identity check before the
+unlink races the same way, so the leftover is for a reviewer to remove by hand. A colliding name at
+creation is retried, bounded, with a fresh random token, and the colliding file is kept. A process that
+replaces the temporary name before the rename has its own bytes renamed over the target; it could
+equally write the target directly, so this grants nothing (diff review is the control). Descriptors are
+closed exactly once on every ordinary success and error path. A KeyboardInterrupt (or another
+asynchronous exception) that lands between an open and the try that owns its descriptor can leave that
+descriptor open; an interrupted run is a process about to exit, whose descriptors the kernel closes, so
+these windows are not guarded. A legacy target still loses a hand edit on regeneration
 unless it holds a marker-like line; --check still catches the edit in CI. A change to a generator's
 header is refused for a composed target that already carries the old header; delete and regenerate after
 reviewing it.
@@ -490,19 +510,19 @@ def _close_fd_yielding(fd):
 # The dir_fd capability probe, bound at import so it reflects the platform, not a later rebinding of an
 # os attribute (the self-test wraps os.mkdir). os.rename, not os.replace, is the member to probe:
 # os.supports_dir_fd lists the renameat capability under rename, and os.replace shares it.
-_DIR_FD_REQUIRES = (os.open, os.stat, os.mkdir, os.unlink, os.rename)
+_DIR_FD_REQUIRES = (os.open, os.stat, os.mkdir, os.rename)
 
 
 def _require_dir_fd():
     """Refuse (ComposeError, which run() maps to exit 2) where descriptor-relative resolution is
-    unavailable: without dir_fd on open/stat/mkdir/unlink/rename plus O_DIRECTORY and O_NOFOLLOW there
+    unavailable: without dir_fd on open/stat/mkdir/rename plus O_DIRECTORY and O_NOFOLLOW there
     is no way to pin a directory against a concurrent swap, and this engine never falls back to a
     path-based target lookup."""
     if (any(fn not in os.supports_dir_fd for fn in _DIR_FD_REQUIRES)
             or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW")):
         raise ComposeError(
             "this platform cannot resolve a target beneath a directory descriptor (os.open, os.stat, "
-            "os.mkdir, os.unlink and os.rename with dir_fd, plus O_DIRECTORY and O_NOFOLLOW, are "
+            "os.mkdir and os.rename with dir_fd, plus O_DIRECTORY and O_NOFOLLOW, are "
             "required); a target is never read or written through a swappable path, so nothing was read "
             "or written")
 
@@ -543,7 +563,8 @@ def _target_dir_fd(root, rel, make_dirs):
     lstat (os.stat with follow_symlinks=False, beneath the descriptor) is None when the target is
     absent; a symlink or non-regular file at the final name is a ComposeError. Returns (None, name,
     None) when a directory above the target is absent and make_dirs is false. The caller closes the
-    returned descriptor; on every other path this function closes it itself, exactly once."""
+    returned descriptor; on every other ordinary path this function closes it itself, exactly once (an
+    interrupt between an open and the next statement is out of scope: see DISCLOSED RESIDUALS)."""
     _require_dir_fd()
     _check_rel(rel, "target")
     parts = rel.split("/")
@@ -620,20 +641,33 @@ def _write_target(root, rel, data):
     """Write data to target rel under root, atomically and never through a path a concurrent process
     can swap: the target's directory descriptor comes from _target_dir_fd (missing directories made
     beneath the held descriptor), an existing target is probed for write permission beneath it (a
-    read-only target refuses with the PermissionError a plain overwrite raised), data goes to a new
-    temporary file (O_CREAT|O_EXCL|O_NOFOLLOW beneath the descriptor; a colliding name is retried with
-    a fresh random token up to _TMP_TRIES times) which takes the existing target's permission mode via
-    fchmod, and os.replace renames it over the target through the same descriptor. On failure only a
-    temporary file this call itself created is removed; a pre-existing file at a colliding name is
-    never touched. The temporary file object is made with closefd=False, so the finally's close is the
-    one close of tfd on every path."""
+    read-only target refuses with the PermissionError a plain overwrite raised) with O_NOFOLLOW (a
+    symlink swapped in since the walk is refused, never followed) and O_NONBLOCK (a FIFO swapped in
+    cannot block the open), and the probe descriptor is fstat-checked to still be a regular file; data
+    goes to a new temporary file (O_CREAT|O_EXCL|O_NOFOLLOW beneath the descriptor; a colliding name is
+    retried with a fresh random token up to _TMP_TRIES times) which takes the existing target's
+    permission mode via fchmod, and os.replace renames it over the target through the same descriptor.
+    Nothing is ever deleted: a pre-existing file at a colliding name is never touched, and on a failure
+    after the temporary file exists that file is left in place and named in the ComposeError (any other
+    exception carries the name as a note), since the name may no longer be this call's file. The
+    temporary file object is made with closefd=False, so the finally's close is the one close of tfd on
+    every path."""
     directory, name, st = _target_dir_fd(root, rel, make_dirs=True)
     try:
         if st is not None:
             # The refusal a plain open-for-write gave before descriptors: an existing target without
             # write permission is PermissionError (exit 2), before any temporary file exists.
-            probe = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            _close_fd_propagating(probe)
+            try:
+                probe = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.EMLINK):
+                    raise _symlink_refusal(rel, rel) from None
+                raise
+            try:
+                if not stat.S_ISREG(os.fstat(probe).st_mode):
+                    raise ComposeError("target {} is not a regular file".format(rel))
+            finally:
+                _close_fd_yielding(probe)
         tmp = tfd = None
         for _ in range(_TMP_TRIES):
             candidate = ".{}.{}.tmp".format(name, secrets.token_hex(8))
@@ -647,6 +681,7 @@ def _write_target(root, rel, data):
         if tmp is None:
             raise ComposeError("target {}: {} random temporary names beside it already hold files; "
                                "none were deleted (they are not this run's)".format(rel, _TMP_TRIES))
+        tmp_rel = "/".join(rel.split("/")[:-1] + [tmp])
         try:
             try:
                 with os.fdopen(tfd, "wb", closefd=False) as fh:
@@ -658,11 +693,14 @@ def _write_target(root, rel, data):
             finally:
                 _close_fd_yielding(tfd)
             os.replace(tmp, name, src_dir_fd=directory, dst_dir_fd=directory)
-        except BaseException:
-            try:
-                os.unlink(tmp, dir_fd=directory)
-            except OSError:
-                pass  # the write failure wins; a leftover temporary file is a disclosed residual
+        except OSError as exc:
+            # Never unlinked: since the create another process may have put its own file at that name.
+            raise ComposeError("target {}: the write failed ({}); the target is unchanged and the "
+                               "temporary file {} was left beside it, not deleted (review it and remove it "
+                               "by hand)".format(rel, exc, tmp_rel)) from exc
+        except BaseException as exc:
+            exc.add_note("unless the rename completed, the temporary file {} was left beside the target, "
+                         "not deleted".format(tmp_rel))
             raise
     finally:
         _close_fd_yielding(directory)

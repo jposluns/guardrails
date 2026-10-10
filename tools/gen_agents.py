@@ -125,7 +125,7 @@ def main():
 #       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
 #   T21 a write keeps the target's mode (umask pinned; the asserted mode holds execute bits no creation
 #       mode supplies, so a dropped fchmod cannot pass) and leaves no temporary file; a failed rename is
-#       exit 2 with the target unchanged and the temporary file removed.
+#       exit 2 with the target unchanged and the temporary file left in place and named in the refusal.
 #   T22 a parent directory swapped for a symlink after the write-side walk: the write lands through the
 #       held descriptor in the original directory and nothing outside the tree changes.
 #   T23 the same swap after the read-side walk: the bytes read are the real target's, never the planted
@@ -140,6 +140,17 @@ def main():
 #   T28 an existing target without write permission is refused (exit 2) with its bytes and mode kept and
 #       no temporary file left (skipped where the runner can write it anyway, e.g. root).
 #   T29 a platform without dir_fd support is exit 2 in both modes: no path-based fallback.
+#   T30 the target swapped for a symlink after the write-side walk: the write probe's no-follow open
+#       refuses (exit 2), the link and the outside file are unchanged and no temporary file is made.
+#   T31 the target swapped for a FIFO with a reader held open after the write-side walk: the fstat check
+#       on the probe descriptor refuses (exit 2) and the FIFO is not replaced.
+#   T32 the target swapped for a FIFO with no reader after the write-side walk: the non-blocking probe
+#       refuses (exit 2) at once; a watchdog that unblocks a blocking open marks the vector failed.
+#   T33 a foreign file put at the temporary name after its creation, then a failed rename: exit 2, the
+#       target unchanged, the foreign file kept and its name given in the refusal (nothing is unlinked).
+#   T34 descriptor accounting: the descriptors open after T1-T33 are the ones open before them, so a
+#       close dropped on any ordinary success or error path fails (skipped where neither /proc/self/fd
+#       nor /dev/fd can be listed).
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -159,7 +170,9 @@ def self_test_main():
     import io
     import os
     import shutil
+    import stat
     import tempfile
+    import threading
     from contextlib import redirect_stderr, redirect_stdout
     import _adapter_compose as ac
 
@@ -242,6 +255,16 @@ def self_test_main():
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
+
+    def open_fds():
+        for fd_dir in ("/proc/self/fd", "/dev/fd"):
+            try:
+                return sorted(os.listdir(fd_dir))
+            except OSError:
+                continue
+        return None
+
+    fds_before = open_fds()
     try:
         # T1. Legacy layout: the pre-registry join, byte for byte, and stable.
         root = tree(ac.registry_text(), blocks=())
@@ -562,7 +585,7 @@ def self_test_main():
         expect("T20 legacy marker-like body, --check", root, True, 0)
         expect("T20 legacy marker-like body, rewrite", root, False, 0)
 
-        # T21. A write keeps the mode, leaves no temporary file, and a failed rename changes nothing.
+        # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
         #      temporary file's creation mode (0o666 before the umask) can never supply, so a dropped
         #      fchmod cannot pass under ANY ambient umask.
@@ -586,18 +609,22 @@ def self_test_main():
 
             ac.os.replace = failing_replace
             try:
-                expect("T21 failed rename", root, False, 2)
+                out = expect("T21 failed rename", root, False, 2)
             finally:
                 ac.os.replace = real_replace
-            if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
-                failures.append("T21: a failed rename left a temporary file: {}".format(
-                    sorted(p.name for p in root.iterdir())))
+            left = [p.name for p in root.iterdir() if p.name not in (".aiqt", AGENTS_REL)]
+            if len(left) != 1 or not left[0].startswith("." + AGENTS_REL + ".") or not left[0].endswith(".tmp"):
+                failures.append("T21: a failed rename did not leave exactly its temporary file: {}".format(left))
+            elif left[0] not in out:
+                failures.append("T21: the refusal does not name the temporary file left: {}".format(out.strip()))
         finally:
             os.umask(saved_umask)
 
         # T22. A parent directory swapped for a symlink AFTER the write-side walk cannot redirect the
         #      write: the temporary create and the rename go through the directory descriptor the walk
-        #      opened, so the bytes land in the original directory and nothing outside the tree changes.
+        #      opened, so the bytes land in the original directory and nothing outside the tree changes
+        #      (a directory renamed out of the tree, rather than within it as here, still receives the
+        #      write at its new place: a disclosed residual of the engine).
         #      The swap runs inside the first token_hex call, which _write_target makes only after
         #      _target_dir_fd has judged the whole path; reverting to path-based writes makes this
         #      vector fail (the swapped parent would redirect the temporary file outside the tree).
@@ -807,6 +834,146 @@ def self_test_main():
         if "directory descriptor" not in out:
             failures.append("T29: the refusal does not explain the missing capability: {}".format(
                 out.strip()))
+
+        # T30-T32 swap the target on the WRITE leg: the hook runs after the _target_dir_fd call that
+        # _write_target makes (make_dirs=True), so the read leg has already read the regular file and only
+        # the write probe stands between the swap and the rename.
+        def write_leg_swap(swap):
+            fired = []
+
+            def walk(*a, **k):
+                result = real_walk(*a, **k)
+                if k.get("make_dirs") and not fired:
+                    fired.append(True)
+                    swap()
+                return result
+            return walk, fired
+
+        def strays(root):
+            return sorted(p.name for p in root.iterdir() if p.name not in (".aiqt", AGENTS_REL))
+
+        # T30. A symlink swapped in at the target after the write-side walk: the probe's O_NOFOLLOW open
+        #      refuses (exit 2); without O_NOFOLLOW the probe opens the outside file through the link, it
+        #      passes the regular-file check, and the rename replaces the link (exit 0).
+        planted = tmp / "t30-outside.md"
+        planted.write_bytes(b"outside line\n")
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+
+        def to_symlink():
+            (root / AGENTS_REL).unlink()
+            os.symlink(planted, root / AGENTS_REL)
+
+        ac._target_dir_fd, fired = write_leg_swap(to_symlink)
+        try:
+            out = expect("T30 target swapped for a symlink after the write-side walk", root, False, 2,
+                         unchanged=False)
+        finally:
+            ac._target_dir_fd = real_walk
+        if not fired:
+            failures.append("T30: the write-leg swap hook did not run")
+        if "symlink" not in out:
+            failures.append("T30: the refusal does not name the symlink: {}".format(out.strip()))
+        if planted.read_bytes() != b"outside line\n" or not (root / AGENTS_REL).is_symlink():
+            failures.append("T30: the outside file or the planted link was changed")
+        if strays(root):
+            failures.append("T30: the refusal left a temporary file: {}".format(strays(root)))
+
+        # T31. A FIFO swapped in after the write-side walk, a reader held open so the non-blocking probe
+        #      open succeeds: the fstat check on the probe descriptor refuses (exit 2); without it the
+        #      rename replaces the FIFO with the generated bytes (exit 0).
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        readers = []
+
+        def to_held_fifo():
+            (root / AGENTS_REL).unlink()
+            os.mkfifo(root / AGENTS_REL)
+            readers.append(os.open(root / AGENTS_REL, os.O_RDONLY | os.O_NONBLOCK))
+
+        ac._target_dir_fd, fired = write_leg_swap(to_held_fifo)
+        try:
+            out = expect("T31 target swapped for a FIFO with a reader after the write-side walk", root, False,
+                         2, unchanged=False)
+        finally:
+            ac._target_dir_fd = real_walk
+            for rfd in readers:
+                os.close(rfd)
+        if not fired:
+            failures.append("T31: the write-leg swap hook did not run")
+        if "not a regular file" not in out:
+            failures.append("T31: the refusal does not say the target is not a regular file: {}".format(
+                out.strip()))
+        if not stat.S_ISFIFO(os.lstat(root / AGENTS_REL).st_mode) or strays(root):
+            failures.append("T31: the FIFO was replaced or a temporary file was left: {}".format(strays(root)))
+
+        # T32. A FIFO with no reader swapped in after the write-side walk: the O_NONBLOCK probe fails at
+        #      once (ENXIO, exit 2). Without O_NONBLOCK the open blocks until a reader arrives; a watchdog
+        #      supplies one after a few seconds, so the run ends either way and the block is reported.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        finished, blocked, rescuers = threading.Event(), [], []
+
+        def to_fifo():
+            (root / AGENTS_REL).unlink()
+            os.mkfifo(root / AGENTS_REL)
+
+        def watchdog():
+            if not finished.wait(5):
+                blocked.append(True)
+                rescuers.append(os.open(root / AGENTS_REL, os.O_RDONLY | os.O_NONBLOCK))
+
+        ac._target_dir_fd, fired = write_leg_swap(to_fifo)
+        dog = threading.Thread(target=watchdog, daemon=True)
+        dog.start()
+        try:
+            expect("T32 target swapped for a FIFO with no reader after the write-side walk", root, False, 2,
+                   unchanged=False)
+        finally:
+            finished.set()
+            dog.join()
+            ac._target_dir_fd = real_walk
+            for rescue_fd in rescuers:
+                os.close(rescue_fd)
+        if not fired:
+            failures.append("T32: the write-leg swap hook did not run")
+        if blocked:
+            failures.append("T32: the write probe blocked on a FIFO with no reader")
+        if not stat.S_ISFIFO(os.lstat(root / AGENTS_REL).st_mode) or strays(root):
+            failures.append("T32: the FIFO was replaced or a temporary file was left: {}".format(strays(root)))
+
+        # T33. Another process replaces the temporary file after its creation, then the rename fails:
+        #      exit 2, the target unchanged, and the foreign file at that name kept (a cleanup by name
+        #      would delete it), the refusal naming the name it left.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
+        foreign = []
+
+        def foreign_then_fail(src, _dst, **_k):
+            (root / src).unlink()
+            with open(root / src, "xb") as fh:
+                fh.write(b"FOREIGN\n")
+            foreign.append(src)
+            raise OSError("injected rename failure")
+
+        ac.os.replace = foreign_then_fail
+        try:
+            out = expect("T33 temporary name replaced after creation, then a failed rename", root, False, 2)
+        finally:
+            ac.os.replace = real_replace
+        if len(foreign) != 1:
+            failures.append("T33: the replacing hook did not run")
+        else:
+            if read(root / foreign[0]) != b"FOREIGN\n":
+                failures.append("T33: the foreign file at the temporary name was deleted or rewritten")
+            if foreign[0] not in out:
+                failures.append("T33: the refusal does not name the file it left: {}".format(out.strip()))
+
+        # T34. Descriptor accounting over T1-T33.
+        fds_after = open_fds()
+        if fds_before is not None and fds_after != fds_before:
+            failures.append("T34: descriptors leaked across the matrix: {} open before, {} after".format(
+                len(fds_before), len(fds_after or ())))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -825,11 +992,15 @@ def self_test_main():
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
           "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
           "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the mode "
-          "(under a pinned umask) and leaves no temporary file, even when the rename fails; a parent "
-          "swapped for a symlink after the walk redirects neither a write nor a read; a symlink or a "
-          "FIFO swapped in at the target is refused, as is a symlink planted against mkdir; a colliding "
-          "temporary name is retried and the colliding file kept; a read-only target is refused; and a "
-          "platform without dir_fd support is refused.")
+          "(under a pinned umask) and leaves no temporary file, and a failed rename names the one it "
+          "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "
+          "symlink or a FIFO swapped in at the target is refused, as is a symlink planted against mkdir; "
+          "a colliding "
+          "temporary name is retried and the colliding file kept; a read-only target is refused; a "
+          "platform without dir_fd support is refused; a symlink or a FIFO (held open or not) swapped in "
+          "at the target after the write-side walk is refused by the write probe without blocking; a "
+          "failed write leaves its temporary file, never deleting a foreign file at that name; and no "
+          "descriptor is left open.")
     return 0
 
 
