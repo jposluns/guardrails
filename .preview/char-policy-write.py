@@ -14,7 +14,8 @@ WHAT IT DOES
     that can start the hook, armed or not; one that cannot start it exits with Python's own status first
     (DECISION). These exits hold while the hook's output (its diagnostic on stderr, and what it prints on
     stdout) can be written and flushed. A failing output stream can change the exit status and can lose
-    output, a decision included; a separate fix in progress addresses this. The verdict is deny, a note or
+    output, a decision included: the exit is the blocking exit 2 when a DENY line cannot be written to stdout
+    and flushed (a lost deny blocks, never allows; a lost note keeps exit 0). The verdict is deny, a note or
     silence: this hook never asks. Once armed (its root set), it allows every call it cannot evaluate with a
     note naming why, a malformed call among them, and it allows silently only a tool other than Write, Edit
     or MultiEdit and a well-formed call (see DECISION) that it evaluates and finds clean, whose target is
@@ -190,11 +191,16 @@ SELF-TEST
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: char-policy-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: char-policy-write.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import os
 import select
@@ -659,9 +665,10 @@ def _read_payload(fd=0, deadline=None):
 
 
 def _emit_line(text):
-    """Write one line to stdout; on any output failure point descriptor 1 at /dev/null so the interpreter's
-    shutdown flush cannot fail, or end at once with status 0: past the floor guard, which an interpreter that
-    cannot start the hook never reaches, the hook always exits 0."""
+    """Write one NOTE line to stdout; on any output failure point descriptor 1 at /dev/null so the
+    interpreter's shutdown flush cannot fail, or end at once with status 0: every line this path carries
+    is advisory, so losing one keeps exit 0 (the deny line goes through _emit_deny_line, which fails
+    closed when the deny cannot be written and flushed)."""
     try:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
@@ -676,10 +683,32 @@ def _emit_line(text):
             os._exit(0)
 
 
+def _emit_deny_line(text):
+    """Write the DENY line to stdout and flush it. A deny that cannot be both written and flushed never
+    provably reached the platform, and the silent exit 0 reads as an allow, so the failure is noted on
+    stderr (best-effort: write, then flush, each failure swallowed) and the process ends at once with the
+    blocking exit 2 through os._exit, which skips the interpreter's exit flush (a stream that buffered a
+    failed write raises again there, and the interpreter's own status, 120, is non-blocking). A lost deny
+    blocks, never allows; a lost NOTE still travels _emit_line's fail-open path and keeps exit 0."""
+    try:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    except BaseException:
+        try:
+            sys.stderr.write("char-policy-write: the deny decision could not be written to stdout; failing "
+                             "closed with exit 2 (a lost deny blocks, never allows).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+        os._exit(2)
+
+
 def main(argv):
-    """The hook, reached only past the floor guard: always 0. `--self-test` alone runs the self-test instead.
-    A real launch passes sys.argv, a non-empty list of strings; any other argv (a call from other code, a
-    tuple included) is treated like an unknown argument, and its payload is never read."""
+    """The hook, reached only past the floor guard: 0, or, through _emit_deny_line, the blocking exit 2
+    when a deny line cannot be written
+    and flushed (a lost deny blocks, never allows). `--self-test` alone runs the self-test instead. A real
+    launch passes sys.argv, a non-empty list of strings; any other argv (a call from other code, a tuple
+    included) is treated like an unknown argument, and its payload is never read."""
     readable = isinstance(argv, list) and len(argv) > 0 and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()
@@ -705,7 +734,10 @@ def main(argv):
         except Exception as exc:
             out = _unchecked(f"an internal error ({type(exc).__name__}) stopped the check")
     if out is not None:
-        _emit_line(json.dumps(out))
+        if "hookSpecificOutput" in out:  # a deny decision: lost means blocked, never allowed
+            _emit_deny_line(json.dumps(out))
+        else:
+            _emit_line(json.dumps(out))
     return 0
 
 
@@ -1445,6 +1477,50 @@ def _self_test():
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here, *extra], input=data,
                                    capture_output=True, env={"LC_ALL": "C"}, timeout=60)
                 self.assertEqual((p.returncode, p.stdout), (0, b""), extra)
+
+        def test_h04b_stream_failure_deny_exits_2(self):
+            """A deny whose stdout cannot be written or flushed exits 2 with the failure noted on stderr
+            (a lost deny blocks, never allows; before this hardening these runs exited 0 with the deny
+            lost, which allowed the call), while a lost NOTE keeps exit 0. One child per state: stdout on
+            /dev/full (the write or flush raises ENOSPC) and on the write end of a pipe whose read end is
+            already closed (EPIPE). Skipped where /dev/full is absent."""
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full is absent on this host")
+            deny_data = json.dumps({"tool_name": "Edit", "tool_input": {
+                "file_path": self.at("docs/a.md"), "old_string": "x", "new_string": em}}).encode("ascii")
+            env = {"LC_ALL": "C", ROOT_VAR: self.root}
+
+            def run_streams(data, stdout_to):
+                handles = []
+                if stdout_to == "full":
+                    handle = open("/dev/full", "wb")
+                    handles.append(handle)
+                    stdout_target = handle
+                else:
+                    read_end, write_end = os.pipe()
+                    os.close(read_end)
+                    handles.append(write_end)
+                    stdout_target = write_end
+                try:
+                    p = subprocess.run([sys.executable, "-I", "-S", "-B", here], input=data,
+                                       stdout=stdout_target, stderr=subprocess.PIPE, env=env, timeout=60)
+                finally:
+                    for handle in handles:
+                        try:
+                            if isinstance(handle, int):
+                                os.close(handle)
+                            else:
+                                handle.close()
+                        except OSError:
+                            pass
+                return p.returncode, p.stderr
+
+            for stdout_to in ("full", "broken"):
+                rc, err = run_streams(deny_data, stdout_to)
+                self.assertEqual(rc, 2, (stdout_to, err))
+                self.assertIn(b"could not be written to stdout", err)
+                rc, err = run_streams(b"not json", stdout_to)  # armed cannot-evaluate: a NOTE line, lost, exit 0
+                self.assertEqual((rc, err), (0, b""), stdout_to)
 
         def test_h05_policy(self):
             self.is_deny(self.edit("docs/a.md", "x", em))

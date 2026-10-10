@@ -166,11 +166,21 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
-These exits, and the floor guard's on an older interpreter that can start this file, hold while the
-hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A
-failing output stream can change the exit status and can lose output, a decision included; a separate fix
-in progress addresses this. The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of
-an interpreter that cannot start this file, which fails first with Python's own exit.
+
+These exits, and the floor guard's on an older interpreter that can start this file, hold even when a
+standard stream cannot be written or flushed (a closed descriptor, a full
+device, a broken pipe). Every stderr diagnostic goes through _stderr_note (write, then flush, every failure
+swallowed), every stdout emission is written and flushed inside a guard whose failure path keeps the MODE's
+posture (a fail-open mode returns 0 with its warning or note lost; a fail-closed mode returns 2, because an
+emission that never provably reached the platform may have been a deny, so a lost decision blocks rather
+than allows), and the entry line leaves through os._exit, which skips the interpreter-exit flush of the std
+streams. Before this hardening, a failing stderr write on a fail-closed path, or the interpreter-exit flush
+of a stream that had buffered one, ended the run with the interpreter's own status (1 or 120), which the
+platform treats as NON-blocking, so a PreToolUse fail-closed path let the call through unchecked; and a deny
+decision whose stdout write failed exited 0, which allows. The floor guard above carries the same
+write-flush-os._exit shape inline, since it runs before any helper exists.
+The PYTHON-FLOOR comment below gives the floor guard's exits and the exit of an interpreter that cannot
+start this file, which fails first with Python's own exit.
 """
 import sys
 
@@ -190,22 +200,39 @@ import sys
 # no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
 # on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
 # all.
+# The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
+# so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
+# sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
+# exiting 1 as an escaping write error once did, which on PreToolUse would let the call through
+# unchecked. Both paths exit through os._exit, which skips the interpreter-exit flush of the std
+# streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
+# as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
+# os._exit discards no other buffered output; the warning itself is flushed before the exit.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
+    import os
     _floor_refusal = (
         "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    sys.stderr.write(_floor_refusal)
+    try:
+        sys.stderr.write(_floor_refusal)
+        sys.stderr.flush()
+    except BaseException:
+        pass
     if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
-        import json
-        sys.stdout.write(json.dumps(dict(systemMessage=(
-            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
-            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
-        raise SystemExit(0)
-    raise SystemExit(2)
+        try:
+            import json
+            sys.stdout.write(json.dumps(dict(systemMessage=(
+                "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+                "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
+            sys.stdout.flush()
+        except BaseException:
+            pass
+        os._exit(0)
+    os._exit(2)
 
 import collections
 import datetime
@@ -15926,13 +15953,32 @@ HANDLER_EVENT = {
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt. It prints the note and
-    returns the exit code 0, so main returns it directly (a note constructor's call is only ever the
-    direct value of a return)."""
+    these paths can wedge a session, trap a teammate, or block a human prompt. It prints and flushes
+    the note and returns the exit code 0, so main returns it directly (a note constructor's call is
+    only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
+    entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
+    refuses a try statement in a leaf constructor's body, so no guard can live here); each fail-open
+    call site in main catches it and returns 0, so a stdout that cannot be written or flushed loses the
+    warning and keeps the non-blocking exit 0, never the interpreter's own exit-time status."""
     print(json.dumps({"systemMessage": (
         "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
         "(non-blocking by design on this event).".format(handler_name, detail))}))
+    sys.stdout.flush()
     return 0
+
+
+def _stderr_note(line):
+    """Best-effort stderr diagnostic: write the line and flush, swallowing every failure (a closed
+    descriptor 2 leaves sys.stderr None; a full device or a broken pipe raises OSError), so the EXIT
+    CODE, never this line, carries the dispatcher's decision. Before this helper, a fail-closed path's
+    own print to sys.stderr could raise on the write, or buffer the line and fail the interpreter-exit
+    flush, ending the run with the interpreter's status 1 or 120; the platform treats any status other
+    than 2 as non-blocking, so the guarded PreToolUse call went ahead unchecked."""
+    try:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
 
 
 def main(argv):
@@ -15945,8 +15991,7 @@ def main(argv):
     # PreToolUse handler still fails closed (exit 2).
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
-        print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
-              file=sys.stderr)
+        _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
         return 2
     handler_name = mode
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
@@ -15954,9 +15999,13 @@ def main(argv):
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0.
-            return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
-        print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
+            # stop guard), not even on a malformed invocation: WARN and exit 0. The warn print raising
+            # (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
+            except BaseException:
+                return 0
+        _stderr_note("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail))
         return 2
     try:
         data = json.loads(sys.stdin.read())
@@ -15969,30 +16018,58 @@ def main(argv):
         detail = "{}: {}".format(type(exc).__name__, exc)
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
-            # payload (including a bare '{' or any garbage) can ever wedge the session.
-            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+            # payload (including a bare '{' or any garbage) can ever wedge the session. The warn print
+            # raising (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
+            except BaseException:
+                return 0
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail), file=sys.stderr)
+        _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
         return 2
     try:
         code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
     except Exception as exc:  # a handler crash is an unreadable result
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
-            # pathological message): WARN and exit 0, never exit 2.
-            return _dispatcher_fail_open_warn(
-                handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+            # pathological message): WARN and exit 0, never exit 2. The warn print raising (a stdout
+            # that cannot be written or flushed) loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(
+                    handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
+            except BaseException:
+                return 0
         # A PreToolUse handler crash fails closed (block), not pass.
-        print("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
-            handler_name, type(exc).__name__, exc), file=sys.stderr)
+        _stderr_note("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
+            handler_name, type(exc).__name__, exc))
         return 2
     if stdout_obj is not None:
-        print(json.dumps(stdout_obj))
+        try:
+            print(json.dumps(stdout_obj))
+            sys.stdout.flush()
+        except BaseException as exc:
+            # The handler's structured output never provably reached the platform (a full device, a
+            # broken pipe, a serialization fault). The posture comes from the MODE, exactly as on the
+            # error paths above: a fail-open mode loses its warning or note and keeps the non-blocking
+            # exit 0; a fail-closed (PreToolUse) mode fails CLOSED, because the lost object may have
+            # been a deny and this block cannot inspect it (the note-shape rules in
+            # tools/selftest_aiqt_hooks.py forbid any use of the bound result beyond the print above),
+            # so a lost decision blocks rather than allows.
+            if is_fail_open:
+                return 0
+            _stderr_note("aiqt_hooks: {}: the decision could not be written to stdout ({}: {}); "
+                         "failing closed".format(handler_name, type(exc).__name__, exc))
+            return 2
     if stderr_text:
-        print(stderr_text, file=sys.stderr)
+        _stderr_note(stderr_text)
     return code
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # os._exit, not sys.exit: main() has already written and flushed its output best-effort, so the
+    # interpreter-exit flush of the std streams could only hurt here (a stream that buffered a failed
+    # write raises again in that flush and the interpreter exits 120, a status the platform treats as
+    # NON-blocking, which would turn a fail-closed exit 2 into an allow). Nothing after main() holds
+    # unflushed output, so os._exit discards nothing.
+    os._exit(main(sys.argv[1:]))

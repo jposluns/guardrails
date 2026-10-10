@@ -37,11 +37,16 @@ failure, which reads as a finding, or 2 for an interpreter predating -I when run
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import json
@@ -55,10 +60,15 @@ try:
 except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
     if exc.name != "tomllib":
         raise  # a dependency missing while tomllib loads keeps its own diagnostic
-    sys.stderr.write(
-        "error: pin.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: pin.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
@@ -1390,27 +1400,25 @@ def self_test():
     try:
         # ---- TNOTOML: a 3.14 interpreter that cannot import tomllib is an incomplete install, not an old
         # one; the module refuses at exit 2 with one error line naming tomllib (never a traceback, never the
-        # version refusal). It is loaded afresh from this file with tomllib blocked (None in sys.modules makes
-        # the import fail). ----
-        nt_err = io.StringIO()
-        nt_saved = sys.modules.get("tomllib"), list(sys.path)
-        sys.modules["tomllib"] = None
-        try:
-            nt_spec = importlib.util.spec_from_file_location("_pin_no_tomllib", os.path.abspath(__file__))
-            with redirect_stderr(nt_err):
-                nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))
-            nt_outcome = "loaded"
-        except SystemExit as exc:
-            nt_outcome = exc.code
-        except ModuleNotFoundError as exc:
-            nt_outcome = "escaped " + type(exc).__name__
-        finally:
-            sys.modules["tomllib"] = nt_saved[0]
-            sys.path[:] = nt_saved[1]
-        nt_lines = nt_err.getvalue().splitlines()
-        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line, got "
-              "{} with {!r}".format(nt_outcome, nt_lines),
-              nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith("error: pin.py cannot import "
+        # version refusal) and an empty stdout. The guard ends its process through os._exit, which an
+        # in-process load would turn into the end of this self-test run itself, so the refusal is exercised
+        # in a REAL subprocess: the child loads the module afresh from this file with tomllib blocked (None
+        # in sys.modules makes the import fail); its trailing sentinel (one 'loaded' line, exit 86) is
+        # reached only if the guard does not refuse. ----
+        nt = subprocess.run(
+            [sys.executable, "-I", "-B", "-c",
+             'import importlib.util, sys\n'
+             'sys.modules["tomllib"] = None\n'
+             'spec = importlib.util.spec_from_file_location("_pin_no_tomllib", sys.argv[1])\n'
+             'spec.loader.exec_module(importlib.util.module_from_spec(spec))\n'
+             'sys.stderr.write("loaded with tomllib blocked\\n")\n'
+             'sys.exit(86)\n', os.path.abspath(__file__)],
+            capture_output=True, text=True, timeout=600)
+        nt_lines = nt.stderr.splitlines()
+        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line with "
+              "empty stdout, got {} with {!r} and stdout {!r}".format(nt.returncode, nt_lines, nt.stdout),
+              nt.returncode == 2 and nt.stdout == "" and len(nt_lines) == 1
+              and nt_lines[0].startswith("error: pin.py cannot import "
               "tomllib, part of the Python standard library") and "requires Python" not in nt_lines[0])
 
         # ---- TNESTED: a ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported
