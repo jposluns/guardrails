@@ -127,7 +127,7 @@ def _snapshot(root):
 _ROUTE_EMITTER = "_init_echo"
 _ROUTE_RENDERED = ("_InitRestoreLine", "_InitPriorStoreRefusal")
 _ROUTE_PINNED = ("_init_echo", "_init_inert", "_init_inert_json",
-                 "_InitRestoreLine", "_InitPriorStoreRefusal")
+                 "_init_exact_str", "_InitRestoreLine", "_InitPriorStoreRefusal")
 # The template-bearing parameters of each rendered type, by POSITIONAL index and
 # (same name) keyword, derived from the real constructor signatures in opf.py:
 # _InitRestoreLine.__new__(cls, template, *values) carries one template, at
@@ -208,6 +208,9 @@ _ROUTE_ALLOWED_REFS = dict(
         "Exception", "RuntimeError", "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "journal._open_parent",
         "journal._recreate_file", "os.fsync", "str-literal.format",
+    ]),
+    _init_exact_str=frozenset([
+        "issubclass", "str", "str.__str__", "type",
     ]),
     _init_git=frozenset([
         "RuntimeError", "_opf_observe._run_git", "result.completed",
@@ -299,7 +302,8 @@ _ROUTE_ALLOWED_REFS = dict(
 _ROUTE_EXTERNAL_BASES = frozenset([
     "AttributeError", "BaseException", "Exception", "FileNotFoundError", "OSError", "Path",
     "RuntimeError", "UnicodeError", "all", "any", "ascii", "dict", "enumerate",
-    "isinstance", "json", "len", "list", "ord", "os", "set", "sorted", "stat",
+    "isinstance", "issubclass", "json", "len", "list", "ord", "os", "set",
+    "sorted", "stat",
     "str", "super", "type",
     "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_store",
     "_opf_write_guard",
@@ -3052,6 +3056,44 @@ def _suite_isolated(invoke):
                                   and "partial-publication" in line
                                   for line in output.splitlines()))
 
+                # QA round 14 D (claude round-13 MINOR 2): a second interrupt
+                # landing in the handler's FIRST print, the cannot-evaluate
+                # line, escaped past the round-13 guard to the last-resort
+                # boundary and dropped the partial-publication sentence. That
+                # print now runs inside the guard, so the fallback line and the
+                # fixed sentence still print; on the round-13 handler only the
+                # last-resort line printed, so this check fails with the move
+                # reverted.
+                real_init_echo = opf._init_echo
+
+                def interrupt3_create(root_fd, relpath, data):
+                    interrupt3_create.calls += 1
+                    if interrupt3_create.calls >= 3:
+                        raise KeyboardInterrupt()
+                    return real_init_create(root_fd, relpath, data)
+                interrupt3_create.calls = 0
+
+                def interrupt3_echo(line, err=False):
+                    if (not interrupt3_echo.fired
+                            and str(line).startswith("opf init: cannot evaluate at ")):
+                        interrupt3_echo.fired = True
+                        raise KeyboardInterrupt()
+                    return real_init_echo(line, err=err)
+                interrupt3_echo.fired = False
+                fpp_repo = make_git("first-print-interrupt-publication")
+                rc, output = drive_cmd_init(
+                    fpp_repo, dict(_init_create=interrupt3_create,
+                                   _init_echo=interrupt3_echo))
+                check("a second interrupt in the handler's first print (the "
+                      "cannot-evaluate line) still prints the fallback line and "
+                      "the fixed partial-publication sentence, then exits 2 (QA "
+                      "round 14 D)",
+                      rc == EXIT_ERROR and interrupt3_echo.fired
+                      and "publication may be partial" in output
+                      and "cannot-evaluate line or the partial-publication "
+                      "detail could not be reported" in output
+                      and "last-resort boundary" not in output)
+
                 pi_repo = make_git("postpub'$(touch PWNED)" + '"' + "`;#")
                 pi_hostile = working + "/x'$(touch PWNED)`"
                 pi_state = {"calls": 0}
@@ -4266,6 +4308,129 @@ def _suite_isolated(invoke):
                       opf._init_refusal_message(RuntimeError("$(touch QA-RT)`"))
                       == inert("$(touch QA-RT)`"))
 
+                # QA round 14 A (codex round-13 MAJOR; claude round-13 MEDIUM
+                # 1): str() may return a str SUBCLASS, and the round-13 code
+                # compared, iterated and formatted that object as it came, so
+                # a subclass's __eq__, __iter__ (yielding characters that hash
+                # and compare like a safe one) or __format__ decided the output
+                # while its own characters printed raw, past an untouched
+                # constructor proof. Every value is now converted to an exact
+                # built-in str first (_init_exact_str). The classes are defined
+                # HERE, outside the scanned module, so the route gate never
+                # sees them; each vector is driven through the REAL refusal
+                # handler by drive_cmd_init. On the round-13 code each printed
+                # its payload raw, so each check fails with the conversion
+                # reverted.
+                qa14_open = chr(36) + chr(40)
+                qa14_tick = chr(96)
+                qa14_payload = ("qa14" + qa14_open + "touch QA14-PWNED)" + qa14_tick
+                                + ";#" + chr(27))
+
+                class Qa14Format(str):
+                    def __format__(self, spec):
+                        return ("qa" + newline + "RAW-FORMAT" + chr(27) + qa14_open
+                                + "touch QA14-FMT)" + qa14_tick)
+
+                class Qa14Eq(str):
+                    def __eq__(self, other):
+                        return True
+
+                    __hash__ = str.__hash__
+
+                class Qa14Char(str):
+                    # Hashes and compares like the safe character "a", so a
+                    # set-membership test admits it, while a join emits its
+                    # own character.
+                    def __eq__(self, other):
+                        return True
+
+                    def __hash__(self):
+                        return hash("a")
+
+                class Qa14Iter(str):
+                    def __iter__(self):
+                        return iter([Qa14Char(ch) for ch in str.__str__(self)])
+
+                class Qa14Value:
+                    def __str__(self):
+                        return Qa14Iter(qa14_payload)
+
+                class Qa14StrOverride(str):
+                    def __str__(self):
+                        return "override"
+
+                class Qa14FormatRefusal(opf._InitPriorStoreRefusal):
+                    def __str__(self):
+                        return Qa14Format("safe")
+
+                class Qa14EqRefusal(opf._InitPriorStoreRefusal):
+                    def __str__(self):
+                        return Qa14Eq(qa14_payload)
+
+                class Qa14IterRefusal(opf._InitPriorStoreRefusal):
+                    def __init__(self):
+                        RuntimeError.__init__(self, "qa14")
+                        self.restore_lines = []
+
+                    def __str__(self):
+                        return Qa14Iter(qa14_payload)
+
+                class Qa14IterError(RuntimeError):
+                    def __str__(self):
+                        return Qa14Iter(qa14_payload)
+
+                qa14_braces = chr(123) + chr(125)
+                qa14_cases = [
+                    ("codex Formatted, __format__ on a proven message",
+                     lambda: Qa14FormatRefusal(qa14_braces, ("safe",), []),
+                     "opf init: REFUSED at ", ": safe; exit 2"),
+                    ("E2, __eq__ fakes the proof comparison",
+                     lambda: Qa14EqRefusal(qa14_braces, ("ok",), []),
+                     "opf init: REFUSED at ", ": " + inert(qa14_payload) + "; exit 2"),
+                    ("E3, no proof and __iter__ spoofs the renderer",
+                     Qa14IterRefusal,
+                     "opf init: REFUSED at ", ": " + inert(qa14_payload) + "; exit 2"),
+                    ("E4, the real constructor over a value whose str() "
+                     "iterates spoofed characters",
+                     lambda: opf._InitPriorStoreRefusal(
+                         qa14_braces, (Qa14Value(),), []),
+                     "opf init: REFUSED at ", ": " + inert(qa14_payload) + "; exit 2"),
+                    ("E5, a plain RuntimeError subclass on the cannot-evaluate "
+                     "path", Qa14IterError, "opf init: cannot evaluate at ",
+                     "Qa14IterError(" + inert(qa14_payload) + "); exit 2"),
+                ]
+                for qa14_number, qa14_case in enumerate(qa14_cases):
+                    qa14_tag, qa14_make, qa14_prefix, qa14_expected = qa14_case
+
+                    def qa14_scan(git_arg, repo_arg, root_arg, make=qa14_make):
+                        raise make()
+                    qa14_repo = make_git("str-subclass-" + str(qa14_number))
+                    rc, output = drive_cmd_init(
+                        qa14_repo, dict(_init_no_prior_store=qa14_scan))
+                    check("str-subclass vector through the real handler, "
+                          + qa14_tag + ": only exact, rendered characters print "
+                          "(QA round 14 A)",
+                          rc == EXIT_ERROR and qa14_prefix in output
+                          and qa14_expected in output
+                          and qa14_open not in output and qa14_tick not in output
+                          and chr(27) not in output and "RAW-FORMAT" not in output
+                          and not (base / "QA14-PWNED").exists()
+                          and paste_probe(output, "str-subclass-"
+                                          + str(qa14_number)) == [])
+                check("the renderer and the bare gate read a str subclass by its "
+                      "own characters, never by its spoofed iteration (QA round "
+                      "14 A)",
+                      opf._init_inert(Qa14Iter(qa14_payload)) == inert(qa14_payload)
+                      and type(opf._init_inert(Qa14Iter(qa14_payload))) is str
+                      and opf._init_bare(Qa14Iter(qa14_payload)) is False)
+                check("a str-subclass value is rendered from its own characters, "
+                      "never from its overriding __str__ (QA round 14 A)",
+                      str(opf._InitRestoreLine(qa14_braces, Qa14StrOverride("data")))
+                      == "data"
+                      and str(opf._InitPriorStoreRefusal(
+                          qa14_braces, (Qa14StrOverride("data"),), []))
+                      == "data")
+
                 # QA round 13 A, the SYNC check: every template a rendered-type
                 # construction site in the real source spells, as a string
                 # literal or through a name bound by literal assignments, is a
@@ -4917,6 +5082,225 @@ def _suite_isolated(invoke):
                     check("raw-walk refusal: " + raw_label,
                           raw_verdict == "RuntimeError"
                           and raw_fragment in raw_message)
+
+                # QA round 14 B (codex round-13 MEDIUM): the walk reconciles
+                # the two sides' FILE TYPES with the status (the derivation is
+                # stated at the parse in opf.py). Each refused relationship
+                # below is one real git never emits; on the round-13 parser
+                # each passed the parse, and the cross-type R100 records
+                # released their sources, so each refusal fails with the type
+                # check reverted. Each accepted relationship is one real git
+                # emits (the real-git fixture below asserts them from git's
+                # own --raw answer) and must still parse; the R100 controls
+                # with both structural files renamed must still release their
+                # sources (no PARTIAL), the others leave old-machine expected
+                # (PARTIAL).
+                nl_b = chr(10).encode("ascii")
+                nul_b = chr(0).encode("ascii")
+                raw_manifest_move = raw_rename_rec(
+                    raw_r100_b, b"old-machine/manifest.toml",
+                    b"new-machine/manifest.toml")
+
+                def raw_typed(src_mode, dst_mode, src_id, dst_id, status):
+                    meta = (":" + src_mode + " " + dst_mode + " " + src_id + " "
+                            + dst_id + " " + status).encode("ascii")
+                    if status[:1] in ("R", "C"):
+                        return (raw_header + raw_rename_rec(
+                            meta, b"old-machine/counters.toml",
+                            b"new-machine/counters.toml") + raw_manifest_move)
+                    return raw_header + raw_single_rec(
+                        meta, b"old-machine/counters.toml")
+
+                raw_type_refused = [
+                    ("an R100 rename from a regular file to a symbolic link with "
+                     "equal ids (codex round-13 MEDIUM)",
+                     "100644", "120000", raw_blob_a, raw_blob_a, "R100"),
+                    ("an R100 rename from a regular file to a gitlink with equal "
+                     "ids (codex round-13 MEDIUM)",
+                     "100644", "160000", raw_blob_a, raw_blob_a, "R100"),
+                    ("an R100 rename from a symbolic link to a gitlink with equal "
+                     "ids", "120000", "160000", raw_blob_a, raw_blob_a, "R100"),
+                    ("a C100 copy from an executable file to a symbolic link",
+                     "100755", "120000", raw_blob_a, raw_blob_a, "C100"),
+                    ("an M from a regular file to a symbolic link (codex "
+                     "round-13 MEDIUM)",
+                     "100644", "120000", raw_blob_a, raw_blob_b, "M"),
+                    ("an M from an executable file to a gitlink",
+                     "100755", "160000", raw_blob_a, raw_blob_b, "M"),
+                    ("an M from a symbolic link to a gitlink",
+                     "120000", "160000", raw_blob_a, raw_blob_b, "M"),
+                    ("a T for an executable-bit change alone (git prints M)",
+                     "100644", "100755", raw_blob_a, raw_blob_a, "T"),
+                    ("a T between two symbolic links",
+                     "120000", "120000", raw_blob_a, raw_blob_b, "T"),
+                    ("a T between two gitlinks",
+                     "160000", "160000", raw_blob_a, raw_blob_b, "T"),
+                    ("an inexact R090 rename between symbolic links",
+                     "120000", "120000", raw_blob_a, raw_blob_b, "R090"),
+                    ("an R100 rename between gitlinks whose ids differ",
+                     "160000", "160000", raw_blob_a, raw_blob_b, "R100"),
+                ]
+                for raw_label, src_m, dst_m, src_i, dst_i, raw_st in raw_type_refused:
+                    raw_verdict, raw_message = raw_scan(
+                        raw_typed(src_m, dst_m, src_i, dst_i, raw_st))
+                    check("raw-walk file-type refusal (QA round 14 B), before any "
+                          "source is resolved or released: " + raw_label,
+                          raw_verdict == "RuntimeError"
+                          and "file types of its two sides" in raw_message)
+                raw_type_accepted = [
+                    ("an M executable-bit change 100644 to 100755",
+                     "100644", "100755", raw_blob_a, raw_blob_a, "M", True),
+                    ("an R100 rename with an executable-bit change (git mv plus "
+                     "chmod)", "100644", "100755", raw_blob_a, raw_blob_a, "R100",
+                     False),
+                    ("an R100 rename between symbolic links with equal ids",
+                     "120000", "120000", raw_blob_a, raw_blob_a, "R100", False),
+                    ("an R100 rename between gitlinks with equal ids",
+                     "160000", "160000", raw_blob_a, raw_blob_a, "R100", False),
+                    ("an inexact R090 rename between regular files",
+                     "100644", "100755", raw_blob_a, raw_blob_b, "R090", True),
+                    ("a T from a regular file to a symbolic link",
+                     "100644", "120000", raw_blob_a, raw_blob_b, "T", True),
+                    ("a T from a symbolic link to a gitlink",
+                     "120000", "160000", raw_blob_a, raw_blob_b, "T", True),
+                    ("a T from a gitlink to an executable file",
+                     "160000", "100755", raw_blob_a, raw_blob_b, "T", True),
+                    ("an M between symbolic links",
+                     "120000", "120000", raw_blob_a, raw_blob_b, "M", True),
+                    ("an M between gitlinks",
+                     "160000", "160000", raw_blob_a, raw_blob_b, "M", True),
+                ]
+                for (raw_label, src_m, dst_m, src_i, dst_i, raw_st,
+                     raw_partial) in raw_type_accepted:
+                    raw_verdict, raw_message = raw_scan(
+                        raw_typed(src_m, dst_m, src_i, dst_i, raw_st))
+                    check("raw-walk file-type control (QA round 14 B), parsed and "
+                          + ("left expected (PARTIAL)" if raw_partial
+                             else "its sources released (no PARTIAL)") + ": "
+                          + raw_label,
+                          raw_verdict == "_InitPriorStoreRefusal"
+                          and ("PARTIAL" in raw_message) == raw_partial)
+
+                # QA round 14 B, the REAL-GIT derivation: git's own --raw answer
+                # for each relationship the parse accepts (an executable-bit M,
+                # an R100 rename with an executable-bit change, a T from an
+                # executable file to a symbolic link, an R100 between symbolic
+                # links, a T from a symbolic link to a gitlink, an R100 between
+                # gitlinks), read with the walk's own options, then the real
+                # init over that history, which must refuse on the prior store
+                # without PARTIAL (every rename released) and never as a
+                # cannot-evaluate.
+                ty_repo = make_git("raw-file-types")
+                ty_w = ty_repo / working
+                (ty_w / "a").mkdir(parents=True)
+                (ty_w / "a" / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1" + nl_b)
+                (ty_w / "a" / _opf_check.COUNTERS_NAME).write_bytes(b"".join(
+                    [b"c%02d = 1" % n + nl_b for n in range(12)]))
+                (ty_repo / _opf_store.POINTER_REL).write_bytes(
+                    b"[store]" + nl_b + b'target = "dir:."' + nl_b)
+                ty_commit = ["-c", "user.email=t@t", "-c", "user.name=t",
+                             "commit", "-q", "-m"]
+                git_call(ty_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(ty_repo, ty_commit + ["store"])
+                ty_anchor = head_of(ty_repo)
+                os.chmod(ty_w / "a" / _opf_check.COUNTERS_NAME, 0o755)
+                git_call(ty_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(ty_repo, ty_commit + ["executable bit"])
+                git_call(ty_repo, ["mv", "--", working + "/a", working + "/b"])
+                os.chmod(ty_w / "b" / _opf_store.MANIFEST_NAME, 0o755)
+                git_call(ty_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(ty_repo, ty_commit + ["move plus executable bit"])
+                (ty_w / "b" / _opf_check.COUNTERS_NAME).unlink()
+                os.symlink("qa-target", str(ty_w / "b" / _opf_check.COUNTERS_NAME))
+                git_call(ty_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(ty_repo, ty_commit + ["to a symbolic link"])
+                git_call(ty_repo, ["mv", "--", working + "/b", working + "/c"])
+                git_call(ty_repo, ty_commit + ["move the symbolic link"])
+                ty_c_counters = working + "/c/" + _opf_check.COUNTERS_NAME
+                ty_d_counters = working + "/d/" + _opf_check.COUNTERS_NAME
+                git_call(ty_repo, ["rm", "-q", "--cached", "--", ty_c_counters])
+                (ty_w / "c" / _opf_check.COUNTERS_NAME).unlink()
+                git_call(ty_repo, ["update-index", "--add", "--cacheinfo",
+                                   "160000," + ty_anchor + "," + ty_c_counters])
+                git_call(ty_repo, ty_commit + ["to a gitlink"])
+                git_call(ty_repo, ["update-index", "--force-remove", "--",
+                                   ty_c_counters])
+                git_call(ty_repo, ["update-index", "--add", "--cacheinfo",
+                                   "160000," + ty_anchor + "," + ty_d_counters])
+                (ty_w / "d").mkdir()
+                git_call(ty_repo, ["mv", "--",
+                                   working + "/c/" + _opf_store.MANIFEST_NAME,
+                                   working + "/d/" + _opf_store.MANIFEST_NAME])
+                git_call(ty_repo, ty_commit + ["move the gitlink"])
+                ty_named = head_of(ty_repo)
+                ty_raw = git_call(ty_repo, [
+                    "log", "--first-parent", "--format=%x01%H", "--raw",
+                    "--no-abbrev", "--find-renames", "-z", ty_named, "--",
+                    ":(glob)" + working + "/*/" + _opf_check.COUNTERS_NAME,
+                    ":(glob)" + working + "/*/" + _opf_store.MANIFEST_NAME])
+
+                def raw_relationships(stream):
+                    found = []
+                    for token in stream.split(nul_b):
+                        fields = token.lstrip(nl_b).split(b" ")
+                        if fields[0][:1] == b":" and len(fields) == 5:
+                            found.append((fields[0][1:].decode("ascii"),
+                                          fields[1].decode("ascii"),
+                                          fields[4].decode("ascii"),
+                                          fields[2] == fields[3]))
+                    return found
+
+                ty_records = raw_relationships(ty_raw)
+                ty_expected = [
+                    ("100644", "100755", "M", True),
+                    ("100644", "100755", "R100", True),
+                    ("100755", "120000", "T", False),
+                    ("120000", "120000", "R100", True),
+                    ("120000", "160000", "T", False),
+                    ("160000", "160000", "R100", True),
+                ]
+                check("raw file types: git's own --raw answer carries each "
+                      "relationship the parse accepts (the fixture premise)",
+                      all(record in ty_records for record in ty_expected))
+                git_call(ty_repo, ["rm", "-r", "-q", "--",
+                                   working, _opf_store.POINTER_REL])
+                git_call(ty_repo, ty_commit + ["drop the store"])
+                if ty_w.exists():
+                    shutil.rmtree(ty_w)
+                rc, output = run(ty_repo)
+                check("raw file types: init over that real history refuses on "
+                      "the prior store, never as a cannot-evaluate, and every "
+                      "rename released its source (no PARTIAL)",
+                      rc == EXIT_ERROR and "REFUSED" in output
+                      and ty_named in output
+                      and "cannot evaluate" not in output
+                      and "PARTIAL" not in output)
+
+                # The premise behind refusing a cross-type rename: git reports
+                # a regular file moved into a symbolic link of identical bytes
+                # as a D and an A, never as an R.
+                tx_repo = make_git("raw-cross-type-move")
+                (tx_repo / working / "p").mkdir(parents=True)
+                (tx_repo / working / "p" / _opf_check.COUNTERS_NAME).write_bytes(
+                    b"qa-target")
+                git_call(tx_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(tx_repo, ty_commit + ["regular"])
+                (tx_repo / working / "p" / _opf_check.COUNTERS_NAME).unlink()
+                (tx_repo / working / "q").mkdir()
+                os.symlink("qa-target", str(
+                    tx_repo / working / "q" / _opf_check.COUNTERS_NAME))
+                git_call(tx_repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(tx_repo, ty_commit + ["moved into a symbolic link"])
+                tx_records = raw_relationships(git_call(tx_repo, [
+                    "log", "--first-parent", "--format=%x01%H", "--raw",
+                    "--no-abbrev", "--find-renames", "-z", "--max-count=1",
+                    "HEAD", "--",
+                    ":(glob)" + working + "/*/" + _opf_check.COUNTERS_NAME]))
+                check("raw file types: git reports a regular file moved into a "
+                      "symbolic link of identical bytes as a D and an A, never "
+                      "an R (the premise behind refusing a cross-type rename)",
+                      sorted(record[:3] for record in tx_records)
+                      == [("000000", "120000", "A"), ("100644", "000000", "D")])
 
                 # QA round 13 C (QA round 11 codex MAJOR): the bootstrap arms
                 # render at their print. Each fault is INJECTED by replacing the

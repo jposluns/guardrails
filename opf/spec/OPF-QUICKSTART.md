@@ -126,16 +126,22 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    statements, after dispatch, escapes it; and an interrupt arriving after that
    handler has returned, in the dispatcher's own return and exit statements, escapes
    it too. Each of the three windows can surface as Python's own traceback or
-   signal (the two interrupt windows interpolate no init value into that traceback;
-   a pre-dispatch fault's traceback carries that fault's own text, a SyntaxError
-   message included, unrendered -- the stated bootstrap residual). What the static
-   route gate proves, and the residual it
-   cannot see (introspection reached at runtime through allowed spellings,
-   rendered-type constructions outside the scanned module, and the sibling modules
-   the init path calls into -- each covered at the output, where the constructors
-   format only registered templates and the refusal handler re-renders anything
-   without its rendering proof), is stated in the tooling docstrings, and
-   the suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   signal. An interrupt in the boundary handler's own statements arrives while the
+   caught exception is still being handled, so its traceback can chain that
+   exception, with its raw, unrendered text; an interrupt after the handler has
+   returned interpolates no init value into its traceback; and a pre-dispatch
+   fault's traceback carries that fault's own text, a SyntaxError message included,
+   unrendered -- the stated bootstrap residual. What the static route gate proves,
+   and the residual it cannot see (introspection reached at runtime through allowed
+   spellings, rendered-type constructions outside the scanned module, and the
+   sibling modules the init path calls into), is stated in the tooling docstrings.
+   What such code hands to init's own printed lines is covered at the output: every
+   value is first converted to an exact built-in string, so a string subclass cannot
+   change what is compared, rendered or printed; the constructors format only
+   registered templates; and the refusal handler re-renders anything without its
+   rendering proof. Output such code writes by itself, and in-process code that
+   rebinds init's own functions or forges the private rendering proof, are not
+   covered. The suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.

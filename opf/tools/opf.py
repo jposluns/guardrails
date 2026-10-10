@@ -14147,6 +14147,26 @@ _INIT_BARE_SAFE = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./-_")
 
 
+def _init_exact_str(value):
+    """The EXACT built-in str that every value init renders, compares, gates or
+    formats is converted to first (QA round 14, requirement A: str() may return
+    a str SUBCLASS, and a subclass overriding __eq__, __hash__, __iter__ or
+    __format__ decided what the rendering proof compared, what the renderer
+    iterated and what str.format printed, while the characters it carried
+    reached the output raw). An instance of str or of any str subclass is
+    copied out through the BASE str.__str__ slot, which returns an exact str of
+    the same characters and never calls the subclass's own __str__; any other
+    value goes through str() once, and whatever that returns, a str subclass
+    included, is copied out the same way. The result's type is exactly str, so
+    the comparison, hashing, iteration and formatting init then applies to it
+    are the built-in ones, never a subclass's."""
+    if type(value) is str:
+        return value
+    if not issubclass(type(value), str):
+        value = str(value)
+    return str.__str__(value)
+
+
 def _init_bare(value):
     """True when every character of value is in the bare-command alphabet: only such a
     value may be interpolated into a printed command hint, because a hint carries its
@@ -14154,8 +14174,9 @@ def _init_bare(value):
     it is never escaped into a command (an escaped command could still carry a live
     shell substitution or split across physical lines, QA round 6 MAJOR); the command
     is withheld instead and the value is printed on a detail line through
-    _init_inert."""
-    return all(ch in _INIT_BARE_SAFE for ch in value)
+    _init_inert. The value is read as its exact str (_init_exact_str), so a str
+    subclass cannot pass the gate by what its own iteration yields."""
+    return all(ch in _INIT_BARE_SAFE for ch in _init_exact_str(value))
 
 
 # The FIXED rendering alphabet (QA round 8 BLOCKER 1: the round-8 widening to
@@ -14190,7 +14211,11 @@ def _init_inert(value):
     the quoted Python literal it yields, where a POSIX shell keeps them live when the
     printed line is pasted (QA rounds 5 and 6 MAJOR). A value proven bare by _init_bare
     renders unchanged. A rendered value is for reconstruction by hand (each escape
-    names one code point); it is never for pasting into a shell."""
+    names one code point); it is never for pasting into a shell. Any value is
+    first converted to its exact str (_init_exact_str; QA round 14, requirement
+    A), so the characters iterated and tested here are the value's own and a
+    str subclass's __str__, __iter__, __eq__ or __hash__ never decides them; the
+    result is a join of exact str pieces, itself an exact str."""
 
     def escape(ch):
         code = ord(ch)
@@ -14200,7 +14225,8 @@ def _init_inert(value):
             return "\\u{:04x}".format(code)
         return "\\U{:08x}".format(code)
 
-    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in value)
+    text = _init_exact_str(value)
+    return "".join(ch if ch in _INIT_INERT_SAFE else escape(ch) for ch in text)
 
 
 def _init_echo(line, err=False):
@@ -14228,7 +14254,9 @@ def _init_echo(line, err=False):
     traceback is printed between init dispatch and that boundary's guarded
     report -- an interrupt landing in the boundary's own few statements, or
     after _cmd_init returns on the dispatcher's return path, can still surface
-    Python's own traceback, the windows _cmd_init and QUICKSTART state -- and
+    Python's own traceback, the windows _cmd_init and QUICKSTART state, and the
+    first of them can chain the caught exception's raw text into that
+    traceback -- and
     the init suite pins that wrapper's exact bytes), and any
     _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
     remedy template included) is not a string literal or a name that the
@@ -14252,16 +14280,23 @@ def _init_echo(line, err=False):
     gate does not read (a rendered-type subclass or construction in ANOTHER
     module, one minted through introspection or type() at runtime, or any other
     spelling of a construction the reference scan cannot see) are the same
-    residual, and they are COVERED AT THE OUTPUT, not chased statically: the
-    rendering constructors format only registered templates (_INIT_TEMPLATES)
-    and render anything else as a value, and the refusal handler accepts a
-    message or restore line only with its constructor's rendering proof,
-    re-rendering everything else at the point of output (QA round 13,
-    requirements A and E). The suite's runtime paste test over
+    residual. What such code hands to init's OWN prints is COVERED AT THE
+    OUTPUT, not chased statically: every value, exception text and printed line
+    is converted to an exact built-in str before it is compared, gated,
+    rendered, formatted or written (_init_exact_str; QA round 14, requirement A:
+    a str subclass returned by str() overrode __eq__, __iter__ or __format__
+    and printed raw past the round-13 checks), the rendering constructors
+    format only registered templates (_INIT_TEMPLATES) and render anything else
+    as a value, and the refusal handler accepts a message or restore line only
+    with its constructor's rendering proof, re-rendering everything else at the
+    point of output (QA round 13, requirements A and E). NOT covered, and
+    stated: output such code writes by itself rather than through this
+    emitter, and in-process rebinding of init's own functions or forgery of
+    the private rendering proofs. The suite's runtime paste test over
     every init exit path is the primary guard for what the printed lines themselves
     can do."""
     stream = sys.stderr if err else sys.stdout
-    stream.write(str(line) + "\n")
+    stream.write(_init_exact_str(line) + "\n")
 
 
 def _init_inert_json(value):
@@ -14405,7 +14440,7 @@ class _InitRestoreLine(str):
     __slots__ = ("_opf_line_rendered",)
 
     def __new__(cls, template, *values):
-        rendered = [_init_inert(str(value)) for value in values]
+        rendered = [_init_inert(value) for value in values]
         if type(template) is str and template in _INIT_TEMPLATES:
             line = str.__new__(cls, template.format(*rendered))
         else:
@@ -14414,7 +14449,7 @@ class _InitRestoreLine(str):
             # rendered, never formatted; the rendered values follow after
             # literal spaces, so the line still carries what was passed, inert.
             line = str.__new__(cls, " ".join(
-                [_init_inert(str(template))] + rendered))
+                [_init_inert(template)] + rendered))
         line._opf_line_rendered = True
         return line
 
@@ -14436,19 +14471,25 @@ def _init_line_rendered(line):
 
 def _init_refusal_message(exc):
     """The caught prior-store refusal's message, PROVEN rendered, or re-rendered
-    HERE, at the point of output (QA round 13, requirement A: render at the
-    output, so no construction route can print an unrendered value). The real
-    constructor binds the composed, fully rendered message to a private
-    attribute AFTER rendering it; this accepts the exception's text only when
-    that attribute exists and EQUALS the live str(exc), so a construction route
-    that never ran the real constructor (a subclass overriding __init__, a
-    minted instance, any other exception type smuggled to the handler) and a
-    message swapped in after construction (a reassigned exc.args) are both
-    rendered through _init_inert here, never printed raw. Equality, not mere
-    presence, because the proof must cover the exact bytes printed. Deliberate
-    in-process forgery of the private attribute around raw text is hostile code
-    already running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
-    text = str(exc)
+    HERE, at the point of output (QA round 13, requirement A; QA round 14,
+    requirement A). The live text is first converted to an EXACT built-in str
+    (_init_exact_str): str(exc) may return a str subclass, whose own __eq__
+    faked the round-13 comparison below and whose __format__ or __iter__
+    changed what the handler printed, raw, past an untouched constructor proof.
+    The real constructor binds the composed, fully rendered message to a
+    private attribute AFTER rendering it; this accepts the exact text only when
+    that attribute is itself an exact str and EQUALS it under the built-in str
+    equality, so a construction route that never ran the real constructor (a
+    subclass overriding __init__, a minted instance, any other exception type
+    smuggled to the handler) and a message swapped in after construction (a
+    reassigned exc.args) are both rendered through _init_inert here, never
+    printed raw. Equality, not mere presence, because the proof must cover the
+    exact characters printed. Either way the return value is an exact str, so
+    the handler formats those characters and nothing a subclass chooses.
+    Deliberate in-process forgery of the private attribute around raw text,
+    and in-process rebinding of these functions, are hostile code already
+    running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    text = _init_exact_str(exc)
     try:
         proven = exc._opf_rendered_message
     except AttributeError:
@@ -14487,19 +14528,19 @@ class _InitPriorStoreRefusal(RuntimeError):
 
     def __init__(self, template, values, restore_lines,
                  remedy_template="", remedy_values=(), partial=False):
-        rendered_remedy = [_init_inert(str(value)) for value in remedy_values]
+        rendered_remedy = [_init_inert(value) for value in remedy_values]
         if type(remedy_template) is str and remedy_template in _INIT_TEMPLATES:
             remedy = remedy_template.format(*rendered_remedy)
         else:
             # Fail-safe (QA round 13, requirement A): an unregistered remedy
             # template is itself a value and renders, never formats.
             remedy = " ".join(
-                [_init_inert(str(remedy_template))] + rendered_remedy)
+                [_init_inert(remedy_template)] + rendered_remedy)
         if partial:
             remedy = remedy + (
                 ", and the restore is PARTIAL (the missing-store-path lines below "
                 "name structural store files the restored .working tree lacks)")
-        rendered = [_init_inert(str(value)) for value in values]
+        rendered = [_init_inert(value) for value in values]
         if type(template) is str and template in _INIT_TEMPLATES:
             message = template.format(*rendered, remedy=remedy)
         else:
@@ -14507,7 +14548,7 @@ class _InitPriorStoreRefusal(RuntimeError):
             # rendered or literal either way above, follows after a literal
             # space so nothing passed in is dropped.
             message = " ".join(
-                [_init_inert(str(template))] + rendered
+                [_init_inert(template)] + rendered
                 + ([remedy] if remedy else []))
         super().__init__(message)
         # The rendering PROOF the refusal handler accepts at the point of
@@ -14728,10 +14769,14 @@ def _init_no_prior_store(git, repo, root):
         through _init_inert at construction of the lines that carry them. The
         stream itself must end with the terminating NUL of its last token, and
         every record's modes, status and object ids must be mutually consistent
-        with the shapes git's documented --raw format prints (the derivation is
-        stated at the parse below; QA round 13 B): a stream or record outside
-        those shapes refuses like every other unreadable answer, fail-closed,
-        before any record can release a rename source."""
+        with the shapes git's documented --raw format prints, the file types of
+        its two sides included (a T only between different file types; an M, R
+        or C only between regular files or two sides of one non-regular mode,
+        the non-regular R or C exact only; an executable-bit change keeps the
+        file type): the derivation is stated at the parse below (QA round 13 B;
+        QA round 14 B). A stream or record outside those shapes refuses like
+        every other unreadable answer, fail-closed, before any record can
+        release a rename source."""
         listing = read(["ls-tree", "-r", "-z", "--name-only",
                         commit + ":" + working_rel])
         names = set(listing.out.split(b"\0")) - {b""}
@@ -14877,6 +14922,47 @@ def _init_no_prior_store(git, repo, root):
                 raise RuntimeError(
                     "git history preflight: --raw record whose modes, status "
                     "and object ids are not mutually consistent {}; "
+                    "refusing".format(ascii(meta)))
+            # FILE TYPES (QA round 14 B; git-diff(1) RAW OUTPUT FORMAT and
+            # git's diffcore, each relationship below pinned by the suite's
+            # real-git fixtures): a present side's file type is REGULAR
+            # (100644 or 100755, which differ in the executable bit alone),
+            # SYMBOLIC LINK (120000) or GITLINK (160000). git prints T exactly
+            # when the two sides' file types differ, and M only when they
+            # agree (an executable-bit change alone is M 100644 100755, never
+            # T). Its rename and copy detection scores similarity between
+            # REGULAR files only and pairs a symbolic link or gitlink only by
+            # an EXACT match of the same mode and the same object id (score
+            # 100), so an R or C record joins two regular files (git mv plus
+            # chmod prints R100 100644 100755) or two sides of one
+            # non-regular mode with equal ids and score 100, and a regular
+            # file moved into a symbolic link of identical bytes prints a D
+            # and an A, never an R. A record outside these relationships (an
+            # R, C or M between a regular file and a symbolic link or gitlink,
+            # or between a symbolic link and a gitlink; a T between sides of
+            # one file type; an inexact R or C between non-regular sides) is
+            # not a record git emits, so it REFUSES here, at the parse,
+            # before any record is resolved and before any rename source can
+            # be released (codex round-13 MEDIUM: an R100 from a regular
+            # file to a symbolic link or gitlink with equal ids released its
+            # source).
+            regular = (b"100644", b"100755")
+            same_type = ((src_mode in regular and dst_mode in regular)
+                         or src_mode == dst_mode)
+            if status[:1] == b"T":
+                type_ok = not same_type
+            elif status[:1] == b"M":
+                type_ok = same_type
+            elif status[:1] in (b"R", b"C"):
+                type_ok = same_type and (
+                    src_mode in regular
+                    or (old_blob == new_blob and status[1:] == b"100"))
+            else:
+                type_ok = True
+            if not type_ok:
+                raise RuntimeError(
+                    "git history preflight: --raw record whose status does not "
+                    "match the file types of its two sides {}; "
                     "refusing".format(ascii(meta)))
             same_blob = old_blob == new_blob and set(old_blob) != {"0"}
             if status[:1] in (b"R", b"C"):
@@ -15314,15 +15400,22 @@ def _init_main(rest):
     Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
     publication started) still reports the partial-publication disclosure before returning rendered (QA
-    round 12 C). The disclosure is itself guarded (QA round 13 D), with its windows stated exactly: a
-    SECOND interrupt, raised while the detail report (the root re-check, the observation pass, the JSON
-    event line) runs, drops only that detail, and a fixed fallback line plus the fixed "publication may
-    be partial" sentence still print; a THIRD interrupt, landing in one of those two fixed prints (or a
-    second one landing there directly), escapes to _cmd_init's boundary, which prints only its rendered
-    last-resort line, so that window carries no partial-publication disclosure at all. Whatever escapes
-    the handlers (an interrupt during the argument loop above the try, for one) is caught by _cmd_init's
-    last-resort rendering boundary (QA round 10 MAJOR 1); the windows that boundary itself does not
-    cover are stated there and in QUICKSTART.
+    round 12 C). The disclosure is itself guarded (QA round 13 D; QA round 14 D: the cannot-evaluate
+    line now prints inside the guard too), with its windows stated exactly. Once publication has
+    started, a SECOND interrupt raised while the cannot-evaluate line or the detail report (the root
+    re-check, the observation pass, the JSON event line) runs drops whatever of those had not yet
+    printed, and a fixed fallback line plus the fixed "publication may be partial" sentence still print.
+    A further interrupt landing in one of those two fixed prints (a third, or a second one landing there
+    directly) escapes to _cmd_init's boundary, which adds only its rendered last-resort line: landing in
+    the fallback print, it leaves no partial-publication sentence printed at all; landing in the fixed
+    sentence, the lines already printed before it (the cannot-evaluate line and detail, or the
+    fallback line, which says the report failed and asks for a review of the created paths) stay
+    printed while the sentence itself may not print. Before publication starts, an interrupt landing in
+    the cannot-evaluate line or the "no publication attempted" line escapes the same way; nothing was
+    published there, so no disclosure is owed. Whatever escapes the handlers (an interrupt during the
+    argument loop above the try, for one) is caught by _cmd_init's last-resort rendering boundary (QA
+    round 10 MAJOR 1); the windows that boundary itself does not cover are stated there and in
+    QUICKSTART.
     """
     root = None
     i = 0
@@ -15558,12 +15651,15 @@ def _init_main(rest):
         # the root, the stage token and the exception text through _init_inert, whose
         # raising sites may quote path-derived values with ascii() (not shell-inert on its
         # own); the exception TYPE is printed by name around the escaped text, the
-        # readable part ascii(exc) used to carry.
-        _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
-            _init_inert(str(root)), _init_inert(stage), _init_inert(type(exc).__name__),
-            _init_inert(str(exc))), err=True)
+        # readable part ascii(exc) used to carry. Once publication has started, the
+        # cannot-evaluate line is printed INSIDE the disclosure guard (QA round 14 D:
+        # a second interrupt landing in that first print escaped past the guard and
+        # dropped the partial-publication sentence).
         if publishing and root_fd is not None:
             try:
+                _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                    _init_inert(str(root)), _init_inert(stage),
+                    _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
                 try:
                     _init_same_root(root, root_fd)
                     binding = "same-root"
@@ -15576,13 +15672,17 @@ def _init_main(rest):
                     "root_binding": binding,
                     "paths": _init_observed(root_fd, directories, payloads),
                 }), sort_keys=True), err=True)
-            except BaseException:  # noqa: BLE001  a SECOND interrupt while the detail report itself runs must not drop the fixed disclosure below (QA round 13 D)
-                _init_echo("opf init: the partial-publication detail could not be "
-                           "reported (a second failure while the report itself "
-                           "ran); review the created paths yourself.", err=True)
+            except BaseException:  # noqa: BLE001  a SECOND interrupt while the cannot-evaluate line or the detail report runs must not drop the fixed disclosure below (QA round 13 D; QA round 14 D)
+                _init_echo("opf init: the cannot-evaluate line or the partial-publication "
+                           "detail could not be reported (a second failure while the "
+                           "report itself ran); review the created paths yourself.",
+                           err=True)
             _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
                        err=True)
         else:
+            _init_echo("opf init: cannot evaluate at {} during {}: {}({}); exit 2".format(
+                _init_inert(str(root)), _init_inert(stage),
+                _init_inert(type(exc).__name__), _init_inert(str(exc))), err=True)
             _init_echo("opf init: preflight refused; no publication attempted.", err=True)
         return EXIT_MALFORMED
     finally:
@@ -15611,15 +15711,20 @@ def _cmd_init(rest):
     _init_main runs reports the same way and exits 2). Three windows this boundary
     does NOT cover, stated so no wording claims more than the code provides: an
     asynchronous interrupt that lands in this handler's own few statements (after
-    the guarded report, at the return) can still escape; any failure BEFORE
+    the guarded report, at the return) can still escape, and because it arrives
+    while the caught exception is still being handled, Python's traceback then
+    CHAINS that exception (its type and its raw, unrendered text, then "During
+    handling of the above exception, another exception occurred"; QA round 14
+    C), so this window can print an init value raw; any failure BEFORE
     init dispatch is outside this boundary entirely (a bootstrap fault other than
     the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
     example a SyntaxError in an installed helper, or an interrupt before or during
     dispatch, surfaces as Python's own traceback or signal); and an interrupt
     AFTER this function returns, in the dispatcher's own return and sys.exit
     statements, escapes as Python's traceback of those dispatcher lines (that
-    traceback shows the dispatcher's source lines and the interrupt type; it
-    interpolates no init value). What a static scan
+    traceback shows the dispatcher's source lines and the interrupt type; by
+    then no exception is being handled, so it interpolates no init value: this
+    qualifier holds for this post-return window only). What a static scan
     still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
     try:
         return _init_main(rest)
