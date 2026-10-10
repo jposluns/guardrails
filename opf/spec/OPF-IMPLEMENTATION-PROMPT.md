@@ -1151,9 +1151,26 @@ Build the primitives every later step relies on.
     16.1 says "the runtime result MUST be written as one of the tokens of the three-valued gate_run
     verdict field (section 8.5)". This prompt's reading of section 16, "Conformance is reported
     against the base and, separately, against each declared profile a tool evaluated", is that every
-    report states its base result. It names an exclusion only as checklist item 19 allows, and for a
-    declared profile your implementation did not evaluate, as section 16 says, "the report names
-    that profile as unevaluated rather than implying whole-store coverage".
+    report states its base result, since the condition "a tool evaluated" qualifies the profiles
+    alone. It names an exclusion only as checklist item 19 allows, and for a declared profile your
+    implementation did not evaluate, as section 16 says, "the report names that profile as
+    unevaluated rather than implying whole-store coverage".
+  - Base result of a run that resolves no store: this applies to the report of every run that
+    resolves no store, each documented run and each run that stops before it resolves a store
+    included. This prompt's choice is that such a report states the base result `indeterminate`,
+    qualified as base, names as its scope that the run resolved no store, and states no profile
+    result, since that run read no manifest that declares a profile. Section 16 gives the basis for
+    excluding the other three tokens: it says "a conformance claim is a completeness claim over a
+    declared set", and a run that resolves no store evaluated no store, so
+    `conformant_for_declared_scope` there claims a completeness that run never checked,
+    `nonconformant` a finding it never made, and `migration_incomplete` migration work of a store it
+    never read. This prompt's reading is that `indeterminate` is the token section 16.1 itself uses
+    where a report gives a base result for a store it did not grade: the refusal-report rule, which
+    binds the fresh-only class, says "For a store its admission check refuses, a report MUST give
+    the base result as `indeterminate`", and its fresh-only paragraph says "Missing evidence makes
+    the claim `indeterminate`, never a pass". The base result of such a report is not one of the
+    four compared parts, so no reference run compares it; step 1's acceptance check below tests it,
+    and the step 15 inspection covers it.
   This prompt's choice is that the emitter checks its own output before it writes it, and writes no
   report that carries `not-read` beside `pass` or `fail` or a digest in any other form.
 
@@ -1189,10 +1206,14 @@ Acceptance checks:
   `cannot_evaluate`, and still restates the shipped declaration. Given `not-read` beside `pass` or
   `fail`, or a digest in uppercase, in the `sha256:` form or of 63 digits, the emitter writes no
   report. Each report above names its scope, its exclusions and its cannot-evaluate results,
-  states its base result in one of the section 16 tokens, qualified as base, and gives any profile
-  result it states in those tokens, qualified as that named profile, while its runtime result stays
-  the gate_run token given above; a report that states no base result fails this check. With the
-  installed copy absent, the cannot-evaluate result of that run is among those it names.
+  states the base result `indeterminate`, qualified as base, with a scope that says the run
+  resolved no store, and states no profile result, while its runtime result stays the gate_run
+  token given above. A report above that states no base result, that states the base result
+  `conformant_for_declared_scope`, `nonconformant` or `migration_incomplete`, or that states any
+  profile result fails this check. With the installed copy absent, the cannot-evaluate result of
+  that run is among those it names. A run of these checks made outside your attempts is no
+  reference run: it directs the step 15 inspection (checklist item 22) and is no evidence under the
+  two rules of section 16.1 (step 15).
 
 ### Step 2: store resolution
 
@@ -2454,7 +2475,10 @@ Acceptance checks:
   2 after it takes the lease, for a reason outside section 16.1, and that writes nothing but the
   lease claim, its release and their `session_lease` records, gives `fail`; and an `opf record` run
   with the step 1 declaration naming another release's identity installed, which stops with exit 2
-  before it resolves the store, gives `cannot_evaluate` and leaves the store unchanged.
+  before it resolves the store, gives `cannot_evaluate`, states the base result `indeterminate` that
+  step 1 fixes for a run that resolves no store, and leaves the store unchanged. These checks are no
+  reference runs, since every documented run resolves no store (step 15): they direct the step 15
+  inspection of the runtime result over performed store operations (checklist item 22).
 
 ### Step 11: releases and the changelog
 
@@ -3013,9 +3037,16 @@ each of these:
   attempt definition above has it; where it puts the installed copy of the declaration file; and
   every change to the stock install it directs.
 - The documented run: the command that runs the runtime check and the emitter over that
-  installation, resolving no store, as the step 1 report emitter checks run them, and where the
-  report it writes appears. This prompt's choice is that the two documented runs of an attempt are
-  that one command run twice in succession.
+  installation, as the step 1 report emitter checks run them, and where the report it writes
+  appears. This prompt's choice is that the documented run resolves no store, which section 16.1
+  permits and does not require: "a documented run of the runtime check and the emitter need not
+  resolve a store". That choice leaves these unexercised by every reference run: no reference run
+  performs a store operation or writes `pass`, none runs a store-coupled cannot-evaluate rule or an
+  admission check, and none states a base result for a store it evaluated; its base result is the
+  `indeterminate` that step 1 fixes for a run that resolves no store. What the commands that
+  resolve a store do there is checked by the inspection below, which the step 10 report checks
+  direct. This prompt's choice is also that the two documented runs of an attempt are that one
+  command run twice in succession.
 - The platforms and versions: section 16.1 says "Every default of that stock install that the
   documentation does not exclude, by directing that it be changed or by naming a platform that lacks
   it, is part of an unaltered execution environment, so meeting it is the release's, whichever
@@ -3023,17 +3054,20 @@ each of these:
   platforms and versions on which you make attempts.
 - The declaration file's bytes: the availability rule below fails "an installer that rewrites that
   file's bytes, by converting its line endings or otherwise". This prompt's choice is that your
-  source repository's `.gitattributes` gives the declaration file's path the attribute `-text`, with
-  no `filter`, `ident`, `working-tree-encoding` or `export-subst` attribute set for it, so no Git
-  checkout, commit or `git archive` converts its line endings or otherwise rewrites it; that your
-  build computes the embedded shipped-file digest from the exact bytes it packages as that file; and
-  that the last step of the documented installation compares the SHA-256 digest of the installed
-  copy's bytes with the shipped-file digest and fails the installation where they differ. That
-  comparison detects a rewrite and does not excuse one: an installation that stops there is "an
-  installation step an attempt cannot complete", a failure of the same rule. Neither the runtime
-  check nor the emitter opens the installed copy for writing, because the same rule fails "a first
-  run whose writes leave the second run with an installed copy that no longer holds the shipped
-  bytes".
+  source repository's `.gitattributes` gives the declaration file's path the attributes
+  `-text -filter -ident -working-tree-encoding -export-subst`. Those explicit values take precedence
+  over a `core.attributesFile`, but `.git/info/attributes`, and a `.gitattributes` file in a deeper
+  directory, take precedence over them, so they keep a Git checkout, commit or `git archive` from
+  converting that file's line endings or otherwise rewriting it only where neither of those sets an
+  attribute for that path. They are therefore not the protection this prompt relies on. That
+  protection is the next two choices: your build computes the embedded shipped-file digest from the
+  exact bytes it packages as that file, and the last step of the documented installation compares
+  the SHA-256 digest of the installed copy's bytes with the shipped-file digest and fails the
+  installation where they differ. That comparison detects a rewrite and does not excuse one: an
+  installation that stops there is "an installation step an attempt cannot complete", a failure of
+  the same rule. Neither the runtime check nor the emitter opens the installed copy for writing,
+  because the same rule fails "a first run whose writes leave the second run with an installed copy
+  that no longer holds the shipped bytes".
 
 Check every attempt and every reference run against the two rules of section 16.1: "A release MUST
 be available: every attempt MUST complete the documented installation and yield two reference runs,
@@ -3053,6 +3087,10 @@ establishing or countering conformance of any release". This prompt's reading is
 your own attempts, are the checker those rules name. So a run of the step 1 or step 10 report
 checks is evidence under those rules only where it is a run of one of your attempts, and a run over
 a changed, absent or unreadable installed copy is never a reference run, by the definition above.
+A run of one of your attempts that is no reference run, such as a second run whose installed copy
+the first run's writes changed, is still evidence under the availability rule, which fails "a first
+run whose writes leave the second run with an installed copy that no longer holds the shipped
+bytes".
 
 Section 16.1 goes on: "whether a release conforms to this section is judged only from the bytes the
 release ships, the implementation and the installer included, inspected, from the documentation of
@@ -3069,13 +3107,54 @@ record the release identity, each file and place you inspected and what you foun
 runtime check compares the installed copy's bytes with the digest the implementation carries before
 it reads any field, as section 16.1 requires, that every command that reads, grades or writes a
 store runs that check first, as "Choices to make before you start" has it, and that the digest sits
-at the place the release documentation states. The step 1 and step 10 report checks, the Appendix E
-scratch-copy probe and every other run that is no reference run of one of your attempts are
-supporting observations only: section 16.1 says such a run "is an observation of the
-implementation's behaviour, never an inspection of the bytes the release ships or a reading of the
-documentation of the release", and "it can only direct the checker to what an inspection of the
-bytes the release ships then finds". This prompt's choice is that an observation the inspection does
-not explain is a defect you resolve before a claim.
+at the place the release documentation states.
+
+Section 16.1 also says "Every requirement of this section that those rules do not compare is a
+requirement on the bytes the release ships, on the documentation of the release, or on a checker's
+own conduct and reporting", and of a requirement on the conduct of the implementation's commands
+outside what the parts above read, "a breach of it is judged by that inspection alone, never by this
+procedure". Every reference run's installed copy holds the shipped bytes and is readable, and every
+documented run resolves no store (the documented run above), so no reference run compares the
+checklist item 20 requirements below for an installed copy other than the shipped bytes or for a
+run that resolves a store. This prompt's reading is that each of them is judged by that
+inspection, so the same inspection covers them, and the record states, for each, each file and
+place you inspected and what you found there:
+
+- The outcome table of the step 1 class declaration check: that an installed copy that is absent,
+  unreadable, malformed or contradictory, one naming another release's identity included, yields
+  cannot-evaluate, and that every command that reads, grades or writes a store then stops with exit
+  2 before any store operation, as section 16.1 requires: "An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation";
+  and that a copy that lacks only its class key proceeds as upgrade-capable. The step 1 class
+  declaration checks and the command checks of item 20 direct this inspection.
+- Reading the installed copy alone: section 16.1 says "A runtime check MUST read the declaration
+  from the copy of that file installed with the implementation (the installed copy) alone, never
+  from the documentation of the release or from any report" and "each check MUST NOT take a class
+  or any other field from the documentation of the release or from any report"; the inspection
+  also covers that no profile, manifest field or command-line request declares or changes the class
+  (section 9.1). The step 1 class declaration checks direct this inspection.
+- The emitter's installed-copy digest outside the shipped bytes: `not-read` exactly where the check
+  read no bytes because the installed copy is absent or unreadable, the digest of the bytes the
+  check read on a digest mismatch, and no report written with `not-read` beside `pass` or `fail`,
+  since section 16.1 says "a report MUST NOT carry `not-read` with any runtime result other than
+  `cannot_evaluate`". The step 1 report emitter checks direct this inspection.
+- The runtime result of a run that resolves a store: the emitter takes `pass` or `fail` from the
+  run's record of the store writes it performed, as step 1 builds it. The step 10 report checks
+  direct this inspection.
+- The report content that section 16.1 does not compare, since it says "no other content of a
+  report is compared": that every report the emitter writes names its scope, its exclusions and its
+  cannot-evaluate results and states its base result as step 1 describes, `indeterminate` for a run
+  that resolves no store included. The step 1 report emitter checks direct this inspection.
+
+A run that is no reference run and belongs to none of your attempts, a run of the step 1 or step 10
+report checks made outside your attempts and the Appendix E scratch-copy probe included, is a
+supporting observation only: section 16.1 says "A run that is no reference run and belongs to none
+of the checker's attempts" is "an observation of the implementation's behaviour, never an
+inspection of the bytes the release ships or a reading of the documentation of the release", and
+"it can only direct the checker to what an inspection of the bytes the release ships then finds". A
+run of one of your attempts is evidence under the two rules of section 16.1, as above, and is no
+inspection either. This prompt's choice is that an observation the inspection does not explain is
+a defect you resolve before a claim.
 
 Section 16.1 also says "The two rules above are the one path from attempts and reference runs to a
 verdict: a breach of any requirement of this section that an attempt or a reference run shows in
@@ -3213,15 +3292,17 @@ maintainer's ruling on an open point, report the ruling with it.
     command-line request declares or changes the class (section 9.1); the class claim says that it
     is self-asserted (section 17); the declared release identity is that of the running release.
     Each release carries the shipped-file digest apart from the declaration file, and its
-    documentation states where (section 16.1). Section 16.1 also says "Every report the emitter of
-    a release writes MUST carry the four parts compared in every report, exactly these: the
-    restatement of the declaration, the shipped-file digest the implementation carries, the
-    installed-copy digest, and the runtime result", and every report of yours carries them in the
-    forms that section fixes, as the step 1 report emitter builds them: the restatement of the
-    declaration as the release ships it, each digest as 64 lowercase hexadecimal digits, the
-    installed-copy digest `not-read` only beside `cannot_evaluate`, and the runtime result read over
-    the store operations the run performed, and every report names its scope, its exclusions and
-    its cannot-evaluate results as step 1 describes (section 16).
+    documentation states where (section 16.1). The documentation of each release restates the
+    declaration file as the release ships it, as section 16.1 requires: "The documentation of each
+    release MUST restate that file's declaration without differing from it". Section 16.1 also says
+    "Every report the emitter of a release writes MUST carry the four parts compared in every
+    report, exactly these: the restatement of the declaration, the shipped-file digest the
+    implementation carries, the installed-copy digest, and the runtime result", and every report of
+    yours carries them in the forms that section fixes, as the step 1 report emitter builds them:
+    the restatement of the declaration as the release ships it, each digest as 64 lowercase
+    hexadecimal digits, the installed-copy digest `not-read` only beside `cannot_evaluate`, and the
+    runtime result read over the store operations the run performed, and every report names its
+    scope, its exclusions and its cannot-evaluate results as step 1 describes (section 16).
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
     identity included, every command that reads, grades or writes a store, `opf init`,
     `opf upgrade`, `opf record` and the step 13 and step 14 checks included, stops with
@@ -3232,34 +3313,53 @@ maintainer's ruling on an open point, report the ruling with it.
     whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade
     requirement binds it".
     The report checks of steps 1 and 10 and the checks of this item passed. They are tests that
-    direct the inspection of item 22, not evidence of conformance: section 16.1 says a run that is
-    no reference run "can only direct the checker to what an inspection of the bytes the release
-    ships then finds". The run evidence for a claim is the reference runs of item 21.
+    direct the inspection of item 22, and a run of them made outside your attempts is not evidence
+    of conformance: section 16.1 says "A run that is no reference run and belongs to none of the
+    checker's attempts" can "only direct the checker to what an inspection of the bytes the release
+    ships then finds". The run evidence for a claim is the reference runs of item 21. The evidence
+    for each requirement of this item that no reference run compares, which step 15 lists (the
+    outcome table of the class declaration check, reading the installed copy alone, the `not-read`
+    rule and the installed-copy digest outside the shipped bytes, the runtime result of a run that
+    resolves a store, and the report content section 16.1 does not compare), is the step 15
+    inspection record of item 22.
 21. Each release was installed and run as step 15 describes, from the installation procedure,
     documented run, and platforms and versions that step 15 has you write into its documentation,
     and its conformance claim names the attempts and reference runs it rests on, as section 16.1
     requires: "a conformance claim under this section MUST name the attempts and reference runs it
-    rests on". Each attempt was made in an unaltered execution environment, a stock install of a
-    platform and version that documentation names, changed only as that documentation directs and in
-    the closed operational list of section 16.1, and the report records for each attempt its
-    platform, its version and every change made to that stock install; of an attempt whose
-    eligibility you cannot determine, section 16.1 says "a failure that only such attempts show MUST
-    be reported as unresolved, never as established". In each attempt the installed copy of the
-    declaration file held the shipped bytes when the installation completed, as the install-time
-    comparison of step 15 checks. Every attempt completed the documented installation and yielded
-    two reference runs, no reference run emitted a report that deviates from the expected report or
-    authorized a store operation the reference-run rule forbids, and no attempt or reference run
-    showed a failure of either rule. A shown failure fails this item and is reported as established
-    or unresolved, naming the platform, the version, and the attempts and reference runs behind that
-    state.
+    rests on". The claim rests only on attempts whose eligibility you determined, for the
+    installation as well as the execution environment: section 16.1 says "The installation or the
+    execution environment is altered where any byte, file, or setting of either differs from what
+    the stock install's defaults, the changes the closed operational list above permits, the
+    documented steps, the release's own code, and code those steps install from a source the
+    documentation of the release directs left it", and "an attempt whose eligibility under this
+    rule the checker cannot determine establishes nothing for that checker: a failure that only such
+    attempts show MUST be reported as unresolved, never as established". The conformance report that
+    step 15 has you write records, for each attempt the claim names, its platform, its version,
+    every change made to that stock install, and that you determined both its execution environment
+    and its installation unaltered, and names apart each attempt whose eligibility you could not
+    determine; a claim that names such an attempt fails this item. In each attempt the installed
+    copy of the declaration file held the shipped bytes when the installation completed, as the
+    install-time comparison of step 15 checks. Every attempt completed the documented installation
+    and yielded two reference runs, no reference run emitted a report that deviates from the
+    expected report or authorized a store operation the reference-run rule forbids, and no attempt
+    or reference run showed a failure of either rule. A shown failure fails this item and is
+    reported as established or unresolved, naming the platform, the version, and the attempts and
+    reference runs behind that state.
 22. Before the conformance claim, the implementation each release ships was inspected as step 15
     describes for the two properties section 17 names: "Whether a release's runtime check compares
     the installed copy's bytes with the digest the implementation carries at all, and whether that
     digest sits at the place the documentation states, are established only by an inspection of the
-    implementation, never by a reference run". The evidence is the step 15 inspection record, this
-    prompt's choice: the release identity, each file and place inspected and what was found there.
-    Probes and test runs, those of steps 1 and 10 and the Appendix E scratch-copy probe included,
-    are supporting observations only and do not pass this item.
+    implementation, never by a reference run". It was also inspected for each item 20 requirement
+    that step 15 lists as one no reference run compares: the outcome table of the class declaration
+    check, reading the installed copy alone, the `not-read` rule and the installed-copy digest
+    outside the shipped bytes, the runtime result of a run that resolves a store, and the report
+    content section 16.1 does not compare. The evidence is the step 15 inspection record, this
+    prompt's choice: the release identity, each file and place inspected and what was found there,
+    for each property and each of those requirements, and the step 1, step 10 or item 20 check that
+    directed it. A run that is no reference run and belongs to none of your attempts, a test run of
+    step 1 or step 10 and the Appendix E scratch-copy probe included, is a supporting observation
+    only and does not pass this item; a run of one of your attempts is evidence under item 21, not
+    an inspection, and does not pass it either.
 
 ## Out of scope for this prompt
 
