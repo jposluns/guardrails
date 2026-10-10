@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c0a422ae4907ce890aba93342e789f70bde2782b120ae589d44d500dc78035ce"
+tree-sha256 = "e9c3bb3d867eb2412e1672339bc62a0ae1f64c97ee9c1f23f3b729aebe81afdb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,8 +31,8 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 299755
-sha256 = "f69c101dc70e8bf69d568fe6267827cbd149c03583d8d17f0f4d46c7466f1c1d"
+bytes = 299860
+sha256 = "9257e29d64ba44c08b7ad93b80d39eda1da5cf054bcb533d0bd00521de155ffd"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -2381,8 +2381,8 @@ sha256 = "42db2862ae33cce674febff7be58c91263cd2932b69d641157c46f08a6eac398"
 
 [[sources]]
 path = "TODO.md"
-bytes = 21204
-sha256 = "95c368358d2df8005260c10f82e4ac52be3f93a2737789309bb63c59a62fd231"
+bytes = 21034
+sha256 = "4fdb82c0cd46b35786f7da8f36fe3d0ecb310c56d12f8924d9c54e39b592dc28"
 
 [[sources]]
 path = "VERSION"
@@ -3291,8 +3291,8 @@ sha256 = "acb14676e67989fa529a2b3de3a17a334eb1e711c97a38dbd2647b6ca45b0108"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 100609
-sha256 = "34a5f828e75cebceb96ab24a94abdb1649a9038f87bac2866b12a78e71303413"
+bytes = 162808
+sha256 = "e7a1ac60ef340bdc56147ed5e0a0ee539d731ce21cba4b3dc2a7f1fef49eaed0"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3446,8 +3446,8 @@ sha256 = "81b082419ed38e94edb9a8d748b97eeeef31da11fa9b095ecf2468b19b18411e"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 469023
-sha256 = "272fd662ee87bb10ba11c8ed5dcb3353ba5d0cfc4eecd94730bc3831cadfb272"
+bytes = 470047
+sha256 = "15b487db317fb9868585e9d229548576411a133c5d6bd5c392c729df018cc1b4"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
