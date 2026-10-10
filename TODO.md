@@ -72,7 +72,6 @@ Fill significant gaps: strengthen capabilities that exist but are too thin to re
 | TOOL-MERGE-TRAIN | In progress (#390) | Merge-train tool: after each merge, bring every open pull request up to date with main, regenerate the generated release files, rerun its checks and push the result (M, S) | `[public]` `[tooling]` |
 | ENFORCEMENT-ATTR-SOURCE-DOC | Not started | Name --attr-source among the git value-taking options in the commit-identity hook description (L, S) | `[public]` `[docs]` |
 | PUBLIC-ROADMAP-REFRESH | In progress (#395) | Bring the public roadmap up to date: plain progress words and a row for every open pull request (M, S) | `[public]` `[docs]` |
-| OPF-SPEC-ABSENT-DECLARATION | Not started | Spec 16.1 states that a missing implementation declaration is malformed and yields cannot-evaluate (S, S) | `[public]` `[adopter]` `[1.1.1]` |
 | OPF-PROMPT-REPIN | Not started | Re-pin the implementation prompt to the spec commit that carries the 16.1 declaration rule (S, S) | `[public]` `[adopter]` `[1.1.1]` |
 | OPF-PROD-GATE-CHILD | Not started | OPF gate commands run loaded code under the child contract (S, M) | `[public]` `[tooling]` |
 
