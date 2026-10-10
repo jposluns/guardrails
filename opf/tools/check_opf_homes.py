@@ -50,85 +50,103 @@ combining grapheme joiner before ST, MUST followed by a superscript 1, and fullw
 mathematical MUST are read too; a removed character that renders visibly (MU!ST) over-fires.
 An informative marker is read the same way, in plain text alone: a heading title or body is
 informative where any of those forms holds "(informative)" (spaces allowed inside the
-parentheses) or the declaration, in any letter case and with any whitespace run, a line break
-included, read as one space; a URI autolink is read once more as its URI, the text CommonMark
-shows for it. A body is read as written and as the text of each of its paragraphs with the
-container markers of its lines removed (a block quote's ">" on every line, nested ones
-included); every paragraph is read, none is skipped, so a near-duplicate of a quoted
-declaration elsewhere in its section skips nothing. So Z (&#105;nformative),
+parentheses) or the declaration, in any ASCII letter case and with any whitespace run, a
+line break included, read as one space; a URI autolink is read once more as its URI, the
+text CommonMark shows for it. A body is read as written and as the text of each of its
+paragraphs with the container markers of its lines removed (a block quote's ">" on every
+line, nested ones included); every paragraph is read, none is skipped, so a near-duplicate
+of a quoted declaration elsewhere in its section skips nothing. So Z (&#105;nformative),
 Z (Informative), Z (informa**tive**) and a declaration split across lines or across
 block-quoted lines mark their sections; reading more forms only marks more sections
 informative, so the guard scans more. The declaration is read wherever it stands in a
 sentence, so a sentence that denies it (Nothing in this section is informative.), one inside
-an HTML attribute or comment read as text, or one inside a fenced or indented code block (the
-body is also read as written) marks its section informative too, over-fires. The guard reads
-no inline HTML tag and no character reference it does not decode; it finds every text that
-could show a declaration from its letters, and holds that text to plain prose. A heading
-title anywhere, or any paragraph in any section, block-quoted or not, is a declaration
-candidate where the letters of "informative" can be assembled, in order, from the letter
-runs of its text (character references decoded, invisible characters dropped, compatibility
-forms folded, case folded): a run inside the word used whole, runs between the pieces
-skipped, and the first and last pieces a suffix and a prefix of their runs. Candidacy and
-the declaration reader fold case the same way (_fold_case: str.casefold with dotless i,
-U+0131, read as "i"); the reader alone used re.IGNORECASE, which reads U+0131 as "i" while
-a bare casefold keeps it, so the plain spelling was read as a declaration while its split
-form was no candidate. A candidate is read, in the plain reading forms alone, only where
-every character of it is plain prose: a Unicode letter (the runs candidacy assembles; a
-look-alike letter of another script is a residual, below), an ASCII digit, a space or the
-line feed joining a paragraph's lines, or one of . , ; : ' " ( ) - ? ! / (sentence
-punctuation, the marker's own parentheses, the hyphen of compound words, the slash of
-either/or phrasing; a bare "!" is plain, and the image form "![" is refused through its
-"["). Every other character in a candidate is a finding naming the character and its code
-point, at its first occurrence, whatever the section's classification and however it
-would render: every markup lead-in ("<" and ">", "[" and "]", the backtick, "*", "_",
-"~", a backslash, "&"), every control or format character (it renders invisibly or not at
-all, so it could split or hide the word unseen), and every other ASCII or non-ASCII
-character (a "#" or "=", another script's punctuation, space or digits, a symbol). An
-allowlist decides that, not a list of markup forms, so no markup form is left to
-enumerate: every HTML, CommonMark, autolink, image and character-reference construct opens
-with a character outside the set (each of QA rounds 4 to 8 found one more form a per-form
-list missed; the allowlist refuses the class at the character). A refused candidate is
-never silently skipped: each refused character is a finding, and the plain reading forms
-are still read over the text, which only marks more sections informative and scans more,
-so the refusal, not the reading, is what the gate relies on. Named over-fires of the
-refusal, each in a candidate alone: markup whose text CommonMark shows is refused even
-though the reading forms read it ([informa](/u)tive and informa**tive** are still read as
-declarations and are findings too, as are a code span, a backslash, a decoded character
-reference and a plain ampersand, AT&T); plain text shaped like markup (informa<b holding
-no tag) is refused; a visible character outside the set (informa=tive, a superscript
-footnote mark, a non-ASCII space or digit) is refused; and ordinary words that never show
-the word can assemble it from pieces (in / form / at / i / v / e), so a paragraph holding
-no declaration can be held to plain prose. A candidate heading title is held to the same
-set by the same scan, each finding naming the title line holding the character, since a
-refused character could hide an "(informative)" marker. A heading title or paragraph that
-is no candidate is not refused for any character, however it renders: its letter runs hold
-no assembly of the word, so no removal or hiding of characters leaves the word shown; what
-a renderer adds beyond the source text is a residual, below.
-An informative section also fails closed, with a finding that
-names the form and asks for plain text or a move out of the section, on inline syntax it does
-not read: a "](" or "][" that opens no plain target (a destination with no space, parenthesis,
-quote, angle bracket or backslash, optionally a title in double or single quotes holding no
-quote, parenthesis or backslash, spaces and angle brackets allowed; or a reference label with no
-bracket or backslash), so nested or escaped parentheses and quoted parentheses are findings;
-a "<" followed by a letter, "/", "!" or "?" other than a URI autolink, since inline HTML can
-hide or reorder text, in a code span or fenced block too; and a character reference the guard
+an HTML attribute or comment read as text, or one inside a fenced or indented code block
+(the body is also read as written) marks its section informative too, over-fires. The guard
+reads no inline HTML tag and no character reference it does not decode; it finds every text
+that could show a declaration from its letters, and holds that text to plain prose. A
+heading title anywhere, or any paragraph in any section, block-quoted or not, is a
+declaration candidate where the letters of "informative" can be assembled, in order, from
+the letter runs of its text (character references decoded, invisible characters dropped,
+compatibility forms folded, ASCII letters lowercased), each non-ASCII letter standing for
+any letter of the word: a run inside the word used whole, runs between the pieces skipped,
+and the first and last pieces a suffix and a prefix of their runs. Candidacy and the
+declaration reader share one case fold (_fold_case): ASCII letters lowercased and every
+other character kept, so it maps each character to one and never expands one. No non-ASCII
+letter is folded, since a Unicode fold can expand one out of the reader's view (str.casefold
+reads the dotted capital I, U+0130, as "i" and a combining dot, so a plain declaration
+spelled with it was neither read nor refused); a non-ASCII letter instead stands for any letter
+in candidacy and is refused inside a candidate (below), so no fold is needed to find or
+refuse it. A candidate is held to plain prose: every character of it must be an ASCII
+letter, an ASCII digit, a space or the line feed joining a paragraph's lines, or one of
+. , ; : ' " ( ) - ? ! / (sentence punctuation, the marker's own parentheses, the hyphen of
+compound words, the slash of either/or phrasing; a bare "!" is plain, and the image form
+"![" is refused through its "["). Every other character in a candidate is a finding naming
+the character and its code point, at its first occurrence, whatever the section's
+classification and however it would render: every markup lead-in ("<" and ">", "[" and "]",
+the backtick, "*", "_", "~", a backslash, "&"), every control or format character (it
+renders invisibly or not at all, so it could split or hide the word unseen), every other
+ASCII character (a "#" or "="), and every non-ASCII character, letters included (another
+script's punctuation, space, digits or letters, a symbol): a letter a Unicode case fold
+expands (U+0130, sharp s U+00DF, a ligature such as U+FB01), one a reader takes for an ASCII
+letter (dotless i U+0131, an accented letter, a look-alike letter of another script such as
+a Cyrillic i), and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), letters that render
+as blank space and that the reading forms drop, so one could stand unseen for the space
+between two words of the declaration. An allowlist decides that, not a list of markup forms,
+so no markup form is left to enumerate: every inline construct that can hide, replace or
+reorder text (an HTML tag or comment, a link, an image, an autolink, a code span, emphasis
+or strikethrough, a backslash escape, a character reference) opens with a character outside
+the set (each of QA rounds 4 to 8 found one more form a per-form list missed; the allowlist
+refuses the class at the character). A construct that opens with an allowed character hides
+no text: a GFM extended autolink (www.example.org) shows its text as written, a list marker,
+setext underline or thematic break is block structure the block scan reads, and a two-space
+hard break is spaces and a line feed. A refused candidate is never silently skipped: each
+refused character is a finding. Its plain reading forms are still read over the text, so it
+can also mark its section informative, which only scans more; the refusal, not the reading,
+is what the gate relies on. Named over-fires of the refusal, each in a candidate alone:
+markup whose text CommonMark shows is refused even though the reading forms read it
+([informa](/u)tive and informa**tive** are still read as declarations and are findings too,
+as are a code span, a backslash, a decoded character reference and a plain ampersand, AT&T);
+plain text shaped like markup (informa<b holding no tag) is refused; a visible character
+outside the set (informa=tive, a superscript footnote mark, a non-ASCII space or digit, an
+accented letter in a name or loanword) is refused; ordinary words that never show the word
+can assemble it from pieces (in / form / at / i / v / e), so a paragraph holding no
+declaration can be held to plain prose; and since each non-ASCII letter stands for any
+letter of the word, text in another script is a candidate wherever its letters can assemble
+the word (any run of eleven non-ASCII letters does), so a paragraph or heading title written
+in another script is refused, each of its distinct letters named. A candidate heading title
+is held to the same set by the same scan, each finding naming the title line holding the
+character, since a refused character could hide an "(informative)" marker. A heading title
+or paragraph that is no candidate is not refused for any character, however it renders: its
+letter runs hold no assembly of the word, so no removal or hiding of characters leaves the
+word shown; what a renderer adds beyond the source text is a residual, below.
+An informative section also fails closed, with a finding that names the form and asks for
+plain text or a move out of the section, on inline syntax it does not read: a "](" or "]["
+that opens no plain target (a destination with no space, parenthesis, quote, angle bracket
+or backslash, optionally a title in double or single quotes holding no quote, parenthesis or
+backslash, spaces and angle brackets allowed; or a reference label with no bracket or
+backslash), so nested or escaped parentheses and quoted parentheses are findings; a "<"
+followed by a letter, "/", "!" or "?" other than a URI autolink, since inline HTML can hide
+or reorder text, in a code span or fenced block too; and a character reference the guard
 does not decode, in a code span or fenced block too. That finding names a "<" that may open
 inline HTML, since plain text of that shape (a<b, a code span holding Vec<u8>, an email
-autolink) is refused too, an over-fire. Residuals: a keyword or an informative marker spelt with
-look-alike letters of another script (Cyrillic or Greek) is not read, so a heading marked
-"(informative)" with a Cyrillic i in it reads as normative; a keyword adjoined by a letter or
-digit in another compatibility form is read as one word with it; a declaration spelled
-without the letters "informative" in their order is no candidate, is not found and marks
-nothing, however it renders: one spelt in other words, and one whose letters a renderer
-reorders (text written reversed under a direction-changing tag, style or override
-character); a renderer can generate text that stands in no letter run of the source, so a
-text that is no candidate can still show a declaration or a keyword on the page (an iframe
-srcdoc attribute a browser decodes a second time, a CSS content rule, an image of text;
-the raw-HTML-block and candidate refusals catch such carriers only where they open a block
-or stand in a candidate); and a heading that renders invisibly or empty (inline HTML in a
-non-candidate title, a comment as the whole title, an empty ATX heading) bounds a section
-here while a reader sees no boundary, so text below it can read on the page as part of the
-informative section above it; review catches those.
+autolink) is refused too, an over-fire. Residuals: a keyword spelt with look-alike letters
+of another script (Cyrillic or Greek) is not read (an informative marker or declaration
+spelt so is not read either, but its text is a candidate and the look-alike letter is
+refused); a keyword adjoined by a letter or digit in another compatibility form is read as
+one word with it; a declaration spelled without the letters "informative" in their order,
+each non-ASCII letter counted as any letter, is no candidate, is not found and marks
+nothing, however it renders: one spelt in other words, one with a non-letter or another
+ASCII letter standing for a letter of the word (an inverted exclamation mark, U+00A1, or a
+digit 1 for the i), and one whose letters a renderer reorders (text written reversed under a
+direction-changing tag, style or override character); a renderer can generate text that
+stands in no letter run of the source, so a text that is no candidate can still show a
+declaration or a keyword on the page (an iframe srcdoc attribute a browser decodes a second
+time, a CSS content rule, an image of text; the raw-HTML-block and candidate refusals catch
+such carriers only where they open a block or stand in a candidate); and a heading that
+renders invisibly or empty (inline HTML in a non-candidate title, a comment as the whole
+title, an empty ATX heading) bounds a section here while a reader sees no boundary, so text
+below it can read on the page as part of the informative section above it; review catches
+those.
 
 Headings are read by CommonMark's block algorithm over block quotes and list items; lines end
 at LF, CR LF or CR only, and a tab advances to the next multiple of 4 columns. A block quote
@@ -1191,7 +1209,7 @@ _INFORMATIVE_KEYWORD = re.compile(
     r"(?<!\w)_*(MUST|SHALL|REQUIRED|SHOULD|MAY|RECOMMENDED|OPTIONAL)_*(?!\w)")
 # An informative marker, matched in each reading form of a heading title (_INFORMATIVE_TITLE)
 # or a body (_INFORMATIVE_MARK), each form folded by the one case fold candidacy shares
-# (_fold_case), so any letter case and dotless i are read; any whitespace run (a line break
+# (_fold_case), so any ASCII letter case is read; any whitespace run (a line break
 # included) reads as one space (_says_informative); a body is also read as its paragraphs'
 # text with their container markers removed (_informative_sections). The body marker matches
 # anywhere in a sentence, so a sentence that denies it marks its section too, a disclosed
@@ -1259,16 +1277,19 @@ def _folded(text):
     return [_visible(unicodedata.normalize("NFKC", form)) for form in (text, split)]
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
 def _fold_case(text):
     # The one case fold candidacy (_declaration_candidate) and the declaration reader
-    # (_says_informative) share: str.casefold, with dotless i (U+0131) read as "i".
-    # re.IGNORECASE, which the reader used alone before, reads U+0131 as "i" while
-    # str.casefold keeps it, so the plain spelling was read as a declaration while its
-    # split form was no candidate; one fold on both sides closes that. casefold covers
-    # every other equivalence IGNORECASE read for these patterns' letters (U+017F folds
-    # to "s", every uppercase form folds to its lowercase), so folding first only reads
-    # more.
-    return text.casefold().replace("\u0131", "i")
+    # (_says_informative) share: ASCII letters lowercased, every other character kept, so
+    # it maps each character to one and never expands or drops one. A Unicode fold can:
+    # str.casefold reads U+0130 (dotted capital I) as "i" and a combining dot, which kept a
+    # plain declaration from being read while nothing refused it (PR #481 QA round 9). No
+    # non-ASCII letter is folded: candidacy reads each as any letter of the word
+    # (_runs_show_word) and a candidate refuses each (_plain_prose), so no fold is needed
+    # to find or refuse a declaration that holds one.
+    return text.translate(_ASCII_LOWER)
 
 
 def _reading_forms(text):
@@ -1305,7 +1326,7 @@ def _says_informative(text, mark):
     # Whether text marks itself informative (mark is _INFORMATIVE_TITLE for a heading title,
     # _INFORMATIVE_MARK for a body): in any plain reading form (_reading_forms), each form
     # folded by the one case fold candidacy uses too (_fold_case). So a marker written in
-    # any letter case or with dotless i, with decoded character references, split by markup
+    # any ASCII letter case, with decoded character references, split by markup
     # the forms remove, by invisible characters or by a line break, in compatibility forms,
     # or shown by a URI autolink is read as the page shows it; reading more forms only
     # marks more sections informative, so the guard scans more. The plain forms are
@@ -1347,7 +1368,9 @@ def _inline_unread_at(text):
 # A declaration candidate is found from its letters: the letters of "informative" can be
 # assembled, in order, from the letter runs of the text in a folded reading form (_folded:
 # character references decoded, invisible characters dropped, compatibility forms folded),
-# case folded by the shared fold (_fold_case). Rendering deletes or hides only regions
+# case folded by the shared fold (_fold_case), each non-ASCII letter standing for any
+# letter of the word (a reader may take it for one: a dotted or dotless i, an accented
+# letter, a look-alike of another script). Rendering deletes or hides only regions
 # delimited by non-letter characters (a tag or comment between "<" and ">", a code-span
 # or emphasis delimiter, a link target behind "](" or "][", an autolink's angle
 # brackets, a backslash), decodes character references, and drops invisible characters, so
@@ -1360,24 +1383,36 @@ _CANDIDATE_WORD = "informative"
 _LETTER_RUN = re.compile(r"[^\W\d_]+")
 
 
+def _spells(piece, part):
+    # Whether piece (a letter run or a slice of one) spells part (a slice of the word):
+    # the same length, each ASCII letter equal and each non-ASCII letter standing for any
+    # letter, so a letter no fold reads as one of the word's still spells it.
+    if piece.isascii():
+        return piece == part
+    return len(piece) == len(part) and all(
+        mine == theirs or not mine.isascii() for mine, theirs in zip(piece, part))
+
+
 def _runs_show_word(runs, word):
-    # Whether word can be assembled, in order, from runs: a run inside the word used whole,
-    # runs between the pieces skipped, the first piece a suffix and the last a prefix of
-    # their runs (the word inside one run included). reached holds each offset into word
-    # that some assembly of the runs so far has spelled exactly.
+    # Whether word can be assembled, in order, from runs (_spells): a run inside the word
+    # used whole, runs between the pieces skipped, the first piece a suffix and the last a
+    # prefix of their runs (the word inside one run included). reached holds each offset
+    # into word that some assembly of the runs so far has spelled.
     reached = set()
+    width = len(word)
     for run in runs:
-        if word in run:
+        if (word in run) if run.isascii() else any(
+                _spells(run[at:at + width], word) for at in range(len(run) - width + 1)):
             return True
         grown = set()
         for at in reached:
             rest = word[at:]
-            if run.startswith(rest):
+            if _spells(run[:len(rest)], rest):
                 return True
-            if rest.startswith(run):
+            if _spells(run, rest[:len(run)]):
                 grown.add(at + len(run))
-        grown.update(length for length in range(1, min(len(run), len(word) - 1) + 1)
-                     if run.endswith(word[:length]))
+        grown.update(length for length in range(1, min(len(run), width - 1) + 1)
+                     if _spells(run[-length:], word[:length]))
         reached |= grown
     return False
 
@@ -1385,33 +1420,38 @@ def _runs_show_word(runs, word):
 def _declaration_candidate(text):
     # Whether text (a heading title or a paragraph) could show "informative" after a
     # renderer removes markup the guard does not parse: its letters hold the word's letters
-    # as runs in order (_runs_show_word), in either folded form, case folded by the fold
-    # the declaration reader uses (_fold_case), so what is read plain is a candidate when
-    # split. The split fold only cuts runs at a superscript, subscript or circled form, so
-    # reading it too only widens candidacy; widening only refuses more, never hides.
+    # as runs in order (_runs_show_word), in either folded form, case folded by the fold the
+    # declaration reader uses (_fold_case), so what is read plain is a candidate when split,
+    # and each non-ASCII letter stands for any letter of the word, so no letter a reader
+    # takes for one of the word's keeps the text from being a candidate. The split fold only
+    # cuts runs at a superscript, subscript or circled form, so reading it too only widens
+    # candidacy; widening only refuses more, never hides.
     return any(_runs_show_word(_LETTER_RUN.findall(_fold_case(form)), _CANDIDATE_WORD)
                for form in _folded(text))
 
 
-# The plain prose a declaration candidate may hold and still be read: Unicode letters (the
-# runs candidacy assembles the word from, which the reading forms read; a look-alike
-# letter of another script is a named residual), ASCII digits, the space and the line feed
-# that joins a paragraph's lines, and the sentence marks below (the marker's own
-# parentheses and the punctuation the spec's declaration paragraphs use; a bare "!" is
-# plain, and the image form "![" is refused through its "["). Every other character is
-# refused (_unread_markup_at): each markup lead-in ("<", ">", "[", "]", the backtick,
-# "*", "_", "~", a backslash, "&"), each control or format character (it renders
-# invisibly or not at all, so it could split or hide the word unseen), and each other
-# ASCII or non-ASCII mark, space, digit or symbol. An allowlist, not a list of markup
-# forms, decides it, so no markup form is left to enumerate: every HTML, CommonMark,
-# autolink, image and character-reference construct opens with a character outside the
-# set.
+# The plain prose a declaration candidate may hold: ASCII letters, ASCII digits, the space
+# and the line feed that joins a paragraph's lines, and the sentence marks below (the
+# marker's own parentheses and the punctuation the spec's declaration paragraphs use; a
+# bare "!" is plain, and the image form "![" is refused through its "["). Every other
+# character is refused (_unread_markup_at): each markup lead-in ("<", ">", "[", "]", the
+# backtick, "*", "_", "~", a backslash, "&"), each control or format character (it
+# renders invisibly or not at all, so it could split or hide the word unseen), each other
+# ASCII mark, and every non-ASCII character, letters included: a letter a Unicode case
+# fold expands (U+0130, sharp s U+00DF, a ligature such as U+FB01), one a reader takes
+# for an ASCII letter (dotless i, an accented letter, a look-alike of another script),
+# and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), letters that render as blank
+# space and that the reading forms drop, so one could stand unseen for the space between
+# two words of the declaration. An allowlist, not a list of markup forms, decides it, so
+# no markup form is left to enumerate: every inline construct that can hide, replace or
+# reorder text opens with a character outside the set.
 _PLAIN_PROSE_MARKS = " \n.,;:'\"()-?!/"
 
 
 def _plain_prose(ch):
-    # Whether a declaration candidate may hold ch and still be read (the allowlist above).
-    return ch.isalpha() or "0" <= ch <= "9" or ch in _PLAIN_PROSE_MARKS
+    # Whether a declaration candidate may hold ch (the allowlist above): ASCII alone, so
+    # no non-ASCII letter is admitted.
+    return ch.isascii() and (ch.isalnum() or ch in _PLAIN_PROSE_MARKS)
 
 
 def _char_label(ch):
@@ -1519,9 +1559,9 @@ def _heading_bounds(text):
     # character outside plain prose (_unread_markup_at) is listed too, at the title line
     # holding it, since such a character could hide an "(informative)" marker; a title
     # that is no candidate holds no assembly of the word and is not scanned. Each paragraph
-    # is kept as its lines' text with their container
-    # markers removed (a block quote's ">" on every line, nested ones included), so a
-    # declaration continued across quoted lines is read (_informative_sections).
+    # is kept as its lines' text with their container markers removed (a block quote's ">"
+    # on every line, nested ones included), so a declaration continued across quoted lines
+    # is read (_informative_sections).
     headings = []
     html_lines = []
     unread = []  # (line, reason) for each line that Markdown renderers read differently
@@ -4424,16 +4464,16 @@ def _self_test_vectors():
     # Marker vectors. A heading title or body is informative where its marker reads so after
     # the normalization the keyword scan uses (character references decoded, markup and
     # invisible characters removed, compatibility forms folded, a URI autolink read as its
-    # URI), in any letter case through the shared case fold and with any whitespace run read
-    # as one space, a body also as each of its paragraphs' text with block-quote markers
-    # removed, every paragraph read and none skipped; a heading title that is a declaration
-    # candidate and holds a character outside plain prose is a finding of its own, at the
-    # title line holding it. Each red vector is green without the behaviour it names; each
-    # green vector is an ordinary heading or body that marks nothing. These reds are
-    # regression coverage for the reader: each passes on the round-8 parent too (any() reads
-    # the keyword finding and ignores the allowlist refusals many of them now also trip);
-    # the round-9 behaviour changes are pinned by the allowlist vectors below, which fail
-    # on that parent.
+    # URI), in any ASCII letter case through the shared case fold and with any whitespace
+    # run read as one space, a body also as each of its paragraphs' text with block-quote
+    # markers removed, every paragraph read and none skipped; a heading title that is a
+    # declaration candidate and holds a character outside plain prose is a finding of its
+    # own, at the title line holding it. Each red vector is green without the behaviour it
+    # names; each green vector is an ordinary heading or body that marks nothing. These reds
+    # are regression coverage for the reader: each passes on the round-8 parent too (any()
+    # reads the keyword finding and ignores the allowlist refusals many of them now also
+    # trip); the round-9 behaviour changes are pinned by the allowlist vectors below, which
+    # fail on that parent.
     notes = normative + "## Z notes\n\n"
     for name, planted in (
             ("heading-reference", normative + "## Z (&#105;nformative)" + plant),
@@ -4461,10 +4501,6 @@ def _self_test_vectors():
             ("body-zero-width", notes + "This section is informa\u200btive." + plant),
             ("body-line-break", notes + "This section\nis informative." + plant),
             ("body-lowercase", notes + "Note that this section is informative." + plant),
-            # The shared case fold keeps reading a plain dotless-i spelling (re.IGNORECASE
-            # read it before, so this is regression coverage); the candidacy side of the
-            # fold is pinned by allowlist-red-dotless-i-split, which fails on the parent.
-            ("body-dotless-i", notes + "This section is \u0131nformative." + plant),
             ("heading-title-case", normative + "## Z (Informative)" + plant),
             ("heading-uppercase", normative + "## Z (INFORMATIVE)" + plant),
             ("body-quote-wrapped", notes + "> This section\n> is informative." + plant),
@@ -4547,17 +4583,18 @@ def _self_test_vectors():
     # heading title is a declaration candidate where the letters of "informative" can be
     # assembled, in order, from the letter runs of its text (character references decoded,
     # invisible characters dropped, compatibility forms folded, case folded by the shared
-    # fold), runs between the pieces skipped. Inside a candidate nothing is masked and
-    # nothing but plain prose is read: each character outside the allowlist (letters, ASCII
-    # digits, space and the marks _PLAIN_PROSE_MARKS names) is a finding naming the section
-    # and the character, whatever the section's classification. The vectors in this loop
-    # predate the allowlist and are regression coverage: each fails when a refusal class or
-    # candidacy step is removed, and each passed on the round-8 parent too (its per-form
-    # refusals caught them); the round-9 allowlist vectors further down each fail on that
-    # parent. Each green vector is a paragraph that is no candidate, so its markup (a
-    # code-span "<type>", an autolink, an undecoded reference, a control character, a
-    # stray "](" before a backtick) is not scanned at all (a fenced block and indented
-    # code are excluded as blocks, the commonmark-html-green vectors).
+    # fold), each non-ASCII letter standing for any letter of the word, runs between the
+    # pieces skipped. Inside a candidate nothing is masked and nothing but plain prose is
+    # read: each character outside the allowlist (ASCII letters, ASCII digits, space and the
+    # marks _PLAIN_PROSE_MARKS names) is a finding naming the section and the character,
+    # whatever the section's classification. The vectors in this loop predate the allowlist
+    # and are regression coverage: each fails when a refusal class or candidacy step is
+    # removed, and each passed on the round-8 parent too (its per-form refusals caught
+    # them); the round-9 allowlist vectors further down each fail on that parent. Each green
+    # vector is a paragraph that is no candidate, so its markup (a code-span "<type>", an
+    # autolink, an undecoded reference, a control character, a stray "](" before a backtick)
+    # is not scanned at all (a fenced block and indented code are excluded as blocks, the
+    # commonmark-html-green vectors).
     could_hide = "guard does not read and which could hide an informative declaration"
     html_form = _char_label("<")
     ref_form = _char_label("&")
@@ -4747,6 +4784,54 @@ def _self_test_vectors():
               w=_char_label(ch): any("section Z notes" in f and could_hide in f
                                      and ("carries " + w) in f
                                      for f in informative_findings(m)))
+    # Round-10 vectors (PR #481 QA round 9): inside a candidate a letter is read only if it
+    # is ASCII, every non-ASCII character, letters included, is refused by name, and in
+    # candidacy each non-ASCII letter stands for any letter of the word. Each red vector
+    # fails on the round-9 parent and on the round-8 one, which admitted every Unicode
+    # letter: there U+0130 case folded to "i" and a combining dot, so a plain declaration
+    # spelled with it was neither read nor refused; a Hangul filler, a letter the reading
+    # forms drop, stood unseen for the space between two words; a letter a Unicode fold
+    # expands (sharp s, a ligature) or an accented letter passed unnamed; and a letter no
+    # fold reads as one of the word's (an accented or Cyrillic i) made no candidate.
+    # body-dotless-i moved here from the marker reds: the ASCII fold no longer reads U+0131
+    # as "i", and its refusal now holds the text.
+    for name, planted, ch in (
+            ("dotted-capital-i-word", "This section is \u0130nformative.", "\u0130"),
+            ("dotted-capital-i-uppercase", "TH\u0130S SECTION IS INFORMATIVE.", "\u0130"),
+            ("dotted-capital-i-subject", "Th\u0130s section is informative.", "\u0130"),
+            ("body-dotless-i", "This section is \u0131nformative.", "\u0131"),
+            ("hangul-filler-3164", "This section is\u3164informative.", "\u3164"),
+            ("hangul-filler-ffa0", "This section\uffa0is informative.", "\uffa0"),
+            ("hangul-filler-115f", "This\u115fsection is informative.", "\u115f"),
+            ("hangul-filler-1160", "This section is\u1160informative.", "\u1160"),
+            ("sharp-s-in-word", "This section is informa\u00dfive.", "\u00df"),
+            ("sharp-s", "This section is informative; see Stra\u00dfe 1.", "\u00df"),
+            ("ligature-fi", "This section is informative for each \ufb01le.", "\ufb01"),
+            ("accented-letter", "This section is informative for the caf\u00e9.", "\u00e9"),
+            ("accented-letter-in-word", "This section is \u00eenformative.", "\u00ee"),
+            ("cyrillic-look-alike", "This section is \u0456nformative.", "\u0456")):
+        check("spec-informative-ascii-red-" + name, lambda m=notes + planted + plant,
+              w=_char_label(ch): any("section Z notes" in f and could_hide in f
+                                     and ("carries " + w) in f
+                                     for f in informative_findings(m)))
+    for name, planted, ch in (
+            ("dotted-capital-i", "## Z (\u0130NFORMATIVE)", "\u0130"),
+            ("dotless-i", "## Z (\u0131nformative)", "\u0131"),
+            ("cyrillic-look-alike", "## Z (\u0456nformative)", "\u0456"),
+            ("hangul-filler", "## Z\u3164(informative)", "\u3164")):
+        check("spec-informative-ascii-title-red-" + name, lambda m=normative + planted + plant,
+              w=_char_label(ch): any(f.startswith("spec informative guard: heading at line ")
+                                     and "could hide" in f and ("carries " + w) in f
+                                     for f in informative_findings(m)))
+    # A paragraph or heading title holding non-ASCII letters is no candidate, and is not
+    # refused for them, where its letters assemble no "informative" with each non-ASCII
+    # letter counted as any letter.
+    for name, planted in (
+            ("accented-and-sharp-s", notes + "The caf\u00e9 serves Stra\u00dfe guests."),
+            ("hangul-filler", notes + "Keep\u3164this list short."),
+            ("title-accented", normative + "## Z caf\u00e9 notes")):
+        check("spec-informative-ascii-green-" + name,
+              lambda m=planted + stays: not informative_findings(m))
     for name, planted in (
             ("code-span-tag", "The layout names `<type>` directories."),
             ("code-span-reference", "Write `&xsplit;` for the raw form."),
