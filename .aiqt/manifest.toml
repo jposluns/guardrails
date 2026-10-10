@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "88ed3a4596e0d4c61f574f1d8c80d9ebde763ec11f0a7ead60ae69208da5c544"
+tree-sha256 = "63af06245766765b54f0e221c88f6aa624e2f5f0ed17553c49f0f1d9333ad63e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -132,7 +132,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "950fca34eee6939fed97c0913c16f9d094e6ab44c2ed2c7f385756e8d5df2598"
+sha256 = "9207c0b45b80819bb479cb5b3d3e708ec4ffa323a3fd9849a99c92433690a8cf"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3376,13 +3376,13 @@ sha256 = "2f51eb3b302390e276ac0b2adc002fd2c184a9cc7e0afdbfc903a30976d06d71"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 155057
-sha256 = "47ea93e856f4207000280c4425267efb09919b09c77dea42ad80f83a19db89b7"
+bytes = 167199
+sha256 = "287120a2fdbf31b9202b3e6b3b3dc27729de2f2dfd1292a5005d3e5826a6bd77"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 67845
-sha256 = "9202801c7cf643f753f55537e56fff21180f14f82b364615bb270c3ed6e25594"
+bytes = 70698
+sha256 = "9105f0c1f26b2f1730ec632e6ac9ec61141955c62613cd494a428f18ddb5400d"
 
 [[sources]]
 path = "tools/check_record_drift.py"
@@ -3581,8 +3581,8 @@ sha256 = "c59e2c19b2cb65c877d9600bd688f1e6984146f0145dad92cb559aa863978ba2"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 17838
-sha256 = "46d578821d3fc45b22bcd562c242768e106613411bf6f6558d685576fbe46960"
+bytes = 18358
+sha256 = "03b0aee957cf9eb690e5beb30e91f6f0295debe5f2b1e59c179ad6da80d9656f"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -3661,13 +3661,13 @@ sha256 = "5a3e5f98d9e3ecd5ecb430c756b32878cf742defbdc2410169b234fabe39a6c3"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 757147
-sha256 = "5a833f91890f1cb5f5eaaeb4a4737b6e554980f9c8d2be4ca6219a21b795b393"
+bytes = 757272
+sha256 = "b4e02a2761506e49cdfd31745499ab03c57e31cb89280149bb0bd4a500c17021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 54013
-sha256 = "b7e2eadeb4beb4e3ca57905ebc6d72542ccd971d0bf255898e377dca808b9f83"
+bytes = 54485
+sha256 = "aed986043592d49155c4fee288d91924e8f67d640ddc20f97f7187622538a797"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -959,10 +959,11 @@ def _test_stream_failure_exits(failures):
     inspect the lost object, so a lost decision blocks, never allows); a fail-open mode keeps exit 0
     with its warning lost. Each failure-stream vector fails on the unhardened code: before the
     dispatcher hardening these runs ended with the interpreter's own status (1 or 120, both of which
-    the platform treats as non-blocking), with exit 0 and the deny or note silently lost (stdout on
-    /dev/full, broken, or closed), or, with descriptor 2 closed, with the diagnostic printed to STDOUT
-    (print falls back to sys.stdout when sys.stderr is None), which the stderr vectors' empty-stdout
-    assertion catches."""
+    the platform treats as non-blocking; a deny or note written to stdout on /dev/full or a broken
+    pipe ended 120, with CPython's "Exception ignored while flushing sys.stdout" on stderr), with
+    exit 0 and the deny or note silently lost (stdout closed), or, with descriptor 2 closed, with the
+    diagnostic printed to STDOUT (print falls back to sys.stdout when sys.stderr is None), which the
+    stderr vectors' empty-stdout assertion catches."""
     hook = os.path.abspath(aiqt_hooks.__file__)
     if not os.path.exists("/dev/full"):
         failures.append("(stream-no-devfull) /dev/full is absent on this host, so the stream-failure "

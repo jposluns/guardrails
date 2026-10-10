@@ -55,9 +55,18 @@ except OSError as _exc:
     # map_keys fails closed on an existing-but-unlistable .aiqt/standards/. This binding runs at import,
     # so convert that read error into a clean exit 2 with a message rather than a bare traceback; every
     # tool that imports gen_rules (against its OWN broken standards dir) then fails closed uniformly.
-    print("error: cannot read {}/.aiqt/standards/ (fail-closed): {}".format(repo_root(), _exc),
-          file=sys.stderr)
-    raise SystemExit(2)
+    # The canonical floor-guard shape (tools/check_python_floor.py GUARD_TEMPLATE): the write and its
+    # flush are best-effort, and os._exit skips the interpreter-exit flush of the std streams, so the
+    # exit stays 2 when sys.stderr is None, fails on write or fails on flush, and stdout stays empty
+    # (`raise SystemExit` became exit 120 under a failing flush, and print, with sys.stderr None, wrote
+    # the diagnostic to stdout instead).
+    try:
+        sys.stderr.write("error: cannot read {}/.aiqt/standards/ (fail-closed): {}\n".format(
+            repo_root(), _exc))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 # Keys whose value, when present, must be a flow sequence (a list): secondary and every mapping key.
 SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')

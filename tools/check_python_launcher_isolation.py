@@ -10,8 +10,9 @@ configuration this repo ships and runs, and fails any direct ``python3`` launche
 
 BOOTSTRAP SELF-GUARD. The gate's own first executable statements import only ``sys`` and refuse to run
 (exit 2) unless the interpreter is itself isolated, so a sibling planted beside this gate cannot neuter
-the gate before it can check anything. Only after that guard passes does it import the rest of the
-stdlib and the sibling generator whose plugin path it tracks.
+the gate before it can check anything. The refusal itself imports ``os`` for ``os._exit`` (the canonical
+floor-guard shape; the comment above the guard says why that import loads no sibling). Only after that
+guard passes does it import the rest of the stdlib and the sibling generator whose plugin path it tracks.
 
 SCANNED SURFACES (the declared set, resolved from the repo root):
   - the generated plugin hook config plugin/aiqt-guardrails-hooks/hooks/hooks.json (required; the scan
@@ -86,11 +87,23 @@ def _interpreter_isolated(flags):
 
 
 # The bootstrap self-guard: refuse to run non-isolated, BEFORE importing anything a sibling could shadow.
+# It refuses through the canonical floor-guard shape (tools/check_python_floor.py GUARD_TEMPLATE): the
+# write and its flush are best-effort, and os._exit skips the interpreter-exit flush of the std
+# streams, so the exit stays 2 when sys.stderr is None, fails on write or fails on flush (`raise
+# SystemExit` became exit 120 under a failing flush, and an unwrapped write to a None stream, exit 1).
+# `import os` here loads no sibling: a normal start has already imported os, and under -S the frozen
+# os module is found before the script directory is searched; only a launch that also passes
+# -X frozen_modules=off could reach a sibling os.py, and such a launch already chooses its own flags.
 if not _interpreter_isolated(sys.flags):
-    sys.stderr.write("check_python_launcher_isolation: refusing to run non-isolated; launch it as "
-                     "`python3 -I -B tools/check_python_launcher_isolation.py` (a sibling file could "
-                     "otherwise shadow a stdlib import and neuter this gate)\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write("check_python_launcher_isolation: refusing to run non-isolated; launch it as "
+                         "`python3 -I -B tools/check_python_launcher_isolation.py` (a sibling file could "
+                         "otherwise shadow a stdlib import and neuter this gate)\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import json  # noqa: E402  imported only after the isolation guard above
 import os  # noqa: E402
@@ -754,6 +767,12 @@ def _build(base, hooks_args=("-I", SCRIPT, "h_one"),
     return base
 
 
+def _close_fd2():
+    """preexec_fn for the self-test's closed-stderr refusal case: descriptor 2 is closed in the child
+    between fork and exec, so the gate starts with sys.stderr None."""
+    os.close(2)
+
+
 def self_test_main():
     import io
     import shutil
@@ -1151,6 +1170,27 @@ def self_test_main():
         if refuse.returncode != 2:
             failures.append("the gate should refuse to run non-isolated (expected exit 2, got {})"
                             .format(refuse.returncode))
+        # 10b. The refusal exit survives a failing stderr: on /dev/full (the write succeeds into the
+        #      buffer, the flush raises ENOSPC) and with descriptor 2 closed before exec (sys.stderr is
+        #      None). The retired `sys.stderr.write(...); raise SystemExit(2)` shape exited 120 and 1 here.
+        if os.path.exists("/dev/full"):
+            with open("/dev/full", "wb") as full:
+                refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())],
+                                        stdout=subprocess.PIPE, stderr=full, env=env, cwd=str(tmp),
+                                        timeout=30)
+            if refuse.returncode != 2 or refuse.stdout:
+                failures.append("with stderr on /dev/full the gate should still refuse non-isolated with "
+                                "exit 2 and empty stdout (got exit {}, stdout {!r})".format(
+                                    refuse.returncode, refuse.stdout))
+        else:
+            skipped.append("10b stderr-full self-guard (/dev/full unavailable)")
+        refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, preexec_fn=_close_fd2, env=env, cwd=str(tmp),
+                                timeout=30)
+        if refuse.returncode != 2 or refuse.stdout:
+            failures.append("with descriptor 2 closed the gate should still refuse non-isolated with "
+                            "exit 2 and empty stdout (got exit {}, stdout {!r})".format(
+                                refuse.returncode, refuse.stdout))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1183,7 +1223,8 @@ def self_test_main():
           "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
           "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
           "fails closed (exit 2); and "
-          "the gate refuses to run non-isolated (exit 2)" + note)
+          "the gate refuses to run non-isolated (exit 2), with stderr on /dev/full and with descriptor "
+          "2 closed too" + note)
     return 0
 
 
