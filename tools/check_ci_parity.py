@@ -4451,6 +4451,14 @@ def self_test():
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,
+            # The suite's own source again, parsed for ast to classify the
+            # kill-sweep call sites in _config_results (_sweep_call_sites,
+            # the same reviewed pattern as _close_lock_sites above): no
+            # runner text, and the path is _config_results' recorded
+            # co_filename, so no caller input reaches the read. The same
+            # disclosed residual applies: the pin is the per-function count
+            # of text-mode open() calls, not the read target.
+            ("_sweep_call_sites", "open-text"): 1,
             ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("prepare", "read_text"): 1,
