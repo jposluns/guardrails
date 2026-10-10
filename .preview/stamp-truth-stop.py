@@ -228,8 +228,11 @@ stdout, so worker output is not distorted, and on exit 0 stderr reaches only the
 skip is logged, not shown); that line is at most 100 characters. The one exception to exit 0 is an
 interpreter older than Python 3.14 that can start the hook: the guard at the top of this file reads no input,
 writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr and exits 1,
-which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. It does not exit 2: on
-a Stop exit 2 blocks the stop, and the guard runs before the BLOCK CAP, so this hook's own block cap would
+which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. These exits hold while
+the hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A
+failing output stream can change the exit status and can lose output, a decision included; a separate fix in
+progress addresses this. It does not exit 2: on a
+Stop exit 2 blocks the stop, and the guard runs before the BLOCK CAP, so this hook's own block cap would
 never run (any limit the host itself applies is outside this hook). An older interpreter that cannot start
 the hook never reaches the guard and fails with Python's own error first: one that predates the -I option
 exits 2, which blocks the stop, and this hook's own block cap never runs; one that accepts -I but cannot

@@ -53,9 +53,12 @@ payload is evaluated. The one exception to exit 0 is an interpreter older than P
 hook: the guard at the top of this file reads no input, writes one line beginning
 `error: clock-inject.py requires Python 3.14 or newer` to stderr and exits 2. Under PostToolUse and
 PostToolUseFailure the tool call has already run, so that exit blocks nothing: the line reaches the assistant
-and no clock line is added. An older interpreter that cannot start the hook never reaches the guard and fails
-with Python's own error first; .preview/README.md (Installing a hook, step 4) describes those cases. The
-payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the process locale.
+and no clock line is added. These exits hold while the hook's output (its diagnostic on stderr, and what it
+prints on stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+output, a decision included; a separate fix in progress addresses this. An older interpreter that cannot start
+the hook never reaches the guard and fails with Python's own error first; .preview/README.md (Installing a
+hook, step 4) describes those cases. The payload is read as BYTES and parsed by json.loads, so its decoding
+does not depend on the process locale.
 Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
