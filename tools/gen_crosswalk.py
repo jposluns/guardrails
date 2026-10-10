@@ -688,7 +688,17 @@ def _fdopen_vectors(base):
                         "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
-            if any(name.endswith(".tmp") for name in os.listdir(dfd)):
+            # F-JOURNAL-HELD-FD-LISTING: dfd was opened BEFORE the vector wrote through it, and a
+            # listing read through a held descriptor can miss every entry created since its open (on
+            # btrfs the kernel snapshots a readdir upper bound at open time), so a leftover temporary
+            # would escape this sweep; list through a FRESH "." descriptor opened beneath dfd (the
+            # same directory identity, no path re-resolution), closed on every path.
+            lfd = real_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            try:
+                leftovers = os.listdir(lfd)
+            finally:
+                os.close(lfd)
+            if any(name.endswith(".tmp") for name in leftovers):
                 problems.append("TEMP")
         finally:
             os.close(dfd)
@@ -776,6 +786,26 @@ def _fdopen_vectors(base):
             os.close(fd)
     if got != "named":
         failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
+    # F-JOURNAL-HELD-FD-LISTING: the TEMP sweep must report a leftover temporary created AFTER the
+    # fixture descriptor was opened (the vector writes it through dfd and leaves it behind); a listing
+    # read through the held descriptor itself can miss every entry created since its open, so the
+    # sweep reads through a fresh descriptor, and this leg fails against that regression.
+
+    def leaves_tmp(dfd):
+        fd = os.open("late-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    problems = run(leaves_tmp, early)
+    runs += 1
+    if problems != ["TEMP"]:
+        failures.append("fdopen vector HELDFD TEMP sweep: a leftover temporary created after the "
+                        "fixture descriptor was opened must be reported (expected ['TEMP'], got "
+                        "{})".format(problems))
+    try:
+        os.unlink(str(base / "late-leftover.tmp"))
+    except FileNotFoundError:
+        pass
     return failures, runs
 
 

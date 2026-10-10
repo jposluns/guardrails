@@ -517,7 +517,10 @@ def _txn_dirs(jr_fd, journal_root):
     _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed). F-R18-JTOCTOU:
     enumeration is bound to the TRUSTED already-open journal-root descriptor `jr_fd` (fd-relative), never a
     re-resolved journal path, so a swapped journal ancestor between open and enumerate cannot redirect the
-    listing onto a decoy and report false-clean."""
+    listing onto a decoy and report false-clean. F-JOURNAL-HELD-FD-LISTING: the delegate reads each
+    enumeration through a fresh "." descriptor opened beneath jr_fd, so a transaction directory created
+    after jr_fd was opened is still enumerated (a listing read through the held descriptor itself can
+    miss entries created since its open)."""
     return _journal._journal_txn_dirs(jr_fd, journal_root)
 
 
@@ -2493,6 +2496,88 @@ def self_test():
         finally:
             os.close(_jt_jrfd)
             os.close(_jt_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, direct) a transaction directory created AFTER the journal-root
+        # descriptor was opened is enumerated by the FIRST _journal_txn_dirs call: the listing reads
+        # through a fresh "." descriptor opened beneath the held jr_fd, never through jr_fd itself
+        # (a held descriptor's listing can miss every entry created since its open; on btrfs the
+        # kernel snapshots a readdir upper bound at open time).
+        _hl_root = tmp / "heldfd" / "root"
+        (_hl_root / JOURNAL_REL / "txnA").mkdir(parents=True)
+        _hl_rfd = os.open(str(_hl_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hl_jrfd = _journal.open_journal_root_fd(_hl_rfd, JOURNAL_REL)
+        try:
+            os.mkdir("txnB", dir_fd=_hl_jrfd)               # created AFTER _hl_jrfd was opened
+            _hl_names = sorted(d.name for d in _journal._journal_txn_dirs(
+                _hl_jrfd, _hl_root / JOURNAL_REL))
+            if _hl_names != ["txnA", "txnB"]:
+                failures.append("HELDFD: the first enumeration after a late mkdir must see the new "
+                                "transaction directory through a fresh listing descriptor (got "
+                                "{})".format(_hl_names))
+            # Filesystem-independent leg: whatever the filesystem's readdir behaviour, the enumeration
+            # must hand os.scandir a FRESH descriptor that carries the held journal-root's identity,
+            # never the held descriptor number itself.
+            _hl_seen = {}
+            _hl_real_scandir = os.scandir
+
+            def _hl_spy(arg, *a, **k):
+                if isinstance(arg, int) and "fd" not in _hl_seen:
+                    _hl_st = os.fstat(arg)                  # stat INSIDE the call: the fd is closed after
+                    _hl_seen["fd"] = (arg, _hl_st.st_dev, _hl_st.st_ino)
+                return _hl_real_scandir(arg, *a, **k)
+            os.scandir = _hl_spy
+            try:
+                _journal._journal_txn_dirs(_hl_jrfd, _hl_root / JOURNAL_REL)
+            finally:
+                os.scandir = _hl_real_scandir
+            _hl_held = os.fstat(_hl_jrfd)
+            if not ("fd" in _hl_seen and _hl_seen["fd"][0] != _hl_jrfd
+                    and _hl_seen["fd"][1:] == (_hl_held.st_dev, _hl_held.st_ino)):
+                failures.append("HELDFD: the enumeration must read through a fresh descriptor carrying "
+                                "the held journal-root's identity, never the held descriptor itself "
+                                "(saw {})".format(_hl_seen.get("fd")))
+        finally:
+            os.close(_hl_jrfd)
+            os.close(_hl_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, reconcile) the stale-lock reconcile must never read a journal
+        # holding an OPEN transaction created after jr_fd was opened as 'all terminal': the late open
+        # transaction is enumerated, recovered to terminal, and only then is the dead owner's stale
+        # lock broken. A reconcile that misses it breaks the lock and leaves the transaction open.
+        _hr_root = _build_case_root(tmp / "heldfd-reconcile" / "root", "flat-files")
+        _hr_jr = _hr_root / JOURNAL_REL
+        _hr_jr.mkdir(parents=True, exist_ok=True)
+        _hr_rfd = os.open(str(_hr_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hr_jrfd = _journal.open_journal_root_from_path(_hr_root, JOURNAL_REL)
+        try:
+            _hr_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            _hr_dead.wait()                                 # a pid that is confirmed dead once reaped
+            (_hr_jr / "lock").write_bytes(json.dumps(
+                {"uid": os.getuid(), "pid": _hr_dead.pid, "session": "dead", "pid-start": "",
+                 "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+            os.mkdir("late-open", dir_fd=_hr_jrfd)          # created AFTER _hr_jrfd was opened
+            _journal.publish(_hr_jrfd, _hr_jr / "late-open", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})   # INTENT, no terminal: OPEN
+            try:
+                _hr_res = _journal.reconcile_and_claim_stale(_hr_jr, _hr_jrfd, _hr_rfd,
+                                                             "heldfd-selftest")
+            except _journal.JournalError as exc:
+                _hr_res = "JournalError({})".format(exc)
+            try:
+                _hr_terminal = _journal.is_terminal(_hr_jrfd, _hr_jr / "late-open")
+            except _journal.JournalError:
+                _hr_terminal = "unreadable"
+            if _hr_res != "acquired" or _hr_terminal is not True:
+                failures.append("HELDFD-RECONCILE: an open transaction created after jr_fd was opened "
+                                "must be enumerated and recovered before the stale lock is broken, "
+                                "never read as 'all terminal' (result {}, late txn terminal "
+                                "{})".format(_hr_res, _hr_terminal))
+            _journal.release_lock(_hr_jr)
+        finally:
+            os.close(_hr_jrfd)
+            os.close(_hr_rfd)
         checked += 1
 
         # (F-R18-OSESC) an enumeration OSError (e.g. EIO) escapes as a CONTEXTUAL JournalError, not a raw

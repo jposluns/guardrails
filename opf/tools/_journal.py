@@ -990,6 +990,33 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
+def _listdir_fresh(held_fd, label):
+    """The entry names of the directory held open at `held_fd`, read through a FRESH descriptor opened
+    as "." beneath it for this listing alone (F-JOURNAL-HELD-FD-LISTING). os.listdir(fd) and
+    os.scandir(fd) read through a dup that SHARES the given descriptor's open file description -- its
+    directory read offset and, on btrfs, a readdir upper bound the kernel snapshots when the directory
+    is opened -- so a listing through a descriptor held from an earlier open or listing can miss every
+    entry created since that open (an entry created after the open reads as absent). The "." open
+    resolves RELATIVE to held_fd inside the kernel, so it reaches exactly the directory the held
+    descriptor identifies without re-resolving any path (the held descriptor's swap/race protection is
+    kept: a rename or decoy at the directory's path cannot divert it), and it carries a fresh open file
+    description whose view includes every entry up to THIS open. The fresh descriptor is closed on
+    every path, exactly once. An OSError opening or listing is wrapped in a contextual JournalError
+    (fail-closed). The enumeration itself stays os.scandir, so an injected scandir fault still
+    exercises the fail-closed wrap (F-R18-OSESC)."""
+    try:
+        lfd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held_fd)
+    except OSError as exc:
+        raise JournalError("cannot reopen {} for a fresh listing ({}); fail-closed".format(label, exc))
+    try:
+        with os.scandir(lfd) as it:
+            return [entry.name for entry in it]
+    except OSError as exc:
+        raise JournalError("cannot list {} ({}); fail-closed".format(label, exc))
+    finally:
+        _close_fd_quietly(lfd)
+
+
 def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
     arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
@@ -1008,22 +1035,26 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
     they are closed here).
 
     F-R18-JTOCTOU: enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
-    (os.scandir(jr_fd), os.lstat(name, dir_fd=jr_fd)), never by re-resolving the journal PATH. A path-based
+    (a fresh "." listing descriptor opened beneath jr_fd, os.lstat(name, dir_fd=jr_fd)), never by
+    re-resolving the journal PATH. A path-based
     Path(journal_root).iterdir() FOLLOWS the journal path at enumeration time, so a swapped journal ANCESTOR
     (a symlink to an empty decoy) planted between the open and the listing would report false-clean (an open
     txn is missed and the caller reads the journal as 'all terminal'). Binding the enumeration to jr_fd keeps
     it on the same directory identity every other journal op is bound to; `journal_root` is used only to build
     the returned entry paths whose basenames the contained per-txn opens resolve beneath jr_fd.
+    F-JOURNAL-HELD-FD-LISTING: the enumeration reads through a FRESH descriptor opened as "." beneath
+    jr_fd for each listing (_listdir_fresh), NEVER through the held jr_fd itself: a listing read through
+    a descriptor held from an earlier open or listing can miss a transaction directory created after
+    that open (on btrfs the kernel snapshots a readdir upper bound when the directory is opened), and a
+    missed OPEN transaction here would read the journal as 'all terminal' in the stale-lock reconcile.
+    The "." open resolves relative to jr_fd inside the kernel, so the enumeration keeps jr_fd's
+    directory identity with no path re-resolution.
     F-R18-OSESC: a listing or entry-stat OSError (e.g. EIO) is wrapped in a contextual JournalError
     (fail-closed), never left to escape as a raw OSError (CLI exit 1 + traceback); the CLI maps it to exit 2,
     _all_terminal to False, and _latest_txn to its documented failure."""
     out = []
     try:
-        try:
-            with os.scandir(jr_fd) as it:
-                names = sorted(e.name for e in it)
-        except OSError as exc:
-            raise JournalError("cannot list journal dir contained ({}); fail-closed".format(exc))
+        names = sorted(_listdir_fresh(jr_fd, "journal dir contained"))
         for name in names:
             try:
                 est = os.lstat(name, dir_fd=jr_fd)
