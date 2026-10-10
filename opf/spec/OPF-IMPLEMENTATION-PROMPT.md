@@ -39,29 +39,31 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`121f57b37221e2e334fbdb852fad15fa4790c0c0` of `jposluns/guardrails`. Read them from the pinned URLs,
-not from a branch, so the text cannot change under you. After downloading each file, compute its
+`028ea6d309eea90d31b51ea57a4e34988972f210` of `jposluns/guardrails`. These pins name the
+specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
+file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
+branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `63f14967a15c1f165cef348c06619ddc3b128b44cc61fd5a144fdcf7ebc4be96` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `3afc5ffb2eec42c674f575305d6727728ce17023909785557d82165d9a5d6c80` |
 | `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `119cb377c6f1ed90aa237b44e14e6f5786d48d28d84bd0fba2ab0e9d9539b4c3` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -86,8 +88,12 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.3.0"`) lists one member, `flow/SKILL.md`, an operating-loop skill for an assistant
-  that is not an import prompt and that this prompt does not use. The pack has two roles in the
+  `version = "0.4.1"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
+  reference tooling's `opf adopt` verb; `adopt/clean-start.md`, its companion for a project with no
+  prior records, whose interim route runs the reference tooling's `opf init`; and `flow/SKILL.md`,
+  an operating-loop skill for an assistant. None of them is an import prompt, and this prompt uses
+  none of them: you build and run your own implementation, never the reference tooling (see "What
+  you must not do"). The pack has two roles in the
   specification, and this fresh start needs neither. Its prompts drive post-adoption import
   (section 14.1, One approval and completion), which a fresh start does not perform, so there are
   no import prompts to run.
@@ -166,8 +172,9 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   to carry in the implementation, apart from that file, the SHA-256 digest of its bytes as shipped
   (the shipped-file digest), with the documentation of each release stating where. This prompt's
   choice is to keep that file inside each release of your implementation, outside every store, to
-  have your build embed the shipped-file digest in the program, and to produce the declaration in
-  the release documentation and in every report from that file. Section 16.1 also says "An
+  have your build embed in the program the shipped-file digest and the declaration as the release
+  ships it, and to produce the declaration in the release documentation and in every report from
+  that embedded copy, never from the installed copy. Section 16.1 also says "An
   unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT
   authorize any store operation";
   step 1 builds that check, and every command that reads, grades or writes a store runs it first.
@@ -1046,7 +1053,10 @@ Build the primitives every later step relies on.
   from the copy installed with the running release (the installed copy) and check it. Section 16.1
   states these rules for the declaration: "An implementation MUST declare, in the documentation of
   each release and in every report its emitter writes, its release identity, its class, and its
-  supported `spec_version`, homes generation, and worklog storage generation." It also says "A
+  supported `spec_version`, homes generation, and worklog storage generation." The emitter there is
+  the step of your implementation that writes its conformance reports, which section 16.1 defines as
+  "never a store-file emitter such as the canonical new-document emitter", so it is not
+  the canonical TOML emitter above; this step builds it below. It also says "A
   runtime check MUST compare the installed copy's bytes with the shipped-file digest before it
   reads any field, and an installed copy that is absent or unreadable, or whose bytes differ from
   that digest, MUST yield cannot-evaluate and MUST NOT authorize any store operation." Later in the
@@ -1058,10 +1068,12 @@ Build the primitives every later step relies on.
   class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation." The
   specification defines no format for the declaration and does not define the three failing cases
   beyond an absent declaration and one that omits a required field; apart from those cases, its
-  digest rule yields cannot-evaluate for an installed copy whose bytes differ from the shipped-file
-  digest. So the cases below other than a digest mismatch, no class, an absent file and a file that
-  lacks the release identity, the `spec_version` or a generation are this prompt's reading, yours
-  to confirm with the maintainer.
+  digest rule yields cannot-evaluate for an installed copy that is absent or unreadable, or whose
+  bytes differ from the shipped-file digest. So the cases below other than a digest mismatch, no
+  class, an absent file and a file that lacks the release identity, the `spec_version` or a
+  generation are this prompt's reading, yours to confirm with the maintainer, except that an
+  unreadable file yields cannot-evaluate as that rule requires; only the definition of the
+  unreadable case is this prompt's reading.
   Every command of yours that reads, grades or writes a store, `opf init` and the step 13 and step
   14 checks included, runs this check before it resolves, reads or writes any store, and on
   cannot-evaluate it stops with exit 2 and performs no store operation.
@@ -1094,6 +1106,41 @@ Build the primitives every later step relies on.
     a digest mismatch.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
+- The report emitter. Build the step that writes every conformance report of your implementation,
+  for a run of any command or for a documented run of the class declaration check and the emitter
+  alone. Section 16.1 says "Every report the emitter of a release writes MUST carry the four parts
+  compared in every report, exactly these: the restatement of the declaration, the shipped-file
+  digest the implementation carries, the installed-copy digest, and the runtime result", and "A
+  report deviates from the expected report where any of the four compared parts is omitted, written
+  in another form, or holds another value". The emitter writes each part as follows.
+  - Restatement: from the declaration your build embeds, never from the installed copy, because
+    the expected report fixes it as "the declaration of that file as the release ships it". It gives
+    every field of that file with the same value and no other field.
+  - Shipped-file digest: the digest your build embeds.
+  - Installed-copy digest: section 16.1 says "The installed-copy digest is the SHA-256 digest of the
+    installed copy's bytes that the runtime check read, or the token `not-read` where that check
+    read none because the installed copy is absent or unreadable, and a report MUST NOT carry
+    `not-read` with any runtime result other than `cannot_evaluate`." So on a digest mismatch the
+    emitter writes the digest of the bytes the check read, not the shipped-file digest.
+  - Digest form: section 16.1 says "Each digest in a report MUST be written as 64 lowercase
+    hexadecimal digits". This prompt's reading is that a report digest carries no `sha256:` prefix,
+    unlike the text form above.
+  - Runtime result: section 16.1 says the runtime result is written as "`cannot_evaluate` where that
+    run's runtime check yielded cannot-evaluate or another rule of this section made that run yield
+    cannot-evaluate, the admission check over the store that run resolved included, and otherwise
+    `pass` where it authorized store operations and `fail` where it did not", and "under this
+    section `pass` and `fail` read observably, over performed store operations, so a documented run
+    that resolves no store, and one whose only writes are the exempt writes above, each authorized
+    none and, where no rule yields cannot-evaluate, write `fail`". A run authorized store operations
+    "exactly where it performed one, a write within a store that run resolved or to that store's
+    lease", and the exempt writes are the lease claim, its release, the `session_lease` records of
+    both, and the lease reconciliation and recovery writes. So the emitter takes the token from the
+    run's record of the store writes it performed, never from the declaration check's outcome
+    alone, the command's exit status or the validator's verdict: a passing declaration check
+    followed by no store write gives `fail`, and a refusal under a rule outside section 16.1 is not
+    `cannot_evaluate` there.
+  This prompt's choice is that the emitter checks its own output before it writes it, and writes no
+  report that carries `not-read` beside `pass` or `fail` or a digest in any other form.
 
 Acceptance checks:
 
@@ -1107,10 +1154,26 @@ Acceptance checks:
   the shipped declaration, declaring `fresh-only`, declaring `spec_version = "1.2.0"`, and
   declaring homes generation 2. Each of them except the absent and unreadable ones is tested with a
   shipped-file digest of its own bytes, so the field checks, not the digest comparison, decide it.
-  The check also yields cannot-evaluate for the shipped declaration with one byte changed, tested
-  with the shipped-file digest of the unchanged file. The shipped declaration with its class key
-  removed, tested with a shipped-file digest of its own bytes, passes with the class
-  `upgrade-capable` (section 16.1). The shipped declaration passes.
+  The check also yields cannot-evaluate for the shipped declaration with one byte changed in a way
+  that keeps it parseable and every field value unchanged, such as one whitespace byte your
+  declaration format permits replaced by another (a space by a tab in TOML), tested with the
+  shipped-file digest of the unchanged file. The same changed file, tested with a shipped-file
+  digest of its own bytes, passes, so the digest comparison alone decides that rejection. The
+  shipped declaration with its class key removed, tested with a shipped-file digest of its own
+  bytes, passes with the class `upgrade-capable` (section 16.1). The shipped declaration passes.
+- The report emitter, over documented runs of the check and the emitter that resolve no store:
+  with the shipped declaration installed, the report restates the shipped declaration, carries the
+  shipped-file digest and the installed-copy digest, each equal to the SHA-256 of the shipped
+  file's bytes and written as 64 lowercase hexadecimal digits, and carries the runtime result
+  `fail`. With the installed copy absent, and with it unreadable, the report carries the
+  installed-copy digest `not-read` and the runtime result `cannot_evaluate`, and still restates the
+  shipped declaration and carries the shipped-file digest. With the one-byte-changed copy above
+  installed, the report carries the installed-copy digest of the changed bytes, which differs from
+  the shipped-file digest, and `cannot_evaluate`; with the copy naming another release's identity
+  installed, it carries the digest of that copy's bytes as its installed-copy digest and
+  `cannot_evaluate`, and still restates the shipped declaration. Given `not-read` beside `pass` or
+  `fail`, or a digest in uppercase, in the `sha256:` form or of 63 digits, the emitter writes no
+  report.
 
 ### Step 2: store resolution
 
@@ -1489,7 +1552,7 @@ containment.
 - On homes 1, path containment recognizes as OPF control area the imported managed leaves,
   `.working/archive/adoption/<run-id>/`, `.working/archive/moved/` and
   `.working/imported/<kind>/<run-id>/` (section 4.2, "Activated 1.3.0 tooling MUST register on
-  homes 1 ..."). C-EVIDENCE-ENUM does not run or read anything on homes 1 (section 4.2).
+  homes 1" ...). C-EVIDENCE-ENUM does not run or read anything on homes 1 (section 4.2).
 - The validator reads the record archive under the discovered machine store (section 12): ID
   uniqueness, the chain rule and archive integrity cover active and archived records together.
   With no archive tree nothing has rotated; an archive that is present and unreadable or malformed
@@ -2365,6 +2428,14 @@ Acceptance checks:
   runs.
 - A file with a comment is refused and left untouched; a held lease refuses; no ID is ever reported
   for a rolled-back transaction.
+- Have the step 1 report emitter write a report for each of these runs, and check its runtime
+  result against the store writes the run performed (section 16.1): an `opf record` run that exits
+  0 after writing a record gives `pass`; an `opf doctor` run over the same store, which writes
+  nothing, gives `fail` though it reports valid; an `opf record` run that you make refuse with exit
+  2 after it takes the lease, for a reason outside section 16.1, and that writes nothing but the
+  lease claim, its release and their `session_lease` records, gives `fail`; and an `opf record` run
+  with the step 1 declaration naming another release's identity installed, which stops with exit 2
+  before it resolves the store, gives `cannot_evaluate` and leaves the store unchanged.
 
 ### Step 11: releases and the changelog
 
@@ -2892,7 +2963,8 @@ not do:
 Whether a scaffold needs an adoption receipt is open point 14: report your ratified reading, and do
 not invent a receipt format.
 
-Then write the conformance report described in the checklist below.
+Then write the conformance report described in the checklist below, with the four parts that your
+step 1 report emitter writes (checklist item 20).
 
 ## Final conformance checklist
 
@@ -2978,7 +3050,8 @@ maintainer's ruling on an open point, report the ruling with it.
     requirement, while one that a base requirement depends on, as open point 25 does, blocks the
     claim rather than narrowing it. Until the maintainer rules on open point 32, this item is not
     passed.
-20. The documentation of each release and every conformance report declare the release identity, the
+20. The documentation of each release and every conformance report your report emitter writes
+    declare the release identity, the
     class `upgrade-capable`, and the supported `spec_version` (`1.3.0`), homes generation (1) and
     worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
     command-line request declares or changes the class (section 9.1); the class claim says that it
@@ -2988,7 +3061,10 @@ maintainer's ruling on an open point, report the ruling with it.
     a release writes MUST carry the four parts compared in every report, exactly these: the
     restatement of the declaration, the shipped-file digest the implementation carries, the
     installed-copy digest, and the runtime result", and every report of yours carries them in the
-    forms that section fixes.
+    forms that section fixes, as the step 1 report emitter builds them: the restatement of the
+    declaration as the release ships it, each digest as 64 lowercase hexadecimal digits, the
+    installed-copy digest `not-read` only beside `cannot_evaluate`, and the runtime result read over
+    the store operations the run performed; the report checks of steps 1 and 10 passed.
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
     identity included, every command that reads, grades or writes a store, `opf init`,
     `opf upgrade`, `opf record` and the step 13 and step 14 checks included, stops with
