@@ -11,6 +11,17 @@ Missing git, unusable temporary storage, or a harness failure returns 2, never a
 
 Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot evaluate the harness.
 Coverage is representative: it does not exhaust concurrent namespace changes or filesystem failures.
+
+Construction-side residual (QA round 13, requirement E): the route gate reads spelled
+references and constructions in opf.py alone. A rendered-type construction it cannot read,
+one in a sibling module, one reached through introspection or minted at runtime, or any
+other spelling of a construction the reference scan does not parse, is NOT chased with
+further static rules: it is covered at the OUTPUT by requirement A's rendering (opf.py's
+constructors format only registered _INIT_TEMPLATES members and render any other template
+as a value, and the refusal handler accepts a message or restore line only with its
+constructor's rendering proof, re-rendering everything else at the point of output), and
+this suite drives that closure directly with inheriting-subclass, overriding-subclass and
+swapped-args vectors.
 """
 import sys
 
@@ -154,11 +165,14 @@ _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
 # a rename in opf.py fails the gate until this roster is re-reviewed.
 _ROUTE_ALLOWED_REFS = dict(
     _InitPriorStoreRefusal=frozenset([
-        "RuntimeError", "remedy_template.format", "self.restore_lines", "str",
-        "super", "super().__init__", "template.format",
+        "RuntimeError", "_INIT_TEMPLATES", "remedy_template.format",
+        "self._opf_rendered_message", "self.restore_lines", "str",
+        "str-literal.join", "super", "super().__init__", "template.format",
+        "type",
     ]),
     _InitRestoreLine=frozenset([
-        "line._opf_line_rendered", "str", "str.__new__", "template.format",
+        "_INIT_TEMPLATES", "line._opf_line_rendered", "str", "str-literal.join",
+        "str.__new__", "template.format", "type",
     ]),
     _cmd_init=frozenset([
         "BaseException", "EXIT_MALFORMED", "str", "str-literal.format", "type",
@@ -240,14 +254,17 @@ _ROUTE_ALLOWED_REFS = dict(
         "read().out.strip", "records.append", "rel.split",
         "restore_lines.append", "result.completed", "result.err", "result.rc",
         "root.relative_to", "set", "sorted", "stores.add", "str",
-        "str-literal.format", "str-literal.join", "tokens.pop",
-        "touched.out.split",
+        "str-literal.format", "str-literal.join", "tokens.pop", "touched.out",
+        "touched.out.endswith", "touched.out.split",
     ]),
     _init_observed=frozenset([
         "Exception", "_opf_store._close_fd_exc_safe", "_opf_store._journal",
         "ascii", "journal._lstat_contained", "journal._open_parent",
         "journal._read_at", "len", "list", "opened.st_nlink", "rows.append",
         "st.st_mode", "st.st_size", "stat.S_ISREG",
+    ]),
+    _init_refusal_message=frozenset([
+        "AttributeError", "exc._opf_rendered_message", "str", "type",
     ]),
     _init_repo=frozenset([
         "Path", "RuntimeError", "_opf_observe._git_path",
@@ -517,7 +534,15 @@ def _init_route_violations(source):
     the constructing function's OWN scope binds only by plain assignments of string
     literals, with no nested def, lambda, match capture, type alias or type
     parameter binding (_route_literal_bound; QA round 10 MAJOR 2; QA round 12 B, D),
-    or which passes a template through a * or ** splat the static scan cannot resolve. str.__new__ is rostered for
+    or which passes a template through a * or ** splat the static scan cannot resolve. Any ClassDef whose
+    bases or keywords reference a rendered type, anywhere in the file, and any
+    ClassDef inside a reachable function, are refused too (QA round 12 MAJOR,
+    both reviewers: a declared local subclass of _InitPriorStoreRefusal
+    inherited the rendering constructor and carried a hostile value in the
+    template position, which the construction rule, keyed on the constructor
+    NAME, never read; the runtime closure for construction routes this scan
+    cannot see at all is the output-side rendering, QA round 13 A).
+    str.__new__ is rostered for
     _InitRestoreLine alone, so minting an instance of that type anywhere else on
     the graph is a violation. Returns a list of violation descriptions; the suite
     requires it empty on the real source and NON-empty on every seeded mutant, so
@@ -589,6 +614,21 @@ def _init_route_violations(source):
                 violations.append(
                     "line {}: binding of the pinned route name {}".format(
                         getattr(node, "lineno", 0), name))
+
+    # A subclass of a rendered type, ANYWHERE in the file (QA round 12 MAJOR,
+    # both reviewers): it inherits a rendering constructor, and a call to it is
+    # not a construction the template rule reads, so a hostile value in the
+    # template position passed the round-12 gate with zero violations. The
+    # bases and keywords (a metaclass spelling included) are walked whole, so a
+    # rendered name anywhere in a base expression refuses.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for expr in list(node.bases) + [kw.value for kw in node.keywords]:
+                for sub in ast.walk(expr):
+                    if isinstance(sub, ast.Name) and sub.id in _ROUTE_RENDERED:
+                        violations.append(
+                            "line {}: class {} derives from the rendered type "
+                            "{}".format(node.lineno, node.name, sub.id))
 
     # The boundary rule (QA round 10 MAJOR 1): an assert, a raise ... from, and
     # an implicit exception (a subscript's KeyError, an IndexError) raised in the
@@ -718,6 +758,15 @@ def _init_route_violations(source):
                 local_bound.update(_route_unit_params(sub))
             if sub is unit:
                 continue
+            if isinstance(sub, ast.ClassDef):
+                # No class is defined inside any reachable init function: a
+                # local class can inherit a rendered constructor through ANY
+                # base expression, computed ones included, so the whole form
+                # is refused rather than enumerating base spellings (QA
+                # round 12 MAJOR; QA round 13 A).
+                violations.append(
+                    "{} line {}: class definition inside a reachable init "
+                    "function".format(name, sub.lineno))
             for bound in _route_binding_names(sub):
                 local_bound.add(bound)
                 if (bound in _ROUTE_EXTERNAL_BASES
@@ -2971,6 +3020,38 @@ def _suite_isolated(invoke):
                       and any(row.get("event") == "partial-publication"
                               for row in spp_rows))
 
+                # QA round 13 D (claude round-12 MINOR 4): a SECOND interrupt,
+                # raised while the disclosure's detail report itself runs (here
+                # from the observation pass it calls), must not drop the fixed
+                # partial-publication sentence: the detail JSON is dropped and
+                # a fixed fallback line says so. On the round-12 handler the
+                # second interrupt escaped to _cmd_init's boundary and no
+                # partial-publication line printed at all, so this check fails
+                # with the disclosure guard reverted.
+                def interrupt2_create(root_fd, relpath, data):
+                    interrupt2_create.calls += 1
+                    if interrupt2_create.calls >= 3:
+                        raise KeyboardInterrupt()
+                    return real_init_create(root_fd, relpath, data)
+                interrupt2_create.calls = 0
+
+                def interrupt2_observed(root_fd, directories, payloads):
+                    raise KeyboardInterrupt()
+                dpp_repo = make_git("double-interrupt-publication")
+                rc, output = drive_cmd_init(
+                    dpp_repo, {"_init_create": interrupt2_create,
+                               "_init_observed": interrupt2_observed})
+                check("a second interrupt during the disclosure's detail report "
+                      "still prints the fixed partial-publication sentence and "
+                      "the fallback line, then exits 2 (QA round 13 D)",
+                      rc == EXIT_ERROR
+                      and "publication may be partial" in output
+                      and "partial-publication detail could not be "
+                      "reported" in output
+                      and not any(line.startswith("{")
+                                  and "partial-publication" in line
+                                  for line in output.splitlines()))
+
                 pi_repo = make_git("postpub'$(touch PWNED)" + '"' + "`;#")
                 pi_hostile = working + "/x'$(touch PWNED)`"
                 pi_state = {"calls": 0}
@@ -3355,6 +3436,20 @@ def _suite_isolated(invoke):
                           journal_anchor + newline
                           + "        qa_args = [str(root)]" + newline
                           + "        raise _InitPriorStoreRefusal(*qa_args)")) != [])
+                # QA round 13 C (codex round-12 MINOR 3): the leading-splat vector
+                # above is also refused by the template rule (args[0] IS the splat),
+                # so it could not discriminate the splat rule itself. A splat AFTER
+                # a literal positional template is refused ONLY by the splat rule:
+                # with that rule reverted this construction reports zero violations
+                # and this check fails, pinning the rule.
+                check("route gate flags a * splat following a literal positional "
+                      "template (only the splat rule reads it, QA round 13 C)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        qa_args = [()]" + newline
+                          + '        raise _InitPriorStoreRefusal("qa {}", '
+                          "*qa_args, [])")) != [])
                 check("route gate flags a non-literal template passed only as the "
                       "template keyword",
                       _init_route_violations(gate_source.replace(
@@ -3362,6 +3457,19 @@ def _suite_isolated(invoke):
                           journal_anchor + newline
                           + "        raise _InitPriorStoreRefusal("
                           "template=str(root), values=(), restore_lines=[])")) != [])
+                # QA round 13 C (codex round-12 MINOR 3): the round-11 gate refused
+                # a keyword-only template as a construction WITHOUT a template even
+                # when it was a literal, so the non-literal keyword vector above
+                # could not discriminate the round-12 keyword reading. This literal
+                # control passes only on a gate that reads the template keyword:
+                # with that reading reverted this acceptance fails, pinning it.
+                check("route gate passes a literal template supplied only as the "
+                      "template keyword (QA round 13 C)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        raise _InitPriorStoreRefusal(template="qa", '
+                          "values=(), restore_lines=[])")) == [])
 
                 # QA round 12 D (codex round-11 MEDIUM 2, claude MINOR 4): the binding
                 # scan did not see a PEP 695 type alias statement, type parameters, or
@@ -3411,6 +3519,41 @@ def _suite_isolated(invoke):
                           journal_anchor + newline
                           + '        qa_lit = "qa"' + newline
                           + "        raise _InitPriorStoreRefusal(qa_lit, (), [])")) == [])
+
+                # QA round 13 A (QA round 12 MAJOR, both reviewers): a declared
+                # subclass of a rendered type inherits the rendering constructor,
+                # and a call to it is not a construction the template rule reads,
+                # so a hostile value in the template position passed the round-12
+                # gate with zero violations. Each form here must be refused; with
+                # the subclass rules reverted every one reports zero violations,
+                # so these checks pin them.
+                check("route gate flags a local subclass of the refusal type "
+                      "(QA round 12 MAJOR)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        class _qa_sub(_InitPriorStoreRefusal):" + newline
+                          + "            pass" + newline
+                          + "        raise _qa_sub(str(root), (), [])")) != [])
+                check("route gate flags a module-level subclass of the refusal "
+                      "type",
+                      _init_route_violations(
+                          gate_source + newline + newline
+                          + "class _QaModRefusal(_InitPriorStoreRefusal):" + newline
+                          + "    pass" + newline) != [])
+                check("route gate flags a local subclass of the restore-line type",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        class _qa_line(_InitRestoreLine):" + newline
+                          + "            pass")) != [])
+                check("route gate flags a local class with a computed base inside "
+                      "a reachable function",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        class _qa_dyn(type(root)):" + newline
+                          + "            pass")) != [])
 
                 # QA rounds 7 and 8 (requirements A and C): the RUNTIME paste
                 # test, the primary guard. THE EXIT-PATH BY VALUE-CLASS MATRIX:
@@ -3967,6 +4110,59 @@ def _suite_isolated(invoke):
                                or inert(boundary_value) in output)
                           and paste_probe(output, "boundary-" + tag) == [])
 
+                # QA round 13 A, the RUNTIME closure for QA round 12 MAJOR,
+                # driven on the real rendering code through loaded mutant
+                # modules: a subclass that INHERITS the refusal constructor
+                # carries its hostile template into the registered-template
+                # fail-safe (the unregistered template renders as a value), and
+                # a subclass that OVERRIDES the constructor carries no rendering
+                # proof, so the refusal handler re-renders str(exc) at the point
+                # of output and coerces its raw restore line. On the round-12
+                # code both printed the raw value, so each fails with its
+                # closure reverted.
+                scl_repo = make_git("subclass'$(touch PWNED-SCL)`;#")
+                scl_inherit = gate_source.replace(
+                    journal_anchor,
+                    journal_anchor + newline
+                    + "        class _qa_sub(_InitPriorStoreRefusal):" + newline
+                    + "            pass" + newline
+                    + "        raise _qa_sub(str(root), (), [])")
+                check("route gate flags the inheriting-subclass runtime mutant",
+                      _init_route_violations(scl_inherit) != [])
+                scl_module = load_mutant("subclass-inherit", scl_inherit)
+                rc, output = drive_module_init(
+                    scl_module, ["--root", str(scl_repo)])
+                check("route runtime: a subclass inheriting the refusal "
+                      "constructor prints its hostile template RENDERED, never "
+                      "raw (QA round 12 MAJOR; QA round 13 A)",
+                      rc == EXIT_ERROR and "REFUSED" in output
+                      and "$(" not in output and "`" not in output
+                      and inert(str(scl_repo)) in output
+                      and not (base / "PWNED-SCL").exists()
+                      and paste_probe(output, "subclass-inherit") == [])
+                ovr_repo = make_git("override'$(touch PWNED-OVR)`;#")
+                scl_override = gate_source.replace(
+                    journal_anchor,
+                    journal_anchor + newline
+                    + "        class _qa_raw(_InitPriorStoreRefusal):" + newline
+                    + "            def __init__(self, value):" + newline
+                    + "                RuntimeError.__init__(self, value)" + newline
+                    + "                self.restore_lines = [value]" + newline
+                    + "        raise _qa_raw(str(root))")
+                check("route gate flags the overriding-subclass runtime mutant",
+                      _init_route_violations(scl_override) != [])
+                ovr_module = load_mutant("subclass-override", scl_override)
+                rc, output = drive_module_init(
+                    ovr_module, ["--root", str(ovr_repo)])
+                check("route runtime: a subclass overriding the refusal "
+                      "constructor (no rendering proof) is re-rendered at the "
+                      "point of output, its raw restore line included",
+                      rc == EXIT_ERROR and "REFUSED" in output
+                      and "$(" not in output and "`" not in output
+                      and inert(str(ovr_repo)) in output
+                      and not (base / "PWNED-OVR").exists()
+                      and paste_probe(output, "subclass-override") == [])
+
                 # QA round 9, requirement C: the third driver's capture path,
                 # driven with raw-descriptor and child-process writes from a
                 # loaded mutant (the gate flags its spelled routes, and the
@@ -4008,15 +4204,110 @@ def _suite_isolated(invoke):
                 # rendered at construction, and a non-line entry is coerced to the
                 # line type.
                 probe_exc = opf._InitPriorStoreRefusal(
-                    "qa " + chr(123) + chr(125) + " qa",
+                    chr(123) + chr(125),
                     ("$(touch QA-X)`;",), ["raw $(touch QA-X)"])
                 check("refusal constructor renders message values and coerces "
                       "restore lines",
-                      str(probe_exc) == "qa " + inert("$(touch QA-X)`;") + " qa"
+                      str(probe_exc) == inert("$(touch QA-X)`;")
                       and list(probe_exc.restore_lines)
                       == [inert("raw $(touch QA-X)")]
                       and type(probe_exc.restore_lines[0]).__name__
                       == "_InitRestoreLine")
+
+                # QA round 13 A: the registered-template set, held in process.
+                # An UNREGISTERED template, whatever supplied it, is itself
+                # rendered as a value and never formatted; on the round-12
+                # constructors each template below passed through raw and its
+                # braces formatted, so each check fails with the registry
+                # reverted.
+                qa_tpl = "qa $(touch QA-REG) " + chr(123) + chr(125) + " `x"
+                qa_unreg = opf._InitPriorStoreRefusal(qa_tpl, ("v$(y)",), [])
+                check("an unregistered refusal template is rendered as a value, "
+                      "never formatted (QA round 13 A)",
+                      str(qa_unreg) == inert(qa_tpl) + " " + inert("v$(y)")
+                      and "$(" not in str(qa_unreg))
+                qa_line_tpl = "qa $(x) " + chr(123) + chr(125)
+                qa_line = opf._InitRestoreLine(qa_line_tpl, "v")
+                check("an unregistered restore-line template is rendered as a "
+                      "value, never formatted",
+                      str(qa_line) == inert(qa_line_tpl) + " v")
+                qa_remedy = opf._InitPriorStoreRefusal(
+                    "qa-t $(a)", (), [],
+                    remedy_template="qa $(z) " + chr(123) + chr(125),
+                    remedy_values=("w$(q)",))
+                check("an unregistered remedy template is rendered as a value, "
+                      "never formatted",
+                      str(qa_remedy) == inert("qa-t $(a)") + " "
+                      + inert("qa $(z) " + chr(123) + chr(125))
+                      + " " + inert("w$(q)"))
+
+                # QA round 13 A: the refusal handler's point-of-output proof.
+                # An untouched constructed refusal passes unchanged (idempotent
+                # acceptance); a message swapped in after construction and an
+                # exception that never ran the real constructor are re-rendered
+                # at the point of output. With the proof check reverted to the
+                # round-12 handler's trust in str(exc), the swapped-args vector
+                # fails.
+                qa_ok = opf._InitPriorStoreRefusal(
+                    chr(123) + chr(125), ("ok",), [])
+                check("the output-point proof accepts an untouched constructed "
+                      "refusal unchanged (idempotent acceptance)",
+                      opf._init_refusal_message(qa_ok) == "ok"
+                      and opf._init_refusal_message(qa_ok) == str(qa_ok))
+                qa_swap = opf._InitPriorStoreRefusal(
+                    chr(123) + chr(125), ("ok",), [])
+                qa_swap.args = ("$(touch QA-SWAP)`",)
+                check("a message swapped in after construction (exc.args) fails "
+                      "the proof and is rendered at the point of output",
+                      opf._init_refusal_message(qa_swap)
+                      == inert("$(touch QA-SWAP)`"))
+                check("an exception that never ran the real constructor is "
+                      "rendered at the point of output",
+                      opf._init_refusal_message(RuntimeError("$(touch QA-RT)`"))
+                      == inert("$(touch QA-RT)`"))
+
+                # QA round 13 A, the SYNC check: every template a rendered-type
+                # construction site in the real source spells, as a string
+                # literal or through a name bound by literal assignments, is a
+                # member of the registry (the two coercion templates "" and {}
+                # included), so a site added or edited without registering it
+                # fails HERE, before the constructor fail-safe changes the
+                # byte-compared outputs.
+                sync_tree = ast.parse(gate_source)
+                sync_templates = set()
+                sync_names = set()
+                for sync_node in ast.walk(sync_tree):
+                    if (isinstance(sync_node, ast.Call)
+                            and isinstance(sync_node.func, ast.Name)
+                            and sync_node.func.id in _ROUTE_RENDERED):
+                        sync_positions = _ROUTE_RENDERED_TEMPLATES[
+                            sync_node.func.id]
+                        sync_exprs = [sync_node.args[position]
+                                      for position in sync_positions
+                                      if position < len(sync_node.args)]
+                        sync_exprs += [
+                            kw.value for kw in sync_node.keywords
+                            if kw.arg in frozenset(sync_positions.values())]
+                        for sync_expr in sync_exprs:
+                            if (isinstance(sync_expr, ast.Constant)
+                                    and isinstance(sync_expr.value, str)):
+                                sync_templates.add(sync_expr.value)
+                            elif isinstance(sync_expr, ast.Name):
+                                sync_names.add(sync_expr.id)
+                for sync_node in ast.walk(sync_tree):
+                    if (isinstance(sync_node, ast.Assign)
+                            and len(sync_node.targets) == 1
+                            and isinstance(sync_node.targets[0], ast.Name)
+                            and sync_node.targets[0].id in sync_names
+                            and isinstance(sync_node.value, ast.Constant)
+                            and isinstance(sync_node.value.value, str)):
+                        sync_templates.add(sync_node.value.value)
+                check("template sync: every construction-site template in the "
+                      "real source is registered (QA round 13 A)",
+                      len(sync_templates) > 0
+                      and "" in opf._INIT_TEMPLATES
+                      and chr(123) + chr(125) in opf._INIT_TEMPLATES
+                      and sync_templates <= opf._INIT_TEMPLATES)
 
                 # QA round 9, requirement B (codex MAJOR 2, claude MAJOR 1): a
                 # FORGED instance of the exact _InitRestoreLine type, minted around
@@ -4037,12 +4328,12 @@ def _suite_isolated(invoke):
                 check("a forged exact-type restore line is re-rendered by the "
                       "refusal constructor",
                       list(forged_exc.restore_lines) == [inert(forged_raw)])
-                genuine = opf._InitRestoreLine("qa {}", forged_raw)
+                genuine = opf._InitRestoreLine("{}", forged_raw)
                 genuine_exc = opf._InitPriorStoreRefusal("qa", (), [genuine])
                 check("a genuine constructed line passes the rendering-proof "
                       "check unchanged (idempotent acceptance)",
                       list(genuine_exc.restore_lines) == [genuine]
-                      and str(genuine) == "qa " + inert(forged_raw))
+                      and str(genuine) == inert(forged_raw))
 
                 # The handler accepts only the line type: a raw string appended to
                 # the caught exception AFTER construction (past the constructor's
@@ -4462,6 +4753,216 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and output == prior_store_output(
                           f3, f3, f3_named, [".opf.toml", ".working"], True,
                           gaps=f3_gaps))
+
+                # QA round 13 B (codex round-12 MEDIUM; QA round 12 E): the --raw
+                # walk refuses a stream without its terminating NUL and any record
+                # whose modes, status and object ids are not mutually consistent
+                # with the shapes git's documented --raw format prints (the
+                # derivation is stated at the parse in opf.py). Real git cannot
+                # emit these streams, so each is driven through a stubbed _run_git
+                # whose other answers reach working_gaps; the two well-formed
+                # controls prove the stub itself parses. On the round-12 parser
+                # the no-NUL, zero-mode-rename and 777777 vectors released the
+                # rename source or passed the frame, and the junk-mode and
+                # malformed-score refusals had no committed vector at all, so
+                # every refusal here fails with its check reverted.
+                raw_c1 = "1" * 40
+                raw_blob_a = "a" * 40
+                raw_blob_b = "b" * 40
+                raw_zero = "0" * 40
+                raw_absent_grafts = os.fsencode(
+                    str(base / "raw-stub-absent" / "info" / "grafts"))
+                raw_pointer = _opf_store.POINTER_REL
+
+                def raw_scan(stream):
+                    def fake_raw_git(git_arg, repo_arg, args, **kwargs):
+                        args = list(args)
+                        if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
+                            return _opf_observe._GitOutcome(
+                                True, 0, raw_c1.encode("ascii") + b"\n", "")
+                        if args == ["rev-parse", "--is-shallow-repository"]:
+                            return _opf_observe._GitOutcome(True, 0, b"false\n", "")
+                        if args == ["rev-parse", "--git-path", "info/grafts"]:
+                            return _opf_observe._GitOutcome(
+                                True, 0, raw_absent_grafts + b"\n", "")
+                        if args[:1] == ["rev-list"]:
+                            return _opf_observe._GitOutcome(
+                                True, 0, raw_c1.encode("ascii") + b"\n", "")
+                        if args[:2] == ["--literal-pathspecs", "ls-tree"]:
+                            if args[-2:] == [raw_pointer, working]:
+                                out = (b"100644 blob " + raw_blob_a.encode("ascii")
+                                       + b"\t" + raw_pointer.encode("ascii") + b"\x00"
+                                       + b"040000 tree " + raw_blob_b.encode("ascii")
+                                       + b"\t" + working.encode("ascii") + b"\x00")
+                                return _opf_observe._GitOutcome(True, 0, out, "")
+                            return _opf_observe._GitOutcome(True, 0, b"", "")
+                        if args[:4] == ["ls-tree", "-r", "-z", "--name-only"]:
+                            out = (b"new-machine/manifest.toml\x00"
+                                   b"new-machine/counters.toml\x00")
+                            return _opf_observe._GitOutcome(True, 0, out, "")
+                        if args[:1] == ["log"]:
+                            return _opf_observe._GitOutcome(True, 0, stream, "")
+                        return _opf_observe._GitOutcome(
+                            False, None, b"", "unexpected raw-stub git call")
+                    raw_stub = base / "raw-stub-repo"
+                    with mock.patch.object(opf._opf_observe, "_run_git",
+                                           fake_raw_git):
+                        try:
+                            opf._init_no_prior_store(git, raw_stub, raw_stub)
+                            return ("passed", "")
+                        except Exception as exc:  # noqa: BLE001  the type is part of the verdict
+                            return (type(exc).__name__, str(exc))
+
+                raw_w = working.encode("ascii")
+
+                def raw_rename_rec(meta, old_name, new_name):
+                    return (meta + b"\x00" + raw_w + b"/" + old_name + b"\x00"
+                            + raw_w + b"/" + new_name + b"\x00")
+
+                def raw_single_rec(meta, name):
+                    return meta + b"\x00" + raw_w + b"/" + name + b"\x00"
+
+                raw_header = b"\x01" + raw_c1.encode("ascii") + b"\x00\n"
+                raw_r100_a = (":100644 100644 " + raw_blob_a + " " + raw_blob_a
+                              + " R100").encode("ascii")
+                raw_r100_b = (":100644 100644 " + raw_blob_b + " " + raw_blob_b
+                              + " R100").encode("ascii")
+                raw_valid = (raw_header
+                             + raw_rename_rec(raw_r100_a,
+                                              b"old-machine/counters.toml",
+                                              b"new-machine/counters.toml")
+                             + raw_rename_rec(raw_r100_b,
+                                              b"old-machine/manifest.toml",
+                                              b"new-machine/manifest.toml"))
+                raw_verdict, raw_message = raw_scan(raw_valid)
+                check("raw-walk control: a well-formed R100 stream parses, "
+                      "releases its sources and refuses non-PARTIAL",
+                      raw_verdict == "_InitPriorStoreRefusal"
+                      and "PARTIAL" not in raw_message)
+                raw_del = (":100644 000000 " + raw_blob_a + " " + raw_zero
+                           + " D").encode("ascii")
+                raw_verdict, raw_message = raw_scan(
+                    raw_header
+                    + raw_single_rec(raw_del, b"old-machine/counters.toml")
+                    + raw_single_rec(raw_del, b"old-machine/manifest.toml"))
+                check("raw-walk control: a well-formed deletion stream parses and "
+                      "the deleted store reads as a PARTIAL restore",
+                      raw_verdict == "_InitPriorStoreRefusal"
+                      and "PARTIAL" in raw_message)
+                raw_vectors = [
+                    ("a stream without its terminating NUL", raw_valid[:-1],
+                     "lacks its terminating NUL"),
+                    ("an R100 record with 000000 modes and non-zero ids "
+                     "(codex round-12 MEDIUM)",
+                     raw_header + raw_rename_rec(
+                         (":000000 000000 " + raw_blob_a + " " + raw_blob_a
+                          + " R100").encode("ascii"),
+                         b"old-machine/counters.toml",
+                         b"new-machine/counters.toml"),
+                     "not mutually consistent"),
+                    ("a 777777 mode (codex round-12 MEDIUM)",
+                     raw_header + raw_rename_rec(
+                         (":777777 777777 " + raw_blob_a + " " + raw_blob_a
+                          + " R100").encode("ascii"),
+                         b"old-machine/counters.toml",
+                         b"new-machine/counters.toml"),
+                     "outside git's documented set"),
+                    ("an undocumented octal mode 100664",
+                     raw_header + raw_single_rec(
+                         (":100664 100644 " + raw_blob_a + " " + raw_blob_b
+                          + " M").encode("ascii"),
+                         b"old-machine/counters.toml"),
+                     "outside git's documented set"),
+                    ("a non-octal mode (QA round 12 E)",
+                     raw_header + raw_single_rec(
+                         (":garbag 100644 " + raw_blob_a + " " + raw_blob_b
+                          + " M").encode("ascii"),
+                         b"old-machine/counters.toml"),
+                     "outside git's documented set"),
+                    ("an out-of-range similarity score R999 (QA round 12 E)",
+                     raw_header + raw_rename_rec(
+                         (":100644 100644 " + raw_blob_a + " " + raw_blob_a
+                          + " R999").encode("ascii"),
+                         b"old-machine/counters.toml",
+                         b"new-machine/counters.toml"),
+                     "malformed similarity score"),
+                    ("a non-numeric similarity score Rxyz (QA round 12 E)",
+                     raw_header + raw_rename_rec(
+                         (":100644 100644 " + raw_blob_a + " " + raw_blob_a
+                          + " Rxyz").encode("ascii"),
+                         b"old-machine/counters.toml",
+                         b"new-machine/counters.toml"),
+                     "malformed similarity score"),
+                    ("an A record whose created side carries the all-zero id",
+                     raw_header + raw_single_rec(
+                         (":000000 100644 " + raw_zero + " " + raw_zero
+                          + " A").encode("ascii"),
+                         b"old-machine/counters.toml"),
+                     "not mutually consistent"),
+                    ("an A record whose source side carries a file mode",
+                     raw_header + raw_single_rec(
+                         (":100644 100644 " + raw_blob_a + " " + raw_blob_b
+                          + " A").encode("ascii"),
+                         b"old-machine/counters.toml"),
+                     "not mutually consistent"),
+                    ("an M record carrying the all-zero id beside a file mode",
+                     raw_header + raw_single_rec(
+                         (":100644 100644 " + raw_zero + " " + raw_blob_b
+                          + " M").encode("ascii"),
+                         b"old-machine/counters.toml"),
+                     "not mutually consistent"),
+                ]
+                for raw_label, raw_stream, raw_fragment in raw_vectors:
+                    raw_verdict, raw_message = raw_scan(raw_stream)
+                    check("raw-walk refusal: " + raw_label,
+                          raw_verdict == "RuntimeError"
+                          and raw_fragment in raw_message)
+
+                # QA round 13 C (QA round 11 codex MAJOR): the bootstrap arms
+                # render at their print. Each fault is INJECTED by replacing the
+                # first helper import in a loaded copy, so the except arms under
+                # test are the real, unmodified code; with the rendering calls in
+                # those arms reverted to the round-11 raw prints, each of these
+                # fails on the raw payload.
+                boot_anchor = "        import _opf_worklog"
+                check("bootstrap: the import anchor is present once",
+                      gate_source.count(boot_anchor) == 1)
+
+                def load_plain(tag, mutated_source):
+                    plain_path = base / ("boot-mutant-" + tag + ".py")
+                    plain_path.write_text(mutated_source, encoding="utf-8")
+                    plain_spec = importlib.util.spec_from_file_location(
+                        "opf_boot_mutant_" + tag.replace("-", "_"),
+                        str(plain_path))
+                    plain_module = importlib.util.module_from_spec(plain_spec)
+                    plain_spec.loader.exec_module(plain_module)
+                    return plain_module
+
+                boot_payload = "qa$(touch QA-BOOT)`;!x"
+                boot_cases = [
+                    ("import-named",
+                     "        raise ImportError(" + repr("zz") + ", name="
+                     + repr(boot_payload) + ")",
+                     boot_payload),
+                    ("import-nameless",
+                     "        raise ImportError("
+                     + repr("imp " + boot_payload) + ")",
+                     "imp " + boot_payload),
+                    ("oserror",
+                     "        raise OSError(" + repr("os " + boot_payload) + ")",
+                     "os " + boot_payload),
+                ]
+                for boot_tag, boot_insertion, boot_carried in boot_cases:
+                    boot_module = load_plain(boot_tag, gate_source.replace(
+                        boot_anchor, boot_insertion + newline + boot_anchor))
+                    rc, output = fd_capture(boot_module._bootstrap)
+                    check("bootstrap " + boot_tag + ": the cannot-bootstrap line "
+                          "is rendered inert (QA round 13 C)",
+                          rc == EXIT_ERROR and "cannot bootstrap" in output
+                          and inert(boot_carried) in output
+                          and "$(" not in output and "`" not in output
+                          and not (base / "QA-BOOT").exists()
+                          and paste_probe(output, "boot-" + boot_tag) == [])
 
                 # QA round 8 (requirement A): the fixed narrow alphabet is pinned at
                 # runtime, in the renderer docstring and in OPF-QUICKSTART.md (the

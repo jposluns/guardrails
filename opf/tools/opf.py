@@ -109,7 +109,9 @@ def _bootstrap():
     printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
     SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
     runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
-    OPF-QUICKSTART state."""
+    OPF-QUICKSTART state. Both mapped arms render their variable parts AT this print (the init suite
+    drives a hostile ImportError, a nameless hostile ImportError and a hostile OSError through them
+    and requires each printed line inert, QA round 13 C)."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
@@ -14222,8 +14224,12 @@ def _init_echo(line, err=False):
     raise or assert inside it, any raise in _init_main outside the one handled
     try unless it constructs _InitPriorStoreRefusal with no raise ... from cause
     (an escaping cause would print raw in a chained traceback; _cmd_init's
-    last-resort boundary now catches whatever escapes, so no traceback is
-    printed at all, and the init suite pins that wrapper's exact bytes), and any
+    last-resort boundary catches whatever escapes while _init_main runs, so no
+    traceback is printed between init dispatch and that boundary's guarded
+    report -- an interrupt landing in the boundary's own few statements, or
+    after _cmd_init returns on the dispatcher's return path, can still surface
+    Python's own traceback, the windows _cmd_init and QUICKSTART state -- and
+    the init suite pins that wrapper's exact bytes), and any
     _InitRestoreLine or _InitPriorStoreRefusal construction whose template (the
     remedy template included) is not a string literal or a name that the
     constructing function's OWN scope binds only by plain assignments of string
@@ -14242,7 +14248,16 @@ def _init_echo(line, err=False):
     whose own output and introspection this gate never parses), or INTROSPECTION
     reached through allowed spellings at runtime; no introspection spelling
     (getattr, globals, vars, __import__) is itself in any roster, but a hostile
-    sibling module is out of this gate's scope. The suite's runtime paste test over
+    sibling module is out of this gate's scope. Construction-side spellings the
+    gate does not read (a rendered-type subclass or construction in ANOTHER
+    module, one minted through introspection or type() at runtime, or any other
+    spelling of a construction the reference scan cannot see) are the same
+    residual, and they are COVERED AT THE OUTPUT, not chased statically: the
+    rendering constructors format only registered templates (_INIT_TEMPLATES)
+    and render anything else as a value, and the refusal handler accepts a
+    message or restore line only with its constructor's rendering proof,
+    re-rendering everything else at the point of output (QA round 13,
+    requirements A and E). The suite's runtime paste test over
     every init exit path is the primary guard for what the printed lines themselves
     can do."""
     stream = sys.stderr if err else sys.stdout
@@ -14270,6 +14285,97 @@ def _init_inert_json(value):
     return value
 
 
+# The REGISTERED rendering templates (QA round 13, requirement A: render at the
+# output, so no construction path prints raw). Every template the real init
+# source passes to _InitRestoreLine or _InitPriorStoreRefusal is spelled once at
+# its construction site, where the route gate pins it as a string literal or a
+# literal-only-bound name, and once here, byte-identically. The rendering
+# constructors FORMAT a template only when it is a member of this set: any other
+# template value, whatever construction route supplied it (a local or
+# module-level subclass inheriting a constructor included; QA round 12 MAJOR: a
+# declared subclass of _InitPriorStoreRefusal escaped the gate's
+# constructor-name rule and its message, a hostile value in the template
+# position, printed raw), is treated as a VALUE and rendered through
+# _init_inert, never formatted. Formatting an untrusted template is refused for
+# a second reason too: a str.format replacement field can traverse attributes of
+# its arguments, so an unregistered template must never reach format at all. A
+# drift between a construction site and this set is loud twice over: the suite's
+# template-sync check reads every construction site from the AST and requires
+# membership here, and the fail-safe rendering changes output bytes the suite
+# compares in full.
+_INIT_TEMPLATES = frozenset([
+    "",
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{}"),
+    ("  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- "
+     "{} {}"),
+    ("a prior store exists in this repository's git history: commit {} on "
+     "HEAD's first-parent line holds {} or a store manifest {} (spec 4.3, "
+     "4.5), and spec 8.2 forbids restarting its counters at zero (record "
+     "ids would be reissued). Remedy: {remedy}, or re-adopt the ancestry "
+     "with opf adopt. Plain opf init refuses whenever this scan of HEAD's "
+     "first-parent line finds a prior store, and a store that never reached "
+     "a tree on HEAD's first-parent line (for example one created and "
+     "deleted on a side branch, merged or not) is not detected (adoption "
+     "across such side lines is opf adopt's authority); the scan checks the "
+     "root's current path only (a store committed under another directory, "
+     "for example before a rename, is not detected)"),
+    "opf init:   additional commit: {}",
+    "opf init:   additional restore path: {}",
+    "opf init:   commit: {}",
+    "opf init:   missing store path: {}",
+    "opf init:   repository: {}",
+    "opf init:   restore path: {}",
+    ("opf init: additional restore command (shell-ready; it restores the "
+     "remaining store path from the newest first-parent tree that holds "
+     "it):"),
+    ("opf init: restore command (shell-ready; it restores only the store "
+     "paths its commit holds, and the additional command below restores the "
+     "other named store path as git checks it out from its own commit):"),
+    ("opf init: restore command (shell-ready; it restores the named store "
+     "paths as git checks them out from that commit):"),
+    ("opf init: restore command withheld: a value in it holds a character "
+     "outside the bare-command alphabet A-Za-z0-9 . / - _ and an escaped "
+     "command could still carry a live shell substitution or split across "
+     "physical lines, so no command is printed. Restore each path named "
+     "below from the commit named above it, in the repository named below, "
+     "by your own means, reading each rendered value literally: the safe "
+     "alphabet is ASCII letters, digits and . / - _ only, and every other "
+     "character, the space included, is written as a backslash escape of "
+     "its code point:"),
+    ("opf init: the restore is PARTIAL: the .working tree the command or "
+     "lines above restore lacks each store path below, so no command or "
+     "path printed above provides it (this scan treats a first-level "
+     ".working subdirectory as a machine store only when it directly holds "
+     "manifest.toml or counters.toml, in that tree or in this line's "
+     "first-parent history at or before the named commit; a store found "
+     "either way is expected to hold both files, and a subdirectory holding "
+     "only other files or only deeper directories is neither expected nor "
+     "named; a structural file counts at its rename destination instead of "
+     "its old path only when the recorded destination blob id equals the "
+     "source blob id (an exact byte-identical move; git's similarity score "
+     "of 100 alone does not prove that, since reordered lines also score "
+     "100), no older first-parent record touched the destination, and the "
+     "renaming commit's tree holds no structural file under the source "
+     "subdirectory, so a machine subdirectory renamed whole with git mv is "
+     "complete at its new path, while any other pairing git's rename "
+     "detection reports, for example a store deleted beside a similar store "
+     "created in the same commit, or a pairing whose bytes were rearranged, "
+     "reads as a deletion of its source, which stays expected, fail-safe); "
+     "supply each missing path by your own means, or re-adopt with opf "
+     "adopt:"),
+    ("restore the store paths the lines below name, from the {} named below "
+     "(no command is printed: a value in it would hold a character outside "
+     "the bare-command alphabet)"),
+    ("restore the store paths the restore command below names, from that "
+     "commit"),
+    ("restore the store paths the restore commands below name, from the "
+     "commits they name (this history deleted the store across more than "
+     "one commit, so one command cannot restore every store path)"),
+    "{}",
+])
+
+
 class _InitRestoreLine(str):
     """One physical line of a prior-store refusal's restore and detail block: a str
     whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
@@ -14277,7 +14383,12 @@ class _InitRestoreLine(str):
     assignments of string literals, with no nested def, lambda or match capture
     binding (the route gate refuses any other construction; QA round 10 MAJOR 2:
     the round-9 rule counted bindings it could not see or that did not bind the
-    read), and EVERY value is rendered through _init_inert
+    read), is FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES (QA round 13, requirement A: a subclass inheriting this
+    constructor carried a hostile value in the template position, which no
+    constructor-name rule reads; an unregistered template is now itself rendered
+    through _init_inert as a value and never formatted, with the rendered values
+    following after literal spaces), and EVERY value is rendered through _init_inert
     before it is formatted in, with no exception and no pass-through of any kind (QA
     round 9, requirement B: the round-8 constructor passed a value of the exact
     _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
@@ -14294,8 +14405,16 @@ class _InitRestoreLine(str):
     __slots__ = ("_opf_line_rendered",)
 
     def __new__(cls, template, *values):
-        line = str.__new__(cls, template.format(
-            *[_init_inert(str(value)) for value in values]))
+        rendered = [_init_inert(str(value)) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            line = str.__new__(cls, template.format(*rendered))
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered template,
+            # whatever construction route supplied it, is itself a VALUE and is
+            # rendered, never formatted; the rendered values follow after
+            # literal spaces, so the line still carries what was passed, inert.
+            line = str.__new__(cls, " ".join(
+                [_init_inert(str(template))] + rendered))
         line._opf_line_rendered = True
         return line
 
@@ -14315,6 +14434,30 @@ def _init_line_rendered(line):
         return False
 
 
+def _init_refusal_message(exc):
+    """The caught prior-store refusal's message, PROVEN rendered, or re-rendered
+    HERE, at the point of output (QA round 13, requirement A: render at the
+    output, so no construction route can print an unrendered value). The real
+    constructor binds the composed, fully rendered message to a private
+    attribute AFTER rendering it; this accepts the exception's text only when
+    that attribute exists and EQUALS the live str(exc), so a construction route
+    that never ran the real constructor (a subclass overriding __init__, a
+    minted instance, any other exception type smuggled to the handler) and a
+    message swapped in after construction (a reassigned exc.args) are both
+    rendered through _init_inert here, never printed raw. Equality, not mere
+    presence, because the proof must cover the exact bytes printed. Deliberate
+    in-process forgery of the private attribute around raw text is hostile code
+    already running in this interpreter, the stated D-STATIC-PIN-RESIDUAL."""
+    text = str(exc)
+    try:
+        proven = exc._opf_rendered_message
+    except AttributeError:
+        return _init_inert(text)
+    if type(proven) is str and proven == text:
+        return text
+    return _init_inert(text)
+
+
 class _InitPriorStoreRefusal(RuntimeError):
     """A DEFINITE prior-store ancestry finding (spec 8.2), as opposed to a cannot-evaluate:
     _cmd_init reports it under a REFUSED prefix in the finding's own words, then prints
@@ -14327,7 +14470,12 @@ class _InitPriorStoreRefusal(RuntimeError):
     The CONSTRUCTOR renders (QA rounds 7 and 9, requirement B): the message is
     template.format over values EACH rendered through _init_inert, with no
     pass-through of any kind (the template and the remedy template are string
-    literals or literal-only-bound names, pinned by the route gate); the remedy
+    literals or literal-only-bound names, pinned by the route gate, and each is
+    FORMATTED only when it is a member of the registered-template set
+    _INIT_TEMPLATES: an unregistered one, a subclass inheriting this constructor
+    included, is itself rendered as a value and never formatted, QA round 13,
+    requirement A); the composed message is then bound to the private rendering
+    proof the refusal handler checks at the point of output; the remedy
     prose is formatted here from its own pinned template over its own rendered
     values, gains the fixed PARTIAL clause when partial is true, and fills the
     template's {remedy} field, so no composed prose is ever passed back through the
@@ -14339,14 +14487,35 @@ class _InitPriorStoreRefusal(RuntimeError):
 
     def __init__(self, template, values, restore_lines,
                  remedy_template="", remedy_values=(), partial=False):
-        remedy = remedy_template.format(
-            *[_init_inert(str(value)) for value in remedy_values])
+        rendered_remedy = [_init_inert(str(value)) for value in remedy_values]
+        if type(remedy_template) is str and remedy_template in _INIT_TEMPLATES:
+            remedy = remedy_template.format(*rendered_remedy)
+        else:
+            # Fail-safe (QA round 13, requirement A): an unregistered remedy
+            # template is itself a value and renders, never formats.
+            remedy = " ".join(
+                [_init_inert(str(remedy_template))] + rendered_remedy)
         if partial:
             remedy = remedy + (
                 ", and the restore is PARTIAL (the missing-store-path lines below "
                 "name structural store files the restored .working tree lacks)")
-        super().__init__(template.format(
-            *[_init_inert(str(value)) for value in values], remedy=remedy))
+        rendered = [_init_inert(str(value)) for value in values]
+        if type(template) is str and template in _INIT_TEMPLATES:
+            message = template.format(*rendered, remedy=remedy)
+        else:
+            # The same fail-safe for the message template: the remedy, itself
+            # rendered or literal either way above, follows after a literal
+            # space so nothing passed in is dropped.
+            message = " ".join(
+                [_init_inert(str(template))] + rendered
+                + ([remedy] if remedy else []))
+        super().__init__(message)
+        # The rendering PROOF the refusal handler accepts at the point of
+        # output (QA round 13, requirement A): set only AFTER the message was
+        # composed from rendered parts, and checked there by VALUE equality
+        # with the live str(exc), so a message swapped in afterwards (a
+        # reassigned exc.args) no longer matches and is re-rendered.
+        self._opf_rendered_message = message
         self.restore_lines = [
             line if _init_line_rendered(line) else _InitRestoreLine("{}", line)
             for line in restore_lines]
@@ -14556,7 +14725,13 @@ def _init_no_prior_store(git, repo, root):
         remedy ever claims to restore the whole store. Called only for a commit whose
         tree holds .working. Entry names are fsdecoded (surrogateescape, never
         raising); the returned paths are DESCRIPTIVE mentions only, always rendered
-        through _init_inert at construction of the lines that carry them."""
+        through _init_inert at construction of the lines that carry them. The
+        stream itself must end with the terminating NUL of its last token, and
+        every record's modes, status and object ids must be mutually consistent
+        with the shapes git's documented --raw format prints (the derivation is
+        stated at the parse below; QA round 13 B): a stream or record outside
+        those shapes refuses like every other unreadable answer, fail-closed,
+        before any record can release a rename source."""
         listing = read(["ls-tree", "-r", "-z", "--name-only",
                         commit + ":" + working_rel])
         names = set(listing.out.split(b"\0")) - {b""}
@@ -14603,12 +14778,18 @@ def _init_no_prior_store(git, repo, root):
         # git prints one newline between a header's NUL and the commit's first
         # record, so the token at a boundary may carry one leading newline (and
         # carries ONLY the next header after it when a listed commit has no
-        # records). Any other or unparseable token shape refuses.
+        # records). Any other or unparseable token shape refuses. The stream
+        # must END with the terminating NUL of its last token (QA round 13 B:
+        # -z terminates every token, headers included, so a non-empty stream
+        # without a final NUL is truncated or not git's, and reading its tail
+        # as a complete token could hand a cut record to the resolver).
+        if touched.out and not touched.out.endswith(b"\0"):
+            raise RuntimeError(
+                "git history preflight: --raw output lacks its terminating NUL "
+                "({}); refusing".format(ascii(touched.out[-32:])))
         tokens = touched.out.split(b"\0")
         if tokens and tokens[-1] == b"":
             tokens.pop()
-        if len(tokens) == 1 and tokens[0] == b"":
-            tokens = []
         commits = []   # (commit id, records, touched paths), newest first
         index = 0
         while index < len(tokens):
@@ -14632,20 +14813,37 @@ def _init_no_prior_store(git, repo, root):
                     "git history preflight: unparseable --raw record {}; "
                     "refusing".format(ascii(meta)))
             status = fields[4]
-            # Each --raw mode is a six-digit octal file mode (git's documented
-            # diff --raw format prints ":<src> <dst>", each mode %06o: 000000 for an
-            # absent side, 100644 / 100755 / 120000 / 160000 otherwise), and a
-            # rename or copy status is its letter followed by git's three-digit
-            # similarity score (%c%03d, 000 to 100). A record whose mode fields are
-            # not octal six-tuples, or whose R/C score is not three decimal digits
-            # in that range, is not a shape git emits and refuses (QA round 12 E:
-            # the round-11 parser checked neither, so junk modes and an out-of-range
-            # or non-numeric score passed, and a malformed rename released a source).
-            for mode in (fields[0][1:], fields[1]):
-                if len(mode) != 6 or any(c not in b"01234567" for c in mode):
+            # DERIVATION (git-diff(1), RAW OUTPUT FORMAT; QA round 13 B): git
+            # prints each record as ":<src mode> <dst mode> <src id> <dst id>
+            # <status>", each mode %06o. A mode is 000000 EXACTLY on the side a
+            # record has no file on -- the src of a creation (A), the dst of a
+            # deletion (D) -- and on that side alone; every side that has a
+            # file carries one of the tree-entry modes git documents and
+            # writes, 100644 or 100755 (regular file), 120000 (symbolic link)
+            # or 160000 (gitlink). A tree's 040000 is NOT accepted: this walk
+            # reads git log's recursive, blob-level record stream, which never
+            # prints a tree record. The object id is the all-zero id exactly
+            # where the mode is 000000 (a log over committed trees never
+            # prints the out-of-sync all-zero id a worktree diff can). A
+            # rename or copy status is its letter followed by git's
+            # three-digit similarity score (%c%03d, 000 to 100). Any record
+            # outside these shapes -- a mode outside the documented set (an
+            # ancient loose mode such as 100664 included: refusing one is a
+            # cannot-evaluate, fail-closed), a 000000 on a side the status
+            # says has a file, a zero id beside a non-zero mode or the
+            # reverse, a malformed score -- is not a shape this scan can vouch
+            # for and REFUSES (QA round 12 E and QA round 13 B: the round-11
+            # parser checked none of this, so junk modes, zero-mode rename
+            # sides carrying non-zero ids, and malformed scores all passed,
+            # and a malformed rename record could release a source).
+            raw_modes = (b"000000", b"100644", b"100755", b"120000", b"160000")
+            src_mode, dst_mode = fields[0][1:], fields[1]
+            for mode in (src_mode, dst_mode):
+                if mode not in raw_modes:
                     raise RuntimeError(
-                        "git history preflight: --raw record with a non-octal "
-                        "mode field {}; refusing".format(ascii(meta)))
+                        "git history preflight: --raw record with a mode "
+                        "outside git's documented set {}; refusing".format(
+                            ascii(meta)))
             if status[:1] in (b"R", b"C"):
                 score = status[1:]
                 if (len(score) != 3 or any(c not in b"0123456789" for c in score)
@@ -14654,14 +14852,32 @@ def _init_no_prior_store(git, repo, root):
                         "git history preflight: --raw rename/copy status with a "
                         "malformed similarity score {}; refusing".format(
                             ascii(status)))
+            if status[:1] == b"A":
+                absent = (True, False)
+            elif status[:1] == b"D":
+                absent = (False, True)
+            elif status[:1] in (b"M", b"T", b"R", b"C"):
+                absent = (False, False)
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --raw status {}; "
+                    "refusing".format(ascii(status)))
             # The blob ids are validated like every other object id this scan
-            # reads, fail-closed; a rename record releases its source below ONLY
-            # when they are EQUAL and not the all-zero id git uses for an absent
-            # side, because git's similarity score of 100 does not prove the
-            # bytes unchanged (QA round 10 MINOR 3: reordered lines score 100
-            # while the blobs differ).
+            # reads, fail-closed, and each side's id and mode must agree with
+            # the status per the derivation above; a rename record releases
+            # its source below ONLY when the ids are EQUAL and not the
+            # all-zero id, because git's similarity score of 100 does not
+            # prove the bytes unchanged (QA round 10 MINOR 3: reordered lines
+            # score 100 while the blobs differ).
             old_blob = oid(fields[2])
             new_blob = oid(fields[3])
+            if ((src_mode == b"000000", dst_mode == b"000000") != absent
+                    or (src_mode == b"000000") != (set(old_blob) == {"0"})
+                    or (dst_mode == b"000000") != (set(new_blob) == {"0"})):
+                raise RuntimeError(
+                    "git history preflight: --raw record whose modes, status "
+                    "and object ids are not mutually consistent {}; "
+                    "refusing".format(ascii(meta)))
             same_blob = old_blob == new_blob and set(old_blob) != {"0"}
             if status[:1] in (b"R", b"C"):
                 if index + 2 > len(tokens) - 1:
@@ -15095,13 +15311,18 @@ def _init_main(rest):
     later failure reports observed planned paths and leaves them for review. Enumeration, root
     identity checks, and final rereads do not serialize concurrent writers or directory renames.
     No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
-    Every failure path prints rendered text through the two handlers below; the second now catches
+    Every failure path prints rendered text through the two handlers below; the second catches
     BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
     publication started) still reports the partial-publication disclosure before returning rendered (QA
-    round 12 C). Whatever escapes the handlers (an interrupt during the argument loop above the try, for
-    one) is caught by _cmd_init's last-resort rendering boundary (QA round 10 MAJOR 1); an interrupt
-    landing in that boundary's own handler is the one window neither covers, stated there and in
-    QUICKSTART.
+    round 12 C). The disclosure is itself guarded (QA round 13 D), with its windows stated exactly: a
+    SECOND interrupt, raised while the detail report (the root re-check, the observation pass, the JSON
+    event line) runs, drops only that detail, and a fixed fallback line plus the fixed "publication may
+    be partial" sentence still print; a THIRD interrupt, landing in one of those two fixed prints (or a
+    second one landing there directly), escapes to _cmd_init's boundary, which prints only its rendered
+    last-resort line, so that window carries no partial-publication disclosure at all. Whatever escapes
+    the handlers (an interrupt during the argument loop above the try, for one) is caught by _cmd_init's
+    last-resort rendering boundary (QA round 10 MAJOR 1); the windows that boundary itself does not
+    cover are stated there and in QUICKSTART.
     """
     root = None
     i = 0
@@ -15304,20 +15525,30 @@ def _init_main(rest):
     except _InitPriorStoreRefusal as exc:
         # A DEFINITE finding, not an evaluation failure: reported as REFUSED in its own
         # words. It is raised only by the read-only ancestry preflight, so publication
-        # never started. Its message is printed unwrapped because the refusal
-        # CONSTRUCTOR rendered every message value through _init_inert (never ascii(),
-        # which leaves a raw dollar sign and backquote inside the quoted literal it
-        # yields, QA round 5 MAJOR). The handler accepts only restore lines that
-        # carry the _InitRestoreLine constructor's rendering proof
-        # (_init_line_rendered, a private slot set after every value was rendered;
-        # never a type check, QA round 9, requirement B: str.__new__ minted an
-        # exact-type instance around a raw value); any other entry (a raw string or
-        # minted instance smuggled onto the caught exception after construction) is
-        # re-rendered through that constructor here, never printed raw. The suite's
-        # runtime paste test holds both properties at runtime.
+        # never started. The message is NOT trusted by type (QA round 13, requirement
+        # A: this handler catches subclasses too, and a subclass inheriting or
+        # overriding the constructor carried a raw value): _init_refusal_message
+        # accepts it at this point of output only with the constructor's rendering
+        # proof, by value equality with the live str(exc), and renders it through
+        # _init_inert otherwise (never ascii(), which leaves a raw dollar sign and
+        # backquote inside the quoted literal it yields, QA round 5 MAJOR). The
+        # restore lines are read defensively (a subclass that never ran the real
+        # constructor may carry none) and each is accepted only with the
+        # _InitRestoreLine constructor's rendering proof (_init_line_rendered, a
+        # private slot set after every value was rendered; never a type check, QA
+        # round 9, requirement B: str.__new__ minted an exact-type instance around a
+        # raw value); any other entry (a raw string or minted instance smuggled onto
+        # the caught exception after construction) is re-rendered through that
+        # constructor here, never printed raw. The suite's runtime paste test holds
+        # these properties at runtime.
         _init_echo("opf init: REFUSED at {} during {}: {}; exit 2".format(
-            _init_inert(str(root)), _init_inert(stage), exc), err=True)
-        for line in exc.restore_lines:
+            _init_inert(str(root)), _init_inert(stage),
+            _init_refusal_message(exc)), err=True)
+        try:
+            caught_lines = list(exc.restore_lines)
+        except Exception:
+            caught_lines = []
+        for line in caught_lines:
             _init_echo(line if _init_line_rendered(line)
                        else _InitRestoreLine("{}", line), err=True)
         _init_echo("opf init: preflight refused; no publication attempted.", err=True)
@@ -15333,17 +15564,22 @@ def _init_main(rest):
             _init_inert(str(exc))), err=True)
         if publishing and root_fd is not None:
             try:
-                _init_same_root(root, root_fd)
-                binding = "same-root"
-            except Exception as binding_exc:
-                binding = "cannot-confirm-root: " + ascii(binding_exc)
-            _init_echo(json.dumps(_init_inert_json({
-                "event": "partial-publication",
-                "root": str(root),
-                "scope": "opened-root-descriptor",
-                "root_binding": binding,
-                "paths": _init_observed(root_fd, directories, payloads),
-            }), sort_keys=True), err=True)
+                try:
+                    _init_same_root(root, root_fd)
+                    binding = "same-root"
+                except Exception as binding_exc:
+                    binding = "cannot-confirm-root: " + ascii(binding_exc)
+                _init_echo(json.dumps(_init_inert_json({
+                    "event": "partial-publication",
+                    "root": str(root),
+                    "scope": "opened-root-descriptor",
+                    "root_binding": binding,
+                    "paths": _init_observed(root_fd, directories, payloads),
+                }), sort_keys=True), err=True)
+            except BaseException:  # noqa: BLE001  a SECOND interrupt while the detail report itself runs must not drop the fixed disclosure below (QA round 13 D)
+                _init_echo("opf init: the partial-publication detail could not be "
+                           "reported (a second failure while the report itself "
+                           "ran); review the created paths yourself.", err=True)
             _init_echo("opf init: publication may be partial; review the observed state. No rollback performed.",
                        err=True)
         else:
@@ -15372,14 +15608,18 @@ def _cmd_init(rest):
     lets escape is caught here and reported rendered, so from init dispatch onward
     opf init reports a rendered line and exits 2 rather than printing a Python
     traceback (a KeyboardInterrupt, or a mutant's SystemExit, raised while
-    _init_main runs reports the same way and exits 2). Two windows this boundary
+    _init_main runs reports the same way and exits 2). Three windows this boundary
     does NOT cover, stated so no wording claims more than the code provides: an
     asynchronous interrupt that lands in this handler's own few statements (after
-    the guarded report, at the return) can still escape, and any failure BEFORE
+    the guarded report, at the return) can still escape; any failure BEFORE
     init dispatch is outside this boundary entirely (a bootstrap fault other than
     the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
     example a SyntaxError in an installed helper, or an interrupt before or during
-    dispatch, surfaces as Python's own traceback or signal). What a static scan
+    dispatch, surfaces as Python's own traceback or signal); and an interrupt
+    AFTER this function returns, in the dispatcher's own return and sys.exit
+    statements, escapes as Python's traceback of those dispatcher lines (that
+    traceback shows the dispatcher's source lines and the interrupt type; it
+    interpolates no init value). What a static scan
     still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
     try:
         return _init_main(rest)
