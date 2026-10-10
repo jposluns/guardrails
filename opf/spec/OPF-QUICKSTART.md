@@ -88,7 +88,10 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `manifest.toml` or `counters.toml`, in the restored tree or in the first-parent history
    at or before the named commit; a store found either way is expected to hold both files,
    and a subdirectory holding only other files or only deeper directories is neither
-   expected nor named. When the `.working` tree a command restores lacks such an expected
+   expected nor named; a structural file whose newest first-parent change at or before the
+   named commit renamed it to another first-level `.working` store path is counted at its
+   new path only (so a machine subdirectory renamed whole with `git mv` is not reported as
+   a PARTIAL restore). When the `.working` tree a command restores lacks such an expected
    structural file, the refusal says the restore is PARTIAL and names each missing path,
    in words that state only that observed lack. A command is printed only when the
    repository path and every restored path consist solely of the bare-command alphabet
@@ -96,11 +99,16 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    all, and the refusal instead names the repository, commit, and paths in a rendered
    form, for a restore performed by hand. Every value interpolated into init's output
    (paths, rejected arguments, commit ids, exception text, and the JSON event lines
-   included) is rendered by one escaper that escapes every character a POSIX shell acts
-   on (substitutions, separators, redirections, the backslash, every control, and every
-   non-ASCII character), so an interpolated value can carry no substitution, separator,
-   redirection, or line break for a POSIX shell to act on, while quotes, spaces, and
-   ordinary punctuation stay readable. A repository whose history the scan cannot trust as-is (a shallow clone, any entry
+   included) is rendered by one escaper with a fixed, narrow safe alphabet: ASCII
+   letters, digits, and `. / - _` render unchanged, and every other character (the
+   space included, both quote kinds, `!`, substitutions, separators, redirections,
+   glob characters, parentheses, braces, the tilde, the backslash, every control or
+   format character, and every non-ASCII character) is written as a backslash escape
+   of its code point. A rendered value is for reading and reconstruction by hand, not
+   for pasting into a shell, and readability is deliberately not a goal that widens
+   the alphabet: characters one shell merely groups are live syntax in another (bash
+   history expansion acts on `!` even inside double quotes; zsh glob qualifiers and
+   fish command substitution execute code). A repository whose history the scan cannot trust as-is (a shallow clone, any entry
    at the legacy `.git/info/grafts` path, or a grafts path it cannot inspect) is refused as
    cannot-evaluate rather than initialized.
 2. Commit the tree; confirm nothing under `.working/` is ignored.

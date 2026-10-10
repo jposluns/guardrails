@@ -120,6 +120,138 @@ _ROUTE_PINNED = ("_init_echo", "_init_inert", "_init_inert_json",
 _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
                            "write", "writelines", "warnings", "logging"])
 
+# The PERMITTED-CALL allowlist (QA round 8, requirement B: the round-7 banned-name
+# check was a denylist, and spelled routes it did not name -- subprocess.run,
+# os.system, os.writev, open on /dev/stdout, Path(...).write_text, sys.exit,
+# SystemExit, input, traceback.print_exc, pprint.pprint, shutil.copyfileobj,
+# sys.displayhook, json.dump, a module-level alias to an out-of-graph helper --
+# all passed it). Every call target in every function reachable from _cmd_init must
+# resolve (_route_call_spelling) to a module-level reachable definition, to a def
+# nested inside the function under scan (whose own body is scanned the same way), or
+# to an entry in this reviewed roster of builtins, module functions and spelled
+# method chains the real init source uses. Anything else, including a target the
+# resolver cannot spell (a computed callee), is a violation. The spellings are
+# deliberately variable-name-specific (journal._open_parent, read().out.strip): a
+# rename in opf.py fails the gate until this roster is re-reviewed.
+_ROUTE_ALLOWED_CALLS = frozenset([
+    "Path",
+    "RuntimeError",
+    "_opf_emit.emit_checked",
+    "_opf_emit.emit_checked().encode",
+    "_opf_init.build_counters",
+    "_opf_init.build_index",
+    "_opf_init.build_manifest",
+    "_opf_init.build_version",
+    "_opf_init.build_worklog",
+    "_opf_observe._git_path",
+    "_opf_observe._run_git",
+    "_opf_observe._run_git_config_discovery",
+    "_opf_observe.indexed_ignore_availability",
+    "_opf_store._close_fd_exc_safe",
+    "_opf_store._journal._close_fd_propagating",
+    "_opf_store._journal._close_fd_quietly",
+    "_opf_store._open_dir_nofollow",
+    "_opf_store.resolve_store",
+    "_opf_write_guard._ignore_file_candidates",
+    "all",
+    "any",
+    "ascii",
+    "body.split",
+    "chunk.partition",
+    "decided.add",
+    "dict",
+    "documents.extend",
+    "entry.partition",
+    "entry.startswith",
+    "extra_paths.append",
+    "grafts_raw.decode",
+    "grafts_text.endswith",
+    "held.append",
+    "isinstance",
+    "journal._check_rel",
+    "journal._lstat_at",
+    "journal._lstat_contained",
+    "journal._open_parent",
+    "journal._read_at",
+    "journal._recreate_file",
+    "journal.require_containment",
+    "json.dumps",
+    "len",
+    "list",
+    "listing.out.split",
+    "meta.split",
+    "name.split",
+    "ord",
+    "os.fsdecode",
+    "os.fsdecode().splitlines",
+    "os.fsencode",
+    "os.fstat",
+    "os.fsync",
+    "os.lstat",
+    "os.mkdir",
+    "os.open",
+    "os.path.abspath",
+    "os.path.isabs",
+    "os.path.join",
+    "os.readlink",
+    "os.scandir",
+    "os.stat",
+    "parent.out.strip",
+    "path.startswith",
+    "payloads.items",
+    "pointer_path.as_posix",
+    "probe.out.split",
+    "raw.decode",
+    "raw.split",
+    "read().out.strip",
+    "records.pop",
+    "rel.split",
+    "restore_lines.append",
+    "root.relative_to",
+    "rows.append",
+    "rows.sort",
+    "set",
+    "sorted",
+    "stat.S_ISDIR",
+    "stat.S_ISLNK",
+    "stat.S_ISREG",
+    "stores.add",
+    "str",
+    "str-literal.format",
+    "str-literal.join",
+    "str.__new__",
+    "super",
+    "super().__init__",
+    "template.format",
+    "text.encode",
+    "touched.out.split",
+    "type",
+    "val.startswith",
+    "value.items",
+    "working_path.as_posix",
+])
+
+
+def _route_call_spelling(func):
+    """Spell a call's target for the permitted-call allowlist: a Name is its id, an
+    attribute chain is spelled dotted down to a Name base, a string-literal base is
+    spelled str-literal (so " ".join and "{}".format resolve without admitting
+    arbitrary objects), and a call base is spelled with a () suffix (read().out.strip),
+    so a chain is allowed only as the exact spelled shape. Anything else (a subscript,
+    a conditional expression, an operator result, a lambda) returns None: a COMPUTED
+    call target, which the gate refuses outright."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        base = _route_call_spelling(func.value)
+        return None if base is None else base + "." + func.attr
+    if isinstance(func, ast.Constant) and isinstance(func.value, str):
+        return "str-literal"
+    if isinstance(func, ast.Call):
+        inner = _route_call_spelling(func.func)
+        return None if inner is None else inner + "()"
+    return None
+
 
 def _route_binding_names(node):
     """Names a statement or clause BINDS (not reads): assignment targets of every kind
@@ -158,28 +290,36 @@ def _route_binding_names(node):
 
 
 def _init_route_violations(source):
-    """Closed-NAME output-route gate over opf.py (QA round 7, requirement B; it replaces
-    the round-6 dataflow proof, which annotated assignments, print aliases, in-place
-    list mutation and out-of-scope helpers all bypassed). It computes the set of
-    module-level opf.py functions and classes REACHABLE from _cmd_init (every Name that
-    resolves to a module-level def, transitively; a duplicate module-level definition
-    or a module-level rebinding of a reachable def refuses as unresolvable) and, in
-    every reachable function except the one emitter _init_echo, refuses BY NAME any
-    reference to print, builtins, stdout, stderr, write, writelines, warnings or
-    logging (as a bare name, an attribute, an import or a keyword target), any binding
-    of a pinned route name (the emitter, the renderers and the two rendering types)
-    anywhere in the file, and any _InitRestoreLine or _InitPriorStoreRefusal
-    construction whose template argument is not a string literal. Returns a list of
-    violation descriptions; the suite requires it empty on the real source and
-    NON-empty on every seeded mutant, so each recognizer is discriminated. RESIDUAL
-    (stated, not waved away): a name check sees names, not values or dataflow. It
-    cannot see WHAT a permitted _init_echo call prints, output written through a raw
-    file descriptor (os.write on an integer), output produced inside the sibling
-    _opf_* modules the init path calls into, or a route reached through an attribute
-    chain it does not name. The suite's RUNTIME paste test, which drives hostile
-    values through every init exit path and feeds every printed line alone to a real
-    POSIX sh, is the primary guard for those; this gate only keeps the output routes
-    closed by name so a reviewer can enumerate them."""
+    """PERMITTED-CALL output-route gate over opf.py (QA round 7, requirement B; QA
+    round 8, requirement B: the round-7 banned-name check was a DENYLIST, and spelled
+    routes it did not name all passed it). It computes the set of module-level opf.py
+    functions and classes REACHABLE from _cmd_init (every Name that resolves to a
+    module-level def, transitively; a duplicate module-level definition or a
+    module-level rebinding of a reachable def refuses as unresolvable) and, in every
+    reachable function except the one emitter _init_echo, requires EVERY call target
+    to resolve through _route_call_spelling to a reachable module-level definition, a
+    def nested in the function under scan, or an entry in the explicit
+    _ROUTE_ALLOWED_CALLS roster; an unresolvable (computed) call target and a call
+    target outside the allowed set are both violations. It additionally refuses BY
+    NAME any reference to print, builtins, stdout, stderr, write, writelines,
+    warnings or logging (as a bare name, an attribute, an import or a keyword
+    target: these catch non-call references too, such as sys.stdout passed as an
+    argument), any binding of a pinned route name (the emitter, the renderers and
+    the two rendering types) anywhere in the file, and any _InitRestoreLine or
+    _InitPriorStoreRefusal construction whose template argument is not a string
+    literal. Returns a list of violation descriptions; the suite requires it empty
+    on the real source and NON-empty on every seeded mutant, so each recognizer is
+    discriminated. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated, not waved away): a
+    static check sees spelled call targets, not values, dataflow or runtime
+    bindings. It cannot see WHAT an allowed call prints or does at runtime (an
+    allowed method name invoked on a hostile object, a permitted name rebound by a
+    test harness), introspection performed inside the sibling _opf_* modules the
+    init path calls into, or output those modules produce; spelled introspection
+    INSIDE opf.py (getattr, globals, vars, __import__) is refused because none of
+    those names is in the allowed set. The suite's RUNTIME paste test, which drives
+    hostile values through every init exit path and feeds every printed line alone
+    to real shells, is the primary guard for those; this gate keeps the reachable
+    call surface enumerable by a reviewer."""
     tree = ast.parse(source)
     violations = []
     top = {}
@@ -235,7 +375,21 @@ def _init_route_violations(source):
     for name in sorted(reachable):
         if name == _ROUTE_EMITTER:
             continue
+        local_defs = {sub.name for sub in ast.walk(top[name])
+                      if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                          ast.ClassDef))}
         for sub in ast.walk(top[name]):
+            if isinstance(sub, ast.Call):
+                spelled = _route_call_spelling(sub.func)
+                if spelled is None:
+                    violations.append(
+                        "{} line {}: computed call target (not a spellable name, "
+                        "attribute chain or call chain)".format(name, sub.lineno))
+                elif not (spelled in top or spelled in local_defs
+                          or spelled in _ROUTE_ALLOWED_CALLS):
+                    violations.append(
+                        "{} line {}: call target {} is not in the permitted-call "
+                        "allowlist".format(name, sub.lineno, spelled))
             if isinstance(sub, ast.Name) and sub.id in _ROUTE_BANNED:
                 violations.append("{} line {}: reference to the banned name "
                                   "{}".format(name, sub.lineno, sub.id))
@@ -295,25 +449,54 @@ def _suite_isolated(invoke):
             if not condition:
                 failures.append(label)
 
+        def fd_capture(runner):
+            # QA round 8 (codex MAJOR): capture at the DESCRIPTOR level.
+            # contextlib.redirect_stdout rebinds only the sys module attribute, so
+            # output written through the raw descriptors (os.write or os.writev on 1
+            # or 2, a subprocess inheriting them, an open of /dev/stdout) escaped the
+            # earlier in-process capture entirely and the captured buffer looked
+            # clean. Descriptors 1 and 2 are dup2-ed onto one unlinked temporary
+            # file around the call and restored on every path; the file's bytes are
+            # the captured output, whatever route wrote them.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            with tempfile.TemporaryFile(prefix="opf-init-fd-capture-") as capture:
+                saved_out = os.dup(1)
+                try:
+                    saved_err = os.dup(2)
+                    try:
+                        os.dup2(capture.fileno(), 1)
+                        os.dup2(capture.fileno(), 2)
+                        try:
+                            rc = runner()
+                        finally:
+                            sys.stdout.flush()
+                            sys.stderr.flush()
+                            os.dup2(saved_out, 1)
+                            os.dup2(saved_err, 2)
+                    finally:
+                        os.close(saved_err)
+                finally:
+                    os.close(saved_out)
+                capture.seek(0)
+                return rc, capture.read().decode("utf-8", errors="replace")
+
         def call(argv):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                rc = invoke(list(argv))
-            return rc, output.getvalue()
+            return fd_capture(lambda: invoke(list(argv)))
 
         def run(root):
             return call(["init", "--root", str(root)])
 
         def inert(text):
-            # An independent spelling of init's ONE renderer (QA rounds 6 and 7):
-            # every character a POSIX shell can act on to run or redirect something
-            # ("$", the backquote, ";", "&", "|", "<", ">", the backslash), every
-            # control character and DEL, and every non-ASCII character becomes a
-            # Python \\x / \\u / \\U escape (written doubled so a
-            # raw_unicode_escape re-decode of this file stays well formed); quotes,
-            # spaces and ordinary punctuation stay raw so diagnostics read plainly
-            # (QA round 7 MINOR 5), while no substitution, separator, redirection
-            # or line break ever reaches a printed line raw.
+            # An independent spelling of init's ONE renderer (QA rounds 6, 7 and 8):
+            # the safe alphabet is FIXED and narrow, ASCII letters, digits and
+            # . / - _ only, and every other character, the SPACE included, becomes a
+            # Python \\x / \\u / \\U escape of its code point (written doubled so a
+            # raw_unicode_escape re-decode of this file stays well formed). QA
+            # round 8 BLOCKER 1: the widened round-8 set let "!" through raw, where
+            # interactive bash history expansion replays the user's history, and let
+            # zsh glob qualifiers and fish command substitution reach output raw;
+            # readability is not a goal that may widen this set.
             def escape(ch):
                 code = ord(ch)
                 if code < 0x100:
@@ -322,7 +505,7 @@ def _suite_isolated(invoke):
                     return "\\u%04x" % code
                 return "\\U%08x" % code
             safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                       "0123456789./-_ !\"#%'()*+,:=?@[]^" + chr(123) + chr(125) + "~")
+                       "0123456789./-_")
             return "".join(ch if ch in safe else escape(ch) for ch in text)
 
 
@@ -778,13 +961,13 @@ def _suite_isolated(invoke):
                              "path named "
                              "below from the commit named above it, in the repository "
                              "named below, "
-                             "by your own means, reading each rendered value literally, "
-                             "with every "
-                             "character a POSIX shell could act on, every control or "
-                             "format "
-                             "character and every non-ASCII character written as a "
-                             "backslash "
-                             "escape of its code point:",
+                             "by your own means, reading each rendered value literally: "
+                             "the safe "
+                             "alphabet is ASCII letters, digits and . / - _ only, and "
+                             "every other "
+                             "character, the space included, is written as a backslash "
+                             "escape of "
+                             "its code point:",
                              "opf init:   repository: " + inert(str(repo)),
                              "opf init:   commit: " + commit]
                             + ["opf init:   restore path: " + inert(path)
@@ -815,9 +998,15 @@ def _suite_isolated(invoke):
                              "subdirectory "
                              "holding only other files or only deeper directories is "
                              "neither "
-                             "expected nor named); supply each missing path by your own "
-                             "means, or "
-                             "re-adopt with opf adopt:"]
+                             "expected nor named; a structural file whose newest "
+                             "first-parent "
+                             "change at or before the named commit renamed it to "
+                             "another "
+                             "first-level .working store path is counted at its new "
+                             "path only); "
+                             "supply each missing path by your own means, or re-adopt "
+                             "with opf "
+                             "adopt:"]
                             + ["opf init:   missing store path: " + inert(path)
                                for path in gap_paths])
                     return (
@@ -868,6 +1057,61 @@ def _suite_isolated(invoke):
 
                 if shutil.which("sh") is None:
                     raise OSError("no POSIX sh on PATH to run the printed restore command")
+                if shutil.which("bash") is None:
+                    raise OSError(
+                        "no bash on PATH: the interactive history-expansion paste leg "
+                        "(QA round 8 BLOCKER 1) cannot run, and a required leg never "
+                        "skips silently")
+                # zsh and fish legs run only where installed (their hazards, glob
+                # qualifiers that execute code and parenthesis command substitution,
+                # are shell-specific and both shells are optional on CI hosts); the
+                # sh and bash legs are REQUIRED and their absence refuses above.
+                probe_has_zsh = shutil.which("zsh") is not None
+                probe_has_fish = shutil.which("fish") is not None
+                probe_seed_names = ("probe-seed-aa.txt", "probe-seed-zz.txt")
+                probe_hist_prime = "true || touch HIST-REPLAYED"
+
+                def seed_cell(cell):
+                    # Probe directories are NOT empty (QA round 8 BLOCKER 1): an
+                    # empty directory gives a glob nothing to match, so a glob or
+                    # glob-qualifier payload would pass unexercised; violation
+                    # detection subtracts exactly these names.
+                    for seed_name in probe_seed_names:
+                        (cell / seed_name).write_bytes(b"seed\n")
+
+                def probe_line_legs(line, cell):
+                    # The per-line legs, each launched with its LITERAL argv head
+                    # (the maintenance-pin scan resolves launch heads to literals):
+                    # plain sh -c; bash --norc --noprofile -i fed a PRIMED history
+                    # line then the probed line (history expansion is live in
+                    # interactive bash, and a replayed prior line is the round-8
+                    # blocker; the primed line is inert unless replayed INTO a
+                    # failing line, where the || arm fires); zsh -f -i (banghist
+                    # and glob qualifiers) and fish --no-config -i (parenthesis
+                    # command substitution) where installed. Returns the completed
+                    # processes so the caller can scan their output for the marker.
+                    primed = (probe_hist_prime + "\n" + line + "\n").encode("utf-8")
+                    probe_env = dict(os.environ, HISTFILE=os.devnull, TERM="dumb")
+                    procs = [subprocess.run(
+                        ["sh", "-c", line], input=b"", cwd=str(cell),
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=60, env=probe_env)]
+                    procs.append(subprocess.run(
+                        ["bash", "--norc", "--noprofile", "-i"], input=primed,
+                        cwd=str(cell), stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=60, env=probe_env))
+                    if probe_has_zsh:
+                        procs.append(subprocess.run(
+                            ["zsh", "-f", "-i"], input=primed, cwd=str(cell),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=60, env=probe_env))
+                    if probe_has_fish:
+                        procs.append(subprocess.run(
+                            ["fish", "--no-config", "-i"],
+                            input=(line + "\n").encode("utf-8"), cwd=str(cell),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=60, env=probe_env))
+                    return procs
 
                 def run_restore(output):
                     # Runs every printed restore line through a real POSIX shell, in the
@@ -887,9 +1131,11 @@ def _suite_isolated(invoke):
 
                 def sh_inert_probe(output, tag):
                     # QA round 5 (requirement A): EVERY line init prints must be
-                    # shell-inert. Three legs, each from the same fresh EMPTY directory,
-                    # returning the sorted union of entries created there (expected:
-                    # none). Leg 1 runs the WHOLE output through the real POSIX sh, which
+                    # shell-inert. Five legs, each from the same fresh SEEDED directory,
+                    # returning the sorted union of non-seed entries created there
+                    # (expected: none); legs 4 and 5 are the interactive-bash
+                    # primed-history legs added below (QA round 8 BLOCKER 1). Leg 1
+                    # runs the WHOLE output through the real POSIX sh, which
                     # EXITS at its first syntax error, so that leg alone proves nothing
                     # past the first unparsable line (QA round 6 MINOR: the earlier
                     # docstring claimed the whole output ran). Leg 2 runs each line alone
@@ -902,22 +1148,47 @@ def _suite_isolated(invoke):
                     # running (the PWNED sentinel) or a redirect creating an entry. Every
                     # output probed here was produced for a hostile-named fixture, whose
                     # command hints init withholds, so no leg reaches a runnable git line.
+                    # QA round 8 BLOCKER 1 additions: the directory is SEEDED (so a
+                    # glob has something to match), and two interactive-bash legs run
+                    # with a primed history line, whole-output and line by line,
+                    # because bash history expansion acts on a raw "!" even inside
+                    # double quotes and dash (the usual sh) never would.
                     probe = base / ("inert-probe-" + tag)
                     probe.mkdir()
+                    seed_cell(probe)
                     created = set()
+
+                    def swept():
+                        return {entry.name for entry in probe.iterdir()} - set(
+                            probe_seed_names)
+
                     subprocess.run(["sh"], input=output.encode("utf-8"), cwd=str(probe),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    timeout=120)
-                    created |= {entry.name for entry in probe.iterdir()}
+                    created |= swept()
                     for line in output.splitlines():
                         subprocess.run(["sh", "-c", line], cwd=str(probe),
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        timeout=120)
-                    created |= {entry.name for entry in probe.iterdir()}
+                        subprocess.run(["bash", "--norc", "--noprofile", "-i"],
+                                       input=(probe_hist_prime + "\n" + line
+                                              + "\n").encode("utf-8"),
+                                       cwd=str(probe), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=120,
+                                       env=dict(os.environ, HISTFILE=os.devnull,
+                                                TERM="dumb"))
+                    created |= swept()
                     subprocess.run(["sh", "-i"], input=output.encode("utf-8"),
                                    cwd=str(probe), stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=120)
-                    created |= {entry.name for entry in probe.iterdir()}
+                    subprocess.run(["bash", "--norc", "--noprofile", "-i"],
+                                   input=(probe_hist_prime + "\n"
+                                          + output).encode("utf-8"),
+                                   cwd=str(probe), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=120,
+                                   env=dict(os.environ, HISTFILE=os.devnull,
+                                            TERM="dumb"))
+                    created |= swept()
                     return sorted(created)
 
                 # SPEC 8.2 ancestry (fix-init-ancestry): plain init must never restart counters
@@ -2009,11 +2280,11 @@ def _suite_isolated(invoke):
                 rc, output = run(nl_repo)
                 check("newline root: refused fail-closed as cannot-evaluate",
                       rc == EXIT_ERROR and "cannot evaluate" in output)
-                # QA round 7 MINOR 5: quotes and spaces now print raw (the renderer
-                # escapes only what a shell acts on), so the payload WORDS appear
-                # rendered mid-line; what must never happen is a payload fragment
-                # LANDING AT A LINE START (the newline is escaped) or a raw
-                # substitution or separator character surviving anywhere.
+                # QA round 8 (requirement A): the alphabet is fixed and narrow
+                # again, so quotes and spaces render as escapes too; what must never
+                # happen is a payload fragment LANDING AT A LINE START (the newline
+                # is escaped) or a raw substitution or separator character surviving
+                # anywhere.
                 check("newline root: no output line carries a payload fragment raw",
                       "$" not in output and "`" not in output
                       and not any(line.startswith("touch")
@@ -2148,15 +2419,16 @@ def _suite_isolated(invoke):
                 # in-process with one injected fault, against a hostile-named repository,
                 # and the complete captured output goes through the same probes.
                 def drive_cmd_init(root, patches):
-                    buffer = io.StringIO()
-                    with contextlib.redirect_stdout(buffer), \
-                            contextlib.redirect_stderr(buffer):
+                    # Captured at the descriptor level through fd_capture (QA round 8,
+                    # codex MAJOR): a redirect_stdout capture missed descriptor-level
+                    # output from a driven fault or mutant.
+                    def driven():
                         with contextlib.ExitStack() as stack:
                             for attr, value in patches.items():
                                 stack.enter_context(
                                     mock.patch.object(opf, attr, value))
-                            rc = opf._cmd_init(["--root", str(root)])
-                    return rc, buffer.getvalue()
+                            return opf._cmd_init(["--root", str(root)])
+                    return fd_capture(driven)
 
                 pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
 
@@ -2216,15 +2488,18 @@ def _suite_isolated(invoke):
                       and not (pi_repo / "PWNED").exists()
                       and not (base / "PWNED").exists())
 
-                # QA round 7 (requirement B): the closed-name route gate over the
+                # QA round 7 (requirement B) and QA round 8 (requirement B: the
+                # gate is now a PERMITTED-CALL allowlist): the route gate over the
                 # real source, plus one seeded mutant per recognizer, so the gate
                 # itself is discriminated. The roster includes every round-7 bypass of
-                # the retired dataflow gate that a NAME can catch: the
+                # the retired dataflow gate that a NAME can catch (the
                 # annotated-assignment print, the print alias and the external helper,
                 # plus builtins.print, sys.stderr.writelines, warnings.warn and the
-                # print inside _init_same_root. The round-7 binding mutants that carry
-                # no banned name are neutralized at RUNTIME by the rendering
-                # constructors and are covered in the runtime mutant block below.
+                # print inside _init_same_root) and, below it, every round-8 SPELLED
+                # route that passed the round-7 denylist. The binding mutants that
+                # carry no banned name and spell only real-source call targets are
+                # neutralized at RUNTIME by the rendering constructors and are
+                # covered in the runtime mutant block below.
                 gate_source = (Path(__file__).resolve().parent / "opf.py").read_text(
                     encoding="utf-8")
                 check("route gate: the real source is clean",
@@ -2281,6 +2556,60 @@ def _suite_isolated(invoke):
                               + "    _qa_route_helper(str(root))")
                           + newline + newline + "def _qa_route_helper(value):"
                           + newline + "    print(value)" + newline) != [])
+                # QA round 8 (requirement B, both reviewers): the SPELLED output
+                # routes that passed the round-7 denylist, one vector each (the 11
+                # claude routes and the 5 codex routes), plus a computed target, a
+                # spelled getattr and a module-level alias. Each must FAIL the
+                # permitted-call gate; on the round-7 denylist every one of them
+                # returned zero violations.
+                spelled_routes = [
+                    ("os.writev on stderr", "    os.writev(2, [str(rest).encode()])"),
+                    ("traceback.print_exc",
+                     "    import traceback@N@    traceback.print_exc()"),
+                    ("pprint.pprint", "    import pprint@N@    pprint.pprint(rest)"),
+                    ("input with a prompt", "    input(str(rest))"),
+                    ("sys.exit with a message", "    sys.exit(str(rest))"),
+                    ("raise SystemExit with a message",
+                     "    raise SystemExit(str(rest))"),
+                    ("subprocess.run of echo",
+                     "    import subprocess@N@"
+                     "    subprocess.run(['/bin/echo', str(rest)])"),
+                    ("os.system of echo", "    os.system('echo ' + str(rest))"),
+                    ("json.dump to an opened /dev/stdout",
+                     "    json.dump(rest, open('/dev/stdout', 'w'))"),
+                    ("shutil.copyfileobj to sys.__stdout__",
+                     "    import shutil, io@N@    shutil.copyfileobj("
+                     "io.StringIO(str(rest)), sys.__stdout__)"),
+                    ("sys.displayhook", "    sys.displayhook(rest)"),
+                    ("codex subprocess echo",
+                     "    import subprocess@N@"
+                     "    subprocess.run(['/bin/echo', rest[0]])"),
+                    ("codex os.system", "    os.system('echo ' + rest[0])"),
+                    ("codex os.writev", "    os.writev(2, [rest[0].encode()])"),
+                    ("codex Path write_text",
+                     "    Path('/dev/stdout').write_text(rest[0])"),
+                    ("a computed call target",
+                     "    (str if rest else repr)(rest)"),
+                    ("a spelled getattr route",
+                     "    getattr(os, 'writev')(2, [b'x'])"),
+                ]
+                for mutant_label, insertion in spelled_routes:
+                    mutated = gate_source.replace(
+                        gate_anchor,
+                        gate_anchor + newline + insertion.replace("@N@", newline))
+                    check("route gate flags the spelled route: " + mutant_label,
+                          _init_route_violations(mutated) != [])
+                check("route gate flags the codex module-level alias to an "
+                      "out-of-graph helper",
+                      _init_route_violations(
+                          gate_source.replace(
+                              gate_anchor,
+                              gate_anchor + newline
+                              + "    _qa_alias_route(str(rest))")
+                          + newline + newline + "def _qa_spelled_helper(value):"
+                          + newline + "    print(value)" + newline + newline
+                          + newline + "_qa_alias_route = _qa_spelled_helper"
+                          + newline) != [])
                 check("route gate refuses a duplicate module-level definition",
                       _init_route_violations(
                           gate_source + newline + newline
@@ -2300,21 +2629,52 @@ def _suite_isolated(invoke):
                           "def _init_echo(line, err=False):",
                           "def _init_echo_gone(line, err=False):")) != [])
 
-                # QA round 7 (requirement A): the RUNTIME paste test, the primary
-                # guard. ONE table of hostile values (both quote kinds, a command
-                # substitution, a backquote, ";", "#", LF, CRLF, the direction
-                # override U+202E, the line separator U+2028, the next-line control
-                # U+0085, the empty value and a printable non-ASCII name) is driven
-                # through EVERY init exit path: argument errors, the prior-store
-                # refusal with its PARTIAL block, the cannot-evaluate report, the
-                # success report and the foreign-content report. Every physical
-                # stdout and stderr line is then passed ALONE to a real POSIX sh -c
-                # in its own fresh empty directory; the probe fails on ANY entry
-                # created there or on the payload marker appearing alone on an
-                # output line. The two intended, deliberately runnable hint lines
-                # are excluded by an EXACT prefix list, and every hostile-value run
-                # additionally asserts that NO printed line matches those prefixes
-                # (so the exclusion cannot mask a leak).
+                # QA rounds 7 and 8 (requirements A and C): the RUNTIME paste
+                # test, the primary guard. THE EXIT-PATH BY VALUE-CLASS MATRIX:
+                #
+                #   exit path                        | driven with
+                #   ---------------------------------+------------------------------
+                #   P1 missing --root argument       | every non-empty value (as the
+                #      (parser; fixed text)          | consumed prior value) + once
+                #                                    | with no value at all
+                #   P2 repeated --root               | every non-empty value (as
+                #      (parser; fixed text)          | both values) + a bare value
+                #   P3 empty / dash-led --root value | the empty value and a
+                #      (parser; value interpolated)  | dash-led substitution payload
+                #   P4 unrecognized argument         | every value
+                #      (parser; value interpolated)  |
+                #   P5 prior-store refusal, withheld | every non-empty value as the
+                #      restore + PARTIAL block       | repository name (line-broken
+                #                                    | values refuse earlier, in the
+                #                                    | P6 shape, asserted as such)
+                #   P6 cannot-evaluate report        | every non-empty value as a
+                #      (non-git root)                | non-git directory name
+                #   P7 success, hints printed        | the bare-named root (the only
+                #                                    | shape that prints hints)
+                #   P8 success, hints withheld       | every non-empty value as the
+                #                                    | repository name
+                #   P9 foreign-content report        | every non-empty value as a
+                #                                    | foreign .working entry name
+                #   P10 partial-publication report   | every value, in the injected
+                #       (fault during publication)   | create-failure text
+                #   P11 post-publish-inventory       | every non-empty value, in the
+                #       report (fault after publish) | injected inventory entry path
+                #
+                # Value classes: both quote kinds, command substitution, backquote,
+                # ";", "#", LF, CRLF, U+202E, U+2028, U+0085, the empty value,
+                # printable non-ASCII, and (QA round 8 BLOCKER 1) history expansion
+                # ("!", "!!", "!-1"), glob characters, a zsh glob QUALIFIER that
+                # executes code, parentheses (fish command substitution), braces
+                # and the tilde. Every physical stdout and stderr line is passed
+                # ALONE through sh -c AND through bash --norc --noprofile -i with a
+                # primed history line (plus zsh -f -i and fish --no-config -i where
+                # installed), each in its own SEEDED, non-empty directory; the
+                # probe fails on ANY non-seed entry created there or on the payload
+                # marker appearing alone on an output line. The two intended,
+                # deliberately runnable hint lines are excluded by an EXACT prefix
+                # list, and every hostile-value run additionally asserts that NO
+                # printed line matches those prefixes (so the exclusion cannot mask
+                # a leak).
                 paste_hint_prefixes = ("  git -C ", "  opf render --write --root ")
                 paste_marker = "QA-PASTE-MARKER-LINE"
 
@@ -2327,16 +2687,16 @@ def _suite_isolated(invoke):
                             continue
                         cell = probe_root / str(number)
                         cell.mkdir()
-                        proc = subprocess.run(
-                            ["sh", "-c", line], cwd=str(cell),
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=60)
-                        created = sorted(entry.name for entry in cell.iterdir())
-                        echoed = [
-                            answer for answer in
-                            (proc.stdout.decode("utf-8", "replace").splitlines()
-                             + proc.stderr.decode("utf-8", "replace").splitlines())
-                            if answer.strip() == paste_marker]
+                        seed_cell(cell)
+                        echoed = []
+                        for proc in probe_line_legs(line, cell):
+                            echoed += [
+                                answer for answer in
+                                (proc.stdout.decode("utf-8", "replace").splitlines()
+                                 + proc.stderr.decode("utf-8", "replace").splitlines())
+                                if answer.strip() == paste_marker]
+                        created = sorted(entry.name for entry in cell.iterdir()
+                                         if entry.name not in probe_seed_names)
                         if created or echoed:
                             violations.append((number, line, created, echoed))
                     return violations
@@ -2358,6 +2718,14 @@ def _suite_isolated(invoke):
                     ("next-line", "v\u0085touch PASTE-PWNED"),
                     ("empty", ""),
                     ("non-ascii", "caf\u00e9 " + paste_payload),
+                    ("bang", "h! ! " + paste_payload),
+                    ("double-bang", "v !! x"),
+                    ("bang-minus-one", "v !-1"),
+                    ("glob-chars", "g* ?[a-z] " + paste_payload),
+                    ("glob-qualifier", "*(e:'touch PASTE-PWNED':)"),
+                    ("parens", "(touch PASTE-PWNED)"),
+                    ("braces", "{touch,PASTE-PWNED} {a,b}"),
+                    ("tilde", "~ x~root"),
                 ]
 
                 def paste_clean(output, tag):
@@ -2379,6 +2747,40 @@ def _suite_isolated(invoke):
                 check("paste dash-led --root value: the rejected-value error is "
                       "paste-inert",
                       rc == EXIT_ERROR and paste_clean(output, "arg-dash-root"))
+
+                # Exit paths P1 and P2 (QA round 8, codex MAJOR: the missing and
+                # repeated --root parser exits were asserted on rc and a reason
+                # substring only, never paste-tested, so a diagnostic edited to
+                # carry a live payload would have passed). Their diagnostics are
+                # fixed literals that interpolate nothing, and the probe holds
+                # exactly that; the hostile value still rides in argv (as the
+                # consumed first --root value), so a regression that echoes argv
+                # into either diagnostic is caught per value class.
+                rc, output = call(["init", "--root"])
+                check("paste P1: the missing --root error is paste-inert",
+                      rc == EXIT_ERROR
+                      and "--root requires a directory argument" in output
+                      and paste_clean(output, "arg-missing-root"))
+                for tag, value in paste_values:
+                    if not value:
+                        continue
+                    rc, output = call(["init", "--root", value, "--root"])
+                    check("paste " + tag + ": the missing --root error after a "
+                          "consumed hostile value is paste-inert",
+                          rc == EXIT_ERROR
+                          and "--root requires a directory argument" in output
+                          and paste_clean(output, "arg-missing-" + tag))
+                    rc, output = call(["init", "--root", value, "--root", value])
+                    check("paste " + tag + ": the repeated --root error is "
+                          "paste-inert",
+                          rc == EXIT_ERROR
+                          and "--root given more than once" in output
+                          and paste_clean(output, "arg-repeat-" + tag))
+                rc, output = call(["init", "--root", ".", "--root", "."])
+                check("paste P2: the repeated --root error on a bare value is "
+                      "paste-inert",
+                      rc == EXIT_ERROR and "--root given more than once" in output
+                      and paste_clean(output, "arg-repeat-bare"))
 
                 # Exit paths 2 to 5 need the value as a DIRECTORY name; the empty
                 # value cannot form one and is covered by path 1 above.
@@ -2489,6 +2891,76 @@ def _suite_isolated(invoke):
                               for line in output.splitlines())
                       and paste_probe(output, "success-bare") == [])
 
+                # Exit paths P10 and P11 per value class (QA round 8, codex MAJOR:
+                # the fault-driven partial-publication and post-publish-inventory
+                # legs kept single vectors). The hostile value rides in the injected
+                # fault, not the repository name, so EVERY value class reaches these
+                # two exits, the line-broken ones included (a line-broken repository
+                # name would refuse earlier, before publication). The driver
+                # captures at the descriptor level (fd_capture).
+                for tag, value in paste_values:
+                    p10_repo = make_git("paste-p10-" + tag)
+
+                    def p10_fail(root_fd, relpath, data, _value=value):
+                        raise RuntimeError("driven create failure " + _value)
+
+                    rc, output = drive_cmd_init(p10_repo, {"_init_create": p10_fail})
+                    check("paste " + tag + ": the partial-publication report is "
+                          "paste-inert",
+                          rc == EXIT_ERROR
+                          and "publication may be partial" in output
+                          and inert("driven create failure " + value) in output
+                          and paste_clean(output, "p10-" + tag))
+                    if not value:
+                        continue
+                    p11_repo = make_git("paste-p11-" + tag)
+                    p11_state = {"calls": 0}
+
+                    def p11_inventory(root_fd, _value=value, _state=p11_state):
+                        _state["calls"] += 1
+                        if _state["calls"] == 1:
+                            return pi_real(root_fd)
+                        return {"complete": True,
+                                "entries": [{"path": working + "/x" + _value,
+                                             "kind": "file"}]}
+
+                    rc, output = drive_cmd_init(
+                        p11_repo, {"_init_inventory": p11_inventory})
+                    p11_rows = [json.loads(line) for line in output.splitlines()
+                                if line.startswith("{")]
+                    check("paste " + tag + ": the post-publish-inventory report is "
+                          "paste-inert",
+                          rc == EXIT_ERROR
+                          and inert("working inventory changed during publication")
+                          in output
+                          and any(row.get("event") == "post-publish-inventory"
+                                  and [entry.get("path")
+                                       for entry in row.get("entries", [])]
+                                  == [inert(working + "/x" + value)]
+                                  for row in p11_rows)
+                          and paste_clean(output, "p11-" + tag))
+
+                # PROBE POTENCY (QA round 8 BLOCKER 1): the interactive-bash leg,
+                # with its primed history line, catches a RAW history-expansion
+                # payload that the sh leg alone cannot (dash has no history
+                # expansion), so the round-8 widened renderer, which printed "!"
+                # raw, cannot pass this probe again. The zsh and fish legs are
+                # exercised the same way where those shells are installed.
+                check("paste probe potency: a raw history-expansion line fails the "
+                      "primed interactive-bash leg",
+                      paste_probe("opf init: unrecognized argument, inert-escaped: "
+                                  "v !-1", "potency-bang") != [])
+                if probe_has_zsh:
+                    check("paste probe potency: a raw zsh glob qualifier fails "
+                          "the zsh leg",
+                          paste_probe("opf init:   root: *(e:'touch "
+                                      "PASTE-PWNED':)", "potency-zsh") != [])
+                if probe_has_fish:
+                    check("paste probe potency: a raw fish command substitution "
+                          "fails the fish leg",
+                          paste_probe("opf init:   root: (touch PASTE-PWNED)",
+                                      "potency-fish") != [])
+
                 # QA round 7: the round-7 BINDING mutants carry no banned name, so
                 # the route gate deliberately passes them (its docstring states that
                 # residual); the rendering CONSTRUCTORS neutralize them at runtime.
@@ -2512,11 +2984,9 @@ def _suite_isolated(invoke):
                     return module
 
                 def drive_module_init(module, argv):
-                    buffer = io.StringIO()
-                    with contextlib.redirect_stdout(buffer), \
-                            contextlib.redirect_stderr(buffer):
-                        rc = module._cmd_init(list(argv))
-                    return rc, buffer.getvalue()
+                    # Descriptor-level capture, like every other in-process leg (QA
+                    # round 8, codex MAJOR).
+                    return fd_capture(lambda: module._cmd_init(list(argv)))
 
                 rt_repo = make_git("route-mutant'$(touch PWNED-RT)`; #a")
                 rt_machine = rt_repo / working / machine_name
@@ -2535,20 +3005,31 @@ def _suite_isolated(invoke):
                 raise_anchor = "    raise _InitPriorStoreRefusal("
                 check("route runtime: the raise anchor is present once",
                       gate_source.count(raise_anchor) == 1)
+                # The permitted-call gate (QA round 8) now FLAGS the extend mutant
+                # (restore_lines.extend is not a real-source call target), so only
+                # the mutants whose spelled calls the real source also makes remain
+                # stated residuals; every one of them is still neutralized at
+                # runtime by the rendering constructors below.
                 runtime_mutants = [
-                    ("append", "    restore_lines.append(str(repo))"),
-                    ("setitem", "    restore_lines[0] = str(repo)"),
-                    ("extend", "    restore_lines.extend([str(repo)])"),
-                    ("annassign-remedy", "    remedy: str = str(repo)"),
-                    ("chained-remedy", "    remedy = _qa_x = str(repo)"),
-                    ("tuple-remedy", "    remedy, _qa_x = str(repo), 0"),
+                    ("append", "    restore_lines.append(str(repo))", True),
+                    ("setitem", "    restore_lines[0] = str(repo)", True),
+                    ("extend", "    restore_lines.extend([str(repo)])", False),
+                    ("annassign-remedy", "    remedy: str = str(repo)", True),
+                    ("chained-remedy", "    remedy = _qa_x = str(repo)", True),
+                    ("tuple-remedy", "    remedy, _qa_x = str(repo), 0", True),
                 ]
-                for tag, insertion in runtime_mutants:
+                for tag, insertion, gate_passes in runtime_mutants:
                     mutated = gate_source.replace(
                         raise_anchor, insertion + newline + raise_anchor)
-                    check("route gate passes the no-banned-name mutant " + tag
-                          + " (its stated residual)",
-                          _init_route_violations(mutated) == [])
+                    if gate_passes:
+                        check("route gate passes the no-banned-name mutant " + tag
+                              + " (its stated residual)",
+                              _init_route_violations(mutated) == [])
+                    else:
+                        check("route gate flags the mutant " + tag
+                              + " (its spelled call target is outside the "
+                              "allowlist)",
+                              _init_route_violations(mutated) != [])
                     module = load_mutant(tag, mutated)
                     rc, output = drive_module_init(
                         module, ["--root", str(rt_repo)])
@@ -2773,14 +3254,130 @@ def _suite_isolated(invoke):
                                 "files, and a subdirectory holding only other files "
                                 "or only deeper directories is neither expected nor "
                                 "named")
+                store_rule_c = ("a structural file whose newest first-parent change "
+                                "at or before the named commit renamed it to another "
+                                "first-level .working store path is counted at its "
+                                "new path only")
                 quickstart_flat = " ".join(
                     quickstart.read_text(encoding="utf-8").replace("`", "").split())
                 check("ancestry: OPF-QUICKSTART.md states the store definition",
                       store_rule_a in quickstart_flat
-                      and store_rule_b in quickstart_flat)
+                      and store_rule_b in quickstart_flat
+                      and store_rule_c in quickstart_flat)
                 check("ancestry: the PARTIAL scope text states the store definition",
                       store_rule_a in " ".join(output.split())
-                      and store_rule_b in " ".join(output.split()))
+                      and store_rule_b in " ".join(output.split())
+                      and store_rule_c in " ".join(output.split()))
+
+                # QA round 8 MINOR 4 (claude; already in the round-7 parent): a
+                # machine subdirectory renamed WHOLE with git mv, the store then
+                # deleted. The named commit's tree holds the complete store at its
+                # NEW name, so the restore is complete; the walk's rename detection
+                # counts each structural file at its destination and the refusal
+                # carries NO PARTIAL block and never names the old subdirectory.
+                # DISCRIMINATOR: the name-only walk read the old paths as expected
+                # and printed a false PARTIAL naming both of them, whose remedy
+                # ("supply each missing path") would create a second store.
+                rnm = make_git("ancestry-renamed-machine")
+                rc, output = run(rnm)
+                check("ancestry renamed-machine fixture first init succeeds",
+                      rc == EXIT_OK)
+                git_call(rnm, ["--literal-pathspecs", "add", "-A"])
+                git_call(rnm, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "store"])
+                git_call(rnm, ["mv", working + "/" + machine_name,
+                               working + "/renamed-machine"])
+                git_call(rnm, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "rename the machine subdirectory"])
+                rnm_named = head_of(rnm)
+                git_call(rnm, ["rm", "-r", "-q", "--",
+                               working, _opf_store.POINTER_REL])
+                git_call(rnm, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "drop the store"])
+                rc, output = run(rnm)
+                check("ancestry renamed-machine: the complete refusal carries NO "
+                      "PARTIAL block and never names the old subdirectory",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          rnm, rnm, rnm_named, [".opf.toml", ".working"], True)
+                      and "PARTIAL" not in output
+                      and working + "/" + machine_name + "/" not in output)
+                check("ancestry renamed-machine: the printed command restores the "
+                      "complete store at its new name, as the refusal says",
+                      run_restore(output) == 0
+                      and (rnm / working / "renamed-machine"
+                           / _opf_check.COUNTERS_NAME).is_file()
+                      and (rnm / working / "renamed-machine"
+                           / _opf_store.MANIFEST_NAME).is_file()
+                      and not (rnm / working / machine_name).exists())
+
+                # The rename FAIL-SAFE arm: structural files renamed OUT of .working
+                # (the destination matches no store pathspec) are reported by git as
+                # plain deletions of their source, so that store still reads as
+                # deleted and the refusal still says PARTIAL and names both paths.
+                # DISCRIMINATOR: a walk that skipped every rename source, wherever
+                # its destination landed, would print no PARTIAL block here.
+                rno = make_git("ancestry-renamed-out")
+                rc, output = run(rno)
+                check("ancestry renamed-out fixture first init succeeds",
+                      rc == EXIT_OK)
+                rno_zeta = rno / working / "zeta-machine"
+                rno_zeta.mkdir()
+                (rno_zeta / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (rno_zeta / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                git_call(rno, ["--literal-pathspecs", "add", "-A"])
+                git_call(rno, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "store with a second machine subdir"])
+                (rno / "backup").mkdir()
+                git_call(rno, ["mv", working + "/zeta-machine/"
+                               + _opf_store.MANIFEST_NAME, "backup/zm.toml"])
+                git_call(rno, ["mv", working + "/zeta-machine/"
+                               + _opf_check.COUNTERS_NAME, "backup/zc.toml"])
+                git_call(rno, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "move the second subdir out"])
+                rno_named = head_of(rno)
+                git_call(rno, ["rm", "-r", "-q", "--",
+                               working, _opf_store.POINTER_REL])
+                git_call(rno, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "drop the store"])
+                # git mv left the emptied, untracked zeta-machine directory on
+                # disk, which git rm does not prune; drop it so init reaches the
+                # ancestry scan rather than the foreign-content refusal.
+                if rno_zeta.exists():
+                    rno_zeta.rmdir()
+                if (rno / working).exists():
+                    (rno / working).rmdir()
+                rc, output = run(rno)
+                rno_gaps = sorted([
+                    working + "/zeta-machine/" + _opf_check.COUNTERS_NAME,
+                    working + "/zeta-machine/" + _opf_store.MANIFEST_NAME])
+                check("ancestry renamed-out: a store renamed out of .working still "
+                      "reads as deleted and the refusal says PARTIAL, naming both "
+                      "structural paths",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          rno, rno, rno_named, [".opf.toml", ".working"], True,
+                          gaps=rno_gaps))
+
+                # QA round 8 (requirement A): the fixed narrow alphabet is pinned at
+                # runtime, in the renderer docstring and in OPF-QUICKSTART.md (the
+                # withheld-restore text is pinned by the complete-text comparisons
+                # above). DISCRIMINATOR: the round-8 widened renderer fails all
+                # three (its set admits "!", quotes and the space, and its texts
+                # claim readability).
+                check("renderer: the runtime safe alphabet is exactly ASCII "
+                      "letters, digits and . / - _, the space escaped",
+                      opf._INIT_INERT_SAFE == frozenset(
+                          "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                          "abcdefghijklmnopqrstuvwxyz0123456789./-_")
+                      and opf._init_inert("a b!c") == "a\\x20b\\x21c")
+                check("renderer: the _init_inert docstring states the fixed narrow "
+                      "alphabet",
+                      "ASCII letters, digits and . / - _ only" in
+                      " ".join(opf._init_inert.__doc__.split()))
+                check("renderer: OPF-QUICKSTART.md states the fixed narrow alphabet",
+                      "ASCII letters, digits, and . / - _ render unchanged, and "
+                      "every other character" in quickstart_flat
+                      and "is written as a backslash escape of its code point" in
+                      quickstart_flat)
 
                 # SPEC 8.2 ancestry, --first-parent is LOAD-BEARING: a merge built with
                 # commit-tree whose tree IS the storeless side tree (TREESAME to its side
