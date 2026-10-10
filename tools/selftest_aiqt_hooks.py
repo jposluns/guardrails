@@ -111,11 +111,16 @@ floor synthesized in-tree, removed in the finally.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import ast
 import collections
@@ -266,8 +271,9 @@ def _note_constructor_shape_failures(path=None):
     constructor name (a name, an attribute, or a string equal to it, as a getattr or globals() lookup
     would need) other than as the callee of a call that is the direct value of a return statement; a
     function returning a declared constructor's call that is neither a declared constructor, a HANDLERS
-    entry referenced only from that table, nor main referenced only from its `sys.exit(main(...))` entry
-    line; a decorator on a declared constructor, a HANDLERS entry or main; and, at the dispatcher
+    entry referenced only from that table, nor main referenced only from its `sys.exit(main(...))` or
+    `os._exit(main(...))` entry line (the hook uses the os._exit form, so the interpreter-exit flush of a
+    std stream cannot replace the exit code main chose with the interpreter's own status); a decorator on a declared constructor, a HANDLERS entry or main; and, at the dispatcher
     boundary, a global or nonlocal statement in main (a nonlocal there is also a compile-time syntax
     error, but the scan refuses it so the rule does not lean on the compiler), a main with no `code,
     stdout_obj, stderr_text = HANDLERS[...](data)` binding, any use of HANDLERS other than main's first
@@ -456,7 +462,8 @@ def _note_constructor_shape_failures(path=None):
         if (isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Name) and node.value.func.id in ctors):
             callee_ok.add(id(node.value.func))
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "exit"
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("exit", "_exit")
                 and len(node.args) == 1 and isinstance(node.args[0], ast.Call)
                 and isinstance(node.args[0].func, ast.Name) and node.args[0].func.id == "main"):
             main_ok.add(id(node.args[0].func))
@@ -951,6 +958,162 @@ _LEAF_REFUSED_MUTANTS = {
 }
 
 
+def _close_fd2():
+    """preexec_fn for the closed-stderr stream vectors: descriptor 2 is closed in the child between fork
+    and exec, so the hook starts with sys.stderr None."""
+    os.close(2)
+
+
+def _close_fd1():
+    """preexec_fn for the closed-stdout stream vectors: descriptor 1 is closed in the child between fork
+    and exec, so the hook starts with sys.stdout None."""
+    os.close(1)
+
+
+def _test_stream_failure_exits(failures):
+    """(stream-*) Real-subprocess vectors: the dispatcher's exit codes survive a standard stream that
+    cannot be written or flushed. Each child runs the LIVE hook file under [sys.executable, "-I", "-B"]
+    with one stream pointed at /dev/full (the write or flush raises ENOSPC), at the write end of a pipe
+    whose read end is already closed (EPIPE), or with descriptor 2 or descriptor 1 closed before exec
+    (the hook starts with sys.stderr or sys.stdout None). Expected: every PreToolUse fail-closed path
+    keeps its blocking exit 2 and leaves stdout, the decision channel, empty (the diagnostic line is
+    best-effort and belongs on stderr alone); a deny decision or an allow-note whose stdout cannot be
+    written or flushed, or whose descriptor is closed, exits 2 instead of 0 (the dispatcher cannot
+    inspect the lost object, so a lost decision blocks, never allows); a fail-open mode keeps exit 0
+    with its warning lost. Each failure-stream vector fails on the unhardened code: before the
+    dispatcher hardening these runs ended with the interpreter's own status (1 or 120, both of which
+    the platform treats as non-blocking; a deny or note written to stdout on /dev/full or a broken
+    pipe ended 120, with CPython's "Exception ignored while flushing sys.stdout" on stderr), with
+    exit 0 and the deny or note silently lost (stdout closed), or, with descriptor 2 closed, with the
+    diagnostic printed to STDOUT (print falls back to sys.stdout when sys.stderr is None), which the
+    stderr vectors' empty-stdout assertion catches."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    if not os.path.exists("/dev/full"):
+        failures.append("(stream-no-devfull) /dev/full is absent on this host, so the stream-failure "
+                        "vectors cannot run; the dispatcher's failing-stream exits are unproven here")
+        return
+    env = dict((k, v) for k, v in os.environ.items()
+               if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_")))
+    deny_payload = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Write",
+                                   tool_input=dict(file_path="relative.txt"))).encode("utf-8")
+    note_payload = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash",
+                                   tool_input=dict(command="cd sub"))).encode("utf-8")
+    miswired_payload = json.dumps(dict(hook_event_name="Stop", tool_name="Write",
+                                       tool_input=dict())).encode("utf-8")
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    wall_payload = json.dumps(dict(hook_event_name="Stop", last_assistant_message=wall)).encode("utf-8")
+
+    def child(label, modes, payload, stdout_to, stderr_to, want_rc, out_needle=None, err_needle=None,
+              out_empty=False):
+        """One hook child. stdout_to / stderr_to: "pipe" (captured), "full" (/dev/full), "broken" (the
+        write end of a pipe whose read end is closed), or "closed" (the descriptor is closed before
+        exec, so the stream is None). A needle, or out_empty, is asserted only against a captured
+        ("pipe") stream."""
+        files = []
+
+        def target(which):
+            if which == "pipe":
+                return subprocess.PIPE
+            if which == "full":
+                handle = open("/dev/full", "wb")
+                files.append(handle)
+                return handle
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            files.append(write_end)
+            return write_end
+
+        preexec = None
+        if stdout_to == "closed":
+            stdout_target = subprocess.DEVNULL
+            preexec = _close_fd1
+        else:
+            stdout_target = target(stdout_to)
+        if stderr_to == "closed":
+            stderr_target = subprocess.DEVNULL
+            preexec = _close_fd2
+        else:
+            stderr_target = target(stderr_to)
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", hook] + list(modes), input=payload,
+                                  stdout=stdout_target, stderr=stderr_target, env=env,
+                                  preexec_fn=preexec, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(" + label + ") could not run the hook child: " + repr(exc))
+            return
+        finally:
+            for handle in files:
+                try:
+                    if isinstance(handle, int):
+                        os.close(handle)
+                    else:
+                        handle.close()
+                except OSError:
+                    pass
+        if proc.returncode != want_rc:
+            failures.append("(" + label + ") expected exit " + str(want_rc) + ", got "
+                            + str(proc.returncode))
+        out = (proc.stdout or b"").decode("utf-8", "replace")
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        if out_needle is not None and out_needle not in out:
+            failures.append("(" + label + ") stdout does not name " + repr(out_needle) + ": " + repr(out))
+        if err_needle is not None and err_needle not in err:
+            failures.append("(" + label + ") stderr does not name " + repr(err_needle) + ": " + repr(err))
+        if out_empty and out:
+            failures.append("(" + label + ") expected empty stdout, the decision channel, got "
+                            + repr(out))
+
+    # Working-stream controls: each path's normal exit and output, so the failure vectors below are
+    # proven against a live baseline, not a stale expectation.
+    child("stream-unknown-ok", ["no_such_mode"], b"garbage", "pipe", "pipe", 2, err_needle="usage")
+    child("stream-badargv-ok", ["absolute_paths", "extra"], b"", "pipe", "pipe", 2,
+          err_needle="failing closed")
+    child("stream-payload-ok", ["absolute_paths"], b"not json", "pipe", "pipe", 2,
+          err_needle="unreadable hook payload")
+    child("stream-hardblock-ok", ["absolute_paths"], miswired_payload, "pipe", "pipe", 2,
+          err_needle="unexpected event")
+    child("stream-deny-ok", ["absolute_paths"], deny_payload, "pipe", "pipe", 0,
+          out_needle='"permissionDecision": "deny"')
+    child("stream-note-ok", ["bash_absolute_paths"], note_payload, "pipe", "pipe", 0,
+          out_needle="systemMessage")
+    child("stream-failopen-ok", ["diff_wall_stop"], b"not json", "pipe", "pipe", 0,
+          out_needle="could not run")
+    child("stream-stopwarn-ok", ["diff_wall_stop"], wall_payload, "pipe", "pipe", 0,
+          out_needle="systemMessage")
+    # The dispatcher's fail-closed stderr diagnostics: exit 2 holds with stderr on /dev/full, on a
+    # broken pipe, and closed outright, and stdout, the decision channel, stays empty. The empty-stdout
+    # assertion is what fails on the unhardened code for the closed state: there the exit was already 2,
+    # but the diagnostic landed on stdout (print falls back to sys.stdout when sys.stderr is None).
+    for stream_state in ("full", "broken", "closed"):
+        child("stream-unknown-stderr-" + stream_state, ["no_such_mode"], b"garbage",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-badargv-stderr-" + stream_state, ["absolute_paths", "extra"], b"",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-payload-stderr-" + stream_state, ["absolute_paths"], b"not json",
+              "pipe", stream_state, 2, out_empty=True)
+        child("stream-hardblock-stderr-" + stream_state, ["absolute_paths"], miswired_payload,
+              "pipe", stream_state, 2, out_empty=True)
+    # A PreToolUse decision or note whose stdout fails is a lost decision: blocking exit 2, with the
+    # diagnostic (best-effort) naming the lost write; a fail-open mode keeps exit 0, warning lost.
+    for stream_state in ("full", "broken"):
+        child("stream-deny-stdout-" + stream_state, ["absolute_paths"], deny_payload,
+              stream_state, "pipe", 2, err_needle="could not be written to stdout")
+        child("stream-note-stdout-" + stream_state, ["bash_absolute_paths"], note_payload,
+              stream_state, "pipe", 2, err_needle="could not be written to stdout")
+        child("stream-failopen-stdout-" + stream_state, ["diff_wall_stop"], b"not json",
+              stream_state, "pipe", 0)
+        child("stream-stopwarn-stdout-" + stream_state, ["diff_wall_stop"], wall_payload,
+              stream_state, "pipe", 0)
+    # Descriptor 1 closed outright (sys.stdout None): a deny or an allow-note is a lost decision, so
+    # the exit is the blocking 2 with the diagnostic naming the lost write. On the unhardened code
+    # these runs exited 0 with the decision silently lost, the one state where a deny was silently
+    # turned into an allow.
+    child("stream-deny-stdout-closed", ["absolute_paths"], deny_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
+    child("stream-note-stdout-closed", ["bash_absolute_paths"], note_payload, "closed", "pipe", 2,
+          err_needle="could not be written to stdout")
+
+
 def _test_note_shape_pins(failures, tmp):
     """(ns-pin-*) Negative controls for _note_constructor_shape_failures: each mutant of the live hook
     source must be refused under the named tag (a literal note in a non-leaf declared constructor, a deny
@@ -1080,16 +1243,17 @@ def _test_note_shape_pins(failures, tmp):
          "note-shape-empty-_diff_source_fallback")
     textual("(ns-pin-dispatch-codex) codex's warning_only pop of main's stdout_obj before the print is "
             "refused",
-            "    if stdout_obj is not None:\n        print(json.dumps(stdout_obj))\n",
+            "    if stdout_obj is not None:\n        try:\n            print(json.dumps(stdout_obj))\n",
             "    if stdout_obj is not None:\n"
             "        if data.get(\"warning_only\"):\n"
             "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
-            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+            "        try:\n"
+            "            print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
     textual("(ns-pin-dispatch-claude) claude's AIQT_HOOKS_AUDIT_ONLY pop of main's stdout_obj is refused",
-            "        print(json.dumps(stdout_obj))\n",
-            "        if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(stdout_obj, dict):\n"
-            "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
-            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+            "            print(json.dumps(stdout_obj))\n",
+            "            if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(stdout_obj, dict):\n"
+            "                stdout_obj.pop(\"hookSpecificOutput\", None)\n"
+            "            print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
     textual("(ns-pin-dispatch-rebind) a second HANDLERS call in main, bound and edited, is refused",
             "    if stdout_obj is not None:\n",
             "    if data.get(\"_qa_audit\"):\n"
@@ -9283,6 +9447,7 @@ def _main_isolated(monitor):
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
+        _test_stream_failure_exits(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable

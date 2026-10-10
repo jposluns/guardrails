@@ -227,7 +227,8 @@ carrying agent_id (a subagent's stop). The worker skip writes one warning line t
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters. The one exception to exit 0 is an
 interpreter older than Python 3.14 that can start the hook: the guard at the top of this file reads no input,
-writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr and exits 1,
+writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr (a
+best-effort write: the exit does not depend on it) and exits 1,
 which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. These exits hold while
 the hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and flushed. A
 failing output stream can change the exit status and can lose output, a decision included; a separate fix in
@@ -370,11 +371,16 @@ sibling that is present but unreadable fails them either way.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: stamp-truth-stop.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(1)
+    import os
+    try:
+        sys.stderr.write(
+            "error: stamp-truth-stop.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(1)
 
 import bisect
 import datetime
