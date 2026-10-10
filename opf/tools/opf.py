@@ -104,7 +104,12 @@ def _bootstrap():
     top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
     Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
-    that could not be brought in."""
+    that could not be brought in; the variable parts of that diagnostic (the helper name or the read
+    error's text) are rendered through _init_inert, the one init escaper, so no raw, shell-live value is
+    printed on the way to any verb. A bootstrap failure OTHER than ImportError or OSError (for example a
+    SyntaxError in an installed helper) is not mapped here and surfaces as Python's own traceback: it
+    runs before init dispatch and outside _cmd_init's rendering boundary, a window _cmd_init and
+    OPF-QUICKSTART state."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
@@ -125,11 +130,14 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
     except ImportError as exc:
-        print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
+        print("opf: cannot bootstrap: {} (cannot evaluate)".format(
+            _init_inert(exc.name or str(exc))), file=sys.stderr)
         return EXIT_MALFORMED
     except OSError as exc:
-        print("opf: cannot bootstrap: a helper module could not be read ({!r}) (cannot evaluate)".format(
-            exc), file=sys.stderr)
+        print("opf: cannot bootstrap: a helper module could not be read "
+              "({}: {}) (cannot evaluate)".format(
+                  _init_inert(type(exc).__name__), _init_inert(str(exc))),
+              file=sys.stderr)
         return EXIT_MALFORMED
     return EXIT_OK
 
@@ -14624,6 +14632,28 @@ def _init_no_prior_store(git, repo, root):
                     "git history preflight: unparseable --raw record {}; "
                     "refusing".format(ascii(meta)))
             status = fields[4]
+            # Each --raw mode is a six-digit octal file mode (git's documented
+            # diff --raw format prints ":<src> <dst>", each mode %06o: 000000 for an
+            # absent side, 100644 / 100755 / 120000 / 160000 otherwise), and a
+            # rename or copy status is its letter followed by git's three-digit
+            # similarity score (%c%03d, 000 to 100). A record whose mode fields are
+            # not octal six-tuples, or whose R/C score is not three decimal digits
+            # in that range, is not a shape git emits and refuses (QA round 12 E:
+            # the round-11 parser checked neither, so junk modes and an out-of-range
+            # or non-numeric score passed, and a malformed rename released a source).
+            for mode in (fields[0][1:], fields[1]):
+                if len(mode) != 6 or any(c not in b"01234567" for c in mode):
+                    raise RuntimeError(
+                        "git history preflight: --raw record with a non-octal "
+                        "mode field {}; refusing".format(ascii(meta)))
+            if status[:1] in (b"R", b"C"):
+                score = status[1:]
+                if (len(score) != 3 or any(c not in b"0123456789" for c in score)
+                        or score > b"100"):
+                    raise RuntimeError(
+                        "git history preflight: --raw rename/copy status with a "
+                        "malformed similarity score {}; refusing".format(
+                            ascii(status)))
             # The blob ids are validated like every other object id this scan
             # reads, fail-closed; a rename record releases its source below ONLY
             # when they are EQUAL and not the all-zero id git uses for an absent
@@ -15065,9 +15095,13 @@ def _init_main(rest):
     later failure reports observed planned paths and leaves them for review. Enumeration, root
     identity checks, and final rereads do not serialize concurrent writers or directory renames.
     No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
-    Every failure path prints rendered text through the two handlers below; whatever escapes
-    them, the argument loop's exits included, is caught by _cmd_init's last-resort rendering
-    boundary (QA round 10 MAJOR 1), so no exception leaves opf init as a traceback.
+    Every failure path prints rendered text through the two handlers below; the second now catches
+    BaseException, so a non-Exception raised while the try body runs (an interrupt or SystemExit after
+    publication started) still reports the partial-publication disclosure before returning rendered (QA
+    round 12 C). Whatever escapes the handlers (an interrupt during the argument loop above the try, for
+    one) is caught by _cmd_init's last-resort rendering boundary (QA round 10 MAJOR 1); an interrupt
+    landing in that boundary's own handler is the one window neither covers, stated there and in
+    QUICKSTART.
     """
     root = None
     i = 0
@@ -15288,7 +15322,7 @@ def _init_main(rest):
                        else _InitRestoreLine("{}", line), err=True)
         _init_echo("opf init: preflight refused; no publication attempted.", err=True)
         return EXIT_MALFORMED
-    except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
+    except BaseException as exc:  # noqa: BLE001  InitError and residual errors, plus a non-Exception (interrupt or SystemExit) after publication started, so the partial-publication disclosure below runs before this returns rendered (QA round 12 C)
         # Every interpolation is rendered inert AT THE PRINT (QA round 5; QA round 6):
         # the root, the stage token and the exception text through _init_inert, whose
         # raising sites may quote path-derived values with ascii() (not shell-inert on its
@@ -15334,11 +15368,19 @@ def _cmd_init(rest):
     more is printed, because a failing print would otherwise raise out of this
     handler with the original exception chained, and Python prints a chained
     traceback with every message raw. PROVED BY THIS SHAPE (the route gate pins
-    the shape, the init suite pins these exact bytes): no exception of any kind
-    propagates out of _cmd_init, so opf init never prints a Python traceback (a
-    KeyboardInterrupt, or a mutant's SystemExit, therefore also reports rendered
-    and exits 2 rather than escaping). What a static scan still cannot prove is
-    stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
+    the shape, the init suite pins these exact bytes): every exception _init_main
+    lets escape is caught here and reported rendered, so from init dispatch onward
+    opf init reports a rendered line and exits 2 rather than printing a Python
+    traceback (a KeyboardInterrupt, or a mutant's SystemExit, raised while
+    _init_main runs reports the same way and exits 2). Two windows this boundary
+    does NOT cover, stated so no wording claims more than the code provides: an
+    asynchronous interrupt that lands in this handler's own few statements (after
+    the guarded report, at the return) can still escape, and any failure BEFORE
+    init dispatch is outside this boundary entirely (a bootstrap fault other than
+    the ImportError or OSError _bootstrap maps to a rendered cannot-evaluate, for
+    example a SyntaxError in an installed helper, or an interrupt before or during
+    dispatch, surfaces as Python's own traceback or signal). What a static scan
+    still cannot prove is stated in _init_echo's docstring (D-STATIC-PIN-RESIDUAL)."""
     try:
         return _init_main(rest)
     except BaseException as exc:  # noqa: BLE001  the last-resort rendering boundary

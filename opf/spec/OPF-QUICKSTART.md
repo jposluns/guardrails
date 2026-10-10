@@ -116,9 +116,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    the alphabet: characters one shell merely groups are live syntax in another (bash
    history expansion acts on `!` even inside double quotes; zsh glob qualifiers and
    fish command substitution execute code). A failure of `opf init` itself is reported
-   the same way: one last-resort handler catches every exception the command lets
-   escape and prints only the rendered exception type and text, so `opf init` never
-   prints a Python traceback; what the static route gate proves, and the residual it
+   the same way: one last-resort handler catches the exceptions the command lets
+   escape from init dispatch onward and prints only the rendered exception type and
+   text, so from that point `opf init` reports a rendered line rather than a Python
+   traceback; a failure before init dispatch (a bootstrap fault other than the import
+   or read errors mapped to a rendered cannot-evaluate, or an interrupt before or
+   during dispatch, or an interrupt landing in the boundary handler's own few
+   statements) is outside that handler and can surface as Python's own traceback or
+   signal; what the static route gate proves, and the residual it
    cannot see (introspection reached at runtime through allowed spellings, and the
    sibling modules the init path calls into), is stated in the tooling docstrings, and
    the suite's runtime paste test is the primary guard. A repository whose history the scan cannot trust as-is (a shallow clone, any entry

@@ -117,6 +117,21 @@ _ROUTE_EMITTER = "_init_echo"
 _ROUTE_RENDERED = ("_InitRestoreLine", "_InitPriorStoreRefusal")
 _ROUTE_PINNED = ("_init_echo", "_init_inert", "_init_inert_json",
                  "_InitRestoreLine", "_InitPriorStoreRefusal")
+# The template-bearing parameters of each rendered type, by POSITIONAL index and
+# (same name) keyword, derived from the real constructor signatures in opf.py:
+# _InitRestoreLine.__new__(cls, template, *values) carries one template, at
+# positional index 0 / keyword "template" (values is a *vararg, each rendered at
+# construction); _InitPriorStoreRefusal.__init__(self, template, values,
+# restore_lines, remedy_template="", remedy_values=(), partial=False) carries the
+# template at index 0 / keyword "template" and the remedy template at index 3 /
+# keyword "remedy_template". The gate reads every one of these and refuses a splat
+# that could reach any of them (QA round 12 B: a positional remedy template and a
+# ** splat each skipped the round-11 rule, which read only args[0] and the
+# remedy_template keyword).
+_ROUTE_RENDERED_TEMPLATES = dict(
+    _InitRestoreLine={0: "template"},
+    _InitPriorStoreRefusal={0: "template", 3: "remedy_template"},
+)
 _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
                            "write", "writelines", "warnings", "logging"])
 
@@ -150,7 +165,8 @@ _ROUTE_ALLOWED_REFS = dict(
         "type().__name__",
     ]),
     _init_main=frozenset([
-        "EXIT_MALFORMED", "EXIT_OK", "Exception", "Path", "RuntimeError",
+        "BaseException", "EXIT_MALFORMED", "EXIT_OK", "Exception", "Path",
+        "RuntimeError",
         "_opf_check.COUNTERS_NAME", "_opf_check.INDEX_SUFFIX",
         "_opf_check.VERSION_NAME", "_opf_check.WORKLOG_NAME",
         "_opf_emit.emit_checked", "_opf_emit.emit_checked().encode",
@@ -338,6 +354,9 @@ def _route_literal_bound(unit, name_id):
     name is a non-Assign binding and refuses the same way."""
     if name_id in _route_unit_params(unit):
         return False
+    if any(param.name == name_id
+           for param in getattr(unit, "type_params", [])):
+        return False
     bindings = 0
     stack = [(unit, False)]
     while stack:
@@ -393,7 +412,11 @@ def _route_binding_names(node):
     comprehension targets, import aliases, nested def / class statements, and match
     capture patterns (MatchAs, MatchStar, and a MatchMapping rest; QA round 10 MAJOR
     2: a case clause rebinds its capture name to the match subject, and the round-9
-    scan never saw it). Used for
+    scan never saw it), PEP 695 type alias statements (the alias name a `type X = ...`
+    binds) and type parameters (the names a def's, class's or type alias's
+    [T]/[*Ts]/[**P] list binds; QA round 12 D: the round-11 scan saw neither, so a
+    name a `type` statement or a type parameter rebound passed the literal-only
+    template rule and the rebinding rules), and an async-for target. Used for
     two refusals: a rebinding of a pinned route name anywhere in opf.py, and a
     module-level rebinding of any function on the init call graph."""
     names = []
@@ -402,7 +425,7 @@ def _route_binding_names(node):
         targets = list(node.targets)
     elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
         targets = [node.target]
-    elif isinstance(node, ast.For):
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
         targets = [node.target]
     elif isinstance(node, ast.withitem) and node.optional_vars is not None:
         targets = [node.optional_vars]
@@ -414,6 +437,12 @@ def _route_binding_names(node):
         for alias in node.names:
             names.append(alias.asname or alias.name.split(".")[0])
     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.append(node.name)
+        names.extend(param.name for param in node.type_params)
+    elif isinstance(node, ast.TypeAlias):
+        targets = [node.name]
+        names.extend(param.name for param in node.type_params)
+    elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
         names.append(node.name)
     elif isinstance(node, (ast.Global, ast.Nonlocal)):
         names.extend(node.names)
@@ -482,11 +511,13 @@ def _init_route_violations(source):
     chained traceback raw; either way the last-resort boundary now renders
     whatever escapes at runtime, and this rule stays as the narrower static pin);
     and any
-    _InitRestoreLine or _InitPriorStoreRefusal construction whose template, or
-    remedy_template keyword, is neither a string literal nor a name that the
-    constructing function's OWN scope binds only by plain assignments of string
-    literals, with no nested def, lambda or match capture binding
-    (_route_literal_bound; QA round 10 MAJOR 2). str.__new__ is rostered for
+    _InitRestoreLine or _InitPriorStoreRefusal construction in which a
+    template-bearing argument (by position OR keyword, per the real constructor
+    signatures in _ROUTE_RENDERED_TEMPLATES) is neither a string literal nor a name
+    the constructing function's OWN scope binds only by plain assignments of string
+    literals, with no nested def, lambda, match capture, type alias or type
+    parameter binding (_route_literal_bound; QA round 10 MAJOR 2; QA round 12 B, D),
+    or which passes a template through a * or ** splat the static scan cannot resolve. str.__new__ is rostered for
     _InitRestoreLine alone, so minting an instance of that type anywhere else on
     the graph is a violation. Returns a list of violation descriptions; the suite
     requires it empty on the real source and NON-empty on every seeded mutant, so
@@ -760,16 +791,38 @@ def _init_route_violations(source):
                     name, sub.lineno, sub.arg))
             if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
                     and sub.func.id in _ROUTE_RENDERED):
+                positions = _ROUTE_RENDERED_TEMPLATES[sub.func.id]
+                keyword_params = frozenset(positions.values())
                 templates = []
-                if sub.args:
-                    templates.append(sub.args[0])
-                else:
+                # A * splat in the arguments or a ** splat in the keywords can land
+                # a non-literal on any template parameter and the static scan cannot
+                # see which, so either refuses outright (QA round 12 B).
+                if any(isinstance(arg, ast.Starred) for arg in sub.args):
+                    violations.append(
+                        "{} line {}: {} construction with a * splat in its "
+                        "positional arguments".format(
+                            name, sub.lineno, sub.func.id))
+                if any(kw.arg is None for kw in sub.keywords):
+                    violations.append(
+                        "{} line {}: {} construction with a ** splat in its "
+                        "keywords".format(name, sub.lineno, sub.func.id))
+                # Every template-bearing parameter, by position AND by keyword.
+                for position in positions:
+                    if position < len(sub.args):
+                        templates.append(sub.args[position])
+                supplied = set()
+                for kw in sub.keywords:
+                    if kw.arg in keyword_params:
+                        templates.append(kw.value)
+                        supplied.add(kw.arg)
+                # The required template (position 0 / its keyword) must be present
+                # unless a ** splat could carry it; a call supplying it no way is a
+                # construction without a template.
+                if (len(sub.args) == 0 and positions[0] not in supplied
+                        and not any(kw.arg is None for kw in sub.keywords)):
                     violations.append(
                         "{} line {}: {} construction without a template".format(
                             name, sub.lineno, sub.func.id))
-                for kw in sub.keywords:
-                    if kw.arg == "remedy_template":
-                        templates.append(kw.value)
                 for expr in templates:
                     literal = (isinstance(expr, ast.Constant)
                                and isinstance(expr.value, str))
@@ -2876,6 +2929,48 @@ def _suite_isolated(invoke):
                       and not (pp_repo / "PWNED").exists()
                       and not (base / "PWNED").exists())
 
+                # QA round 12 C (claude round-11 MEDIUM 2): a non-Exception raised
+                # after publication started (an interrupt or SystemExit) must still
+                # produce the partial-publication disclosure, then exit 2. On the
+                # round-11 handler (except Exception) the interrupt escaped _init_main
+                # to _cmd_init's boundary, which printed only a "cannot evaluate" line
+                # and dropped the disclosure; the round-12 handler (except
+                # BaseException) reports it here before returning rendered. Each test
+                # uses its own fresh repository so publication actually starts.
+                real_init_create = opf._init_create
+
+                def interrupt_on_third_create(root_fd, relpath, data):
+                    interrupt_on_third_create.calls += 1
+                    if interrupt_on_third_create.calls >= 3:
+                        raise KeyboardInterrupt()
+                    return real_init_create(root_fd, relpath, data)
+                interrupt_on_third_create.calls = 0
+                ipp_repo = make_git("interrupt-during-publication")
+                rc, output = drive_cmd_init(
+                    ipp_repo, {"_init_create": interrupt_on_third_create})
+                ipp_rows = [json.loads(line) for line in output.splitlines()
+                            if line.startswith("{")]
+                check("interrupt during publication still reports the "
+                      "partial-publication disclosure, then exits 2 (QA round 12 C)",
+                      rc == EXIT_ERROR
+                      and "publication may be partial" in output
+                      and any(row.get("event") == "partial-publication"
+                              for row in ipp_rows))
+
+                def exit_on_first_create(root_fd, relpath, data):
+                    raise SystemExit(0)
+                spp_repo = make_git("systemexit-during-publication")
+                rc, output = drive_cmd_init(
+                    spp_repo, {"_init_create": exit_on_first_create})
+                spp_rows = [json.loads(line) for line in output.splitlines()
+                            if line.startswith("{")]
+                check("SystemExit during publication also reports the "
+                      "partial-publication disclosure, then exits 2 (QA round 12 C)",
+                      rc == EXIT_ERROR
+                      and "publication may be partial" in output
+                      and any(row.get("event") == "partial-publication"
+                              for row in spp_rows))
+
                 pi_repo = make_git("postpub'$(touch PWNED)" + '"' + "`;#")
                 pi_hostile = working + "/x'$(touch PWNED)`"
                 pi_state = {"calls": 0}
@@ -3232,6 +3327,90 @@ def _suite_isolated(invoke):
                           + '        qa_t = "qa"' + newline
                           + "        raise _InitPriorStoreRefusal(qa_t, (), [])"
                           )) == [])
+
+                # QA round 12 B (claude round-11 MAJOR 1): the round-11 template rule
+                # read only args[0] and the remedy_template keyword, so a remedy
+                # template supplied positionally (index 3) or through a ** splat
+                # skipped the gate, and a * splat could land one on any position.
+                # Each mutant here must be refused; the controls above (the real
+                # source's keyword remedy-template shape) still pass.
+                check("route gate flags a positional remedy template (4th argument, "
+                      "QA round 12 B)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_t = "qa {remedy} ."' + newline
+                          + "        raise _InitPriorStoreRefusal("
+                          "qa_t, (), [], str(root))")) != [])
+                check("route gate flags a ** splat remedy template",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_t = "qa {remedy} ."' + newline
+                          + "        raise _InitPriorStoreRefusal("
+                          "qa_t, (), [], **dict(remedy_template=str(root)))")) != [])
+                check("route gate flags a * splat in a rendered-type construction",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        qa_args = [str(root)]" + newline
+                          + "        raise _InitPriorStoreRefusal(*qa_args)")) != [])
+                check("route gate flags a non-literal template passed only as the "
+                      "template keyword",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        raise _InitPriorStoreRefusal("
+                          "template=str(root), values=(), restore_lines=[])")) != [])
+
+                # QA round 12 D (codex round-11 MEDIUM 2, claude MINOR 4): the binding
+                # scan did not see a PEP 695 type alias statement, type parameters, or
+                # an async-for target, so a name one rebound passed the literal-only
+                # template rule and the pinned-name / reachable-definition rebinding
+                # rules. Each form here must be refused; the literal control still
+                # passes.
+                check("route gate flags a type-alias rebinding of a template name "
+                      "(QA round 12 D)",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_t = "qa {} ."' + newline
+                          + "        type qa_t = str" + newline
+                          + "        raise _InitPriorStoreRefusal(qa_t, (), [])")) != [])
+                check("route gate flags a type parameter rebinding a template name",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_t = "qa ."' + newline
+                          + "        def _qa_nested[qa_t]():" + newline
+                          + "            pass" + newline
+                          + "        raise _InitPriorStoreRefusal(qa_t, (), [])")) != [])
+                check("route gate flags a type-alias rebinding of the pinned emitter",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        type _init_echo = str")) != [])
+                check("route gate flags a type-alias rebinding of a reachable "
+                      "definition",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        type _init_same_root = str")) != [])
+                check("route gate flags an async-for target rebinding the pinned "
+                      "emitter",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + "        async def _qa_async():" + newline
+                          + "            async for _init_echo in []:" + newline
+                          + "                pass")) != [])
+                check("route gate passes a plain literal-assignment control for the "
+                      "QA round 12 D forms",
+                      _init_route_violations(gate_source.replace(
+                          journal_anchor,
+                          journal_anchor + newline
+                          + '        qa_lit = "qa"' + newline
+                          + "        raise _InitPriorStoreRefusal(qa_lit, (), [])")) == [])
 
                 # QA rounds 7 and 8 (requirements A and C): the RUNTIME paste
                 # test, the primary guard. THE EXIT-PATH BY VALUE-CLASS MATRIX:
