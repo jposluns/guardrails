@@ -17,11 +17,14 @@ rule, so it is not an obligation identifier here; the slug is a path component, 
 
 Rule span. tools/gen_agents.py renders AGENTS.md as a fixed header followed by each rule's body
 (gen_agents.body_of: the source text after the front matter, stripped, its title demoted one level) in
-gen_agents.sort_key order, the bodies separated by blank lines. A rule's span is the byte range of that
-body, UTF-8 encoded, inside the AGENTS.md bytes. It is located only after AGENTS.md is proven to be
-byte-identical to gen_agents.render over the same corpus (so the file is that rendering and nothing else),
-by an in-order scan that requires each body to occur EXACTLY ONCE in the file and every gap between
-consecutive spans to be whitespace only. Any other shape is ambiguous and fails closed.
+gen_agents.sort_key order, the bodies separated by blank lines; the block registry
+(.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py) may wrap that rule region in an
+AIQT-RULES block with reviewed blocks before or after it. A rule's span is the byte range of that body,
+UTF-8 encoded, inside the AGENTS.md bytes. It is located only after AGENTS.md is proven to be
+byte-identical to the composition of the same corpus and registry (so the file is that rendering and
+nothing else), by an in-order scan of the rule region alone that requires each body to occur EXACTLY ONCE
+in it and every gap between consecutive spans to be whitespace only; offsets are then made absolute, so a
+block before the rules moves every span against the cap. Any other shape is ambiguous and fails closed.
 
 Delivered. A rule is delivered when its WHOLE span lies inside the first CAP_BYTES bytes, i.e. its end
 offset (exclusive) is at most CAP_BYTES. A rule that starts inside the cap but ends past it STRADDLES the
@@ -68,7 +71,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
-import gen_agents  # noqa: E402  the AGENTS.md layout (sort_key, body_of, render) is single-sourced there
+import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
+import _adapter_compose as adapter_compose  # noqa: E402  the AGENTS.md layout (load_registry, compose)
 # The consumer's contract, single-sourced: the cap, the exact key set, and the superset check it applies.
 from check_release_build import (CAP_BYTES, FIRST_PIN_DEMO_KEYS, FIRST_PIN_DEMO_REL,  # noqa: E402
                                  _demo_superset_findings)
@@ -81,7 +85,7 @@ RULES_PARTS = (".aiqt", "core", "rules")
 # it does not affect what this generator produces. No RENDERER_DECL: this is not an adapter renderer.
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/release/first-pin-demonstration.toml", "kind": "file",
-     "sources": ("AGENTS.md", ".aiqt/core/rules/"),
+     "sources": ("AGENTS.md", ".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
      "regenerate": "python3 tools/gen_first_pin_demo.py"},
 )
 
@@ -165,9 +169,11 @@ def build(root, cap=CAP_BYTES):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    if gen_agents.render(pairs).encode("utf-8") != agents:
-        raise DemoError("{} is not the gen_agents rendering of the rule corpus (run tools/gen_agents.py); "
-                        "the rule spans cannot be located unambiguously".format(AGENTS_REL))
+    composed = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
+                                       adapter_compose.load_registry(root))
+    if composed.data != agents:
+        raise DemoError("{} is not the gen_agents rendering of the rule corpus and the block registry (run "
+                        "tools/gen_agents.py); the rule spans cannot be located unambiguously".format(AGENTS_REL))
     apexes = [str(fm["corpus-id"]) for _src, fm in pairs if fm.get("apex") is True]
     if len(apexes) != 1:
         raise DemoError("the rule corpus must carry exactly one apex rule, found {}".format(len(apexes)))
@@ -177,7 +183,12 @@ def build(root, cap=CAP_BYTES):
         if not CID_RE.match(rid):
             raise DemoError("rule id {!r} is not a well-formed corpus-id".format(rid))
         rules.append((rid, gen_agents.body_of(src).encode("utf-8")))
-    spans = rule_spans(agents, rules)
+    # Spans are located inside the rule region only (the whole file after the header in the legacy layout,
+    # the AIQT-RULES inner text when composed), then shifted back to absolute offsets in AGENTS.md, so a
+    # block before the rules moves every span and a block after them is never read as rule text.
+    base = composed.rules_start
+    spans = [(rid, start + base, end + base)
+             for rid, start, end in rule_spans(agents[base:composed.rules_end], rules)]
     if spans[0][0] != apexes[0]:
         raise DemoError("the apex rule {} is not the first rule in {} (found {} first); the floor profile "
                         "cannot be derived from an unexpected layout".format(apexes[0], AGENTS_REL, spans[0][0]))
@@ -223,9 +234,9 @@ def main():
 
 
 # --- self-test ------------------------------------------------------------------------------------
-# Synthetic temp trees only, never the real tree. Each fixture writes a schema-valid rule corpus and an
-# AGENTS.md rendered from it by gen_agents.render, with rule bodies padded to place spans at exact offsets
-# against the real CAP_BYTES. Vectors, each asserted on its exact outcome:
+# Synthetic temp trees only, never the real tree. Each fixture writes a schema-valid rule corpus, a block
+# registry, and the AGENTS.md _adapter_compose builds from them, with rule bodies padded to place spans at
+# exact offsets against the real CAP_BYTES. Vectors, each asserted on its exact outcome:
 #   0. obligations() directly: an apex ending past the cap is not delivered but is added to the floor;
 #      a rule ending at CAP_BYTES + 1 is not delivered and one ending at CAP_BYTES is;
 #   1. a rule STRADDLING the cap is not delivered, while the rule before it (ending 10 bytes inside) is;
@@ -240,16 +251,20 @@ def main():
 #   5. a digest mismatch (a hand-edited agents-sha256, or AGENTS.md regenerated after the demonstration)
 #      is drift (exit 1), and the consumer's _demo_superset_findings flags the hand-edited binding;
 #   6. an unreadable AGENTS.md (mode 000, a directory, absent, invalid UTF-8) and an AGENTS.md that is not
-#      the gen_agents rendering each fail closed (exit 2).
+#      the gen_agents rendering each fail closed (exit 2);
+#   7. the block registry: a before-rules block shifts every span by exactly the bytes it adds, so a rule
+#      delivered in the legacy layout is pushed past the cap and no longer delivered; an after-rules block
+#      is not read as rule text (the build passes; spans move only by the AIQT-RULES BEGIN line).
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
 
 
-def _write_tree(root, specs):
-    """specs: [(corpus_id, is_apex, pad)], pad an ASCII byte count or a literal fill string; write the corpus
-    and its gen_agents AGENTS.md. Returns the spans dict {corpus_id: (start, end)} measured on the written
-    AGENTS.md."""
+def _write_tree(root, specs, registry=None, blocks=()):
+    """specs: [(corpus_id, is_apex, pad)], pad an ASCII byte count or a literal fill string; write the corpus,
+    the block registry (registry text, all targets legacy by default) with each block's source (blocks are
+    (id, target, position, order, source, text) rows), and the AGENTS.md _adapter_compose builds from them.
+    Returns the spans dict {corpus_id: (start, end)} measured on the written AGENTS.md."""
     rdir = root.joinpath(*RULES_PARTS)
     rdir.mkdir(parents=True, exist_ok=True)
     for old in rdir.iterdir():
@@ -259,11 +274,16 @@ def _write_tree(root, specs):
         fill = pad if isinstance(pad, str) else "a" * pad  # an int pads with ASCII; a str is the literal fill
         body = "\n# Rule {}\n\nObligation text {}{}.\n".format(cid, cid, fill)
         (rdir / ("{}.md".format(cid))).write_text(head + body, encoding="utf-8")
+    reg = root.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
+    reg.write_text(adapter_compose.registry_text() if registry is None else registry, encoding="utf-8")
+    for _bid, _target, _position, _order, source, text in blocks:
+        (root / source).parent.mkdir(parents=True, exist_ok=True)
+        (root / source).write_text(text, encoding="utf-8")
     pairs = [(src, fm) for src, fm, _ in load_corpus(rdir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    text = gen_agents.render(pairs)
-    (root / AGENTS_REL).write_text(text, encoding="utf-8")
-    raw = text.encode("utf-8")
+    raw = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
+                                  adapter_compose.load_registry(root)).data
+    (root / AGENTS_REL).write_bytes(raw)
     return {str(fm["corpus-id"]): (raw.find(gen_agents.body_of(src).encode("utf-8")),
                                    raw.find(gen_agents.body_of(src).encode("utf-8"))
                                    + len(gen_agents.body_of(src).encode("utf-8"))) for src, fm in pairs}
@@ -502,6 +522,50 @@ def self_test_main():
                                      ("invalid-utf8", bad_utf8, "not valid UTF-8"),
                                      ("hand-edited", hand_edited, "not the gen_agents rendering")):
             unreadable(name, mutate, reason)
+
+        # 7. The block registry. (a) A before-rules block moves every span by exactly the bytes it adds (its
+        #    segment, one blank line, and the AIQT-RULES BEGIN line plus its LF), so ruleaa, ending 10 bytes
+        #    inside the cap in the legacy layout, ends past it and is no longer delivered. (b) An after-rules
+        #    block follows the rule region and is never read as rule text.
+        specs = [("prjint1", True, 0), ("ruleaa", False, 20000), ("rulebb", False, 400)]
+        lg = tmp / "registry-legacy"
+        delta = CAP_BYTES - 10 - _write_tree(lg, specs)["ruleaa"][1]
+        specs = [(c, a, p + delta if c == "ruleaa" else p) for c, a, p in specs]
+        legacy_spans = _write_tree(lg, specs)
+        inner = "A reviewed block placed before the rules."
+        before = ("OPF-SELFTEST", AGENTS_REL, "before-rules", 1, "opf/blocks/selftest.md", inner + "\n")
+        after = ("OPF-SELFTEST", AGENTS_REL, "after-rules", 1, "opf/blocks/selftest.md", inner + "\n")
+        cb = tmp / "registry-before"
+        composed_spans = _write_tree(cb, specs, adapter_compose.registry_text([(AGENTS_REL, "composed")], [before]),
+                                     [before])
+        raw = (cb / AGENTS_REL).read_bytes()
+        rules_begin = raw[raw.find(b"<!-- AIQT-RULES:BEGIN"):].split(b"\n", 1)[0]
+        block_begin = raw[raw.find(b"<!-- OPF-SELFTEST:BEGIN"):].split(b"\n", 1)[0]
+        shift = (len(block_begin) + 1 + len(inner.encode("utf-8")) + 1 + len(b"<!-- OPF-SELFTEST:END -->") + 2
+                 + len(rules_begin) + 1)
+        moved = sorted(set(composed_spans[c][i] - legacy_spans[c][i] for c in legacy_spans for i in (0, 1)))
+        if legacy_spans["ruleaa"][1] != CAP_BYTES - 10 or moved != [shift]:
+            failures.append("before-rules block: expected every span moved by {} bytes, got {} (legacy ruleaa "
+                            "end {})".format(shift, moved, legacy_spans["ruleaa"][1]))
+        code, out = capture(lg, False)
+        if code != 0 or demo_of(lg).get("delivered-prefix-obligations") != ["prjint1", "ruleaa"]:
+            failures.append("before-rules block: the legacy fixture must deliver prjint1 and ruleaa, got {}\n{}".format(
+                code, out))
+        code, out = capture(cb, False)
+        if code != 0 or demo_of(cb).get("delivered-prefix-obligations") != ["prjint1"]:
+            failures.append("before-rules block: ruleaa pushed past the cap must not be delivered, got {}\n{}".format(
+                code, out))
+        # (b) Only the AIQT-RULES BEGIN line precedes the rules, so every span moves by that line alone (which
+        # also pushes ruleaa past the cap); the block text after the rules is never read as rule text.
+        ab = tmp / "registry-after"
+        after_spans = _write_tree(ab, specs, adapter_compose.registry_text([(AGENTS_REL, "composed")], [after]),
+                                  [after])
+        moved = sorted(set(after_spans[c][i] - legacy_spans[c][i] for c in legacy_spans for i in (0, 1)))
+        code, out = capture(ab, False)
+        if moved != [len(rules_begin) + 1] or code != 0 or demo_of(ab).get(
+                "delivered-prefix-obligations") != ["prjint1"]:
+            failures.append("after-rules block: expected spans moved by {} bytes and exit 0 delivering prjint1, "
+                            "got {} / {}\n{}".format(len(rules_begin) + 1, moved, code, out))
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -521,7 +585,9 @@ def self_test_main():
           "in UTF-8 bytes, not characters; an apex that is not the first rule fails closed (exit 2); an "
           "AGENTS.md under the cap delivers every rule; a missing apex and an apex past the cap fail closed "
           "(exit 2); a digest mismatch is drift (exit 1) and the consumer flags it; an unreadable, absent, "
-          "non-regular, non-UTF-8 or hand-edited AGENTS.md fails closed (exit 2).")
+          "non-regular, non-UTF-8 or hand-edited AGENTS.md fails closed (exit 2); a before-rules block moves "
+          "every span by exactly the bytes it adds and can push a rule past the cap, and an after-rules block "
+          "is never read as rule text.")
     return 0
 
 
