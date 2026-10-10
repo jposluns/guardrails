@@ -161,11 +161,15 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   conformance report you emit, your release identity, the class `upgrade-capable`, and the
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
   (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
-  "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it. This
-  prompt's choice is to keep the declaration in one file shipped inside each release of your
-  implementation, outside every store, and to produce the declaration in the release documentation
-  and in every report from that file. Section 16.1 also says "An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation";
+  "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it.
+  Section 16.1 requires each release to ship the declaration as one file, the declaration file, and
+  to carry in the implementation, apart from that file, the SHA-256 digest of its bytes as shipped
+  (the shipped-file digest), with the documentation of each release stating where. This prompt's
+  choice is to keep that file inside each release of your implementation, outside every store, to
+  have your build embed the shipped-file digest in the program, and to produce the declaration in
+  the release documentation and in every report from that file. Section 16.1 also says "An
+  unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT
+  authorize any store operation";
   step 1 builds that check, and every command that reads, grades or writes a store runs it first.
   A fresh start of your project's store does not make your implementation fresh-only. If the
   maintainer prefers the fresh-only class, this prompt does not cover it: its admission check,
@@ -1039,23 +1043,32 @@ Build the primitives every later step relies on.
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
 - The class declaration check. Read the declaration file of "Choices to make before you start"
-  from the running release and check it. Section 16.1 states these rules for the declaration: "An
-  implementation MUST declare, in the documentation of each release and in every conformance
-  report it emits, its release identity, its class, and its supported `spec_version`, homes
-  generation, and worklog storage generation. An implementation whose declaration lacks only its
-  class MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
-  malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
-  store operation. A declaration that is absent, or that omits its release identity, its
-  `spec_version`, its homes generation, or its worklog storage generation, is malformed rather than
-  one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store
-  operation." The specification defines no format for the declaration and does not define the
-  three failing cases beyond an absent declaration and one that omits a required field, so the
-  cases below other than no class, an absent file and a file that lacks the release identity, the
-  `spec_version` or a generation are this prompt's reading, yours to confirm with the maintainer.
+  from the copy installed with the running release (the installed copy) and check it. Section 16.1
+  states these rules for the declaration: "An implementation MUST declare, in the documentation of
+  each release and in every report its emitter writes, its release identity, its class, and its
+  supported `spec_version`, homes generation, and worklog storage generation." It also says "A
+  runtime check MUST compare the installed copy's bytes with the shipped-file digest before it
+  reads any field, and an installed copy that is absent or unreadable, or whose bytes differ from
+  that digest, MUST yield cannot-evaluate and MUST NOT authorize any store operation." Later in the
+  same section it says: "An implementation whose declaration lacks only its class MUST be treated
+  as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.
+  A declaration that is absent, or that omits its release identity, its `spec_version`, its homes
+  generation, or its worklog storage generation, is malformed rather than one that declares no
+  class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation." The
+  specification defines no format for the declaration and does not define the three failing cases
+  beyond an absent declaration and one that omits a required field; apart from those cases, its
+  digest rule yields cannot-evaluate for an installed copy whose bytes differ from the shipped-file
+  digest. So the cases below other than a digest mismatch, no class, an absent file and a file that
+  lacks the release identity, the `spec_version` or a generation are this prompt's reading, yours
+  to confirm with the maintainer.
   Every command of yours that reads, grades or writes a store, `opf init` and the step 13 and step
   14 checks included, runs this check before it resolves, reads or writes any store, and on
   cannot-evaluate it stops with exit 2 and performs no store operation.
   The check gives each declaration one of these outcomes:
+  - Digest mismatch: the installed copy's bytes differ from the shipped-file digest. The check
+    compares them before it reads any field, so a file with this outcome gets no other.
+    Cannot-evaluate.
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
@@ -1076,7 +1089,9 @@ Build the primitives every later step relies on.
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
     absent file: section 16.1 limits it to a declaration that lacks only its class, and rules an
-    absent declaration malformed.
+    absent declaration malformed. Because the digest comparison comes first, this case arises only
+    where the release ships a file with no class key; removing that key from an installed copy is
+    a digest mismatch.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 
@@ -1090,8 +1105,12 @@ Acceptance checks:
   unreadable, not parseable, missing each field other than the class in turn, carrying an extra
   key, naming an unknown class, naming another release's identity with every other field equal to
   the shipped declaration, declaring `fresh-only`, declaring `spec_version = "1.2.0"`, and
-  declaring homes generation 2. The shipped declaration with its class key removed passes with the
-  class `upgrade-capable` (section 16.1). The shipped declaration passes.
+  declaring homes generation 2. Each of them except the absent and unreadable ones is tested with a
+  shipped-file digest of its own bytes, so the field checks, not the digest comparison, decide it.
+  The check also yields cannot-evaluate for the shipped declaration with one byte changed, tested
+  with the shipped-file digest of the unchanged file. The shipped declaration with its class key
+  removed, tested with a shipped-file digest of its own bytes, passes with the class
+  `upgrade-capable` (section 16.1). The shipped declaration passes.
 
 ### Step 2: store resolution
 
@@ -2964,14 +2983,21 @@ maintainer's ruling on an open point, report the ruling with it.
     worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
     command-line request declares or changes the class (section 9.1); the class claim says that it
     is self-asserted (section 17); the declared release identity is that of the running release.
+    Each release carries the shipped-file digest apart from the declaration file, and its
+    documentation states where (section 16.1). Section 16.1 also says "Every report the emitter of
+    a release writes MUST carry the four parts compared in every report, exactly these: the
+    restatement of the declaration, the shipped-file digest the implementation carries, the
+    installed-copy digest, and the runtime result", and every report of yours carries them in the
+    forms that section fixes.
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
     identity included, every command that reads, grades or writes a store, `opf init`,
     `opf upgrade`, `opf record` and the step 13 and step 14 checks included, stops with
     cannot-evaluate (exit 2) before any store operation, as section 16.1 requires: "An unreadable,
     malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
-    store operation". With the declaration that lacks only its class key, they proceed as
-    upgrade-capable, as section 16.1 requires: "An implementation whose declaration lacks only its
-    class MUST be treated as upgrade-capable, and every upgrade requirement binds it".
+    store operation". With the declaration that lacks only its class key, and a shipped-file digest
+    of its own bytes, they proceed as upgrade-capable, as section 16.1 requires: "An implementation
+    whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade
+    requirement binds it".
 
 ## Out of scope for this prompt
 
