@@ -10,21 +10,41 @@ it to one canonical identity, and fails on an identity that no manifest register
 covers. A manifest registers the identities this same grammar finds in its own `name` and `edition` fields, so
 there is no hand-kept alias list to drift.
 
-Grammar (case-insensitive; a designator may wrap across one line break; an en dash reads as a hyphen):
-  ISO[/IEC][/IEEE] n[-part][:yyyy]        identity ISO n[-part]           (organisation and year dropped)
-  [NIST] SP n-n[letter]                   identity NIST SP n-n[LETTER]    (SP 800-53A is not SP 800-53)
-  NIST AI n-n                             identity NIST AI n-n
-  NIST IR n[-n][letter], NISTIR n         identity NIST IR n[-n][LETTER]
-  FIPS [PUB] n[-n]                        identity FIPS n[-n]             (FIPS 140-2 is not FIPS 140-3)
-  RFC n                                   identity RFC n
+Grammar (case-insensitive). These spellings, and only these, are discovered:
+  ISO[/IEC][/IEEE][ TR|TS|PAS|DIS|FDIS] n[-part][:yyyy]  identity ISO n[-part]   (organisation, type, year dropped)
+  [NIST] SP n-n[letter][-n]                 identity NIST SP n-n[LETTER][-n]  (SP 800-53A is not SP 800-53)
+  NIST 800-n[letter][-n]                    identity NIST SP 800-n[LETTER][-n]
+  NIST SP n                                 identity NIST SP n                (a single number needs NIST)
+  NIST AI n-n                               identity NIST AI n-n
+  NIST IR n[-n][letter], NISTIR n           identity NIST IR n[-n][LETTER]
+  FIPS [PUB] n[-n]                          identity FIPS n[-n]               (FIPS 140-2 is not FIPS 140-3)
+  RFC n                                     identity RFC n
+A type (TR, TS, PAS, DIS, FDIS) follows ISO after a slash or whitespace. Between a body and its number the
+separator is whitespace, one hyphen or dash, one dot, or nothing (RFC3339, ISO-27001, NIST.SP.800-53, SP800-53).
+A hyphen or dash is any of U+002D, U+2010 to U+2015 and U+2212. Wherever the grammar allows whitespace (between
+words, before and after the ISO slash, after the year colon) that whitespace may hold one line break, and a
+Markdown blockquote marker (">") may open the continued line.
+
+Token boundaries. A designator starts only where the character before it is not a letter or digit, and it runs
+to the end of its token: letters or digits the grammar does not read as a known part (RFC3339Parser,
+SP 800-53Ar5, SP 800-53AB), a dot, colon or slash followed by a digit (ISO 27001/27002), or a dash followed by
+a digit, a line break allowed between them (SP 800-63-3-1, NIST SP 800-<break>53), join it. Such a run is
+reported as token "<text>" and is never resolved to a shorter identity; no manifest registers a token, and only
+an exclusion naming the whole token waives it. An underscore, other punctuation, whitespace, or a hyphen
+followed by a letter ends a token (strict_rfc3339 and RFC 3339-compliant both read RFC 3339).
 
 The corpus is scanned as raw text, code spans and fences included, so backticks are not a bypass. The
 threshold is fixed at one document: a single citation in a single file fails. It is not configurable.
 
-Residual, printed on every run: only numbered designators are discovered. A framework named without a number
-(an OWASP, MITRE or CSA title, "AI RMF", "Google SAIF", "OWASP SCVS") is not seen; prose control ids
-(CWE-79, LLM01) are not checked; a prose edition is not compared with the manifest `edition`; designators of
-other bodies (IEC alone, IEEE alone, ANSI, ETSI, CIS) are outside the grammar.
+Residual, printed on every run (RESIDUAL below): only the spellings above are discovered. A framework named
+without a number (an OWASP, MITRE or CSA title, "AI RMF", "Google SAIF", "OWASP SCVS") is not seen, nor is a
+designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS), SP with one number and no NIST (SP 1270),
+NIST with a number outside the 800 series and no SP (NIST 1270), a designator broken by markup, an entity or two
+line breaks in one gap (*ISO/IEC* 42001, ISO/IEC&nbsp;42001), or a line break inside a number where the text
+before the break is no designator (SP 800-<break>53, NIST AI 100-<break>1). Prose control ids (CWE-79, LLM01)
+are not checked; a prose edition is not compared with the manifest `edition`, and a hyphenated year reads as a
+part (ISO 42001-2023 is its own identity, so it fails). Matching errs toward reporting: it is case-insensitive
+and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339) is reported, never ignored.
 
   check_cited_standards.py                  check the repository's rule corpus
   check_cited_standards.py --root DIR       check the tree at DIR (manifests from DIR/.aiqt/standards)
@@ -42,9 +62,10 @@ default file is read. A config file carries:
 An exclusion waives only its listed paths, so a later citation elsewhere still fails, and it goes stale (a
 finding) when its identity no longer occurs in one of those paths.
 
-Exit: 0 clean; 1 an unresolved identity or a stale exclusion; 2 cannot evaluate (a malformed or unreadable
-manifest, config or corpus file, a corpus glob that matches nothing, an unlistable directory, two manifests
-deriving one identity, or an exclusion that a manifest contradicts). Fail-closed: never a false clean.
+Exit: 0 clean; 1 an unresolved identity or token, or a stale exclusion; 2 cannot evaluate (a malformed or
+unreadable manifest, config or corpus file, a corpus glob that matches nothing, an unlistable directory, two
+manifests deriving one identity, an exclusion that a manifest contradicts, or a usage error). Fail-closed:
+never a false clean.
 """
 import sys
 
@@ -59,6 +80,7 @@ import contextlib
 import io
 import os
 import re
+import socket
 import stat
 import tempfile
 import tomllib
@@ -75,31 +97,53 @@ CONFIG_KEYS = {"format-version", "corpus", "exclusion"}
 EXCLUSION_KEYS = {"designator", "paths", "reason"}
 
 RESIDUAL = (
-    "Residual: only numbered designators are discovered (ISO, ISO/IEC, NIST SP, NIST AI, NIST IR, FIPS, RFC).",
-    "  A framework named without a number (an OWASP, MITRE or CSA title, AI RMF, Google SAIF, OWASP SCVS) "
-    "is not seen.",
+    "Residual: only the designator spellings in the gate's grammar are discovered: ISO, ISO/IEC, ISO/IEEE (with "
+    "an optional TR, TS, PAS, DIS or FDIS), NIST SP, SP, NIST 800-, NIST AI, NIST IR, NISTIR, FIPS and RFC, each "
+    "followed by its number.",
+    "  Not seen: a framework named without a number (an OWASP, MITRE or CSA title, AI RMF, Google SAIF, "
+    "OWASP SCVS); a designator of another body (IEC alone, IEEE alone, ANSI, ETSI, CIS); SP with one number and "
+    "no NIST (SP 1270); NIST with a number outside the 800 series and no SP (NIST 1270).",
+    "  Not seen: a designator broken by markup or an entity (*ISO/IEC* 42001, ISO/IEC&nbsp;42001), by two line "
+    "breaks in one gap, or by a line break inside a number where the text before the break is no designator "
+    "(SP 800-<break>53, NIST AI 100-<break>1); after one (NIST SP 800-<break>53) the whole run is a token.",
     "  Prose control ids (CWE-79, LLM01) are not checked.",
-    "  A prose edition is not compared with the manifest edition (ISO/IEC 42001:2015 resolves to ISO 42001).",
+    "  A prose edition is not compared with the manifest edition (ISO/IEC 42001:2015 resolves to ISO 42001); a "
+    "hyphenated year reads as a part (ISO 42001-2023 is its own identity).",
+    "  A designator run on into letters or digits it does not read (RFC3339Parser, SP 800-53Ar5) is reported as "
+    "a whole token, never resolved to a shorter identity.",
+    "  Matching is case-insensitive and an underscore is a boundary, so a look-alike (sp 3-4, strict_rfc3339) is "
+    "reported, never ignored.",
     "  Code spans and fences are scanned, not stripped, so backticks are not a bypass.",
 )
 
-# Whitespace with at most one line break: SEP needs at least one character, OPT may be empty.
-_SEP = r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*)"
-_OPT = r"[^\S\n]*\n?[^\S\n]*"
-_DASH = "[-\u2013]"
+# A gap between words: whitespace holding at most one line break, after which Markdown blockquote markers may
+# open the continued line. GAP needs at least one character, OPT may be empty. NUMSEP sits between a body and its
+# number: a gap, one dash, one dot, or nothing.
+_DASHES = "-\u2010-\u2015\u2212"
+_DASH = "[" + _DASHES + "]"
+_GAP = r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*(?:>[^\S\n]*)*)"
+_OPT = "(?:" + _GAP + ")?"
+_NUMSEP = "(?:" + _GAP + "|" + _DASH + r"|\.)?"
+_TYPE = "(?:TR|TS|PAS|FDIS|DIS)"
+# A designator starts where no letter or digit precedes it. GLUED takes the rest of its token: letters or digits,
+# a dot, colon or slash followed by a digit, or a dash followed by a digit (a line break allowed between them). A
+# non-empty GLUED makes the whole match a token, so a match always ends at a token boundary and never stops short
+# at a shorter identity.
 _PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:"
-    r"(?P<iso>ISO(?:[^\S\n]*/[^\S\n]*(?:IEC|IEEE))*" + _SEP + r"(?P<iso_n>\d+)"
-    r"(?:" + _DASH + r"(?P<iso_part>\d+))?(?!\d)(?::[^\S\n]*\d{4}(?!\d))?)"
-    r"|(?P<ai>NIST" + _SEP + r"AI" + _SEP + r"(?P<ai_a>\d+)" + _DASH + r"(?P<ai_b>\d+)(?!\d))"
-    r"|(?P<sp>(?:NIST" + _SEP + r")?SP" + _SEP + r"(?P<sp_a>\d+)" + _DASH + r"(?P<sp_b>\d+)"
-    r"(?:(?P<sp_x>[A-Za-z])(?![A-Za-z0-9]))?(?!\d))"
-    r"|(?P<ir>NIST" + _OPT + r"IR" + _SEP + r"(?P<ir_a>\d+)(?:" + _DASH + r"(?P<ir_b>\d+))?"
-    r"(?:(?P<ir_x>[A-Za-z])(?![A-Za-z0-9]))?(?!\d))"
-    r"|(?P<fips>FIPS(?:" + _SEP + r"PUB)?" + _SEP + r"(?P<fips_a>\d+)(?:" + _DASH + r"(?P<fips_b>\d+))?(?!\d))"
-    r"|(?P<rfc>RFC" + _OPT + r"(?P<rfc_n>\d+)(?!\d))"
-    r")",
+    r"(?<![^\W_])(?:"
+    r"(?P<iso>ISO(?:" + _OPT + "/" + _OPT + "(?:IEC|IEEE|" + _TYPE + "))*(?:" + _GAP + _TYPE + ")?" + _NUMSEP
+    + r"(?P<iso_n>\d+)(?:" + _DASH + r"(?P<iso_part>\d+))?(?::" + _OPT + r"\d{4})?)"
+    r"|(?P<ai>NIST" + _GAP + "AI" + _NUMSEP + r"(?P<ai_a>\d+)" + _DASH + r"(?P<ai_b>\d+))"
+    r"|(?P<sp>(?:(?:NIST" + _GAP + ")?SP" + _NUMSEP + "|NIST" + _NUMSEP + "(?=800" + _DASH + r"\d))"
+    r"(?P<sp_a>\d+)" + _DASH + r"(?P<sp_b>\d+)(?P<sp_x>[A-Z])?(?:" + _DASH + r"(?P<sp_c>\d+))?)"
+    r"|(?P<sp1>NIST" + _GAP + "SP" + _NUMSEP + r"(?P<sp1_a>\d+))"
+    r"|(?P<ir>NIST" + _OPT + "IR" + _NUMSEP + r"(?P<ir_a>\d+)(?:" + _DASH + r"(?P<ir_b>\d+))?(?P<ir_x>[A-Z])?)"
+    r"|(?P<fips>FIPS(?:" + _GAP + "PUB)?" + _NUMSEP + r"(?P<fips_a>\d+)(?:" + _DASH + r"(?P<fips_b>\d+))?)"
+    r"|(?P<rfc>RFC" + _NUMSEP + r"(?P<rfc_n>\d+))"
+    r")(?P<glued>(?:[^\W_]|[.:/](?=\d)|" + _DASH + r"(?:[^\S\n]*\n[^\S\n]*)?(?=\d))*)",
     re.IGNORECASE)
+_TOKEN = 'token "'      # the identity prefix of a designator run on into a suffix the grammar does not read
+_ONE_DASH = str.maketrans({ch: "-" for ch in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"})
 
 
 class CannotEvaluate(Exception):
@@ -110,16 +154,26 @@ def _num(text):
     return str(int(text))
 
 
+def _flat(text):
+    """Match text on one line: blockquote markers and whitespace runs become one space, every dash a hyphen."""
+    return " ".join(text.replace(">", " ").split()).translate(_ONE_DASH)
+
+
 def _identity(m):
-    """The canonical identity of one designator match."""
+    """The canonical identity of one designator match; a match with a glued suffix is its whole token."""
+    if m.group("glued"):
+        return _TOKEN + _flat(m.group(0)) + '"'
     if m.group("iso"):
         part = "-" + _num(m.group("iso_part")) if m.group("iso_part") else ""
         return "ISO " + _num(m.group("iso_n")) + part
     if m.group("ai"):
         return "NIST AI {}-{}".format(_num(m.group("ai_a")), _num(m.group("ai_b")))
     if m.group("sp"):
-        return "NIST SP {}-{}{}".format(_num(m.group("sp_a")), _num(m.group("sp_b")),
-                                        (m.group("sp_x") or "").upper())
+        tail = "-" + _num(m.group("sp_c")) if m.group("sp_c") else ""
+        return "NIST SP {}-{}{}{}".format(_num(m.group("sp_a")), _num(m.group("sp_b")),
+                                          (m.group("sp_x") or "").upper(), tail)
+    if m.group("sp1"):
+        return "NIST SP " + _num(m.group("sp1_a"))
     if m.group("ir"):
         tail = "-" + _num(m.group("ir_b")) if m.group("ir_b") else ""
         return "NIST IR {}{}{}".format(_num(m.group("ir_a")), tail, (m.group("ir_x") or "").upper())
@@ -134,7 +188,7 @@ def designators(text):
     out = []
     for m in _PATTERN.finditer(text):
         line = text.count("\n", 0, m.start()) + 1
-        out.append((_identity(m), line, " ".join(m.group(0).split())))
+        out.append((_identity(m), line, _flat(m.group(0))))
     return out
 
 
@@ -146,12 +200,15 @@ def parse_designator(text):
 
 def manifest_identities(manifests):
     """{identity: manifest file name}, read from each manifest's own name and edition fields with the corpus
-    grammar. Two manifests deriving one identity is a contradiction the gate cannot resolve: exit 2."""
+    grammar. A token registers nothing, so it never resolves. Two manifests deriving one identity is a
+    contradiction the gate cannot resolve: exit 2."""
     owner = {}
     for key in sorted(manifests):
         man = manifests[key]
         for field in (man.name, man.edition):
             for ident, _line, _text in designators(field):
+                if ident.startswith(_TOKEN):
+                    continue
                 prior = owner.get(ident)
                 if prior is not None and prior != man.path.name:
                     raise CannotEvaluate("manifests {} and {} both derive the identity {}".format(
@@ -346,8 +403,10 @@ def run(root, config=None):
             len(unresolved), len(stale)))
         for ident in sorted(unresolved):
             sites = unresolved[ident]
-            print("  {}: cited in {} document(s); no manifest registers it and no exclusion covers it".format(
-                ident, len({rel for rel, _l, _t in sites})))
+            why = ("a designator run on into a suffix the grammar does not read; it never resolves to a shorter "
+                   "identity, and only an exclusion naming the whole token covers it" if ident.startswith(_TOKEN)
+                   else "no manifest registers it and no exclusion covers it")
+            print("  {}: cited in {} document(s); {}".format(ident, len({rel for rel, _l, _t in sites}), why))
             for rel, line, text in sites:
                 print("    {}:{}: {}".format(rel, line, text))
         for ident, rel in stale:
@@ -369,6 +428,7 @@ def run(root, config=None):
 
 _BASE_NAME = "ISO/IEC 42001:2023 test"
 _A = ".aiqt/core/rules/a.md"
+_B = ".aiqt/core/rules/b.md"
 _EXCL = 'format-version = 1\n[[exclusion]]\ndesignator = "{}"\npaths = ["{}"]\nreason = "{}"\n'
 
 
@@ -380,7 +440,8 @@ def _manifest_text(stem, name, edition="2023", kind="control"):
 
 def _fixture(tmp, manifests=None, rules=None, config=None):
     """A temp root with a .git marker, the given manifests ({stem: toml text}) and rule files ({name: bytes or
-    str}). config is TOML text written beside the root, or used as the literal path when it is a Path."""
+    str}; None is a dangling symlink, ("outside", text) a symlink to a file beside the root, ("socket",) a unix
+    socket). config is TOML text written beside the root, or used as the literal path when it is a Path."""
     root = Path(tmp) / "root"
     (root / ".git").mkdir(parents=True)
     std = root / STANDARDS_REL
@@ -395,6 +456,20 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
         if body is None:      # a dangling symlink: present in the listing, unreadable as a file
             (rules_dir / name).symlink_to(rules_dir / "absent-target.md")
             continue
+        if body == ("socket",):       # listed, not a regular file, and open() fails at once instead of blocking
+            cwd = os.getcwd()
+            os.chdir(rules_dir)       # bind a short relative name: AF_UNIX caps the path length
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.bind(name)
+            finally:
+                os.chdir(cwd)
+            continue
+        if isinstance(body, tuple):   # ("outside", text): a regular file outside the root, linked from inside
+            target = Path(tmp) / ("outside-" + name)
+            target.write_text(body[1], encoding="utf-8")
+            (rules_dir / name).symlink_to(target)
+            continue
         (rules_dir / name).write_bytes(body.encode("utf-8") if isinstance(body, str) else body)
     cfg = None
     if isinstance(config, Path):
@@ -405,25 +480,42 @@ def _fixture(tmp, manifests=None, rules=None, config=None):
     return root, cfg
 
 
-def _drive(manifests=None, rules=None, config=None):
+def _drive(manifests=None, rules=None, config=None, patch=None):
+    """run() over a fixture; patch ({global name: value}) is swapped into this module for the run only."""
+    saved = {name: globals()[name] for name in (patch or {})}
     with tempfile.TemporaryDirectory(prefix="aiqt-cited-standards-selftest-") as tmp:
         root, cfg = _fixture(tmp, manifests, rules, config)
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            code = run(root, cfg)
+        globals().update(patch or {})
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                code = run(root, cfg)
+        finally:
+            globals().update(saved)
         return code, buf.getvalue()
+
+
+def _unlistable(directory):
+    raise PermissionError(13, "Permission denied (injected by the self-test)", str(directory))
 
 
 def _two_manifests(stem, name, edition="2023"):
     return {"iso-42001": _manifest_text("iso-42001", _BASE_NAME), stem: _manifest_text(stem, name, edition)}
 
 
-# (label, expected exit, manifests, rules, config, a predicate the combined output must satisfy). V1 to V16 each
-# fail under one named weakening of the gate (register-driven discovery, ignored manifests, a dropped /IEC or year
-# normalisation, an edition check, a global exclusion, no reason check, no stale check, an allowed contradiction,
-# a threshold of 2, stripped code, a skipped undecodable file, an empty corpus read as clean, a missing config
-# falling back to the default, ignored unknown keys, a swallowed manifest error, last writer wins); the rest
-# widen the fail-closed coverage.
+# (label, expected exit, manifests, rules, config, a predicate the combined output must satisfy[, a patch of module
+# globals for the run]). V1 to V16 each fail under one named weakening of the gate (register-driven discovery,
+# ignored manifests, a dropped /IEC or year normalisation, an edition check, a global exclusion, no reason check, no
+# stale check, an allowed contradiction, a threshold of 2, stripped code, a skipped undecodable file, an empty
+# corpus read as clean, a missing config falling back to the default, ignored unknown keys, a swallowed manifest
+# error, last writer wins). V26 to V35 hold the token boundaries and wrapping: each before V35 fails on a grammar
+# with no trailing boundary or no line break after "ISO/". V36 to V42 each fail when one guarded branch is removed:
+# the duplicate-exclusion check, per-path staleness, the outside-the-root check, the distinct-paths check, the
+# integer type of format-version, ensure_listable before a glob, and the regular-file check in read_corpus. The
+# rest widen the fail-closed coverage.
+_RFC = _two_manifests("rfc-3339", "RFC 3339 date and time")
+_SP53 = _two_manifests("nist-80053", "NIST SP 800-53 controls")
+_TWO_PATHS = 'format-version = 1\n[[exclusion]]\ndesignator = "RFC 3339"\npaths = ["{}", "{}"]\nreason = "r"\n'
 _VECTORS = (
     ("V0 clean corpus, no citation", 0, None, None, None, lambda o: "PASS: 1 corpus document(s)" in o),
     ("V1 unregistered ISO/IEC 99999:2031 fails, naming file and identity", 1, None,
@@ -483,6 +575,47 @@ _VECTORS = (
      lambda o: "is not valid TOML" in o),
     ("V25 a dangling symlink matched by the corpus glob cannot evaluate", 2, None,
      {"r.md": "Nothing.\n", "gone.md": None}, None, lambda o: "corpus file .aiqt/core/rules/gone.md cannot be read" in o),
+    ("V26 RFC3339Parser never resolves to the registered RFC 3339: it fails as its whole token", 1, _RFC,
+     {"r.md": "Use the RFC3339Parser class.\n"}, None, lambda o: 'token "RFC3339Parser": cited in 1' in o),
+    ("V27 a URL path ending in RFC3339Parser fails as its whole token", 1, _RFC,
+     {"r.md": "See https://example.test/RFC3339Parser for it.\n"}, None,
+     lambda o: 'token "RFC3339Parser": cited in 1' in o),
+    ("V28 NIST SP 800-53AB never resolves to the registered NIST SP 800-53", 1, _SP53,
+     {"r.md": "Follows NIST SP 800-53AB.\n"}, None, lambda o: 'token "NIST SP 800-53AB": cited in 1' in o),
+    ("V29 NIST SP 800-53Ar5 never resolves to the registered NIST SP 800-53", 1, _SP53,
+     {"r.md": "Controls follow NIST SP 800-53Ar5 procedures.\n"}, None,
+     lambda o: 'token "NIST SP 800-53Ar5": cited in 1' in o),
+    ("V30 NIST SP 800-63-3 is not the registered NIST SP 800-63", 1,
+     _two_manifests("nist-80063", "NIST SP 800-63 x"), {"r.md": "Follows NIST SP 800-63-3.\n"}, None,
+     lambda o: "NIST SP 800-63-3: cited in 1" in o),
+    ("V31 a manifest name run on into a suffix registers nothing", 1,
+     _two_manifests("nist-80053", "NIST SP 800-53Ar5 assessment"),
+     {"r.md": "Follows NIST SP 800-53Ar5 and NIST SP 800-53.\n"}, None,
+     lambda o: "NIST SP 800-53: cited in 1" in o and 'token "NIST SP 800-53Ar5": cited in 1' in o),
+    ("V32 an exclusion naming the whole token waives it", 0, None, {"a.md": "Use RFC3339Parser.\n"},
+     _EXCL.format("RFC3339Parser", _A, "a class name"), lambda o: o.startswith("PASS") and "1 exclusion(s)" in o),
+    ("V33 a designator wrapped right after ISO/ fails", 1, None, {"r.md": "This follows ISO/\nIEC 99999:2031.\n"},
+     None, lambda o: "ISO 99999: cited in 1" in o and ".aiqt/core/rules/r.md:1: ISO/ IEC 99999:2031" in o),
+    ("V34 a designator wrapped into a blockquote continuation line fails", 1, None,
+     {"r.md": "> This follows ISO/IEC\n> 99999 closely.\n"}, None, lambda o: "ISO 99999: cited in 1" in o),
+    ("V35 an underscore is a boundary, so strict_rfc3339 reads RFC 3339 and is reported", 1, None,
+     {"r.md": "Call strict_rfc3339 here.\n"}, None, lambda o: "RFC 3339: cited in 1" in o),
+    ("V36 a second exclusion of one identity cannot evaluate", 2, None, {"a.md": "RFC 3339.\n"},
+     _EXCL.format("RFC 3339", _A, "r") + _EXCL.format("rfc3339", _A, "r").replace("format-version = 1\n", ""),
+     lambda o: "already has an exclusion" in o),
+    ("V37 an exclusion path whose file no longer cites it is stale although another path still does", 1, None,
+     {"a.md": "RFC 3339.\n", "b.md": "Nothing.\n"}, _TWO_PATHS.format(_A, _B),
+     lambda o: "0 unresolved" in o and "stale exclusion: RFC 3339 no longer occurs in .aiqt/core/rules/b.md" in o),
+    ("V38 a corpus symlink resolving outside the root cannot evaluate", 2, None,
+     {"r.md": "Nothing.\n", "out.md": ("outside", "Nothing.\n")}, None, lambda o: "resolves outside the root" in o),
+    ("V39 an exclusion listing one path twice cannot evaluate", 2, None, {"a.md": "RFC 3339.\n"},
+     _TWO_PATHS.format(_A, _A), lambda o: "non-empty list of distinct strings" in o),
+    ("V40 format-version = true cannot evaluate", 2, None, None, "format-version = true\n",
+     lambda o: "format-version must be the integer 1" in o),
+    ("V41 a corpus directory that cannot be listed cannot evaluate", 2, None, None, None,
+     lambda o: "cannot be listed" in o, {"ensure_listable": _unlistable}),
+    ("V42 a corpus entry that is not a regular file cannot evaluate", 2, None,
+     {"r.md": "Nothing.\n", "s.md": ("socket",)}, None, lambda o: "s.md is not a regular file" in o),
 )
 
 _NORMALISATION = (
@@ -501,10 +634,53 @@ _NORMALISATION = (
     ("FIPS PUB 197", "FIPS 197"),
     ("RFC 3339", "RFC 3339"),
     ("RFC3339", "RFC 3339"),
+    ("ISO/\nIEC 42001", "ISO 42001"),
+    ("ISO /\n  IEC\n> 42001:\n2023", "ISO 42001"),
+    ("ISO27001", "ISO 27001"),
+    ("ISO-27001", "ISO 27001"),
+    ("ISO/IEC TR 24028:2020", "ISO 24028"),
+    ("ISO/TS 15066", "ISO 15066"),
+    ("ISO/IEC 42001-2023", "ISO 42001-2023"),
+    ("SP800-53", "NIST SP 800-53"),
+    ("NIST 800-53", "NIST SP 800-53"),
+    ("NIST SP 1270", "NIST SP 1270"),
+    ("NIST SP 800-63-3", "NIST SP 800-63-3"),
+    ("NIST SP 800-63B-4", "NIST SP 800-63B-4"),
+    ("NIST SP 800\u201153", "NIST SP 800-53"),
+    ("NIST SP 800\u221253", "NIST SP 800-53"),
+    ("NISTIR8259", "NIST IR 8259"),
+    ("FIPS-140-2", "FIPS 140-2"),
+    ("RFC-3339", "RFC 3339"),
+    ("rfc3339", "RFC 3339"),
+    ("RFC3339Parser", 'token "RFC3339Parser"'),
+    ("NIST SP 800-53AB", 'token "NIST SP 800-53AB"'),
+    ("NIST SP 800-53Ar5", 'token "NIST SP 800-53Ar5"'),
+    ("NIST SP 800-53r5", 'token "NIST SP 800-53r5"'),
+    ("NIST SP 800-63-3-1", 'token "NIST SP 800-63-3-1"'),
+    ("ISO 27001/27002", 'token "ISO 27001/27002"'),
+    ("ISO 42001:20234", 'token "ISO 42001:20234"'),
+    ("FIPS 140-2a", 'token "FIPS 140-2a"'),
+    ("NIST AI 100-1x", 'token "NIST AI 100-1x"'),
+    ("NIST IR 8259AB", 'token "NIST IR 8259AB"'),
+    ("ISO 42001x", 'token "ISO 42001x"'),
+    ("NIST SP 800-\n53", 'token "NIST SP 800- 53"'),
+    ("ISO 26262\u2013\n  6", 'token "ISO 26262- 6"'),
+)
+
+# (text, [identities designators() finds]): an identity ends at a token boundary, a hyphen before a letter ends
+# it, and a look-alike is reported rather than ignored.
+_IN_TEXT = (
+    ("Timestamps are RFC 3339-compliant.", ["RFC 3339"]),
+    ("See https://www.rfc-editor.org/rfc/rfc3339 for it.", ["RFC 3339"]),
+    ("strict_rfc3339 and format_rfc3339()", ["RFC 3339", "RFC 3339"]),
+    ("see sp 3-4 tokens", ["NIST SP 3-4"]),
+    ("map-iso-42001-broad: [6.1]", ["ISO 42001"]),
+    ("Use RFC3339Parser, then RFC 3339.", ['token "RFC3339Parser"', "RFC 3339"]),
 )
 
 _NOT_DESIGNATORS = ("ISO", "ISO/IEC", "SP 800", "NIST", "XRFC 3339", "OWASP Top 10", "CWE-79", "LLM01",
-                    "AI 100-1", "ISOLATION 42", "fips")
+                    "AI 100-1", "ISOLATION 42", "fips", "SP 1270", "NIST 1270", "nist-80053-tight", "rfc-editor",
+                    "ISO/IEC\n\n42001", "SP 800-\n53", "NIST AI 100-\n1", "*ISO/IEC* 42001", "ISO/IEC&nbsp;42001")
 
 # The roster's numbered manifests, field for field, and the identities they must derive (and no others).
 _ROSTER = (
@@ -524,25 +700,40 @@ def self_test_main():
         got = parse_designator(text)
         if got != expect:
             failures.append("normalise {!r}: expected {!r}, got {!r}".format(text, expect, got))
+    for text, expect in _IN_TEXT:
+        got = [ident for ident, _l, _t in designators(text)]
+        if got != expect:
+            failures.append("in {!r}: expected {}, got {}".format(text, expect, got))
     for text in _NOT_DESIGNATORS:
         if designators(text):
             failures.append("{!r} must not read as a designator: {}".format(text, designators(text)))
     derived = sorted(ident for fields in _ROSTER for field in fields for ident, _l, _t in designators(field))
     if derived != _ROSTER_IDENTITIES:
         failures.append("manifest-field identities: expected {}, got {}".format(_ROSTER_IDENTITIES, derived))
-    for label, expect, manifests, rules, config, predicate in _VECTORS:
-        code, out = _drive(manifests, rules, config)
+    for label, expect, manifests, rules, config, predicate, *patch in _VECTORS:
+        code, out = _drive(manifests, rules, config, patch[0] if patch else None)
         if code != expect or not predicate(out):
             failures.append("{}: expected exit {}, got {}; output:\n{}".format(label, expect, code, out))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        code = main(["--root"])
+    if code != 2 or RESIDUAL[0] not in buf.getvalue():
+        failures.append("a usage error: expected exit 2 and the residual, got {}; output:\n{}".format(
+            code, buf.getvalue()))
     if failures:
         print("SELF-TEST FAIL: {} case(s)".format(len(failures)))
         for line in failures:
             print("  " + line)
+        for line in RESIDUAL:
+            print(line)
         return 1
-    print("SELF-TEST PASS: {} normalisation case(s), {} non-designator case(s), the roster's manifest-field "
-          "identities, and {} fixture vector(s): an unresolved designator fails, a manifest resolves it, an "
-          "exclusion is per path, needs a reason and goes stale, and a contradicted or malformed input fails "
-          "closed".format(len(_NORMALISATION), len(_NOT_DESIGNATORS), len(_VECTORS)))
+    print("SELF-TEST PASS: {} normalisation case(s), {} in-text case(s), {} non-designator case(s), the roster's "
+          "manifest-field identities, {} fixture vector(s) and the usage error: an unresolved designator fails, a "
+          "manifest resolves it, a suffixed token never resolves to a shorter identity, an exclusion is per path, "
+          "needs a reason and goes stale, and a contradicted or malformed input fails closed".format(
+              len(_NORMALISATION), len(_IN_TEXT), len(_NOT_DESIGNATORS), len(_VECTORS)))
+    for line in RESIDUAL:
+        print(line)
     return 0
 
 
@@ -555,6 +746,8 @@ def main(argv):
         flag = argv[i]
         if flag not in ("--root", "--config") or flag in opts or i + 1 >= len(argv):
             print("usage: check_cited_standards.py [--root DIR] [--config PATH] | --self-test", file=sys.stderr)
+            for line in RESIDUAL:
+                print(line)
             return 2
         opts[flag] = Path(argv[i + 1])
         i += 2

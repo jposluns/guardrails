@@ -4,9 +4,13 @@ These TOML files are the crosswalk's no-fabrication source of truth. Each one pi
 framework: its edition and the enumerated set of canonical control ids that a rule's `map-<key>`
 frontmatter is allowed to cite. A rule's `map-<key>` frontmatter may cite a framework only after its
 manifest lands here, so a mapping to an unsourced framework, or to an id that does not exist in the
-pinned edition, cannot ship. Rule-body prose is checked more narrowly: a numbered designator (ISO,
-ISO/IEC, NIST SP, NIST AI, NIST IR, FIPS or RFC followed by its number) must resolve to a manifest or a
-recorded exclusion. A framework named in prose without such a number is not detected.
+pinned edition, cannot ship. Rule-body prose is checked more narrowly: a numbered designator in one of
+the spellings the gate's grammar lists (ISO, ISO/IEC or ISO/IEEE, NIST SP or SP, NIST 800-, NIST AI,
+NIST IR or NISTIR, FIPS or RFC, followed by its number) must resolve to a manifest or a recorded
+exclusion, and one run on into letters or digits the grammar does not read is reported as a whole token,
+never resolved to a shorter identity. A framework named in prose without such a number, a body outside
+that list, or a designator broken by markup is not detected; the grammar and its full residual are in
+the docstring of `tools/check_cited_standards.py`.
 
 ## How it is enforced
 
@@ -22,9 +26,10 @@ recorded exclusion. A framework named in prose without such a number is not dete
   manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
   private source catalogues.
 - `tools/check_cited_standards.py` (a CI gate, and part of `run_all_checks.sh`) scans the rule corpus for
-  numbered standard designators and fails on one that no manifest's `name` or `edition` carries and no
-  recorded exclusion covers. It prints its residual on every run; a clean result is not a complete
-  enumeration of the standards the prose names.
+  numbered standard designators in its grammar's spellings and fails on one that no manifest's `name` or
+  `edition` carries and no recorded exclusion covers. It prints its residual on every run, the self-test
+  and a usage error included; a clean result is not a complete enumeration of the standards the prose
+  names.
 
 ## Manifest schema
 

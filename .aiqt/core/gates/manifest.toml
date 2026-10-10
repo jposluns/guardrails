@@ -480,7 +480,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It discovers numbered standard designators (ISO, ISO/IEC, NIST SP, NIST AI, NIST IR, FIPS, RFC) in the rule corpus and fails on one that resolves to no manifest and no recorded exclusion. It does not see a framework named without a number, a control id cited in prose, or a prose edition that differs from the manifest's. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It discovers numbered standard designators in the spellings its grammar lists (ISO, ISO/IEC or ISO/IEEE, NIST SP or SP, NIST 800-, NIST AI, NIST IR or NISTIR, FIPS, RFC, each followed by its number) in the rule corpus and fails on one that resolves to no manifest and no recorded exclusion; a designator run on into letters or digits it does not read fails as a whole token, never as a shorter identity. It does not see a framework named without a number, a body or spelling outside its grammar (such as a designator broken by markup or an entity), a control id cited in prose, or a prose edition that differs from the manifest's. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "reference-facts"
