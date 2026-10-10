@@ -2480,7 +2480,16 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # the budget is reached, which stands the run down;
 # "failed-signal", the same with the lock wrapper armed for the failed-member branch;
 # "failed-handshake", the same with member b never reporting running, so member a's handshake
-# (1 s here) expires and member a raises HandshakeTimeout, never the injected failure. Every
+# (1 s here) expires and member a raises HandshakeTimeout, never the injected failure;
+# "failed-stalled", the deterministic twin of the slow positive control: ONE member, whose
+# injected failure raises BEFORE a_arrived is set, before any handshake and before any send,
+# so member a's arrival and raise and the send list hold, in every run on any host, exactly
+# the state a merely slow git leaves them in, while the branch still sweeps and every
+# compared field (member_a [False, False] included) is structural; the empty send list is
+# the scenario itself, deliberate (_DELIBERATE_EMPTY_SEND), so nothing stands down in a
+# healthy run and a producer tied to those facts, however spelled, mismatches definitely;
+# only a positive control slower than its 60 s bound is recorded (as the reached bound
+# "positive control a observed") and stands the run down, cannot-evaluate, never definite. Every
 # wait the child makes is bounded, and an expiry is recorded under one of two keys by WHO sets
 # the state waited on. HARNESS-ARRANGED state (member b arrived or running, member a's raise
 # reaching member b once its positive control was observed, a lock holder's own acquire granted,
@@ -2739,6 +2748,8 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "        except ValueError as exc:",
     "            extra['caught'] = str(exc)",
     "        suite._reopen_members()",
+    "    elif scenario == 'failed-stalled':",
+    "        pool(('a',))",
     "    elif scenario.startswith('failed'):",
     "        pool(('a', 'b'))",
     "    elif scenario == 'closing-control' or scenario.startswith('split-'):",
@@ -2906,6 +2917,12 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    def observed(bypass, what):",
     "        real_observed(bypass, what)",
     "        if what.startswith('positive control') and what.endswith(' a sleep'):",
+    "            if scenario == 'failed-stalled':",
+    "                # The deterministic twin of a merely slow git (round 20): member a",
+    "                # fails WITHOUT arriving, so a_arrived, a_raises and the send list",
+    "                # leave this run in the exact state a slow positive control leaves",
+    "                # a 'failed' run in, in every run, on any host.",
+    "                raise ValueError('injected failed member a')",
     "            a_arrived.set()",
     "            try:",
     "                if scenario == 'failed-handshake':",
@@ -2984,8 +3001,17 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "    # member a's arrival and raise sit BEHIND the positive control's 60 s subprocess",
     "    # bound: a merely slow git leaves both False with the code healthy, so they are",
     "    # the member_a extra, off the _STATE_EVIDENCE allowlist (a wrong member_a always",
-    "    # comes with the completion budget recorded, so it is never definite). evidence",
-    "    # keeps only the branch facts no bound shapes; producer-map pins what it reads.",
+    "    # comes with the completion budget recorded, so it is never definite; in",
+    "    # 'failed-stalled' the empty send list is the scenario itself, deliberate, and",
+    "    # member_a [False, False] is compared definitely). evidence keeps only the",
+    "    # branch facts no bound shapes; producer-map pins what it reads, and the",
+    "    # 'failed-stalled' run pins BY VALUE that no spelling of a producer can tie an",
+    "    # allowlisted field to member a's arrival or raise or to the send list.",
+    "    if scenario == 'failed-stalled' and outcome.startswith('TimeoutExpired'):",
+    "        # Only a positive control slower than its 60 s bound reaches here: the",
+    "        # reached bound is recorded and the run stands down, cannot-evaluate,",
+    "        # never a definite mismatch on a merely slow host.",
+    "        extra.setdefault('missing', []).append('positive control a observed')",
     "    extra['member_a'] = [a_arrived.is_set(), a_raises.is_set()]",
     "    extra['evidence'] = [bool(branch_swept)]",
     "    witnessed = len(branch_swept)",
@@ -3314,6 +3340,14 @@ def _pidfd_group_signal_supported():
 _DELIBERATE_HANDSHAKES = dict([("failed-handshake", ("member b running",)),
                                ("late-monitor", ("late SIGINT",))])
 
+# The scenarios whose EMPTY send list is the scenario itself: "failed-stalled" owes no signal
+# by construction (its one member fails without arriving, deterministically, so nothing is
+# ever sent and the completion budget measures nothing), the same way _DELIBERATE_HANDSHAKES
+# names each scenario's own deliberate expiry. Only the completion-budget record is exempt:
+# a reached code-owned bound, an owed signal or an expired handshake in such a run is still
+# recorded and stands the observation down. The "record-map" vectors pin both halves.
+_DELIBERATE_EMPTY_SEND = ("failed-stalled",)
+
 
 def _handshake_expired(scenario, extra):
     """The harness-timeout message for a _CLOSE_PROBE_CHILD run one of whose handshakes expired
@@ -3383,11 +3417,20 @@ def _handshake_expired(scenario, extra):
 #   False with the code healthy; they are the "member_a" extra, never definite when
 #   wrong (a wrong member_a leaves the send list empty, so the completion budget is
 #   recorded beside it and it stands down).
-# THE PRODUCER PIN: the "producer-map" entry (_allowlist_producers) pins, read from the
-# child's source, the exact names every write of each entry above reads, closed over
-# their origins, so a producer re-tied to timing (member a's arrival or raise, the send
-# list, a stall) fails definitively in a healthy run too; "producer-oracle" pins that
-# discrimination on mutated copies of the child source.
+# THE PRODUCER PIN, two independent nets so no spelling of a re-tied producer passes:
+# the "producer-map" entry (_allowlist_producers) pins, read from the child's source and
+# fail closed on everything it cannot classify, the exact names every write of each entry
+# above reads, closed over their origins, so a producer re-tied to timing (member a's
+# arrival or raise, the send list, a stall) fails definitively in a healthy run too;
+# "producer-oracle" pins that discrimination, rule by rule, on mutated copies of the
+# child source. THE VALUE PIN: the "failed-stalled" scenario holds member a's arrival
+# and raise and the send list, deterministically and in every run, in the exact state a
+# merely slow git leaves them in, with every compared field structural, so an edit tying
+# an allowlisted field to those facts yields a wrong VALUE there whatever its spelling,
+# through whatever construct, reflection and module attributes included; a stall's
+# presence is pinned the same way by "failed-refused" (stalls nonempty) beside "failed"
+# (stalls empty). What neither net reaches is named, exactly, in the oracle's
+# DISCLOSED BOUNDARIES.
 # A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
 # hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
 # still poison any field, the allowlist included (a live holder owns the lock; a live
@@ -3421,7 +3464,9 @@ def _scenario_timeout_record(scenario, observation, extra, recorded=None):
     wait on code-owned state reached its bound) and an "unsent" entry (the monitor returned
     without sending a signal the harness owed) are popped and recorded; a False timeliness
     field (the completion budget) is recorded, unless the unsent record already covers the
-    empty send list; a non-deliberate expired handshake is recorded by _handshake_expired.
+    empty send list or the scenario owes no signal by construction (_DELIBERATE_EMPTY_SEND,
+    whose other records stay graded like any scenario's); a non-deliberate expired handshake
+    is recorded by _handshake_expired.
     When ANYTHING was recorded, an expired kind naming a thread its bounded join left alive
     (its entry ends " finished") replaces the whole observation with the recorded message (a
     live thread can poison every field, the allowlist included), and otherwise the
@@ -3444,7 +3489,8 @@ def _scenario_timeout_record(scenario, observation, extra, recorded=None):
     if unsent:
         messages.append("TIMEOUT: member-close child ({}): owed signal never sent: {} "
                         "(cannot evaluate)".format(scenario, ", ".join(unsent)))
-    if (not unsent and isinstance(observation, tuple) and len(observation) == 7
+    if (not unsent and scenario not in _DELIBERATE_EMPTY_SEND
+            and isinstance(observation, tuple) and len(observation) == 7
             and observation[5] is False):
         messages.append("TIMEOUT: member-close child ({}): completion budget reached "
                         "(cannot evaluate)".format(scenario))
@@ -3656,39 +3702,70 @@ def _sweep_call_sites(config=None):
 # name's origins, with its arguments' reads, in _allowlist_producers.
 _PRODUCER_MUTATORS = ("append", "extend", "insert", "add", "update", "setdefault")
 
+# Reflective builtins that can reach any binding without spelling its name: ANY use of one of
+# these names in the child is "unrecognized" (fail closed), so no producer can hide behind
+# them. getattr, setattr and delattr are refused the same way unless called directly on an
+# import-bound module object, whose attribute state is a disclosed boundary of the oracle.
+_REFLECTIVE_NAMES = ("globals", "vars", "locals", "eval", "exec", "compile", "__import__")
+
 
 def _allowlist_producers(source=None):
     """The producer pin of the _STATE_EVIDENCE allowlist, read from the _CLOSE_PROBE_CHILD
     source (source, default _CLOSE_PROBE_CHILD) and never run: a dict giving, for each
     allowlisted extras key, the sorted names its producers READ, and under "unrecognized"
-    every reference to the child's extras dict this oracle cannot classify, as (line, form).
-    The record-map vectors pin the classifier (which fields a recorded timeout keeps); this
-    pins what feeds the kept fields, so a child that ties one of them to timing again (member
-    a's arrival or raise, the send list, a stall) fails "producer-map" definitively even in a
-    healthy run, where no timeout ever exercises the classifier.
+    every construct this oracle refuses, as (line, form). The record-map vectors pin the
+    classifier (which fields a recorded timeout keeps); this pins what feeds the kept
+    fields, and the "failed-stalled" scenario pins the same class BY VALUE (its run holds
+    member a's arrival and raise and the send list in the slow-git state while every
+    compared field is structural), so a child that ties evidence, lock_free or restored to
+    member a's arrival or raise or to the send list fails a check whatever the spelling,
+    even in a healthy run, where no timeout ever exercises the classifier; a stall's
+    presence is pinned by "failed-refused" (stalls nonempty) beside "failed" (stalls empty).
     A producer is every write of an allowlisted key: extra['<key>'] = value (a tuple target
     is paired element by element), extra['<key>'].<mutator>(args) and extra.update(<key>=
     value). Its reads are the names loaded in the written value, plus the names loaded in
-    the test of every if, while or conditional expression enclosing the write, closed
-    transitively over each read name's origins in the child: a module-level assignment to
-    the name (paired the same way), a subscript store into it, a _PRODUCER_MUTATORS call on
-    it (each origin with its own enclosing tests, up to the enclosing def), and, for a
-    module-level def, the names its body loads that it does not bind. So a flag gated by
-    member a's arrival, directly, through a guard or inside the sweep wrapper's append,
-    adds a_arrived to the signature and fails the pin; the "producer-oracle" probes pin
-    that discrimination on mutated copies of the child source.
-    EVERY other touch of the extras dict that could write an allowlisted key comes back
-    "unrecognized", never skipped: a subscript with a non-constant key, an allowlisted key
-    read in any other way (an alias), deleted or augmented, a method call other than
-    setdefault, pop, get and update, or one of those naming an allowlisted key or a
-    non-constant key (update with positional or ** arguments included), an attribute not
-    called, a rebinding other than the one binding to {}, and a bare use other than as an
-    element of the report list passed to json.dumps. Raises LookupError, which the caller
-    records as cannot-evaluate, when the source does not parse. Syntactic limits, disclosed:
-    control dependence is read only through those enclosing tests (an early return, a
-    raise, a for loop, a try, a with or a match around or before the write is not), a name
-    bound inside a def is not expanded (its loads are reported as the bare name), and the
-    suite code the child calls is not read (the reads stop at the name suite)."""
+    the test of every if, while or conditional expression enclosing the write and in every
+    operand short-circuiting ahead of it inside an enclosing and/or, closed transitively
+    over each read name's origins in the child: an assignment to the name at module scope
+    or under a global declaration (paired the same way; a walrus included), a subscript
+    store into it (the index's reads included), a _PRODUCER_MUTATORS call on it, a call
+    taking the bare non-module name as an argument (the whole call is read: the callee may
+    bind or mutate it), each origin with its own enclosing tests up to the enclosing def,
+    and, for a module-level def, the names its body loads that it does not bind.
+    FAIL CLOSED on the extras dict: EVERY reference through the NAME extra that could
+    write an allowlisted key comes back "unrecognized", never skipped: a subscript with a
+    non-constant key, an allowlisted key read in any other way (an alias), deleted or
+    augmented, a method call other than setdefault, pop, get and update, or one of those
+    naming an allowlisted key or a non-constant key (update with positional or **
+    arguments included), an attribute not called, a rebinding other than the one binding
+    to {}, and a bare use other than as an element of the report list passed to json.dumps
+    (reaching the dict WITHOUT the name extra is reflection or a module attribute, below).
+    FAIL CLOSED on the carriers: for every name in an allowlisted signature whose origins
+    show a mutable literal (branch_swept and restored in the committed child, plus
+    whatever an edit routes into a signature), EVERY occurrence of that name outside the
+    recognised origin forms is "<name> escape", never skipped: a del, a non-mutator
+    method call (clear, pop), a bound method or attribute taken, an alias made of it, a
+    bare use in a test or anywhere else. Recognised: an origin target, a mutator
+    receiver, a bare call argument (an origin itself) and a traced producer value.
+    FAIL CLOSED on reflection: any use of a _REFLECTIVE_NAMES name anywhere in the child
+    is "unrecognized", and so is getattr, setattr or delattr except called directly on an
+    import-bound module object. Raises LookupError, which the caller records as
+    cannot-evaluate, when the source does not parse. Every refusal and tracing rule here
+    has a "producer-oracle" probe on a mutated copy of the child source, including one
+    probe per disclosed boundary below pinning its empty diff.
+    DISCLOSED BOUNDARIES, each named here exactly because this oracle does NOT read it;
+    the "failed-stalled" value pin above covers every spelling of them for the facts it
+    holds (member a's arrival and raise, the send list): state routed through an
+    attribute of an import-bound module object (a store like sys.<attr> = ..., the
+    suite's patched attributes, getattr or setattr on a module) is not traced; control
+    reaching a write or an origin through anything but the enclosing if, while and
+    conditional tests and short-circuits is not read (an early return or raise, a for
+    loop, a try, a with, a match, an assert, a def whose call sites gate it); a name
+    bound inside a def is not expanded (its loads are reported as the bare name); the
+    suite code the child calls is not read (the reads stop at the name suite); and a
+    producer tied to a timing MAGNITUDE (never to the pinned arrival, raise or send
+    facts) smuggled through one of these boundaries is outside both nets and would need
+    a vector of its own."""
     source = _CLOSE_PROBE_CHILD if source is None else source
     try:
         tree = ast.parse(source)
@@ -3699,12 +3776,34 @@ def _allowlist_producers(source=None):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    imports, declared = set(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                imports.add((alias.asname or alias.name).partition(".")[0])
+        elif isinstance(node, ast.Global):
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, defs):
+                owner = parents.get(owner)
+            if owner is not None:
+                declared.setdefault(owner, set()).update(node.names)
 
     def module_scope(node):
         ancestor = parents.get(node)
         while ancestor is not None:
             if isinstance(ancestor, defs):
                 return False
+            ancestor = parents.get(ancestor)
+        return True
+
+    def global_store(name, node):
+        # A store that binds the module-level name: at module scope, or under a global
+        # declaration of that name in the enclosing def (its VALUE reads are traced; the
+        # call sites gating such a def are a disclosed control boundary).
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, defs):
+                return isinstance(ancestor, defs[:2]) and name in declared.get(ancestor, ())
             ancestor = parents.get(ancestor)
         return True
 
@@ -3717,6 +3816,9 @@ def _allowlist_producers(source=None):
         while ancestor is not None and not isinstance(ancestor, defs):
             if isinstance(ancestor, (ast.If, ast.While, ast.IfExp)) and below is not ancestor.test:
                 found |= loads(ancestor.test)
+            elif isinstance(ancestor, ast.BoolOp) and below in ancestor.values:
+                for prior in ancestor.values[:ancestor.values.index(below)]:
+                    found |= loads(prior)
             below, ancestor = ancestor, parents.get(ancestor)
         return found
 
@@ -3739,25 +3841,55 @@ def _allowlist_producers(source=None):
             return paired(target.value, value)
         return [(target, value)]
 
-    origins = {}
+    # Beside each origin, "sanctioned" collects the exact Name nodes the recognised forms
+    # account for; the carrier sweep below refuses every other occurrence of a carrier.
+    origins, sanctioned = {}, set()
+    unrecognized, bindings = [], []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _REFLECTIVE_NAMES:
+            unrecognized.append((node.lineno, node.id + " reference"))
+        elif isinstance(node, ast.Name) and node.id in ("getattr", "setattr", "delattr"):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node and parent.args
+                    and isinstance(parent.args[0], ast.Name) and parent.args[0].id in imports):
+                unrecognized.append((node.lineno, node.id + " reference"))
         if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
             for target in getattr(node, "targets", None) or [node.target]:
                 for part, value in paired(target, node.value):
-                    if isinstance(part, ast.Name) and module_scope(node):
+                    if isinstance(part, ast.Name) and global_store(part.id, node):
                         origins.setdefault(part.id, []).append((value, node))
+                        sanctioned.add(id(part))
                     elif isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name):
-                        origins.setdefault(part.value.id, []).append((value, node))
+                        origins.setdefault(part.value.id, []).extend(
+                            [(value, node), (part.slice, node)])
+                        sanctioned.add(id(part.value))
+        elif (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
+                and global_store(node.target.id, node)):
+            origins.setdefault(node.target.id, []).append((node.value, node))
+            sanctioned.add(id(node.target))
         elif isinstance(node, defs[:2]) and module_scope(node):
             origins.setdefault(node.name, []).append((node, node))
-        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.attr in _PRODUCER_MUTATORS):
-            origins.setdefault(node.func.value.id, []).extend(
-                (value, node) for value in node.args + [key.value for key in node.keywords])
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                    and node.func.attr in _PRODUCER_MUTATORS):
+                origins.setdefault(node.func.value.id, []).extend(
+                    (value, node) for value in node.args + [key.value for key in node.keywords])
+                sanctioned.add(id(node.func.value))
+            receiver = node.func
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if not (isinstance(receiver, ast.Name) and receiver.id == "extra"):
+                # A bare name passed to any call (the extras writers aside, which the scan
+                # below traces) may be bound or mutated by the callee: the whole call is
+                # that name's origin. An import-bound module passed on is the disclosed
+                # module-attribute boundary instead.
+                for value in node.args + [key.value for key in node.keywords]:
+                    part = value.value if isinstance(value, ast.Starred) else value
+                    if isinstance(part, ast.Name) and part.id not in imports:
+                        origins.setdefault(part.id, []).append((node, node))
+                        sanctioned.add(id(part))
 
     writers = {key: [] for key in _STATE_EVIDENCE}
-    unrecognized, bindings = [], []
     for name in ast.walk(tree):
         if not (isinstance(name, ast.Name) and name.id == "extra"):
             continue
@@ -3785,14 +3917,17 @@ def _allowlist_producers(source=None):
                           for part, value in paired(target, statement.value) if part is parent]
                 if values:
                     writers[key].extend(values)
+                    sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
                 else:
                     form = key + " store"
             elif (isinstance(parent.ctx, ast.Load) and isinstance(grand, ast.Attribute)
                     and grand.attr in _PRODUCER_MUTATORS
                     and isinstance(parents.get(grand), ast.Call)
                     and parents[grand].func is grand):
-                writers[key].extend(parents[grand].args
-                                    + [keyword.value for keyword in parents[grand].keywords])
+                values = (parents[grand].args
+                          + [keyword.value for keyword in parents[grand].keywords])
+                writers[key].extend(values)
+                sanctioned.update(id(v) for v in values if isinstance(v, ast.Name))
             else:
                 form = key + " reference"
         elif isinstance(parent, ast.Attribute) and parent.value is name:
@@ -3805,6 +3940,8 @@ def _allowlist_producers(source=None):
                 for keyword in call.keywords:
                     if keyword.arg in _STATE_EVIDENCE:
                         writers[keyword.arg].append(keyword.value)
+                        if isinstance(keyword.value, ast.Name):
+                            sanctioned.add(id(keyword.value))
             elif not (call.args and isinstance(call.args[0], ast.Constant)
                       and isinstance(call.args[0].value, str)
                       and call.args[0].value not in _STATE_EVIDENCE):
@@ -3831,6 +3968,21 @@ def _allowlist_producers(source=None):
         return sorted(seen)
 
     found = {key: signature(values) for key, values in writers.items()}
+    # THE CARRIER SWEEP, closed world: a carrier is a signature name whose origins show a
+    # mutable literal (so its OBJECT can carry state into a producer; extra has its own
+    # scan above, and an import-bound module is the disclosed boundary). Every occurrence
+    # of a carrier the recognised forms did not account for is refused, so a deletion, a
+    # clear, a pop, an alias or any new spelling of a touch fails the pin instead of
+    # passing silently.
+    mutable = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.SetComp, ast.DictComp)
+    closure = {name for key in _STATE_EVIDENCE for name in found[key]}
+    carriers = {name for name in closure
+                if name != "extra" and name not in imports
+                and any(isinstance(value, mutable) for value, _ in origins.get(name, ()))}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id in carriers
+                and id(node) not in sanctioned):
+            unrecognized.append((node.lineno, node.id + " escape"))
     found["unrecognized"] = sorted(unrecognized)
     return found
 
@@ -3931,7 +4083,12 @@ def _member_close_controls(fixture):
     refused, and the ValueError propagates ("failed") or the SIGINT deferred at the failed-member
     branch's acquire is raised by _raise_held once after the second close ("failed-signal"), and
     with member b never reporting running, member a's expired handshake raises HandshakeTimeout and
-    never the injected failure ("failed-handshake"); TIMING ALONE IS NEVER A DEFINITE FINDING
+    never the injected failure ("failed-handshake"); "failed-stalled" is the deterministic twin
+    of a merely slow git: its one member fails WITHOUT arriving (nothing is sent, deliberately,
+    _DELIBERATE_EMPTY_SEND), so a_arrived, a_raises and the send list hold the slow-git state in
+    every run while every compared field stays structural, and ANY edit, whatever its spelling,
+    that ties an allowlisted field to member a's arrival or raise or to the send list is a
+    definite mismatch there in a healthy run; TIMING ALONE IS NEVER A DEFINITE FINDING
     in these scenarios: member b times the kill sweep in bounded stages (member a's raise, the
     failed-member branch entering the sweep, the harness lock holders' release, the real
     sweep's return), and every reached bound, whoever was slow, is recorded by the parent as a
@@ -4081,7 +4238,8 @@ def _member_close_controls(fixture):
     got = {}
     for scenario in ("pooled", "communicate", "leader-first", "setsid", "close", "sigterm",
                      "install", "split-T-I", "split-T-II", "split-TI-I", "split-IT-I", "lock",
-                     "failed", "failed-signal", "failed-handshake", "unresolved",
+                     "failed", "failed-signal", "failed-handshake", "failed-stalled",
+                     "unresolved",
                      "release-timeout", "start-timeout", "sweep-refused", "close-refused",
                      "close-wait-refused", "close-left-refused", "failed-refused",
                      "closing-control", "late-monitor"):
@@ -4266,6 +4424,24 @@ def _member_close_controls(fixture):
                  dict(restored=[True, True, True], lock_free=True, lines=[False, False],
                       late=[["b", "the suite is closing: no new member starts"]],
                       member_a=[True, True], evidence=[True, True]))
+    stalled_extra = dict(restored=[True, True, True], lock_free=True, lines=[False, False],
+                         late=[], member_a=[False, False], evidence=[True, True])
+    stalled_obs = ("failed-stalled", "ValueError: injected failed member a", 0, [], 0,
+                   False, stalled_extra)
+    stalled_recorded = []
+    stalled_kept = _scenario_timeout_record("failed-stalled", stalled_obs,
+                                            dict(stalled_extra), stalled_recorded)
+    stalled_bound = ("TIMEOUT: member-close child (failed-stalled): code-owned bound "
+                     "reached: positive control a observed (cannot evaluate)")
+    stalled_slow_extra = dict(missing=["positive control a observed"],
+                              restored=[True, True, True], lock_free=True,
+                              lines=[False, False], late=[], member_a=[False, False],
+                              evidence=[True, True])
+    stalled_slow_recorded = []
+    stalled_slow_down = _scenario_timeout_record(
+        "failed-stalled",
+        ("failed-stalled", "TimeoutExpired: positive control", 0, [], 0, False,
+         stalled_slow_extra), stalled_slow_extra, stalled_slow_recorded)
     got["record-map"] = ("record-map", [
         # A reached code-owned bound ("missing") is a recorded timeout like any other: the
         # probe observation (not a report tuple, so nothing to stand down) becomes the
@@ -4380,19 +4556,48 @@ def _member_close_controls(fixture):
         # stood-down observation, so a merely slow positive control whose evidence is at its
         # want is cannot-evaluate, never a definite mismatch. That the child's evidence IS
         # at its want under a slow positive control is the producer pin, "producer-map".
-        _stood_down_wants([slow_down], [slow_want]) == [slow_down]])
+        _stood_down_wants([slow_down], [slow_want]) == [slow_down],
+        # The deliberate empty send list (round 20): "failed-stalled" owes no signal by
+        # construction, so its False timeliness field alone records nothing and the whole
+        # observation stays compared; the exemption is scenario-keyed, pinned verbatim,
+        # and the SAME shape under "failed" is the budget stand-down above (budget_down).
+        stalled_kept is stalled_obs and stalled_recorded == [],
+        _DELIBERATE_EMPTY_SEND == ("failed-stalled",),
+        # Any OTHER record in a stalled run (here the slow positive control's reached
+        # bound) still stands it down to the allowlist, the budget never doubling it.
+        stalled_slow_down == ("failed-stalled",) + (stalled_bound,) * 5 + (
+            dict(kept_state, evidence=[True, True], stood_down=stalled_bound),)
+        and stalled_slow_recorded == [stalled_bound],
+        _stood_down_wants([stalled_slow_down],
+                          [("failed-stalled", "ValueError: injected failed member a", 0,
+                            [], 0, False, dict(stalled_extra))]) == [stalled_slow_down]])
     # The allowlist's PRODUCER pin, beside the classifier pins above: the names every write
     # of an allowlisted extras key reads in the child source, closed over their origins
     # (_allowlist_producers), so a child tying a kept field to timing again fails here even
-    # in a healthy run, where no timeout exercises the classifier. Its own discrimination
+    # in a healthy run, where no timeout exercises the classifier (and fails the
+    # "failed-stalled" value pin besides, whatever the spelling). Its own discrimination
     # ("producer-oracle"): each probe rewrites one statement of the child source and must
-    # change exactly the named entries: evidence tied to member a's arrival (conj), the
-    # round-17 flags re-added (flag), the sweep wrapper's append gated on member a's
-    # arrival (guard), the lock read tied to the measured stalls (lock), a restoration flag
-    # tied to the send list (restored), an allowlisted key written through an alias (alias)
-    # or through ** arguments (star); an anchor no longer in the source is "anchor
+    # change exactly the named entries, so EVERY refusal and tracing rule of the oracle has
+    # a probe that fails when the rule regresses: evidence tied to member a's arrival
+    # (conj), the round-17 flags re-added (flag), the sweep wrapper's append gated on
+    # member a's arrival (guard), the lock read tied to the measured stalls (lock), a
+    # restoration flag tied to the send list (restored), an allowlisted key written through
+    # an alias (alias) or through ** arguments (star); the gate spelled as a short-circuit
+    # (boolop), a while test (while), a conditional expression (condexp), a walrus
+    # (walrus), a global rebinding inside a def (rebound), a slice-store index (sliceidx);
+    # a carrier erased or escaping: del (removal), clear (clear), pop on restored (popper),
+    # an alias taken (escape), the bare name passed to a helper (callarg); the extras dict
+    # reached reflectively (reflect), by a dynamic key (dynkey), rebound (rebind),
+    # augmented (augstore), an allowlisted key aliased (keyref), a bound method taken
+    # (uncalled), the dict used bare (bare); an origin augmented from the send list
+    # (augorigin); each _PRODUCER_MUTATORS entry traced (extendm, insertm, addm, updatem,
+    # setdefm); getattr aimed at a non-module (getat); and the two disclosed
+    # boundaries pinned AT their empty diff, a module attribute store (moduleattr) and
+    # a for-loop gate (forloop), both of which only the "failed-stalled" value pin
+    # catches. An anchor no longer in the source is "anchor
     # missing", never a silently clean probe. ast.parse alone reads each source; no probe
     # source is executed.
+    witnessed_line = "    witnessed = len(branch_swept)\n"
     producer_probes = (
         ("conj", "extra['evidence'] = [bool(branch_swept)]",
          "extra['evidence'] = [a_arrived.is_set() and bool(branch_swept)]"),
@@ -4404,8 +4609,56 @@ def _member_close_controls(fixture):
          "    free = suite._MEMBERS_LOCK.acquire(0) and not stalls\n"),
         ("restored", "    restored.append(False)\n", "    restored.append(bool(sent))\n"),
         ("alias", "extra['evidence'].append(", "extra.get('evidence').append("),
-        ("star", "    witnessed = len(branch_swept)\n",
-         "    witnessed = len(branch_swept)\n    extra.update(**dict(evidence=[True]))\n"))
+        ("star", witnessed_line,
+         witnessed_line + "    extra.update(**dict(evidence=[True]))\n"),
+        ("boolop", "            branch_swept.append(True)\n",
+         "            a_arrived.is_set() and branch_swept.append(True)\n"),
+        ("while", "extra['evidence'] = [bool(branch_swept)]",
+         "while not a_arrived.is_set():\n        extra['evidence'] = "
+         "[bool(branch_swept)]\n        break"),
+        ("condexp", "            branch_swept.append(True)\n",
+         "            (branch_swept.append(True) if a_arrived.is_set() else None)\n"),
+        ("walrus", witnessed_line, witnessed_line
+         + "    (branch_swept := [] if a_arrived.is_set() else list(branch_swept))\n"),
+        ("rebound", witnessed_line, witnessed_line
+         + "    def _drop():\n        global branch_swept\n        branch_swept = "
+         "list(branch_swept) if a_arrived.is_set() else []\n"),
+        ("sliceidx", witnessed_line,
+         witnessed_line + "    branch_swept[a_arrived.is_set():] = []\n"),
+        ("removal", witnessed_line, witnessed_line + "    del branch_swept[:]\n"),
+        ("clear", witnessed_line, witnessed_line + "    branch_swept.clear()\n"),
+        ("popper", "    restored.append(False)\n",
+         "    restored.append(False)\n    restored.pop()\n"),
+        ("escape", witnessed_line, witnessed_line + "    sweep_alias = branch_swept\n"),
+        ("callarg", witnessed_line, witnessed_line + "    _inspect(branch_swept)\n"),
+        ("reflect", witnessed_line,
+         witnessed_line + "    globals()['extra']['evidence'] = [True]\n"),
+        ("dynkey", witnessed_line,
+         witnessed_line + "    extra[str('evidence')] = [True]\n"),
+        ("rebind", witnessed_line, witnessed_line + "    extra = {}\n"),
+        ("augstore", witnessed_line,
+         witnessed_line + "    extra['evidence'] += [a_arrived.is_set()]\n"),
+        ("keyref", witnessed_line, witnessed_line + "    _flags = extra['evidence']\n"),
+        ("uncalled", witnessed_line, witnessed_line + "    _writer = extra.update\n"),
+        ("bare", witnessed_line, witnessed_line + "    _record = extra\n"),
+        ("augorigin", witnessed_line, witnessed_line + "    witnessed += len(sent)\n"),
+        ("extendm", witnessed_line,
+         witnessed_line + "    branch_swept.extend([a_arrived.is_set()])\n"),
+        ("insertm", witnessed_line,
+         witnessed_line + "    branch_swept.insert(0, a_arrived.is_set())\n"),
+        ("addm", witnessed_line,
+         witnessed_line + "    branch_swept.add(a_arrived.is_set())\n"),
+        ("updatem", witnessed_line,
+         witnessed_line + "    branch_swept.update(a_arrived.is_set())\n"),
+        ("setdefm", witnessed_line,
+         witnessed_line + "    branch_swept.setdefault(a_arrived.is_set())\n"),
+        ("getat", witnessed_line,
+         witnessed_line + "    getattr(witnessed, 'bit_length')()\n"),
+        ("moduleattr", witnessed_line,
+         witnessed_line + "    sys.a_flag = a_arrived.is_set()\n"),
+        ("forloop", witnessed_line, witnessed_line
+         + "    for _ in range(0 if a_arrived.is_set() else 1):\n"
+         "        branch_swept[:] = []\n"))
     try:
         producers = _allowlist_producers()
         got["producer-map"] = ("producer-map", producers)
@@ -4546,8 +4799,9 @@ def _member_close_controls(fixture):
         CANNOT_EVALUATE.append(sweep_down)
         got["sweep-site"] = sweep_down
 
-    def expect(scenario, outcome, registered, states, records, lines=(False, False), **more):
-        return (scenario, outcome, registered, states, records, True,
+    def expect(scenario, outcome, registered, states, records, lines=(False, False),
+               timely=True, **more):
+        return (scenario, outcome, registered, states, records, timely,
                 dict(restored=[True, True, True], lock_free=True, lines=list(lines), **more))
 
     closing = "the suite is closing: no new member starts"
@@ -4592,8 +4846,20 @@ def _member_close_controls(fixture):
                 expect("failed-handshake", "HandshakeTimeout: member b running not within 1 s",
                        0, [], 0, late=[["b", closing]], handshake=["member b running"],
                        member_a=[True, True], evidence=[True, True]),
+                # The deterministic stalled twin (round 20): one member, failing WITHOUT
+                # arriving, so a_arrived, a_raises and the send list hold, in every run,
+                # the state a slow git leaves them in, while every compared field is
+                # structural. Any edit, however spelled, that ties evidence, lock_free or
+                # restored to member a's arrival or raise or to the send list yields a
+                # wrong VALUE here, a definite mismatch in a healthy run; a stall's
+                # presence is pinned the same way by "failed-refused" (stalls nonempty)
+                # beside "failed" (stalls empty). The empty send list is deliberate
+                # (_DELIBERATE_EMPTY_SEND), so a healthy stalled run stands nothing down.
+                expect("failed-stalled", "ValueError: injected failed member a", 0, [], 0,
+                       timely=False, late=[], member_a=[False, False],
+                       evidence=[True, True]),
                 ("handshake-map", [True, True, True, True]),
-                ("record-map", [True] * 26),
+                ("record-map", [True] * 30),
                 # Each allowlisted field's producer reads only its traced bound-free source:
                 # evidence the sweep wrapper's branch_swept appends (guarded only by its pure
                 # frame walk, frame), their count before the direct call (witnessed), the
@@ -4605,9 +4871,24 @@ def _member_close_controls(fixture):
                               "witnessed"],
                     lock_free=["lock_free", "suite"], restored=["restored", "signal"],
                     unrecognized=[])),
-                ("producer-oracle", [["evidence"], ["evidence"], ["evidence"], ["lock_free"],
-                                     ["restored"], ["evidence", "unrecognized"],
-                                     ["unrecognized"]]),
+                # One expectation per probe, in producer_probes order; the two final
+                # empty diffs are the pinned disclosed boundaries (moduleattr, forloop),
+                # which the "failed-stalled" scenario covers by value.
+                ("producer-oracle", [["evidence"], ["evidence"], ["evidence"],
+                                     ["lock_free", "unrecognized"],
+                                     ["restored", "unrecognized"],
+                                     ["evidence", "unrecognized"], ["unrecognized"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"], ["evidence"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["unrecognized"],
+                                     ["unrecognized"], ["evidence", "unrecognized"],
+                                     ["evidence"], ["evidence"], ["evidence"],
+                                     ["evidence"], ["evidence"],
+                                     ["evidence", "unrecognized"], [], []]),
                 ("sweep-site", ["except-before-wait"]),
                 ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
                                   "LookupError", [(5, "unrecognized")],
