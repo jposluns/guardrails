@@ -517,7 +517,10 @@ def _txn_dirs(jr_fd, journal_root):
     _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed). F-R18-JTOCTOU:
     enumeration is bound to the TRUSTED already-open journal-root descriptor `jr_fd` (fd-relative), never a
     re-resolved journal path, so a swapped journal ancestor between open and enumerate cannot redirect the
-    listing onto a decoy and report false-clean."""
+    listing onto a decoy and report false-clean. F-JOURNAL-HELD-FD-LISTING: the delegate reads each
+    enumeration through a fresh "." descriptor opened beneath jr_fd, so a transaction directory created
+    after jr_fd was opened is still enumerated (a listing read through the held descriptor itself can
+    miss entries created since its open)."""
     return _journal._journal_txn_dirs(jr_fd, journal_root)
 
 
@@ -2493,6 +2496,140 @@ def self_test():
         finally:
             os.close(_jt_jrfd)
             os.close(_jt_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, direct, native) a transaction directory created AFTER the
+        # journal-root descriptor was opened is enumerated by the FIRST _journal_txn_dirs call: the
+        # listing reads through a fresh "." descriptor opened beneath the held jr_fd, never through jr_fd
+        # itself. FILESYSTEM-DEPENDENT integration evidence: it discriminates only where a held
+        # descriptor's listing is stale (btrfs, which snapshots a readdir upper bound at open time; not
+        # tmpfs). The seam leg below discriminates on any filesystem.
+        _hl_root = tmp / "heldfd" / "root"
+        (_hl_root / JOURNAL_REL / "txnA").mkdir(parents=True)
+        _hl_rfd = os.open(str(_hl_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hl_jrfd = _journal.open_journal_root_fd(_hl_rfd, JOURNAL_REL)
+        try:
+            os.mkdir("txnB", dir_fd=_hl_jrfd)               # created AFTER _hl_jrfd was opened
+            _hl_names = sorted(d.name for d in _journal._journal_txn_dirs(
+                _hl_jrfd, _hl_root / JOURNAL_REL))
+            if _hl_names != ["txnA", "txnB"]:
+                failures.append("HELDFD: the first enumeration after a late mkdir must see the new "
+                                "transaction directory through a fresh listing descriptor (got "
+                                "{})".format(_hl_names))
+        finally:
+            os.close(_hl_jrfd)
+            os.close(_hl_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, direct, seam) the same late transaction directory under
+        # _journal._StStaleListing, which serves the STALE view (the entries at the held open) through
+        # jr_fd and every descriptor sharing its open file description (a dup), and the current view
+        # only through a "." descriptor opened relative to jr_fd: on ANY filesystem the enumeration
+        # must see txnB, and every listing of the journal root must be a fresh one.
+        _hs_root = tmp / "heldfd-seam" / "root"
+        (_hs_root / JOURNAL_REL / "txnA").mkdir(parents=True)
+        _hs_rfd = os.open(str(_hs_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hs_jrfd = _journal.open_journal_root_fd(_hs_rfd, JOURNAL_REL)
+        try:
+            with _journal._StStaleListing() as _hs_seam:
+                _hs_seam.hold(_hs_jrfd)
+                os.mkdir("txnB", dir_fd=_hs_jrfd)           # created AFTER _hs_jrfd was opened
+                _hs_names = sorted(d.name for d in _journal._journal_txn_dirs(
+                    _hs_jrfd, _hs_root / JOURNAL_REL))
+            if _hs_names != ["txnA", "txnB"] or not _hs_seam.views or "stale" in _hs_seam.views:
+                failures.append("HELDFD-SEAM: under the stale-listing seam the enumeration must read "
+                                "through a fresh descriptor and see the late transaction directory (got "
+                                "{}, listing views {})".format(_hs_names, _hs_seam.views))
+        finally:
+            os.close(_hs_jrfd)
+            os.close(_hs_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, reconcile, native) the stale-lock reconcile must enumerate an OPEN
+        # transaction created after jr_fd was opened: the late open transaction is recovered to terminal,
+        # and only then is the dead owner's stale lock broken. A reconcile whose first listing misses it
+        # leaves it unrecovered: when the validation listing then sees it, the reconcile refuses to break
+        # the lock (the parent's observed behaviour on btrfs: fail-closed, recovery unavailable); only
+        # when both listings miss it is the lock broken with the transaction still open. This native leg
+        # is FILESYSTEM-DEPENDENT integration evidence (it discriminates only where a held descriptor's
+        # listing is stale, e.g. btrfs); the seam leg after it discriminates on any filesystem.
+        _hr_root = _build_case_root(tmp / "heldfd-reconcile" / "root", "flat-files")
+        _hr_jr = _hr_root / JOURNAL_REL
+        _hr_jr.mkdir(parents=True, exist_ok=True)
+        _hr_rfd = os.open(str(_hr_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hr_jrfd = _journal.open_journal_root_from_path(_hr_root, JOURNAL_REL)
+        try:
+            _hr_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            _hr_dead.wait()                                 # a pid that is confirmed dead once reaped
+            (_hr_jr / "lock").write_bytes(json.dumps(
+                {"uid": os.getuid(), "pid": _hr_dead.pid, "session": "dead", "pid-start": "",
+                 "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+            os.mkdir("late-open", dir_fd=_hr_jrfd)          # created AFTER _hr_jrfd was opened
+            _journal.publish(_hr_jrfd, _hr_jr / "late-open", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})   # INTENT, no terminal: OPEN
+            try:
+                _hr_res = _journal.reconcile_and_claim_stale(_hr_jr, _hr_jrfd, _hr_rfd,
+                                                             "heldfd-selftest")
+            except _journal.JournalError as exc:
+                _hr_res = "JournalError({})".format(exc)
+            try:
+                _hr_terminal = _journal.is_terminal(_hr_jrfd, _hr_jr / "late-open")
+            except _journal.JournalError:
+                _hr_terminal = "unreadable"
+            if _hr_res != "acquired" or _hr_terminal is not True:
+                failures.append("HELDFD-RECONCILE: an open transaction created after jr_fd was opened "
+                                "must be enumerated and recovered before the stale lock is broken, "
+                                "never read as 'all terminal' (result {}, late txn terminal "
+                                "{})".format(_hr_res, _hr_terminal))
+            _journal.release_lock(_hr_jr)
+        finally:
+            os.close(_hr_jrfd)
+            os.close(_hr_rfd)
+        checked += 1
+
+        # (F-JOURNAL-HELD-FD-LISTING, reconcile, seam) the same late open transaction under
+        # _journal._StStaleListing, held from the jr_fd open: on ANY filesystem both of the reconcile's
+        # listings must read through fresh descriptors, so the transaction is recovered before the stale
+        # lock is broken. A listing through jr_fd or a dup of it is served the stale view, under which
+        # both listings miss the transaction and the lock is broken with it still open.
+        _hq_root = _build_case_root(tmp / "heldfd-reconcile-seam" / "root", "flat-files")
+        _hq_jr = _hq_root / JOURNAL_REL
+        _hq_jr.mkdir(parents=True, exist_ok=True)
+        _hq_rfd = os.open(str(_hq_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _hq_jrfd = _journal.open_journal_root_from_path(_hq_root, JOURNAL_REL)
+        try:
+            with _journal._StStaleListing() as _hq_seam:
+                _hq_seam.hold(_hq_jrfd)
+                _hq_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+                _hq_dead.wait()                             # a pid that is confirmed dead once reaped
+                (_hq_jr / "lock").write_bytes(json.dumps(
+                    {"uid": os.getuid(), "pid": _hq_dead.pid, "session": "dead", "pid-start": "",
+                     "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+                os.mkdir("late-open", dir_fd=_hq_jrfd)      # created AFTER _hq_jrfd was opened
+                _journal.publish(_hq_jrfd, _hq_jr / "late-open", _journal.F_INTENT,
+                                 {"txn": "A", "header": {}, "ops": []})   # INTENT, no terminal: OPEN
+                try:
+                    _hq_res = _journal.reconcile_and_claim_stale(_hq_jr, _hq_jrfd, _hq_rfd,
+                                                                 "heldfd-seam-selftest")
+                except _journal.JournalError as exc:
+                    _hq_res = "JournalError({})".format(exc)
+            try:
+                _hq_terminal = _journal.is_terminal(_hq_jrfd, _hq_jr / "late-open")
+            except _journal.JournalError:
+                _hq_terminal = "unreadable"
+            if (_hq_res != "acquired" or _hq_terminal is not True or not _hq_seam.views
+                    or "stale" in _hq_seam.views):
+                failures.append("HELDFD-RECONCILE-SEAM: under the stale-listing seam the reconcile must list "
+                                "through fresh descriptors and recover the late open transaction before the "
+                                "stale lock is broken (result {}, late txn terminal {}, listing views "
+                                "{})".format(_hq_res, _hq_terminal, _hq_seam.views))
+            try:
+                _journal.release_lock(_hq_jr)
+            except (_journal.JournalError, OSError):
+                pass                                        # a failing leg may hold no lock to release
+        finally:
+            os.close(_hq_jrfd)
+            os.close(_hq_rfd)
         checked += 1
 
         # (F-R18-OSESC) an enumeration OSError (e.g. EIO) escapes as a CONTEXTUAL JournalError, not a raw
