@@ -545,3 +545,202 @@ def _st_watch_drop_check():
             failures.append("{} with {} dropped from the watch: expected red by WRONG alone, got {}".format(
                 label, dropped, red or "green"))
     return failures, runs
+
+
+# F-JOURNAL-HELD-FD-LISTING: the deterministic stale-listing seam. A listing read through a held directory
+# descriptor can miss every entry created since that descriptor was opened, but only on some filesystems
+# (btrfs does; tmpfs does not), so a vector that relies on the native behaviour discriminates only where its
+# fixture happens to sit. Under this seam the stale view is served on ANY filesystem, so each fresh-descriptor
+# listing site's vector fails if that site lists through the held descriptor or through a dup of it.
+
+class _StStaleScandir:
+    """The STALE view of a real os.scandir iterator: only the entries named at _StStaleListing.hold() (the
+    real DirEntry objects, filtered), with the iterator's context-manager and close behaviour."""
+
+    def __init__(self, it, names):
+        self._it, self._names = it, names
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for entry in self._it:
+            if entry.name in self._names:
+                return entry
+        raise StopIteration
+
+    def close(self):
+        self._it.close()
+
+
+class _StStaleListing:
+    """A deterministic model of a STALE directory listing (F-JOURNAL-HELD-FD-LISTING), so a vector proves
+    that a listing reads through a FRESH descriptor whatever filesystem its fixture is on.
+
+    hold(fd) records a held directory descriptor and the entry names its directory had at that moment (a
+    vector calls it right after the open, before it creates the late entry). While the seam is entered (with
+    seam:), a listing (os.listdir or os.scandir given an int) of a held directory is served
+      STALE (only the entries named at hold(), less any since removed) through the held descriptor itself and
+      through ANY descriptor that shares its open file description (os.dup, os.dup2, fcntl F_DUPFD and
+      F_DUPFD_CLOEXEC). Sharing is decided by the kernel, not by bookkeeping: O_NONBLOCK, a status flag of
+      the open file description, is flipped on the listed descriptor and read back on the held one;
+      CURRENT (the real listing) only through a descriptor os.open returned for "." relative to the held one
+      (dir_fd=held) that shares no open file description with a held one;
+      STALE through any other descriptor of the held directory (a path-based reopen, say).
+    Listings of any other directory, and of a path, are the real ones. Each decision is appended to `views`
+    ("stale" or "current"), so a vector can also require that every listing of the held directory was fresh.
+    hold_on_open(match, after) holds the first descriptor os.open returns for which match(path, kwargs) is
+    true and then calls after(fd): the vector's late entry, created inside the code's own open-to-list
+    window. recording(opener) wraps an opener captured before the seam was entered (one that bypasses the
+    patched os.open) so its "." opens are recorded too. The seam's own vectors: _st_stale_listing_check.
+
+    Imported only by a self-test; nothing here runs on a production path."""
+
+    def __init__(self):
+        self.held = {}                            # fd -> ((st_dev, st_ino), the entry names at hold())
+        self.fresh = {}                           # fd -> (st_dev, st_ino) of the held directory it reopens
+        self.views = []
+        self._match = self._after = None
+        self._saved = None
+        self._real_open, self._real_close = os.open, os.close
+        self._real_listdir, self._real_scandir = os.listdir, os.scandir
+
+    def _ident(self, fd):
+        st = os.fstat(fd)
+        return (st.st_dev, st.st_ino)
+
+    def hold(self, fd):
+        lfd = self._real_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            names = frozenset(self._real_listdir(lfd))
+        finally:
+            self._real_close(lfd)
+        self.held[fd] = (self._ident(fd), names)
+
+    def hold_on_open(self, match, after):
+        self._match, self._after = match, after
+
+    def _note(self, fd, path, kwargs):
+        parent = kwargs.get("dir_fd")
+        if path == "." and parent in self.held:
+            self.fresh[fd] = self.held[parent][0]
+        elif self._match is not None and self._match(path, kwargs):
+            self._match = None
+            self.hold(fd)
+            self._after(fd)
+
+    def recording(self, opener):
+        def recorded(path, flags, *args, **kwargs):
+            fd = opener(path, flags, *args, **kwargs)
+            self._note(fd, path, kwargs)
+            return fd
+        return recorded
+
+    def _shares(self, fd, held):
+        before, mine = os.get_blocking(held), os.get_blocking(fd)
+        os.set_blocking(fd, not mine)
+        try:
+            return os.get_blocking(held) != before
+        finally:
+            os.set_blocking(fd, mine)
+
+    def _view(self, fd):
+        ident = self._ident(fd)
+        held = [h for h, (hid, _names) in self.held.items() if hid == ident]
+        if not held:
+            return None, None
+        for h in held:
+            if fd == h or self._shares(fd, h):
+                return "stale", self.held[h][1]
+        if self.fresh.get(fd) == ident:
+            return "current", None
+        return "stale", self.held[held[0]][1]
+
+    def _listing(self, real, args, kwargs, wrap):
+        target = args[0] if args else kwargs.get("path")
+        view, names = self._view(target) if isinstance(target, int) else (None, None)
+        if view is None:
+            return real(*args, **kwargs)
+        self.views.append(view)
+        listed = real(*args, **kwargs)
+        return listed if view == "current" else wrap(listed, names)
+
+    def _open(self, path, flags, *args, **kwargs):
+        return self.recording(self._real_open)(path, flags, *args, **kwargs)
+
+    def _close(self, fd):
+        self.held.pop(fd, None)
+        self.fresh.pop(fd, None)
+        self._real_close(fd)
+
+    def _listdir(self, *args, **kwargs):
+        return self._listing(self._real_listdir, args, kwargs,
+                             lambda listed, names: [name for name in listed if name in names])
+
+    def _scandir(self, *args, **kwargs):
+        return self._listing(self._real_scandir, args, kwargs, _StStaleScandir)
+
+    def __enter__(self):
+        self._saved = (os.open, os.close, os.listdir, os.scandir)
+        os.open, os.close, os.listdir, os.scandir = self._open, self._close, self._listdir, self._scandir
+        return self
+
+    def __exit__(self, *exc):
+        os.open, os.close, os.listdir, os.scandir = self._saved
+
+
+def _st_stale_listing_check(base):
+    """The stale-listing seam's own vectors, on whatever filesystem `base` (an existing directory) is on: with
+    `early` present at hold() and `late` created after it, the held descriptor, an os.dup, an os.dup2, a fcntl
+    F_DUPFD and F_DUPFD_CLOEXEC dup of it and a path-based reopen each list only `early` (os.listdir and
+    os.scandir), a "." reopen relative to the held descriptor lists both, and an unrelated directory lists
+    its real entries; leaving the seam restores the os functions. Returns (failures, checks)."""
+    import fcntl
+    root = os.path.join(base, "stale-listing-seam")
+    os.makedirs(os.path.join(root, "dir", "early"))
+    os.makedirs(os.path.join(root, "other", "entry"))
+    failures, checks, fds = [], 0, []
+    try:
+        held = os.open(os.path.join(root, "dir"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(held)
+        with _StStaleListing() as seam:
+            seam.hold(held)
+            os.mkdir("late", dir_fd=held)
+            spare = os.open(os.devnull, os.O_RDONLY)
+            fds.append(spare)
+            os.dup2(held, spare)
+            cases = [("held", held, ["early"]), ("os.dup2", spare, ["early"])]
+            for label, opener, want in (
+                    ("os.dup", lambda: os.dup(held), ["early"]),
+                    ("F_DUPFD", lambda: fcntl.fcntl(held, fcntl.F_DUPFD, 0), ["early"]),
+                    ("F_DUPFD_CLOEXEC", lambda: fcntl.fcntl(held, fcntl.F_DUPFD_CLOEXEC, 0), ["early"]),
+                    ("path reopen", lambda: os.open(os.path.join(root, "dir"), os.O_RDONLY | os.O_DIRECTORY),
+                     ["early"]),
+                    ("fresh '.' reopen", lambda: os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=held),
+                     ["early", "late"]),
+                    ("unrelated", lambda: os.open(os.path.join(root, "other"), os.O_RDONLY | os.O_DIRECTORY),
+                     ["entry"])):
+                fds.append(opener())                  # recorded at once, so the finally closes it
+                cases.append((label, fds[-1], want))
+            for label, number, want in cases:
+                with os.scandir(number) as it:
+                    scanned = sorted(entry.name for entry in it)
+                for listing, got in (("os.listdir", sorted(os.listdir(number))), ("os.scandir", scanned)):
+                    checks += 1
+                    if got != want:
+                        failures.append("stale-listing seam: {} through the {} descriptor: expected {}, got "
+                                        "{}".format(listing, label, want, got))
+        checks += 1
+        if (os.open, os.close, os.listdir, os.scandir) != (seam._real_open, seam._real_close,
+                                                           seam._real_listdir, seam._real_scandir):
+            failures.append("stale-listing seam: leaving the seam did not restore the os functions")
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return failures, checks

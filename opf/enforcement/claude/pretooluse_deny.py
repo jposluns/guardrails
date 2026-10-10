@@ -483,7 +483,8 @@ per-platform residual coverage carry the same list):
 
 Offline, stdlib only (json, tomllib, os, re, stat, sys), no subprocess, no network. Launched isolated
 (python3 -I) so a file planted beside it cannot shadow a stdlib import. Exit statuses: 0 (with a deny
-decision or silent allow) and 2 (blocking error) only. These statuses hold even when a standard stream
+decision or silent allow) and 2 (blocking error) only, the floor guard's below included. These statuses hold
+even when a standard stream
 cannot be written or flushed: every stderr diagnostic is best-effort (write, then flush, each failure
 swallowed, so the EXIT CODE carries the decision), a deny decision whose stdout write or flush fails exits
 2 instead of 0 (a lost deny blocks, never allows), and the hook leaves through os._exit after flushing
@@ -499,11 +500,11 @@ error that lets the tool call proceed, while exit 2 blocks it and feeds standard
 an interpreter older than Python 3.14 that can start the hook reads no input, writes one line beginning
 `error: pretooluse_deny.py requires Python 3.14 or newer` to standard error (a best-effort write: the
 exit does not depend on it) and exits 2: the tool call is
-blocked (cannot evaluate), never waved through. An older interpreter that cannot start the hook (one that
-cannot compile this file, or a launch that fails before the guard runs) never reaches the guard and fails
-with its own error first; that exit status is not set by this hook, and an exit other than 2 lets the
-call proceed, so register the hook with an interpreter at or above the floor (the registration above
-names python3; point it at a 3.14 or newer interpreter where python3 is older).
+blocked (cannot evaluate), under the output condition above. An older interpreter that cannot start the
+hook (one that cannot compile this file, or a launch that fails before the guard runs) never reaches the
+guard and fails with its own error first; that exit status is not set by this hook, and an exit other than
+2 lets the call proceed, so register the hook with an interpreter at or above the floor (the registration
+above names python3; point it at a 3.14 or newer interpreter where python3 is older).
 """
 import sys
 

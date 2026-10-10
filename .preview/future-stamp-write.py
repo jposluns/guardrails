@@ -322,12 +322,16 @@ exception is an interpreter older than Python 3.14 that can start the hook: the 
 reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or newer` to
 stderr (a best-effort write: the exit does not depend on it) and exits 2, which PreToolUse treats as a
 deny, so every matching Write, Edit, MultiEdit and Bash call
-is denied until Python is upgraded or the hook's entry is removed. An older interpreter that cannot start the
-hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
-2, which still denies every matching call, and one that accepts -I but cannot compile this file (Python 3.4
-and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so every matching call is allowed
-unchecked; .preview/README.md (Installing a hook, step 4) describes those cases. The payload is read as
-BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
+the launch line hands to Python is denied until Python is upgraded or the hook's entry is removed. These exits
+hold while the hook's output (its diagnostic on stderr, and what it prints on stdout) can be written and
+flushed. A failing output stream can change the exit status and can lose output, a decision included.
+An older interpreter that cannot start the hook never reaches the
+guard and fails with Python's own error first: one that predates the -I option exits 2, which still denies
+every such matching call, and one that accepts -I but cannot compile this file (Python 3.4 and 3.5 cannot: it
+uses f-strings) exits 1, a non-blocking error, so every such matching call is allowed unchecked;
+.preview/README.md (Installing a hook, step 4) describes those cases and its launch line, which skips the
+hook, so the call goes ahead, when a standard stream is a directory. The payload is read as BYTES and parsed
+by json.loads, so its decoding does not depend on the process locale. An
 error writing the DENY line (a closed or full stdout, a broken pipe) no longer fails open: a deny that
 cannot be both written and flushed never provably reached the platform, so the hook notes the failure on
 stderr (best-effort) and ends at once with the blocking exit 2 through os._exit (a lost deny blocks, never

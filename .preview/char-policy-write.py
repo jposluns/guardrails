@@ -10,22 +10,25 @@ WHAT IT DOES
 
     Event: PreToolUse, matcher Write|Edit|MultiEdit. Output: nothing (allow), one line holding the standard
     PreToolUse deny object, or one line holding a systemMessage note (allow with a note). Exit status: 0,
-    or the blocking exit 2 when a DENY line cannot be written to stdout and flushed (a lost deny blocks,
-    never allows; a lost note keeps exit 0); the decision travels in the JSON. The verdict is deny, a note
-    or silence: this hook never asks. Once
-    armed (its root set), it allows every call it cannot evaluate with a note naming why, a malformed call
-    among them, and it allows silently only a tool other than Write, Edit or MultiEdit and a well-formed call
-    (see DECISION) that it evaluates and finds clean, whose target is outside the root or the policy's scope,
-    or whose root holds no policy file.
+    with the decision in the JSON, except the floor guard's exit 2 on an interpreter older than Python 3.14
+    that can start the hook, armed or not; one that cannot start it exits with Python's own status first
+    (DECISION). These exits hold while the hook's output (its diagnostic on stderr, and what it prints on
+    stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+    output, a decision included: the exit is the blocking exit 2 when a DENY line cannot be written to stdout
+    and flushed (a lost deny blocks, never allows; a lost note keeps exit 0). The verdict is deny, a note or
+    silence: this hook never asks. Once armed (its root set), it allows every call it cannot evaluate with a
+    note naming why, a malformed call among them, and it allows silently only a tool other than Write, Edit
+    or MultiEdit and a well-formed call (see DECISION) that it evaluates and finds clean, whose target is
+    outside the root or the policy's scope, or whose root holds no policy file.
 
 CONFIGURATION
     AIQT_CHAR_POLICY_ROOT holds one absolute path, the repository root whose policy applies. There is no
-    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently. Set but
-    relative, holding a control character, or naming a path that does not exist or is not a directory, it
-    checks nothing and says so in a note on every call; so does an armed hook launched with any command-line
-    argument other than --self-test alone. The policy file is <root>/.aiqt/char-policy.json; absent, the hook
-    allows a well-formed call silently and notes a malformed one (the gate then applies its built-in default
-    policy, which this hook does not copy).
+    default and no older spelling. Unset or empty, the hook is not armed and does nothing, silently (the
+    floor guard still runs first: DECISION). Set but relative, holding a control character, or naming a path
+    that does not exist or is not a directory, it checks nothing and says so in a note on every call; so does
+    an armed hook launched with any command-line argument other than --self-test alone. The policy file is
+    <root>/.aiqt/char-policy.json; absent, the hook allows a well-formed call silently and notes a malformed
+    one (the gate then applies its built-in default policy, which this hook does not copy).
 
 POLICY FILE
     {"version": 1, "id": <name>, "chars": {<one code point>: <name>, ...}, "advice": <optional text>,
@@ -88,6 +91,18 @@ POLICY FILE
     from the reviewed one; whoever makes an edit can record the new hashes in the same change.
 
 DECISION
+    - The floor guard runs first, armed or not, on every call the launch line hands to Python (the README
+      launch line skips the hook, so the call goes ahead, when a standard stream is a directory). On an
+      interpreter older than Python 3.14 that can start the hook, the guard at the top of this file reads
+      no input, writes one line beginning `error: char-policy-write.py requires Python 3.14 or newer` to
+      stderr and exits 2, which PreToolUse treats as a deny, so every such matching Write, Edit and
+      MultiEdit call is denied until Python is upgraded or the hook's entry is removed, under the output
+      condition WHAT IT DOES states. An older interpreter that cannot start the hook never reaches the
+      guard and fails with Python's own error first: one that predates the -I option exits 2, which still
+      denies every such matching call, and one that accepts -I but cannot compile this file (Python 3.4
+      and 3.5 cannot: it uses f-strings, and 3.4 also rejects its starred items in list displays) exits 1,
+      a non-blocking error, so every such matching call is allowed unchecked; .preview/README.md
+      (Installing a hook, step 4) describes those cases.
     - AIQT_CHAR_POLICY_ROOT unset or empty: allow, silently (the hook is not armed). Set but relative,
       holding a control character, or naming a path that does not exist, cannot be examined or is not a
       directory: allow with a note naming the variable and the reason. Armed, but launched with a
@@ -689,7 +704,8 @@ def _emit_deny_line(text):
 
 
 def main(argv):
-    """The hook: 0, or, through _emit_deny_line, the blocking exit 2 when a deny line cannot be written
+    """The hook, reached only past the floor guard: 0, or, through _emit_deny_line, the blocking exit 2
+    when a deny line cannot be written
     and flushed (a lost deny blocks, never allows). `--self-test` alone runs the self-test instead. A real
     launch passes sys.argv, a non-empty list of strings; any other argv (a call from other code, a tuple
     included) is treated like an unknown argument, and its payload is never read."""

@@ -107,8 +107,12 @@ the doctor and the resume audit report and arm from it):
   log fails other than as not found, because the state directory cannot be searched or is not a
   directory, as with that regular file, the warning also names the forced-exit log as unreadable).
   That warning then also says the barrier was not persisted (this audit did not arm it) and asks for a
-  manual record, instead of saying that a re-run clears the barrier. A clean audit that cannot clear the
-  barrier adds no warning: a barrier it leaves armed, or a directory in its place, still reads as armed. The
+  manual record, instead of saying that a re-run clears the barrier, and names the remedy: remove a
+  directory at the barrier path (neither audit can replace one), otherwise make the state directory
+  creatable and writable. A clean audit that cannot clear the barrier adds no warning: a barrier it
+  leaves armed still reads as armed, noted once per arming where its warned flag can be written, otherwise
+  on each mutation outside the record surfaces (one already warned about stays silent), and
+  a directory in its place reads as armed and is noted on each mutation outside the record surfaces. The
   PreToolUse barrier reads the barrier file only where the registry loader reads the registry ok, so
   for a registry it reads bad an armed barrier surfaces nothing there until the registry reads ok. It
   reads an absent barrier file (a dangling symlink included) as clear, and a symlink to a regular file
@@ -192,7 +196,37 @@ Stop or TeammateIdle, which has no banner; a denied scheduling call carries it i
 banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
 (every non-closed-disposition forced exit appended as its
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
-companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
+companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+`backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
+`forced-exit-surfaced.json`) are each saved by one writer: it opens the state directory once as a
+directory descriptor (with `O_PATH` where the platform has it, so the open needs no permission on that
+directory itself, only search permission on its ancestors, while the later stat, create, rename and cleanup
+need search permission on it, the last three write permission too, and a write-and-search-only state
+directory saves; where `O_PATH` is absent the fallback open also needs read permission on that directory)
+and binds every later step (the read of the target's permission bits, the
+create, the rename and the cleanup removal) to it, so a symlink swapped in for that directory after the open
+can neither make the writer publish foreign content under the target's name nor hide the writer's own
+temporary file (the directory path itself is resolved once, at that open, a directory moved after the open
+still receives the save under its new name, and the writing uid is not a boundary); it creates a temporary
+file of its own beside the target (an exclusive create under a random name that never follows a symlink, so
+a file or symlink already at a temporary-like name is never opened, written or removed), gives it the
+existing target's permission bits (0600 for a new target), writes and fsyncs it, and renames it onto the
+target. A reader
+therefore sees the previous file or the new one, never a part of either, and a failed save leaves the
+previous file (or its absence) in place. A failed save is named with its error in the hook's output, except
+for the forced-exit surfaced set, whose failed advance raises those rows again at the next resume audit; a
+temporary file whose removal after a failure also fails is left beside the target and named there too, by
+the state directory path as given, which after a swap may no longer lead to it, and one left by a process
+killed mid-save is removed by nothing. Concurrent saves never share a temporary file,
+so one save cannot corrupt or remove another's, but the last rename wins: two hooks that read, modify and
+save the same file at once can lose one update (the read-modify-write is not serialized), and each reports
+its own save as succeeded. The save needs a writable and searchable state directory (and, where `O_PATH`
+is absent, a readable one), so a writable `turn-state.json` in a
+state directory the hook cannot write is not saved: a Stop or TeammateIdle deny there now fails open with
+findings (the earlier in-place overwrite let it stand), and a scheduling deny says its counter was not
+written. A symlink at the target is replaced, not written through, and the new file is owned by the writing
+uid. The uid the hooks run as can replace any of these files itself, so this is crash and collision safety,
+not a boundary against that uid. The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
 scan), and is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` declaration line, or a JSON
 object with exactly a top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`). A
 leading byte-order mark is tolerated in both shapes (stripped once before any check). The `Operating-mode:`
@@ -204,17 +238,32 @@ and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<atten
 strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
 whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
-recognized value: a present-but-unreadable or non-UTF-8 file, a present `Operating-mode:` declaration whose
+recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
+holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a
+surrogate-escaped non-UTF-8 name arrives), refused fail-closed before any open even where the OS could open
+it; a file that cannot be opened or read, a socket included, whose non-blocking open itself fails (`ENXIO`
+on Linux); one that is not a regular file, such as a FIFO, a device like `/dev/zero` or a directory, refused
+by an fstat after the non-blocking open and before any read, so a FIFO with no writer does not wait; one
+larger than 1048576 bytes, of which the reader reads at most one byte more; or one whose bytes are not valid UTF-8), each of which the ask guard's
+deny names, a present `Operating-mode:` declaration whose
 value is empty or does not begin with attended/unattended, a JSON-shaped marker (content beginning with `{`,
-`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate keys
-included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
+`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, duplicate keys, or
+nesting too deep to parse included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
 scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
 `mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
-(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty
+(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file (one
+whose open reports not found; a missing file under a parent path that is a regular file reports not a
+directory and fails closed, as any other unreadable file does), an empty
 or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
 JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
 mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
-trailing`, is such prose and does not arm). The escape sentinel (default
+trailing`, is such prose and does not arm). Every other input fails closed, so every input reaches one of
+the two answers; only a stall bounded by the hook timeout delays it (a path lookup on a hung mount, a read
+from a stalled filesystem, or what a device driver's open does). The scope check of the stop, idle and
+yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and
+every fail-closed result counts there as a declared mode, so scope is live: a read failure (a file not valid
+UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
+unrecognized alike. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
@@ -362,7 +411,8 @@ one space. The value is the rest of that line. The brief must be UTF-8 with no N
 boundary other than a physical newline.
 
 - `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
-  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row.
+  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row; where
+  that row cannot be written, the note says so (the allow stands).
 - `Reviewed-revision:` is required, once, for a `revision` target. It must be the full lowercase
   commit id, at the length of the repository's object format. A short id, a branch name or `HEAD`
   is refused.
@@ -510,4 +560,4 @@ The stop guard's blocker substantiation is itself largely ACTOR-AUTHORABLE: the 
 
 The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded (a failed record write is warned about in the hook's banner, or in the block reason of a denied Stop or TeammateIdle), and normally raised once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
 
-The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
+The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. A checkpoint or init marker that cannot be written is named in the hook's output (the deny reason and banner of a scheduling call, the block reason of a denied Stop or TeammateIdle, or the banner or note of an allow) whether or not its guard-events row is written; an unwritten checkpoint does not record that window's items, so one that then vanishes or is demoted before a later checkpoint write succeeds is not held as such unless an earlier checkpoint records it, and an unwritten init marker holds that window as cannot-evaluate. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.

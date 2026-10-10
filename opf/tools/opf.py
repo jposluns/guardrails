@@ -15669,8 +15669,17 @@ def _cmd_adopt(rest):
           `run_nonce` from os.urandom, both injected into the planner (the deterministic run id composes
           them). Exit 0: VALID -- the frozen plan TOML on stdout (an inert, digest-bound PROPOSAL, never
           permission or readiness to apply; the approval lives in the run evidence, a later PR).
-          Exit 1: INVALID (a schema-violating decision, op or plan). Exit 2: cannot-evaluate (an
-          unreadable worksheet, a changed inventory, an unresolvable root, an unresolved disposition).
+          Exit 1: INVALID (an op row or the frozen plan breaks the plan schema: an op missing a required
+          field, enforcement rows that are not each platform once in order, a means its platform does not
+          allow or one lacking its required residual, an enforcement member no op installs, a release
+          anchor disagreeing with manifest_sha256, or a move destination the frozen plan refuses, such as
+          one in the store tree outside the Move archive or one another effect also claims). Exit 2:
+          cannot-evaluate (an unreadable worksheet, a changed inventory, an unresolvable root, an
+          unresolved disposition; a decision row _opf_adopt_plan._decisions refuses before the plan
+          freezes: its keys, disposition, actor or candidate path, a keep of an occupying candidate, or
+          a move destination with no observed absence; an op, product, skip policy, enforcement
+          platform, means or residual outside its vocabulary; or a planner binding rule such as a
+          missing init-store or render-views members that are not exactly the declared views).
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's

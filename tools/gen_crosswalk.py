@@ -669,7 +669,7 @@ def _fdopen_vectors(base):
         real_fdopen(fd, *args, **kwargs).close()
         raise sent
 
-    def run(call, fault):
+    def run(call, fault, seam=None):
         opened = []
 
         def spy(*args, **kwargs):
@@ -698,7 +698,20 @@ def _fdopen_vectors(base):
                         "descriptor census cannot evaluate descriptor {}: {!r}".format(fd, exc))
                 problems.append("OPEN")
                 os.close(fd)                              # a failing vector leaks; release it here
-            if any(name.endswith(".tmp") for name in os.listdir(dfd)):
+            # F-JOURNAL-HELD-FD-LISTING: dfd was opened BEFORE the vector wrote through it, and a
+            # listing read through a held descriptor can miss every entry created since its open (on
+            # btrfs the kernel snapshots a readdir upper bound at open time), so a leftover temporary
+            # would escape this sweep; list through a FRESH "." descriptor opened beneath dfd (the
+            # same directory identity, no path re-resolution), closed on every path. Under the
+            # stale-listing seam (the HELDFD-SEAM leg) the open is recorded, so the seam can tell this
+            # fresh descriptor from dfd and its dups.
+            listing_open = real_open if seam is None else seam.recording(real_open)
+            lfd = listing_open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            try:
+                leftovers = os.listdir(lfd)
+            finally:
+                os.close(lfd)
+            if any(name.endswith(".tmp") for name in leftovers):
                 problems.append("TEMP")
         finally:
             os.close(dfd)
@@ -786,6 +799,55 @@ def _fdopen_vectors(base):
             os.close(fd)
     if got != "named":
         failures.append("fdopen vector CENSUS: expected the EIO descriptor named, got {}".format(got))
+    # F-JOURNAL-HELD-FD-LISTING: the TEMP sweep must report a leftover temporary created AFTER the
+    # fixture descriptor was opened (the vector writes it through dfd and leaves it behind); a listing
+    # read through the held descriptor itself can miss every entry created since its open, so the
+    # sweep reads through a fresh descriptor. FILESYSTEM-DEPENDENT integration evidence: this native leg
+    # fails against that regression only where a held descriptor's listing is stale (btrfs, not tmpfs);
+    # the seam leg after it fails against it on any filesystem.
+
+    def leaves_tmp(dfd):
+        fd = os.open("late-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    problems = run(leaves_tmp, early)
+    runs += 1
+    if problems != ["TEMP"]:
+        failures.append("fdopen vector HELDFD TEMP sweep: a leftover temporary created after the "
+                        "fixture descriptor was opened must be reported (expected ['TEMP'], got "
+                        "{})".format(problems))
+    try:
+        os.unlink(str(base / "late-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    # HELDFD-SEAM: the same leftover under the stale-listing seam (_close_selftest._StStaleListing), with dfd
+    # held before the vector writes through it: the seam serves the stale view through dfd and any dup of
+    # it, and the current view only through a "." descriptor opened relative to it, so on ANY filesystem
+    # the sweep must list through a fresh descriptor and report TEMP. Then the seam's own vectors.
+    seam = _close_selftest._StStaleListing()
+
+    def leaves_tmp_held(dfd):
+        seam.hold(dfd)
+        fd = os.open("late-seam-leftover.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dfd)
+        os.close(fd)
+        raise sent
+
+    with seam:
+        problems = run(leaves_tmp_held, early, seam)
+    runs += 1
+    if problems != ["TEMP"] or not seam.views or "stale" in seam.views:
+        failures.append("fdopen vector HELDFD-SEAM TEMP sweep: under the stale-listing seam a leftover "
+                        "temporary created after the fixture descriptor was opened must be reported through "
+                        "a fresh listing descriptor (expected ['TEMP'], got {}; listing views "
+                        "{})".format(problems, seam.views))
+    try:
+        os.unlink(str(base / "late-seam-leftover.tmp"))
+    except FileNotFoundError:
+        pass
+    seam_failures, seam_checks = _close_selftest._st_stale_listing_check(str(base))
+    failures.extend("fdopen vector " + failure for failure in seam_failures)
+    runs += 1 if seam_checks else 0                 # the seam's own vectors count as one run
     return failures, runs
 
 
