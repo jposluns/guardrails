@@ -26,9 +26,16 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      resolves by its first dotted component to a module present in one of the file's search roots, or to
                      the standard library. A name present in none of them is a finding: a third-party or invented name.
                      A same-named file outside the file's search roots never resolves it. A relative import must name a
-                     module or package that exists under its base directory (or the base must be a package). An importer
-                     call passing a starred or double-starred argument, and a call of a getattr passing one or a
-                     keyword, is a finding: the name it imports, or the function it calls, cannot be read statically.
+                     module or package that exists under its base directory (or the base must be a package). A value the
+                     gate reads to decide an importer call is a finding when it cannot read it with certainty, never a
+                     pass: an importer call passing a starred or double-starred argument; a string literal at its
+                     module-name parameter that is not a dotted name of identifiers once the callee's own reading is
+                     applied ('x.', 'x..y', 'x.0' and 'x-y' among them), or an f-string there with no placeholder;
+                     beside a string-literal name, a level that is not an integer literal (-0, +0, a computed level);
+                     and, at the callee after the .__call__ normalisation, a call of a getattr passing a starred or
+                     double-starred argument or a keyword, or a call through a getattr name or a subscript key written
+                     as an f-string with no placeholder. A computed module name (any expression other than a literal,
+                     an f-string with a placeholder among them) is not read: its site is reviewed (DISCLOSED RESIDUAL).
                      Each IMPORT_SEARCH_ROOTS row is held live: its file is scanned, its root lies beyond the file's own
                      directory, the file calls sys.path.insert or sys.path.append and names every component of the
                      root's path relative to the file's directory as a string literal somewhere in the file, and at
@@ -66,14 +73,19 @@ Rules (each self-test vector is caught by exactly its rule, and passes with that
                      _find_and_load, iter_importers, _run_module_as_main and _get_module_details; doc, render_doc,
                      resolve and writedoc only through pydoc) by name, by attribute, by getattr with two or three
                      arguments, a literal name and no starred argument, by a subscript with a literal key (pydoc reached
-                     through pydoc, vars(pydoc) or pydoc.__dict__), through a transparent .__call__, or, for help, by
-                     calling what pydoc.Helper(), _Helper() or type(help) makes. Its module name is read by the callee's
-                     real signature: the first argument, or the keyword of that parameter (name, fullname, mod_name,
-                     path, request or thing), and the level by its position or its keyword where the callee takes one;
-                     help strips surrounding whitespace and resolve_name reads the module before a module:object colon. A string-literal absolute name read there at
-                     level 0 is also an import record for import-closure, whether its site is allowlisted or not;
-                     run_path's argument is a file path and is not resolved. No alias is resolved: an alias is itself a
-                     site.
+                     through pydoc, vars(pydoc) or pydoc.__dict__), or, for help, by calling what pydoc.Helper(),
+                     _Helper() or type(help) makes; a trailing .__call__ is transparent, at the call and at each
+                     getattr, type, vars or helper-class callee inside it (getattr.__call__ reads as getattr). Its
+                     module name is read by the callee's real signature: the first argument, or the keyword of that
+                     parameter (name, fullname, mod_name, path, request or thing), and the level by its position or its
+                     keyword where the callee takes one; help strips surrounding whitespace, resolve_name reads the
+                     module before a module:object colon, and the relative importers import_module, find_spec and
+                     resolve_name read a name beginning with a dot as relative to their package argument. A
+                     string-literal absolute name read there at level 0 is also an import record for import-closure,
+                     whether its site is allowlisted or not, and a literal there that the gate cannot read is a finding
+                     (import-closure, above). A relative request (an integer level above 0, or a relative importer's
+                     name beginning with a dot) is not resolved, and run_path's argument is a file path and is not
+                     resolved. No alias is resolved: an alias is itself a site.
   relative-escape    a relative import whose base directory lies outside the repository root, or, for a
                      vendored file, outside its own vendored package root.
   vendor-provenance  each _vendor directory: every NAME.provenance.toml there records [package] name,
@@ -141,41 +153,59 @@ or action line outside the accepted YAML subset (above).
 Exit convention: 0 clean; 1 a finding; 2 usage or cannot-evaluate.
 
 DISCLOSED RESIDUAL. Dynamic imports: an allowlisted site is reviewed, not evaluated; the gate resolves only a
-string-literal absolute name an importer call passes in a form it reads, so a computed name is never judged by
+string-literal absolute name an importer call passes in a form it reads, and refuses a literal it cannot read (above),
+so a computed name (a variable, a concatenation, a call, a subscript, an f-string with a placeholder) is never judged by
 import-closure, and the unreached-module condition is static (an allowlisted site can still reach the module at runtime:
-the vendored marko.helpers, an allowlisted site, loads an extension by a computed name). A row allows one node, not what
-becomes of its value: a listed reference that is not called in place (an importer returned, stored, passed or bound by
-an alias, or a lambda holding a call) lets whatever later calls that value import without a site of its own, so such a
-row is reviewed for where the value goes, and a finding says when a reference is not a call. A row names line and column
-numbers, so an edit that moves a listed reference makes the row stale and the reference a finding until the row is
-rewritten (the re-review the binding asks for); a listed literal climbs into the call it is an argument of, or the
-subscript it is the key of, before the row records it, so turning that call or subscript into a called importer is a
-finding, and the residual is the introspection-only routes below and whatever a listed reference's value is passed to or
-stored as. Importer calls: the module name is read at the callee's first argument
-or that parameter's keyword, so an importer called unbound with its instance passed first (pydoc.Helper.help(h, name))
-is not read; the callee is read by its name, so an importer bound to another name and called through it (h = help) is
-not read, though the binding is itself a site when it names a watched name; doc, render_doc, resolve and writedoc are
-read only through pydoc (this tree defines functions of those names), so a call of one of those four after a
-from-import of pydoc is reviewed at that import (a site, since it names pydoc) and not read; safeimport has no such
-owner, so an unqualified safeimport call is read. Over-rejections, disclosed: an importer's name on an unrelated object (o.locate, o.help, o.find_spec with a
-third-party literal) is read as an importer; importlib.util.resolve_name computes a name without importing it and is
-read as an importer; help with a keyword or topic word (help('if')) reads the word as a module name (help('modules')
-does import every package it finds); and a starred or double-starred argument is refused even when it is a literal the
-gate could expand. The members are read from IMPORT_SYSTEM_MODULES, not from every importer: the members of
-importlib.resources and importlib.metadata are reached only through a watched importlib reference, and a member's name
-used for a local object (a def, a parameter, a plain name) is not a site. Not seen: exec, eval or compile of a string,
-whose source the gate does not read as Python; a watched name assembled at runtime from pieces (a computed string handed
-to getattr, vars, globals or sys.modules); an import function reached through the object graph without naming it (a
-function's __globals__, a frame, the garbage collector); and other standard-library functions that import by name as a
-side effect (pickle loading a class reference, logging.config factories, unittest name loaders, xml.sax.make_parser,
-among others): the watched set covers the import system's own modules and help, not every importer by name in the
-standard library. A native library loaded through ctypes, and Python source handed to a subprocess or written to a file,
-are outside the surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's model of
-sys.path; a row is held live by a sys.path.insert or sys.path.append call and the root's path components as string
-literals anywhere in the file, not by evaluating that call's argument; the gate does not evaluate a sys.path expression
-or the order of insertions (it refuses a name present in two places instead), it does not model an in-code insertion of
-a path outside the tree (a site-packages directory, which can then shadow an in-repo name), and it does not see a
-program launched with another path (PYTHONPATH, python3 -m from another directory, or python3 -I without the
+the vendored marko.helpers, an allowlisted site, loads an extension by a computed name). A relative request is not
+resolved either: what it imports depends on its package argument or the caller's globals, which the gate does not read
+(import_module('.x', 'pkg') and find_spec('.x', 'pkg') import pkg, and __import__('x', g, None, (), 1) imports from the
+package g names), so its site is reviewed. A row allows one node, not what becomes of its value: a listed reference that
+is not called in place (an importer returned, stored, passed or bound by an alias, or a lambda holding a call) lets
+whatever later calls that value import without a site of its own, so such a row is reviewed for where the value goes,
+and a finding says when a reference is not a call. A row names line and column numbers, so an edit that moves a listed
+reference makes the row stale and the reference a finding until the row is rewritten (the re-review the binding asks
+for); a listed string literal, or one inside an f-string, climbs into the call it is directly an argument of, or the
+subscript it is directly the key of, before the row records it, so turning that call or subscript into a called importer
+is a finding. An expression built from a listed literal ('__import__'.strip(), a tuple holding it) is a value passed on:
+the call around that expression is not climbed into, so it is part of the residual, with the introspection-only routes
+below and whatever a listed reference's value is passed to or stored as. Importer calls: the reader covers the callee
+names LITERAL_IMPORTERS lists, reached by the spellings above; it does not read every way to reach an import function.
+Not read, so the name such a call passes is not resolved (the call is reviewed only as a site, where it names a watched
+name or member, and through an alias only at the import that binds it): an import function the table does not list
+(importlib._bootstrap._find_and_load_unlocked, pkgutil.get_data, the anchor functions of importlib.resources such as
+files and read_text, pydoc._url_handler, and their kin); a pydoc helper reached through an owner spelled other than
+pydoc, vars(pydoc) or pydoc.__dict__ (__import__('pydoc').doc, sys.modules['pydoc'].doc,
+import_module('pydoc').render_doc); a help instance made other than by pydoc.Helper(), _Helper() or type(help)
+(help.__class__()); an importer called unbound with its instance passed first (pydoc.Helper.help(h, name)), since the
+module name is read at the callee's first argument or that parameter's keyword; and an importer bound to another name
+and called through it (h = help), since the callee is read by its name, though the binding is itself a site when it
+names a watched name. doc, render_doc, resolve and writedoc are read only through pydoc (this tree defines functions of
+those names), so a call of one of those four after a from-import of pydoc is reviewed at that import (a site, since it
+names pydoc) and not read; safeimport has no such owner, so an unqualified safeimport call is read. Over-rejections,
+disclosed: an importer's name on an unrelated object (o.locate, o.help, o.find_spec with a third-party literal) is read
+as an importer; importlib.util.resolve_name computes a name without importing it and is read as an importer;
+iter_importers is read as an import of the name it is given, though it imports only the parent package of a dotted name,
+and only once iterated (iter_importers('requests') imports nothing); help with a keyword or topic word (help('if'))
+reads the word as a module name (help('modules') does import every package it finds), and help of a symbol or a phrase
+(help('+'), help('modules x')) is refused as a literal it cannot read; every other string that is not a dotted name of
+identifiers ('' anywhere, '.x' at __import__) is refused whether or not the interpreter would import anything for it,
+and so is a level that is a literal of another type (None, 0.0); and a starred or double-starred argument is refused
+even when it is a literal the gate could expand. The members are read from IMPORT_SYSTEM_MODULES, not from every
+importer: the members of importlib.resources and importlib.metadata are reached only through a watched importlib
+reference, and a member's name used for a local object (a def, a parameter, a plain name) is not a site. Not seen: exec,
+eval or compile of a string, whose source the gate does not read as Python; a watched name assembled at runtime from
+pieces (a computed string handed to getattr, vars, globals or sys.modules); an import function reached through the
+object graph without naming it (a function's __globals__, a frame, the garbage collector); and other standard-library
+functions that import by name as a side effect (pickle loading a class reference, logging.config factories, unittest
+name loaders, xml.sax.make_parser, among others): the watched set covers the import system's own modules and help, not
+every importer by name in the standard library, and of the import system's own functions only those LITERAL_IMPORTERS
+lists are read as importers. A native library loaded through ctypes, and Python source handed to a subprocess or written
+to a file, are outside the surface. Search roots: the own-directory root and the IMPORT_SEARCH_ROOTS rows are the gate's
+model of sys.path; a row is held live by a sys.path.insert or sys.path.append call and the root's path components as
+string literals anywhere in the file, not by evaluating that call's argument; the gate does not evaluate a sys.path
+expression or the order of insertions (it refuses a name present in two places instead), it does not model an in-code
+insertion of a path outside the tree (a site-packages directory, which can then shadow an in-repo name), and it does not
+see a program launched with another path (PYTHONPATH, python3 -m from another directory, or python3 -I without the
 own-directory insertion, under which a sibling import fails or reaches an installed module of that name). Third-party
 code committed outside a _vendor directory and reached through a recorded root counts as in-repo, without provenance;
 the rows are reviewed in this file. Surface: only .py files are scanned; Python launched from another suffix, other
@@ -304,26 +334,28 @@ INERT_IMPORT_SYSTEM_MEMBERS = (
 )
 # The importers, each read by its real signature, written as one string so the table is no site: callee name, the
 # keywords of its module-name parameter (its first), the position:keyword of its level parameter or -, what the
-# parameter names (a module, or a file path, which is not resolved), and the module the callee must be reached
+# parameter names (module; relative, a module or, beginning with a dot, a name relative to the package argument,
+# which is not resolved; or path, a file path, which is not resolved), and the module the callee must be reached
 # through (pydoc's doc, render_doc, resolve and writedoc only as attributes of pydoc, since this tree defines
 # functions of those names) or -. A string-literal absolute name an importer call passes at level 0 is resolved
 # like an import statement wherever the call sits, an allowlisted site included; a starred or double-starred
-# argument at any importer call is a finding (see the docstring). help and pydoc's helpers import the module a
-# dotted name starts with.
+# argument, and a literal name or level the gate cannot read, at any importer call is a finding (see the
+# docstring). help and pydoc's helpers import the module a dotted name starts with; iter_importers imports only
+# the parent package of a dotted name, once iterated, and is read like the others (a disclosed over-rejection).
 LITERAL_IMPORTERS = tuple((row[0], tuple(row[1].split(",")), None if row[2] == "-" else
                            (int(row[2].split(":")[0]), row[2].split(":")[1]), row[3], None if row[4] == "-" else row[4])
                           for row in (line.split() for line in """
-    __import__     name           4:level  module  -
-    import_module  name           -        module  -
-    _gcd_import    name           2:level  module  -
-    find_spec      name,fullname  -        module  -
-    resolve_name   name           -        module  -
+    __import__     name           4:level  module    -
+    import_module  name           -        relative  -
+    _gcd_import    name           2:level  module    -
+    find_spec      name,fullname  -        relative  -
+    resolve_name   name           -        relative  -
     run_module     mod_name       -        module  -
     run_path       path_name      -        path    -
     locate         path           -        module  -
     safeimport     path           -        module  -
     help           request        -        module  -
-    _find_and_load      name,fullname  -   module  -
+    _find_and_load      name           -   module  -
     iter_importers      fullname       -   module  -
     _run_module_as_main mod_name       -   module  -
     _get_module_details mod_name       -   module  -
@@ -685,21 +717,21 @@ DYNAMIC_IMPORT_SITES = (
       "690:8-690:39: spec.loader.exec_module(module)"),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
     ("tools/check_import_closure.py", "<module>",
-     ("208:0-208:21: import importlib.util",
-      "762:25-762:67: 'self_test._NestedMissingFinder.find_spec'",
-      "783:21-783:63: 'self_test._NestedMissingFinder.find_spec'",),
+     ("238:0-238:21: import importlib.util",
+      "794:25-794:67: 'self_test._NestedMissingFinder.find_spec'",
+      "815:21-815:63: 'self_test._NestedMissingFinder.find_spec'",),
      "this gate's tables and self-test data name watched names as strings; it imports importlib.util for _load_mutant"),
     ("tools/check_import_closure.py", "_literal_import_name",
-     ("988:47-988:53: 'help'",
-      "989:50-989:64: 'resolve_name'",),
+     ("1042:46-1042:52: 'help'",
+      "1043:49-1043:63: 'resolve_name'",),
      "the importer names help and resolve_name, compared as string literals to read each importer's own argument spelling"),
     ("tools/check_import_closure.py", "watched_names",
-     ("1053:26-1053:55: importlib.import_module(name)",),
+     ("1130:26-1130:55: importlib.import_module(name)",),
      "loads the fixed standard-library modules of IMPORT_SYSTEM_MODULES to read the watched set from them"),
     ("tools/check_import_closure.py", "_load_mutant",
-     ("2809:11-2809:92: importlib.util.spec_from_file_location('import_closure_mutant_%d' % number, path)",
-      "2810:13-2810:50: importlib.util.module_from_spec(spec)",
-      "2813:8-2813:39: spec.loader.exec_module(module)",),
+     ("3033:11-3033:92: importlib.util.spec_from_file_location('import_closure_mutant_%d' % number, path)",
+      "3034:13-3034:50: importlib.util.module_from_spec(spec)",
+      "3037:8-3037:39: spec.loader.exec_module(module)",),
      "self-test loads a scratch copy or mutant of this file, written from its own source, by its path"),
     ("tools/check_instruction_budget.py", "_mutant",
      ("1386:4-1386:25: import importlib.util",
@@ -917,10 +949,25 @@ def _catches_import_error(handler):
     return any(isinstance(k, ast.Name) and k.id in IMPORT_ERRORS for k in kinds)
 
 
+def _transparent(func):
+    """func with every trailing .__call__ removed: X.__call__ reaches whatever X reaches."""
+    while isinstance(func, ast.Attribute) and func.attr == "__call__":
+        func = func.value
+    return func
+
+
+def _placeholder_free(node):
+    """True for an f-string with no replacement field: a literal the gate does not evaluate, so a finding wherever
+    the gate must read a name (an f-string with a replacement field is a computed value, reviewed at its site)."""
+    return isinstance(node, ast.JoinedStr) and not any(isinstance(v, ast.FormattedValue) for v in node.values)
+
+
 def _callee_name(func):
-    """The name a call reaches its function by: a name, an attribute, getattr (two or three arguments, no
-    keyword, no starred argument) with a literal name, a subscript with a literal key, or help for an instance a
-    HELPER_CLASSES call or type(help) makes; None otherwise."""
+    """The name a call reaches its function by, after the .__call__ normalisation (_transparent, here and so at
+    the getattr, type, vars and helper-class callees inside it): a name, an attribute, getattr (two or three
+    arguments, no keyword, no starred argument) with a literal name, a subscript with a literal key, or help for
+    an instance a HELPER_CLASSES call or type(help) makes; None otherwise."""
+    func = _transparent(func)
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
@@ -954,8 +1001,7 @@ def _importer(func):
     """The LITERAL_IMPORTERS row a call's function reaches by its callee name, through its module when the row
     names one (pydoc.doc, getattr(pydoc, ...), vars(pydoc)['doc'], pydoc.__dict__['doc']), or None. A trailing
     .__call__ is transparent: X.__call__ reaches whatever X reaches."""
-    while isinstance(func, ast.Attribute) and func.attr == "__call__":
-        func = func.value
+    func = _transparent(func)
     row = IMPORTERS.get(_callee_name(func))
     if row is None or row[4] is None:
         return row
@@ -965,50 +1011,81 @@ def _importer(func):
     return row if owner is not None and _owner_module(owner) == row[4] else None
 
 
-def _is_zero(node):
-    return isinstance(node, ast.Constant) and node.value == 0
-
-
 def _literal_import_name(call, importer):
-    """The string-literal absolute dotted name an importer call (a LITERAL_IMPORTERS row) passes as its module-name
-    parameter, its first argument or that parameter's keyword; None when the name is computed, relative or a
-    file path, or the level (by position or keyword) is not the literal 0. help strips surrounding whitespace as
-    the interpreter does; resolve_name reads the module before a module:object colon."""
-    _callee, keywords, level, kind, _owner = importer
+    """(name, problem) for an importer call (a LITERAL_IMPORTERS row) with no starred argument. name is the
+    string-literal absolute dotted name it passes as its module-name parameter (its first argument or that
+    parameter's keyword), read at level 0, else None. problem, else None, says which value the gate needs is a
+    literal it cannot read with certainty: an f-string with no placeholder; a string that is not a dotted name of
+    identifiers once the callee's own reading is applied (help strips surrounding whitespace, resolve_name reads
+    the module before a module:object colon, a relative importer's name may begin with a dot); or, beside a
+    string literal, a level that is not an integer literal. A computed name (any other expression) is neither:
+    its site is reviewed. A relative request (an integer level above 0, or a relative importer's name that begins
+    with a dot) and a file path are not resolved."""
+    callee, keywords, level, kind, _owner = importer
     name = call.args[0] if call.args else None
+    depth = call.args[level[0]] if level is not None and len(call.args) > level[0] else None
     for keyword in call.keywords:
         if keyword.arg in keywords and name is None:
             name = keyword.value
-        if level is not None and keyword.arg == level[1] and not _is_zero(keyword.value):
-            return None
-    if level is not None and len(call.args) > level[0] and not _is_zero(call.args[level[0]]):
-        return None
-    if kind != "module" or not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
-        return None
-    spelled = name.value.strip() if _callee == "help" else \
-        name.value.split(":", 1)[0] if _callee == "resolve_name" else name.value
+        if level is not None and keyword.arg == level[1]:
+            depth = keyword.value
+    if kind == "path":
+        return None, None
+    if _placeholder_free(name):
+        return None, "its module name as an f-string with no placeholder, which the gate does not evaluate"
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+        return None, None
+    if depth is not None and not (isinstance(depth, ast.Constant) and isinstance(depth.value, int)):
+        return None, "a literal module name at the level %s, which is not an integer literal" % ast.unparse(depth)
+    if depth is not None and depth.value != 0:
+        return None, None
+    spelled = name.value.strip() if callee == "help" else \
+        name.value.split(":", 1)[0] if callee == "resolve_name" else name.value
+    if kind == "relative" and spelled.startswith("."):
+        return None, None
     if not all(part.isidentifier() for part in spelled.split(".")):
-        return None
-    return spelled
+        return None, "the literal module name %r, which is not a dotted name of identifiers" % name.value
+    return spelled, None
 
 
 def unreadable_calls(tree):
-    """(line, text, what) for every call the gate cannot read statically: an importer call passing a starred or
-    double-starred argument (its module name cannot be read), and a call of a getattr passing one or a keyword
-    (the function it calls cannot be read)."""
+    """(line, message) for every call the gate cannot read statically, each a finding: an importer call passing
+    a starred or double-starred argument (its module name cannot be read), or a literal module name or level it
+    cannot read with certainty (_literal_import_name); and, at the callee after the same .__call__ normalisation the
+    importer reader applies, a call of a getattr passing a starred or double-starred argument or a keyword (the
+    function it calls cannot be read), or a call through a getattr name or a subscript key written as an f-string
+    with no placeholder."""
     out = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if _importer(node.func) is not None:
+        callee = _transparent(node.func)
+        importer = _importer(node.func)
+        text = ast.unparse(node)
+        if importer is not None:
             starred = any(isinstance(a, ast.Starred) for a in node.args)
             unpacked = any(k.arg is None for k in node.keywords)
             if starred or unpacked:
-                out.append((node.lineno, node.col_offset, ast.unparse(node), "importer call"))
-        elif isinstance(node.func, ast.Call) and _callee_name(node.func.func) == "getattr" and \
-                (any(isinstance(a, ast.Starred) for a in node.func.args) or node.func.keywords):
-            out.append((node.lineno, node.col_offset, ast.unparse(node), "call of a getattr"))
-    return [(line, text, what) for line, _column, text, what in sorted(out)]
+                out.append((node.lineno, node.col_offset, "importer call %s passes a starred or double-starred "
+                            "argument, so the name it imports cannot be read statically: spell each argument out"
+                            % text))
+                continue
+            problem = _literal_import_name(node, importer)[1]
+            if problem is not None:
+                out.append((node.lineno, node.col_offset, "importer call %s passes %s, so what it imports cannot "
+                            "be read statically: pass the module's dotted name as a plain string literal at level 0"
+                            % (text, problem)))
+        elif isinstance(callee, ast.Call) and _callee_name(callee.func) == "getattr" and \
+                (any(isinstance(a, ast.Starred) for a in callee.args) or callee.keywords):
+            out.append((node.lineno, node.col_offset, "call of a getattr %s passes a starred or double-starred "
+                        "argument or a keyword, so the function it calls cannot be read statically: spell each "
+                        "argument out" % text))
+        elif isinstance(callee, ast.Call) and _callee_name(callee.func) == "getattr" and len(callee.args) > 1 and \
+                _placeholder_free(callee.args[1]) or isinstance(callee, ast.Subscript) and \
+                _placeholder_free(callee.slice):
+            out.append((node.lineno, node.col_offset, "call %s reaches its function by an f-string with no "
+                        "placeholder, which the gate does not evaluate: write a plain string literal" % text))
+    return [(line, message) for line, _column, message in sorted(out)]
 
 
 def extract_imports(tree):
@@ -1025,7 +1102,7 @@ def extract_imports(tree):
             records.append((node.lineno, node.module or "", node.level,
                             tuple(a.name for a in node.names), guarded))
         elif isinstance(node, ast.Call) and _importer(node.func) is not None:
-            name = _literal_import_name(node, _importer(node.func))
+            name = _literal_import_name(node, _importer(node.func))[0]
             if name is not None:
                 records.append((node.lineno, name, 0, (), guarded))
         if isinstance(node, (ast.Try, ast.TryStar)):
@@ -1097,14 +1174,16 @@ def _scoped_children(node, scope):
 
 def _site_reference(node, parents):
     """The node a watched name is reviewed as: an alias's import statement, or the expression climbed through
-    the attribute access, call and subscript the name is the target of. A literal first climbs into the call it is
-    an argument of (or whose keyword it is), or the subscript it is the key of, then climbs on like a name, so an
-    edit that turns the call or subscript around a listed literal into a called importer is a finding (a def, class
-    or parameter is its own node)."""
+    the attribute access, call and subscript the name is the target of. A literal (inside an f-string, that
+    f-string) first climbs into the call it is directly an argument of (or whose keyword it is), or the subscript it
+    is directly the key of, then climbs on like a name, so an edit that turns that call or subscript into a called
+    importer is a finding (a def, class or parameter is its own node; an expression built from a literal is not)."""
     if isinstance(node, ast.alias):
         return parents[id(node)]
     if isinstance(node, ast.Constant):
         parent = parents.get(id(node))
+        while isinstance(parent, (ast.FormattedValue, ast.JoinedStr)):
+            node, parent = parent, parents.get(id(parent))
         if isinstance(parent, ast.keyword):
             parent = parents.get(id(parent))
             if isinstance(parent, ast.Call):
@@ -1418,10 +1497,8 @@ def scan_python(root, files, stdlib, records, rules, search_roots, watched):
             raise CannotEvaluate("%s: does not parse: %s" % (rel, exc))
         trees[rel] = tree
         imports = extract_imports(tree)
-        for lineno, text, what in unreadable_calls(tree):
-            findings.append(("import-closure", rel, lineno, "%s %s passes a starred or double-starred argument%s, "
-                             "which the gate cannot read statically: spell each argument out"
-                             % (what, text, "" if what == "importer call" else " or a keyword")))
+        for lineno, message in unreadable_calls(tree):
+            findings.append(("import-closure", rel, lineno, message))
         sites.extend((rel,) + site for site in dynamic_sites(tree, *watched))
         stats["files"] += 1
         by_file[rel] = imports
@@ -2203,6 +2280,92 @@ _RULE_VECTORS = (
      (("tools/t.py", "import builtins\ngetattr(builtins, name='__import__')('requests')\n"),), (),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
                                        ("2:0-2:48: getattr(builtins, name='__import__')('requests')",), "r"),)), True),
+    # Round-7: what the gate cannot read is a finding. A literal module name or level it cannot read with certainty
+    # is refused, at an allowlisted site too; each such vector names a standard-library module, so only the refusal
+    # (never import-closure's resolution of a third-party name) can make it red. The getattr refusal applies
+    # after the .__call__ normalisation, which also reads getattr.__call__ and pydoc.doc.__call__ (third-party
+    # names, read), a getattr name or subscript key written as an f-string with no placeholder is refused, and a
+    # literal inside an f-string climbs into the call around it.
+    ("literal module name with an empty component at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('json.')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:19: __import__('json.')",), "r"),)), True),
+    ("literal module name with a non-identifier component at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('json.0')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:20: __import__('json.0')",), "r"),)), True),
+    ("pydoc.locate of a name with a leading dot at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import pydoc\npydoc.locate('.json')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:12: import pydoc", "2:0-2:21: pydoc.locate('.json')"), "r"),)), True),
+    ("help of a name with a trailing dot at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "help('json.')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:13: help('json.')",), "r"),)), True),
+    ("pydoc.locate of a name with a trailing dot at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import pydoc\npydoc.locate('json.')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:12: import pydoc", "2:0-2:21: pydoc.locate('json.')"), "r"),)), True),
+    ("pydoc.render_doc of a name with a repeated dot at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import pydoc\npydoc.render_doc('json..thing')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:12: import pydoc", "2:0-2:31: pydoc.render_doc('json..thing')"),
+                                       "r"),)), True),
+    ("f-string module name at an allowlisted importer call", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__(f'json')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:19: __import__(f'json')",), "r"),)), True),
+    ("__import__ level keyword written -0 at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('json', level=-0)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:28: __import__('json', level=-0)",), "r"),)),
+     True),
+    ("__import__ fifth argument written +0 at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('json', None, None, (), +0)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:38: __import__('json', None, None, (), +0)",), "r"),)), True),
+    ("starred getattr through dunder call at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr(*(builtins,), '__import__').__call__(''.join(('a', 'b')))\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("2:0-2:65: getattr(*(builtins,), '__import__').__call__(''.join(('a', 'b')))",),
+                                       "r"),)), True),
+    ("double-starred getattr through dunder call at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr(builtins, '__import__', **{}).__call__(''.join(('a', 'b')))\n"),),
+     (), dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                           ("2:0-2:67: getattr(builtins, '__import__', **{}).__call__("
+                                            "''.join(('a', 'b')))",), "r"),)), True),
+    ("getattr with a keyword through dunder call at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr(builtins, name='__import__').__call__(''.join(('a', 'b')))\n"),),
+     (), dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                           ("2:0-2:66: getattr(builtins, name='__import__').__call__("
+                                            "''.join(('a', 'b')))",), "r"),)), True),
+    ("starred getattr reached through its own dunder call at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr.__call__(*(builtins,), '__import__')(''.join(('a', 'b')))\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("2:0-2:65: getattr.__call__(*(builtins,), '__import__')(''.join(('a', 'b')))",),
+                                       "r"),)), True),
+    ("getattr through dunder call reaching __import__ at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr.__call__(builtins, '__import__')('requests')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("2:0-2:52: getattr.__call__(builtins, '__import__')('requests')",), "r"),)),
+     True),
+    ("getattr name as an f-string at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\ngetattr(builtins, f'__import__')(''.join(('a', 'b')))\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("2:0-2:53: getattr(builtins, f'__import__')(''.join(('a', 'b')))",), "r"),)),
+     True),
+    ("subscript key as an f-string at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import builtins\nvars(builtins)[f'__import__'](''.join(('a', 'b')))\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("2:0-2:50: vars(builtins)[f'__import__'](''.join(('a', 'b')))",), "r"),)),
+     True),
+    ("__import__ level keyword written None at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "__import__('json', level=None)\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:30: __import__('json', level=None)",),
+                                       "r"),)), True),
+    ("pydoc.doc through dunder call at an allowlisted site", "import-closure", "tools/t.py",
+     (("tools/t.py", "import pydoc\npydoc.doc.__call__('requests')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:12: import pydoc", "2:0-2:30: pydoc.doc.__call__('requests')"), "r"),)),
+     True),
+    ("literal inside an f-string climbed into its call", "dynamic-import", "tools/t.py",
+     (("tools/t.py", "import builtins\npatch(builtins, f'__import__', x)('requests')\n"),), (),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("2:18-2:28: '__import__'",), "r"),)), True),
 )
 
 # (name, extra rows, scan keyword overrides): each must pass (exit 0); each pins a reading the gate must not widen.
@@ -2228,6 +2391,25 @@ _GREEN_VECTORS = (
      (("tools/t.py", "def f(x):\n    __import__(x); x = 'json'; __import__(x)\n"),),
      dict(allowlist=_FIXTURE_SITES + (("tools/t.py", "f", ("2:4-2:17: __import__(x)", "2:31-2:44: __import__(x)"),
                                        "r"),))),
+    ("plain literal names at importers, each listed",
+     (("tools/t.py", "__import__('json', level=0)\nhelp(' json ')\nimport pydoc\npydoc.locate('json.decoder')\n"
+                     "pydoc.render_doc('json')\n"),),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:27: __import__('json', level=0)", "2:0-2:14: help(' json ')",
+                                        "3:0-3:12: import pydoc", "4:0-4:28: pydoc.locate('json.decoder')",
+                                        "5:0-5:24: pydoc.render_doc('json')"), "r"),))),
+    ("help of a whitespace-padded standard-library name", (("tools/t.py", "help(' json ')\n"),),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE, ("1:0-1:14: help(' json ')",), "r"),))),
+    ("resolve_name of a standard-library module-object name",
+     (("tools/t.py", "import pkgutil\npkgutil.resolve_name('json:loads')\n"),),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:14: import pkgutil", "2:0-2:34: pkgutil.resolve_name('json:loads')"),
+                                       "r"),))),
+    ("import_module of an f-string with a placeholder (a computed name)",
+     (("tools/t.py", "import importlib\nimportlib.import_module(f'json.{x}')\n"),),
+     dict(allowlist=_FIXTURE_SITES + (("tools/t.py", MODULE_SCOPE,
+                                       ("1:0-1:16: import importlib", "2:0-2:36: importlib.import_module(f'json.{x}')"),
+                                       "r"),))),
 )
 
 
@@ -2246,7 +2428,7 @@ def _importer_vectors():
     importer's row must turn its vector green (the self-test removes each in turn)."""
     out = []
     for callee, keywords, _level, kind, owner in LITERAL_IMPORTERS:
-        if kind != "module":
+        if kind == "path":
             continue
         source = ("import %s\n%s" % (owner, owner) if owner else "o") + ".%s(%s='requests')\n" % (callee, keywords[-1])
         refs = tuple(key for key, _scope, _names, _called in dynamic_sites(ast.parse(source), *watched_names()))
@@ -2633,24 +2815,25 @@ MUTANTS = (
     ("literal-name-keyword", "        if keyword.arg in keywords and name is None:\n", "        if False:\n",
      "run_module mod_name keyword at an allowlisted site"),
     ("literal-level-keyword",
-     "        if level is not None and keyword.arg == level[1] and not _is_zero(keyword.value):\n",
-     "        if False:\n", "__import__ at a non-zero level keyword"),
+     "        if level is not None and keyword.arg == level[1]:\n            depth = keyword.value\n",
+     "        if False:\n            depth = keyword.value\n", "__import__ at a non-zero level keyword"),
     ("literal-level-positional",
-     "    if level is not None and len(call.args) > level[0] and not _is_zero(call.args[level[0]]):\n",
-     "    if False:\n", "__import__ at a non-zero level argument"),
+     "    depth = call.args[level[0]] if level is not None and len(call.args) > level[0] else None\n",
+     "    depth = None\n", "__import__ at a non-zero level argument"),
     ("literal-name-absolute", '    if not all(part.isidentifier() for part in spelled.split(".")):\n',
-     "    if False:\n", "import_module of a relative name"),
-    ("literal-path-unresolved", '    if kind != "module" or not (', "    if not (", "run_path of a file path"),
+     "    if False:\n", "literal module name with an empty component at an allowlisted site"),
+    ("literal-path-unresolved", '    if kind == "path":\n        return None, None\n',
+     "    if False:\n        return None, None\n", "run_path of a file path"),
     ("importer-owner", "    if row is None or row[4] is None:\n", "    if True:\n",
      "a local function named like a pydoc helper"),
     ("unreadable-starred", "            starred = any(isinstance(a, ast.Starred) for a in node.args)\n",
      "            starred = False\n", "starred module name at an allowlisted importer call"),
     ("unreadable-double-starred", "            unpacked = any(k.arg is None for k in node.keywords)\n",
      "            unpacked = False\n", "double-starred module name at an allowlisted importer call"),
-    ("unreadable-getattr", "(any(isinstance(a, ast.Starred) for a in node.func.args) or node.func.keywords)", "False",
+    ("unreadable-getattr", "(any(isinstance(a, ast.Starred) for a in callee.args) or callee.keywords)", "False",
      "starred getattr callee at an allowlisted site"),
-    ("unreadable-checked", "        for lineno, text, what in unreadable_calls(tree):\n",
-     "        for lineno, text, what in ():\n", "starred module name at an allowlisted importer call"),
+    ("unreadable-checked", "        for lineno, message in unreadable_calls(tree):\n",
+     "        for lineno, message in ():\n", "starred module name at an allowlisted importer call"),
     # workflow classification and pins
     ("yaml-forbidden-characters", "    if bad is not None:\n", "    if False:\n",
      "bare CR line break after a comment"),
@@ -2785,20 +2968,61 @@ MUTANTS = (
     ("importer-owner-getattr",
      "        func.args[0] if isinstance(func, ast.Call) and _callee_name(func.func) == \"getattr\" else \\\n",
      "        None if False else \\\n", "doc through getattr(pydoc) at an allowlisted site"),
-    ("literal-help-strip", "    spelled = name.value.strip() if _callee == \"help\" else \\\n",
-     "    spelled = name.value if _callee == \"help\" else \\\n",
-     "help of a whitespace-padded name at an allowlisted site"),
-    ("literal-resolve-colon", "        name.value.split(\":\", 1)[0] if _callee == \"resolve_name\" else name.value\n",
-     "        name.value if _callee == \"resolve_name\" else name.value\n",
-     "resolve_name of a module-object name at an allowlisted site"),
-    ("importer-find-spec-name", "    find_spec      name,fullname  -        module  -\n",
-     "    find_spec      fullname       -        module  -\n", "find_spec name keyword at an allowlisted site"),
-    ("unreadable-getattr-keyword", " or node.func.keywords)", " or False)",
+    ("literal-help-strip", "    spelled = name.value.strip() if callee == \"help\" else \\\n",
+     "    spelled = name.value if callee == \"help\" else \\\n",
+     "help of a whitespace-padded standard-library name"),
+    ("literal-resolve-colon", "        name.value.split(\":\", 1)[0] if callee == \"resolve_name\" else name.value\n",
+     "        name.value if callee == \"resolve_name\" else name.value\n",
+     "resolve_name of a standard-library module-object name"),
+    ("importer-find-spec-name", "    find_spec      name,fullname  -        relative  -\n",
+     "    find_spec      fullname       -        relative  -\n", "find_spec name keyword at an allowlisted site"),
+    ("unreadable-getattr-keyword", " or callee.keywords)", " or False)",
      "getattr callee with a keyword at an allowlisted site"),
     ("helper-class-builtin",
      "HELPER_CLASSES = dict(pair.split(\":\") for pair in \"Helper:help _Helper:help\".split())",
      "HELPER_CLASSES = dict(pair.split(\":\") for pair in \"Helper:help\".split())",
      "builtin help helper class instance at an allowlisted site"),
+    # Round-7: what the gate cannot read is a finding (an unreadable literal name, f-string or level; the getattr
+    # refusal after the .__call__ normalisation; an f-string getattr name or subscript key), a relative or computed
+    # f-string request stays unresolved rather than refused, and a literal inside an f-string climbs; each removed
+    # in turn and caught by its vector.
+    ("unreadable-literal-checked", "            problem = _literal_import_name(node, importer)[1]\n",
+     "            problem = None\n", "help of a name with a trailing dot at an allowlisted site"),
+    ("literal-fstring-name",
+     "        return None, \"its module name as an f-string with no placeholder, which the gate does not evaluate\"\n",
+     "        return None, None\n", "f-string module name at an allowlisted importer call"),
+    ("literal-level-unreadable",
+     "        return None, \"a literal module name at the level %s, which is not an integer literal\" % "
+     "ast.unparse(depth)\n",
+     "        return None, None\n", "__import__ level keyword written -0 at an allowlisted site"),
+    ("literal-level-integer",
+     "    if depth is not None and not (isinstance(depth, ast.Constant) and isinstance(depth.value, int)):\n",
+     "    if depth is not None and not isinstance(depth, ast.Constant):\n",
+     "__import__ level keyword written None at an allowlisted site"),
+    ("literal-relative-importers-only", '    if kind == "relative" and spelled.startswith("."):\n',
+     '    if spelled.startswith("."):\n', "pydoc.locate of a name with a leading dot at an allowlisted site"),
+    ("importer-owner-dunder-call", "    func = _transparent(func)\n    row = IMPORTERS.get(_callee_name(func))\n",
+     "    row = IMPORTERS.get(_callee_name(func))\n", "pydoc.doc through dunder call at an allowlisted site"),
+    ("literal-relative-unresolved", "    if kind == \"relative\" and spelled.startswith(\".\"):\n",
+     "    if False:\n", "import_module of a relative name"),
+    ("fstring-placeholder-computed",
+     "    return isinstance(node, ast.JoinedStr) and not any(isinstance(v, ast.FormattedValue) for v in node.values)\n",
+     "    return isinstance(node, ast.JoinedStr)\n",
+     "import_module of an f-string with a placeholder (a computed name)"),
+    ("unreadable-getattr-normalised", "        callee = _transparent(node.func)\n", "        callee = node.func\n",
+     "starred getattr through dunder call at an allowlisted site"),
+    ("callee-dunder-call", "    func = _transparent(func)\n    if isinstance(func, ast.Name):\n",
+     "    if isinstance(func, ast.Name):\n", "getattr through dunder call reaching __import__ at an allowlisted site"),
+    ("unreadable-fstring-getattr",
+     "        elif isinstance(callee, ast.Call) and _callee_name(callee.func) == \"getattr\" and "
+     "len(callee.args) > 1 and \\\n",
+     "        elif False and \\\n", "getattr name as an f-string at an allowlisted site"),
+    ("unreadable-fstring-subscript",
+     "isinstance(callee, ast.Subscript) and \\\n                _placeholder_free(callee.slice):", "False:",
+     "subscript key as an f-string at an allowlisted site"),
+    ("site-fstring-climb",
+     "        while isinstance(parent, (ast.FormattedValue, ast.JoinedStr)):\n",
+     "        while False:\n", "literal inside an f-string climbed into its call"),
 )
 
 
