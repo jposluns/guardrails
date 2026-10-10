@@ -130,6 +130,18 @@ gen_manifest.py at build time).
   An id is a corpus-id (no dot) or a clause-id (exactly one dot). Tombstones and successors are BOTH
   retirement rows; a retired id never returns to a live inventory (resurrection).
 
+  `.aiqt/core/clause-exemptions.toml`, the reviewed record of rule text that carries no clause row on
+  purpose, author-maintained, manifest-covered. An array of `[[exempt]]` tables, each with exactly:
+    corpus-id = "<corpus-id>"   the rule the text sits in
+    text      = "..."           the exempted text, byte-exact (an embedded line-wrap LF kept): one whole
+                                sentence or clause, or a run of them, found exactly once in the rule body
+    reason    = "..."           why the text needs no clause row (a definition, a cross-reference, a
+                                rationale, an example, a scope note); never empty
+  An absent file at the default path reads as no exemption, so deleting it can only add findings, never
+  hide one; a file named with --exemptions must exist. A file that is present but unreadable or not TOML,
+  a top-level key other than `exempt`, and a row whose keys are not exactly these three or whose values are
+  not strings (or whose corpus-id is not a well-formed corpus-id) are malformed input (exit 2).
+
 LEGS (all run at the default step-1 invocation; none needs a manifest):
   ID SCHEME (7.1):      every rule corpus-id under rules-dir appears in the inventory; every clause-id is
                         `<corpus-id>.<ordinal>` with an UNPADDED positive-decimal ordinal (no leading
@@ -154,6 +166,34 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         requires every id that DISAPPEARED since the predecessor inventory to carry exactly
                         one retirement row (zero unexplained disappearances). Without a predecessor that
                         cross-release leg reports NOT APPLICABLE (genesis / step-1 baseline).
+  TEXT COVERAGE:        every sentence or clause of every rule body lies inside the resolved occurrence of
+                        some clause row's canonical-text or inside one recorded exemption. The checked text
+                        is the rule body after the frontmatter and after a first-line `# ` title heading (a
+                        title, not an obligation). The gate cuts it into units at every position the
+                        WHOLE-CLAUSE EDGES grammar above reads as a sentence or clause boundary at enclosure
+                        depth 0 (the same _is_boundary and _enclosures the per-row leg uses; there is no
+                        second tokenizer), drops a bare ';' between two clauses, and reports each unit that
+                        no row covers and no exemption names. An exemption is a finding when its reason is
+                        empty or whitespace-only; when its text is empty, has edge whitespace, no longer
+                        occurs in its rule's body (stale), occurs there more than once, does not begin and
+                        end at a boundary at depth 0, or names no unit; when its corpus-id names no rule
+                        (stale); when it repeats another exemption; and when a clause row already covers a
+                        unit it names (redundant). This closes the hole an id-only completeness leaves:
+                        removing a passage's clause rows and their id-history rows together while the
+                        passage stays in the rule is now a finding, not a clean pass.
+                        CANNOT EVALUATE (exit 2, never a pass): a rule file that cannot be read or is not
+                        UTF-8; a body with no frontmatter; a title heading with no blank line after it; a
+                        line the splitter cannot classify (a heading other than the title, a list item, a
+                        blockquote, a table row, a code fence, an HTML tag or comment, a thematic break or
+                        setext underline, an indented line); a paragraph that ends with an opener still
+                        open (an inch mark, a stray backtick); and a unit with no letter or digit.
+                        RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
+                        when any row's resolved text contains it, whatever obligation that row names, and an
+                        exemption's reason is read by a reviewer, never judged by the gate. The title
+                        heading is never checked, so an obligation written only as the title passes. The
+                        units come from the WHOLE-CLAUSE EDGES grammar, so a cut it reads where no sentence
+                        ends (an abbreviation, a list number) splits one sentence into two units, each of
+                        which must then be covered or exempted.
 
 DEFERRED manifest-SOURCES leg (7.2 + round-10 R10-2 / gemini R9-4): the leg that cross-checks each row's
 source-digest against the manifest's SOURCES entry is OFF by default and reads no manifest. It runs only
@@ -173,15 +213,17 @@ born row's release equals the release under build. A row mis-dated to an old rel
 in-file legs alone; the cross-history and manifest legs cover it at the release gate.
 
   check_clauses.py [--root DIR] [--rules-dir DIR] [--inventory FILE] [--register FILE]
-                   [--prev-inventory FILE] [--genesis] [--with-manifest | --manifest FILE]
+                   [--exemptions FILE] [--prev-inventory FILE] [--genesis] [--with-manifest | --manifest FILE]
   check_clauses.py --self-test    deterministic self-test (synthetic fixtures in a private tempdir)
 
 Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE
-  1  a real finding (a scheme, per-row, cumulative-max, resurrection, or completeness violation, or an
-     inventory row naming a missing or non-UTF-8 source file, which is exactly what this gate asserts against)
-  2  malformed or unreadable required input (the inventory, the register, the rules dir, an unparseable
-     source, or a permission error), fail-closed: an input the gate cannot read never reads as clean.
+  1  a real finding (a scheme, per-row, cumulative-max, resurrection, completeness, or text-coverage
+     violation, including an uncovered rule sentence and a bad exemption, or an inventory row naming a
+     missing or non-UTF-8 source file, which is exactly what this gate asserts against)
+  2  malformed or unreadable required input (the inventory, the register, the rules dir, the exemptions
+     file, an unparseable or unreadable source, rule text the coverage splitter cannot classify, or a
+     permission error), fail-closed: an input the gate cannot read never reads as clean.
 """
 import sys
 
@@ -797,7 +839,7 @@ def _edge_findings(source, begin, finish):
     return problems
 
 
-def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
+def check_rows(root, rows, manifest_sources, rule_sources, rules_dir, row_spans=None):
     """PER-ROW (7.2), Model C. For each row: the source file is read (its whole raw bytes hashed for the
     digest and its text sliced for the window); the [start,end] block resolves inside the file and is
     treated as a locating WINDOW of whole lines; canonical-text occurs EXACTLY ONCE as a contiguous
@@ -815,7 +857,10 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     is not None (the DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES
     entry. Returns a list of finding strings; a required field of the wrong type, including a non-integer or
     boolean start-line/end-line or a source-digest that is not 64 lowercase hex characters, is a GateError
-    (fail-closed). A well-formed-but-wrong digest (correct syntax, wrong value) stays an exit-1 finding."""
+    (fail-closed). A well-formed-but-wrong digest (correct syntax, wrong value) stays an exit-1 finding.
+    When row_spans is a dict, each row whose canonical-text occurs exactly once in its window adds that
+    occurrence's (begin, end) index pair in the decoded source to row_spans[resolved source Path], for the
+    text-coverage leg."""
     findings = []
     digest_cache = {}
     for i, row in enumerate(rows, 1):
@@ -908,6 +953,9 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                                     .format(where, source_path))
                 window_at = len("\n".join(decoded.split("\n")[:start - 1])) + (1 if start > 1 else 0)
                 problems = _edge_findings(decoded, window_at + first, window_at + first + len(text_field))
+                if row_spans is not None:
+                    row_spans.setdefault(resolved, []).append(
+                        (window_at + first, window_at + first + len(text_field)))
                 if problems:
                     findings.append("{}: canonical-text {} in {}; a canonical-text begins and ends at a "
                                     "sentence or clause boundary outside any quotation or bracket, so "
@@ -931,6 +979,244 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                 findings.append("{}: source-digest disagrees with the manifest SOURCES digest for {}"
                                 .format(where, source_path))
     return findings
+
+
+# --- text coverage: every rule sentence lies inside a clause row or a recorded exemption ------------
+
+EXEMPTIONS_REL = ".aiqt/core/clause-exemptions.toml"
+EXEMPTION_KEYS = frozenset({"corpus-id", "text", "reason"})
+_FRONTMATTER_CLOSE = "\n---\n"  # gen_rules.parse_source's closing fence
+_TITLE_RE = re.compile(r"# \S")  # the one heading a rule body opens with: its title, not an obligation
+# a body line the splitter cannot classify, markup the WHOLE-CLAUSE EDGES grammar does not model: a heading
+# (other than the title), a bulleted or numbered list item, a blockquote, a table row, a code fence, an HTML
+# tag or comment, a thematic break or setext underline, and any indented line (an indented code block or a
+# nested item)
+_UNCLASSIFIABLE_LINE_RE = re.compile(
+    r"(?:#|[-*+](?:[ \t]|$)|[0-9]+[.)](?:[ \t]|$)|>|\||```|~~~|<[A-Za-z/!?]|(?:[-*_=][ \t]*){3,}$|[ \t])")
+_CUT_CANDIDATE_RE = re.compile(r"\s+|;")  # a boundary has whitespace at it or sits right before a ';'
+_UNIT_WORD_RE = re.compile(r"\w")  # a unit with no letter or digit is no sentence the splitter knows
+
+
+def _read_rule_text(src):
+    """The decoded text of one rule source for the text-coverage leg. A file that cannot be read or is not
+    UTF-8 is a GateError (cannot evaluate, exit 2), never an empty rule."""
+    try:
+        raw = Path(src).read_bytes()
+    except OSError as exc:
+        raise GateError("cannot read rule source {} for the text-coverage leg ({})".format(src, exc))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GateError("rule source {} is not valid UTF-8, so the text-coverage leg cannot evaluate it "
+                        "({})".format(src, exc))
+
+
+def _refuse_open_enclosure(source, where, still_open):
+    """A paragraph or the file that ends with an opener still open (an inch mark, a stray backtick, a
+    half-open interval) has no cut after that opener, so the splitter cannot classify it: GateError."""
+    if still_open:
+        opener, at = still_open[-1]
+        raise GateError("{} line {}: a paragraph ends with the {!r} opened after {!r} still open, so the "
+                        "text-coverage splitter cannot classify it; cannot evaluate".format(
+                            where, source.count("\n", 0, at) + 1, opener, source[max(0, at - 20):at]))
+
+
+def rule_units(source, where):
+    """Cut one decoded rule source into the units the text-coverage leg checks. Returns (text_start, units):
+    text_start is the index where the checked text begins (after the frontmatter and, when the body's first
+    non-blank line is a `# ` title, after that line), and units is the ordered list of (begin, end) index
+    pairs, one per sentence or clause, with no edge whitespace. The cuts are the positions the WHOLE-CLAUSE
+    EDGES grammar reads as a boundary (_is_boundary) at enclosure depth 0 (_enclosures): the very test both
+    edges of a row's canonical-text must pass, so a row's occurrence is always a run of whole units. A bare
+    ';' between two clauses is no unit. Text the grammar does not model raises GateError (cannot evaluate,
+    exit 2): no frontmatter, a title with no blank line after it, a line _UNCLASSIFIABLE_LINE_RE matches, a
+    paragraph that ends with an opener still open, and a unit with no letter or digit."""
+    if not source.startswith("---\n") or source.find(_FRONTMATTER_CLOSE, 4) == -1:
+        raise GateError("{}: no frontmatter, so the text-coverage leg cannot find the rule body; cannot "
+                        "evaluate".format(where))
+    body = source.find(_FRONTMATTER_CLOSE, 4) + len(_FRONTMATTER_CLOSE)
+    text_start, offset, first, after_title = body, body, True, False
+    for number, line in enumerate(source[body:].split("\n"), source.count("\n", 0, body) + 1):
+        if line.strip():
+            if after_title:
+                raise GateError("{} line {}: the title heading has no blank line after it, so the "
+                                "text-coverage splitter cannot classify {!r}; cannot evaluate".format(
+                                    where, number, line))
+            if first and _TITLE_RE.match(line):
+                text_start, after_title = offset + len(line), True
+            elif _UNCLASSIFIABLE_LINE_RE.match(line):
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (markup "
+                                "the sentence grammar does not model); cannot evaluate".format(where, number, line))
+            first = False
+        else:
+            after_title = False
+        offset += len(line) + 1
+    cuts = {text_start, len(source)}
+    for match in _CUT_CANDIDATE_RE.finditer(source, text_start):
+        pos = match.start()
+        if not _is_boundary(source, pos):
+            continue
+        still_open, _closed = _enclosures(source, pos)
+        if not still_open:
+            cuts.add(pos)
+        elif match.group().count("\n") >= 2 or match.end() == len(source):
+            _refuse_open_enclosure(source, where, still_open)
+    _refuse_open_enclosure(source, where, _enclosures(source, len(source))[0])
+    units = []
+    ordered = sorted(cuts)
+    for begin, end in zip(ordered, ordered[1:]):
+        piece = source[begin:end]
+        text = piece.strip()
+        if not text or text == CLAUSE_SEPARATOR:
+            continue
+        if not _UNIT_WORD_RE.search(text):
+            raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (no letter "
+                            "or digit); cannot evaluate".format(where, source.count("\n", 0, begin) + 1, text))
+        lead = len(piece) - len(piece.lstrip())
+        units.append((begin + lead, begin + lead + len(text)))
+    return text_start, units
+
+
+def load_exemptions(path, required):
+    """Parse the clause exemptions into their list of row tables. An absent file reads as no exemption
+    unless required (a file named on the command line), since an exemption only ever removes a finding;
+    every other unreadable or malformed input is a GateError (exit 2): not TOML, a top-level key other than
+    `exempt`, an `exempt` that is not an array of tables, a row whose keys are not exactly corpus-id, text
+    and reason, a value that is not a string, or a corpus-id that is not a well-formed corpus-id."""
+    try:
+        data = load_toml(path)
+    except FileNotFoundError:
+        if required:
+            raise GateError("the clause exemptions file {} does not exist".format(path))
+        return []
+    except (OSError, ValueError) as exc:
+        raise GateError("cannot read the clause exemptions {} ({})".format(path, exc))
+    if set(data) - {"exempt"}:
+        raise GateError("clause exemptions {}: the only top-level key is 'exempt' (found {})".format(
+            path, sorted(data)))
+    rows = data.get("exempt", [])
+    if not isinstance(rows, list):
+        raise GateError("clause exemptions {}: 'exempt' is not an array of tables".format(path))
+    for i, row in enumerate(rows, 1):
+        where = "clause exemption #{} in {}".format(i, path)
+        if not isinstance(row, dict):
+            raise GateError("{}: not a table ({!r})".format(where, row))
+        if set(row) != EXEMPTION_KEYS:
+            raise GateError("{}: the keys are exactly corpus-id, text and reason (found {})".format(
+                where, sorted(row)))
+        for key in sorted(EXEMPTION_KEYS):
+            if not isinstance(row[key], str):
+                raise GateError("{}: {} is not a string ({!r})".format(where, key, row[key]))
+        if not CID_RE.fullmatch(row["corpus-id"]):
+            raise GateError("{}: corpus-id {!r} is not a well-formed corpus-id".format(
+                where, row["corpus-id"]))
+    return rows
+
+
+def _exemption_findings(i, row):
+    """The findings (exit 1) on one well-typed exemption row by itself: an empty or whitespace-only reason,
+    and a text that is empty, whitespace-only, or begins or ends with whitespace."""
+    findings = []
+    where = "clause exemption #{} ({!r})".format(i, row["corpus-id"])
+    if not row["reason"].strip():
+        findings.append("{}: no reason; an exemption records why its text needs no clause row".format(where))
+    text = row["text"]
+    if not text.strip():
+        findings.append("{}: text is empty or whitespace-only".format(where))
+    elif text[0].isspace() or text[-1].isspace():
+        findings.append("{}: text begins or ends with whitespace; an exemption names whole sentences or "
+                        "clauses".format(where))
+    return findings
+
+
+def _locate_exemption(source, text_start, text):
+    """Find an exemption's text in a rule body. Returns ((begin, end), None) for its one occurrence at or
+    after text_start whose edges are boundaries at enclosure depth 0 (_edge_findings, the row grammar), or
+    (None, problem): no occurrence (stale), more than one, or an edge inside a sentence or enclosure."""
+    first = source.find(text, text_start)
+    count, idx = 0, first
+    while idx != -1:
+        count += 1
+        idx = source.find(text, idx + 1)
+    if count == 0:
+        return None, "its text no longer occurs in the rule body (a stale exemption)"
+    if count > 1:
+        return None, "its text occurs {} times in the rule body; an exemption names one place".format(count)
+    problems = _edge_findings(source, first, first + len(text))
+    if problems:
+        return None, "its text {}; an exemption names whole sentences or clauses".format(" and ".join(problems))
+    return (first, first + len(text)), None
+
+
+def _unknown_corpus_findings(by_corpus, rule_sources):
+    """One finding per exemption whose corpus-id names no rule source (a stale exemption)."""
+    findings = []
+    for corpus in sorted(set(by_corpus) - set(rule_sources)):
+        for i, _row in by_corpus[corpus]:
+            findings.append("clause exemption #{}: corpus-id {!r} names no rule source (a stale "
+                            "exemption)".format(i, corpus))
+    return findings
+
+
+def _uncovered_findings(corpus, src, source, units, covered, exempt):
+    """One finding per unit that no clause row covers and no exemption names."""
+    findings = []
+    for k, (begin, end) in enumerate(units):
+        if not covered[k] and not exempt[k]:
+            findings.append("rule {} ({}) line {}: {!r} lies inside no clause row's canonical-text and "
+                            "no recorded exemption; give it a clause row (with its id-history born row) or an "
+                            "exemption with a reason in {}".format(
+                                corpus, src, source.count("\n", 0, begin) + 1, source[begin:end],
+                                EXEMPTIONS_REL))
+    return findings
+
+
+def check_text_coverage(rule_sources, row_spans, exemptions):
+    """TEXT COVERAGE. rule_sources is the loader's {corpus-id: source Path}; row_spans is check_rows'
+    {resolved source Path: [(begin, end), ...]}; exemptions is load_exemptions' row list. Every unit of
+    every rule body (rule_units) must lie inside some row span or inside one exemption's located text.
+    Returns (findings, (units, covered, exempted)). A rule source that cannot be read or classified raises
+    GateError (cannot evaluate), never a pass."""
+    findings = []
+    by_corpus = {}
+    for i, row in enumerate(exemptions, 1):
+        findings += _exemption_findings(i, row)
+        by_corpus.setdefault(row["corpus-id"], []).append((i, row))
+    findings += _unknown_corpus_findings(by_corpus, rule_sources)
+    n_units = n_covered = n_exempt = 0
+    for corpus, src in sorted(rule_sources.items()):
+        source = _read_rule_text(src)
+        text_start, units = rule_units(source, src)
+        spans = row_spans.get(Path(src).resolve(), [])
+        covered = [any(a <= begin and end <= b for a, b in spans) for begin, end in units]
+        exempt = [False] * len(units)
+        seen = {}
+        for i, row in by_corpus.get(corpus, []):
+            text = row["text"]
+            if not text.strip() or text[0].isspace() or text[-1].isspace():
+                continue  # _exemption_findings has reported it
+            where = "clause exemption #{} ({!r} in {})".format(i, corpus, src)
+            if text in seen:
+                findings.append("{}: repeats exemption #{}".format(where, seen[text]))
+                continue
+            seen[text] = i
+            hit, problem = _locate_exemption(source, text_start, text)
+            if problem is not None:
+                findings.append("{}: {}".format(where, problem))
+                continue
+            inside = [k for k, (begin, end) in enumerate(units) if hit[0] <= begin and end <= hit[1]]
+            if not inside:
+                findings.append("{}: its text names no sentence or clause".format(where))
+            for k in inside:
+                if covered[k]:
+                    findings.append("{}: a clause row already covers {!r}, so the exemption is "
+                                    "redundant; drop it".format(where, source[units[k][0]:units[k][1]]))
+                exempt[k] = True
+        findings += _uncovered_findings(corpus, src, source, units, covered, exempt)
+        n_units += len(units)
+        n_covered += sum(covered)
+        n_exempt += sum(1 for k in range(len(units)) if exempt[k] and not covered[k])
+    return findings, (n_units, n_covered, n_exempt)
 
 
 def load_manifest_sources(path):
@@ -965,15 +1251,18 @@ def load_manifest_sources(path):
 # --- orchestration ----------------------------------------------------------------------------------
 
 def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None, genesis=False,
-        manifest_path=None):
+        manifest_path=None, exemptions_path=None, exemptions_required=False):
     """Run every leg. Returns the exit code 0/1/2. Parameterized on paths so the self-test drives synthetic
-    tempdir fixtures, never the real corpus."""
+    tempdir fixtures, never the real corpus. exemptions_path None reads no exemption file (every rule unit
+    then needs a clause row); exemptions_required makes an absent exemptions file a GateError."""
     try:
         rule_corpus_ids = load_rule_corpus_ids(rules_dir)
         rows = load_inventory(inventory_path)
         born, retired_rows, retired_ids, born_clause_ids, retirements, successors = load_register(register_path)
         prev_ids = load_prev_ids(prev_inventory_path) if prev_inventory_path is not None else None
         manifest_sources = load_manifest_sources(manifest_path) if manifest_path is not None else None
+        exemptions = (load_exemptions(exemptions_path, exemptions_required)
+                      if exemptions_path is not None else [])
 
         if genesis:
             if prev_inventory_path is not None:
@@ -1000,19 +1289,23 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         findings = []
         findings += check_scheme(rows, set(rule_corpus_ids))
         findings += check_no_nesting(rows)
-        findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir)
+        row_spans = {}
+        findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir, row_spans)
         findings += check_cumulative_max(born_clause_ids)
         findings += check_register_integrity(born, retirements, successors)
         findings += check_resurrection(inventory_ids, retired_ids)
         completeness, na = check_completeness(inventory_ids, set(born), retired_rows, live_ids, prev_ids)
         findings += completeness
+        coverage, (n_units, n_covered, n_exempt) = check_text_coverage(rule_corpus_ids, row_spans, exemptions)
+        findings += coverage
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
 
-    print("checked {} clause row(s) against {} rule source(s); cross-release disappearance leg {}; "
-          "manifest-SOURCES leg {}".format(
-              len(rows), len(rule_corpus_ids),
+    print("checked {} clause row(s) against {} rule source(s); text coverage: {} sentence or clause "
+          "unit(s), {} inside a clause row, {} exempted by {} exemption row(s); cross-release disappearance "
+          "leg {}; manifest-SOURCES leg {}".format(
+              len(rows), len(rule_corpus_ids), n_units, n_covered, n_exempt, len(exemptions),
               "NOT APPLICABLE (no predecessor inventory)" if na else "ran",
               "armed" if manifest_path is not None else "deferred (off)"))
     if findings:
@@ -1020,8 +1313,8 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: clause-id scheme, per-row span/text/digest, cumulative-max ordinal, resurrection, and "
-          "completeness all hold")
+    print("PASS: clause-id scheme, per-row span/text/digest, cumulative-max ordinal, resurrection, "
+          "completeness, and text coverage all hold")
     return 0
 
 
@@ -1132,6 +1425,40 @@ def _good_genesis():
 def _run_quiet(**kwargs):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run(**kwargs)
+
+
+def _run_capture(**kwargs):
+    """run() with its printed output captured: (exit code, stdout and stderr text)."""
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(out):
+        code = run(**kwargs)
+    return code, out.getvalue()
+
+
+def _row_leg_quiet(base):
+    """The PER-ROW leg's own verdict on a fixture corpus under base: 0 clean, 1 a finding, 2 malformed input
+    (a GateError). The WHOLE-CLAUSE EDGES vectors use it because each fixture rule holds text beside its one
+    row on purpose, and some hold markup the TEXT COVERAGE leg refuses, so the whole gate would answer about
+    coverage rather than about the row; the TEXT COVERAGE leg has its own vectors."""
+    rules_dir = base / ".aiqt" / "core" / "rules"
+    try:
+        sources = load_rule_corpus_ids(rules_dir)
+        rows = load_inventory(base / ".aiqt" / "core" / "clauses.toml")
+        return 1 if check_rows(base, rows, None, sources, rules_dir) else 0
+    except GateError:
+        return 2
+
+
+def _toml_exemptions(rows):
+    """Exemption rows as `[[exempt]]` tables; a string value is escaped and any other value written as is,
+    so a fixture can carry a wrong-typed value."""
+    out = []
+    for row in rows:
+        out.append("[[exempt]]")
+        for key, value in row.items():
+            out.append('{} = {}'.format(key, '"{}"'.format(_toml_escape(value)) if isinstance(value, str) else value))
+        out.append("")
+    return "\n".join(out)
 
 
 def _paths(base, **overrides):
@@ -1260,6 +1587,24 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             [("ca.1", "cb.1", _semver("1.1.0"))]):
         failures.append("register-integrity wrongly flagged a same-release pass-through fold")
 
+    # TEXT COVERAGE splitter (pure): the units are the row grammar's own boundaries at depth 0, the title
+    # is no unit, a bare ';' is no unit, a sentence end inside a bracket opened mid-sentence is no cut, and
+    # text with no frontmatter is a cannot-evaluate.
+    probe = "---\ncorpus-id: cprobe\n---\n\n# Title words\n\nAlpha holds; beta waits. Gamma ends.\n\nA (bracketed aside. Here.) closes.\n"
+    try:
+        _at, probe_units = rule_units(probe, "probe")
+        got = [probe[b:e] for b, e in probe_units]
+        if got != ["Alpha holds", "beta waits.", "Gamma ends.",
+                   "A (bracketed aside. Here.) closes."]:
+            failures.append("rule_units: unexpected units {!r}".format(got))
+    except GateError as exc:
+        failures.append("rule_units: a plain rule body raised {}".format(exc))
+    try:
+        rule_units("# Title\n\nAlpha holds.\n", "probe")
+        failures.append("rule_units: a body with no frontmatter must be a cannot-evaluate (GateError)")
+    except GateError:
+        pass
+
     # --- end-to-end fixture cases (a synthetic corpus per fail mode in a private tempdir) ----------
     import copy
     import shutil
@@ -1287,7 +1632,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
         def _model_c_case(corpus, obligations, clause_text, start_off, end_off, paragraphs=True):
             """Build a one-corpus, one-clause genesis corpus whose single row spans the obligation lines
             [start_off, end_off] (0-based indices into obligations) with canonical-text clause_text, then
-            run the gate under --genesis and return its exit code. Exercises the Model C window/substring
+            return the per-row leg's verdict (_row_leg_quiet). Exercises the Model C window/substring
             resolution for a sub-line or multi-line obligation (paragraphs=False for adjacent lines)."""
             lines, line_of = _rule_lines(corpus, obligations, paragraphs)
             digest = _sha_of(lines)
@@ -1298,7 +1643,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                    "canonical-text": clause_text, "source-digest": digest}
             born = [(corpus, "1.1.0"), (clause_id, "1.1.0")]
             base = _fresh({corpus: lines}, [row], born)
-            return _run_quiet(**_paths(base, genesis=True))
+            return _row_leg_quiet(base)
 
         try:
             # (0) the passing genesis corpus, with --genesis, is clean (exit 0).
@@ -2271,6 +2616,156 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh(rules, rows, born3, tombstones=tombs3, successors=succs3)
             if _run_quiet(**_paths(base)) != 0:
                 failures.append("same-release pass-through fold: expected exit 0")
+            # (54) TEXT COVERAGE: every sentence or clause of a rule body lies inside a clause row or a
+            # recorded exemption. _cover builds a one-rule corpus whose rows cover the listed (line index,
+            # text) pairs, each with its born row, optionally writes an exemptions file, and returns
+            # (exit code, output). The first vectors are the reported defect: a passage whose clause rows and
+            # id-history rows are removed while its text stays in the rule passed the id-only legs.
+            def _cover(corpus, obligations, covered, exemptions=None, exemptions_text=None, extra_born=(),
+                       tombstones=(), lines=None, **overrides):
+                if lines is None:
+                    lines, line_of = _rule_lines(corpus, obligations)
+                else:
+                    line_of = {k: lines.index(text) + 1 for k, text in enumerate(obligations)}
+                digest = _sha_of(lines)
+                rows, born = [], [(corpus, "1.1.0")]
+                for ordinal, (idx, text) in enumerate(covered, 1):
+                    rows.append({"clause-id": "{}.{}".format(corpus, ordinal), "corpus-id": corpus,
+                                 "source-path": ".aiqt/core/rules/{}.md".format(corpus),
+                                 "start-line": line_of[idx], "end-line": line_of[idx],
+                                 "canonical-text": text, "source-digest": digest})
+                    born.append(("{}.{}".format(corpus, ordinal), "1.1.0"))
+                base = _fresh({corpus: lines}, rows, born + list(extra_born), tombstones=tombstones)
+                kw = {"genesis": not tombstones}
+                if exemptions is not None or exemptions_text is not None:
+                    kw["exemptions_path"] = base / EXEMPTIONS_REL
+                    kw["exemptions_path"].write_text(
+                        exemptions_text if exemptions_text is not None else _toml_exemptions(exemptions),
+                        encoding="utf-8")
+                kw.update(overrides)
+                return _run_capture(**_paths(base, **kw))
+
+            two = ["Alpha holds the lease.", "Beta logs every wait."]
+            uncovered = "lies inside no clause row"
+            cover_vectors = [
+                ("both sentences carry a row", "ccova1", two, [(0, two[0]), (1, two[1])], {}, 0, ""),
+                ("a passage stays while its clause row and id-history row are removed", "ccova2", two,
+                 [(0, two[0])], {}, 1, uncovered),
+                ("a passage stays while its clause row is retired by a tombstone", "ccova3", two, [(0, two[0])],
+                 {"extra_born": [("ccova3.2", "1.1.0")], "tombstones": [("ccova3.2", "1.2.0")]}, 1, uncovered),
+                ("the passage removed together with its rows and history", "ccova4", two[:1], [(0, two[0])], {},
+                 0, ""),
+                ("an exemption with a reason", "ccova5", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccova5", "text": two[1], "reason": "A rationale."}]}, 0, ""),
+                ("an exemption with an empty reason", "ccova6", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccova6", "text": two[1], "reason": ""}]}, 1, "no reason"),
+                ("an exemption with a whitespace-only reason", "ccova7", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccova7", "text": two[1], "reason": " \t "}]}, 1, "no reason"),
+                ("an exemption with no reason key", "ccova8", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccova8", "text": two[1]}]}, 2, "keys are exactly"),
+                ("an exemption whose reason is not a string", "ccova9", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccova9", "text": two[1], "reason": 7}]}, 2, "not a string"),
+                ("an exemption naming text the rule no longer holds", "ccovb1", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions": [{"corpus-id": "ccovb1", "text": "Gamma is gone.", "reason": "Gone."}]}, 1,
+                 "stale exemption"),
+                ("an exemption left behind when its sentence is reworded", "ccovb2",
+                 [two[0], "Beta logs each wait."], [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovb2", "text": two[1], "reason": "A rationale."}]}, 1,
+                 "stale exemption"),
+                ("an exemption naming a rule that does not exist", "ccovb3", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions": [{"corpus-id": "cgone1", "text": two[1], "reason": "A rationale."}]}, 1,
+                 "names no rule source"),
+                ("an exemption naming text a clause row covers", "ccovb4", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions": [{"corpus-id": "ccovb4", "text": two[1], "reason": "A rationale."}]}, 1,
+                 "redundant"),
+                ("an exemption whose text occurs twice", "ccovb5", [two[0], "Beta waits. Beta waits."], [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovb5", "text": "Beta waits.", "reason": "A rationale."}]}, 1,
+                 "occurs 2 times"),
+                ("an exemption cut inside a sentence", "ccovb6", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovb6", "text": "logs every wait.", "reason": "A rationale."}]},
+                 1, "names whole sentences"),
+                ("an exemption repeated", "ccovb7", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovb7", "text": two[1], "reason": "A rationale."},
+                                 {"corpus-id": "ccovb7", "text": two[1], "reason": "A rationale."}]}, 1, "repeats exemption"),
+                ("an exemption that names only a ';'", "ccovb8", ["Alpha holds the lease; beta reads it."],
+                 [(0, "Alpha holds the lease"), (0, "beta reads it.")],
+                 {"exemptions": [{"corpus-id": "ccovb8", "text": ";", "reason": "A rationale."}]}, 1,
+                 "names no sentence or clause"),
+                ("an exemption with edge whitespace", "ccovb9", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovb9", "text": two[1] + " ", "reason": "A rationale."}]}, 1,
+                 "begins or ends with whitespace"),
+                ("an exemption with empty text", "ccovc1", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions": [{"corpus-id": "ccovc1", "text": "", "reason": "A rationale."}]}, 1,
+                 "empty or whitespace-only"),
+                ("an exemption of a whole sentence of two clauses", "ccovc2", [two[0], "Beta logs it; gamma reads it."],
+                 [(0, two[0])], {"exemptions": [{"corpus-id": "ccovc2", "text": "Beta logs it; gamma reads it.",
+                                              "reason": "A rationale."}]}, 0, ""),
+                ("a row over one clause leaves the other clause of its sentence uncovered", "ccovc3",
+                 ["Alpha holds the lease; beta reads it."], [(0, "Alpha holds the lease")], {}, 1, uncovered),
+                ("a row over one clause and an exemption over the other", "ccovc4",
+                 ["Alpha holds the lease; beta reads it."], [(0, "Alpha holds the lease")],
+                 {"exemptions": [{"corpus-id": "ccovc4", "text": "beta reads it.", "reason": "A rationale."}]}, 0,
+                 ""),
+                ("an exemptions file with an unknown top-level key", "ccovc5", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions_text": "other = 1\n"}, 2, "only top-level key"),
+                ("an exemptions file whose exempt is not an array of tables", "ccovc6", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_text": "exempt = 7\n"}, 2, "not an array of tables"),
+                ("an exemptions file that is not TOML", "ccovc7", two, [(0, two[0]), (1, two[1])],
+                 {"exemptions_text": "[[exempt]\n"}, 2, "cannot read the clause exemptions"),
+                ("an exemption with an extra key", "ccovc8", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "ccovc8", "text": two[1], "reason": "A rationale.", "note": "x"}]},
+                 2, "keys are exactly"),
+                ("an exemption with a malformed corpus-id", "ccovc9", two, [(0, two[0])],
+                 {"exemptions": [{"corpus-id": "Bad", "text": two[1], "reason": "A rationale."}]}, 2,
+                 "not a well-formed corpus-id"),
+            ]
+            # CANNOT EVALUATE: a line the splitter cannot classify, an opener left open at a paragraph end,
+            # and a unit with no letter or digit are exit 2. Each fixture's prose is covered by a row, so
+            # without the refusal the leg would report the markup as uncovered text (exit 1), never 0.
+            for k, markup in enumerate(["- beta item", "* beta item", "+ beta item", "1. beta item", "2) beta item",
+                                        "> beta quote", "| beta | cell |", "```", "~~~", "## Beta heading",
+                                        "<!-- beta -->", "<div>beta</div>", "    beta indented",
+                                        "\tbeta indented", "---", "***", "==="], 1):
+                cover_vectors.append(("an unclassifiable line {!r}".format(markup), "ccovm{}".format(k),
+                                      [two[0], markup], [(0, two[0])], {}, 2, "cannot classify"))
+            cover_vectors += [
+                ("an inch mark leaves a quotation open at the paragraph end", "ccovn1",
+                 [two[0], 'Use a 3" pipe.'], [(0, two[0])], {}, 2, "still open"),
+                ("a stray backtick leaves a code span open at the paragraph end", "ccovn2",
+                 [two[0], "Press the ` key."], [(0, two[0])], {}, 2, "still open"),
+                ("a unit with no letter or digit", "ccovn3", [two[0], "Stop. ... Go."],
+                 [(0, two[0]), (1, "Stop."), (1, "Go.")], {}, 2, "no letter or digit"),
+                ("a title with no blank line after it", "ccovn4", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn4", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                           two[0]]}, 2, "no blank line after it"),
+                ("a second heading", "ccovn5", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn5", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                           "", "# Another title", "", two[0]]}, 2, "cannot classify"),
+                ("a body with no title is checked whole", "ccovn6", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn6", "origin: pack", "slug: fixture", "---", "", two[0]]}, 0, ""),
+                ("an exemptions file named on the command line that does not exist", "ccovn7", two,
+                 [(0, two[0]), (1, two[1])], {"exemptions_path": Path("/nonexistent-aiqt-dir/clause-exemptions.toml"),
+                                              "exemptions_required": True}, 2, "does not exist"),
+                ("an absent default exemptions file reads as no exemption", "ccovn8", two, [(0, two[0])],
+                 {"exemptions_path": Path("/nonexistent-aiqt-dir/clause-exemptions.toml")}, 1, uncovered),
+            ]
+            for label, corpus, obligations, covered, extra, want, needle in cover_vectors:
+                got, out = _cover(corpus, obligations, covered, **extra)
+                if got != want or needle not in out:
+                    failures.append("text coverage, {} ({}): expected exit {} naming {!r}, got exit {}: "
+                                    "{}".format(label, corpus, want, needle, got, out.strip()[-300:]))
+
+            # The leg reads every rule itself and fails closed on one it cannot read: a missing file, a
+            # directory, and a file that is not UTF-8 each raise GateError (cannot evaluate), never a pass.
+            unreadable = base_tmp / "unreadable"
+            (unreadable / "dir.md").mkdir(parents=True)
+            (unreadable / "latin1.md").write_bytes(b"---\ncorpus-id: clatin\n---\n\nCaf\xe9 holds.\n")
+            for name in ("missing.md", "dir.md", "latin1.md"):
+                try:
+                    check_text_coverage({"cunrd1": unreadable / name}, {}, [])
+                    failures.append("text coverage: an unreadable rule source ({}) must raise GateError".format(name))
+                except GateError:
+                    pass
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -2319,7 +2814,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "word, or a bare sentence end before an opener, is no sentence end, and a closer is no next "
               "start), each boundary "
               "sub-predicate and each quote and bracket kind has its own vector, the disclosed fail-closed "
-              "over-fires are refused, and the disclosed residuals pass)"
+              "over-fires are refused, and the disclosed residuals pass; and the text-coverage leg: a passage "
+              "whose clause rows and id-history rows are removed, or retired, while its text stays fails, an "
+              "exemption with no reason, a stale exemption (text gone, rule gone), and a redundant, repeated, "
+              "ambiguous, cut or empty exemption fail, a malformed exemptions file and every unclassifiable "
+              "or unreadable rule text is a cannot-evaluate (exit 2), and covered or exempted text passes)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
@@ -2331,10 +2830,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
 
 def _parse_args(argv):
     opts = {"root": None, "rules_dir": None, "inventory": None, "register": None, "prev_inventory": None,
-            "genesis": False, "manifest": None, "with_manifest": False, "self_test": False}
+            "genesis": False, "manifest": None, "with_manifest": False, "self_test": False,
+            "exemptions": None}
     i = 0
     single = {"--root": "root", "--rules-dir": "rules_dir", "--inventory": "inventory",
-              "--register": "register", "--prev-inventory": "prev_inventory", "--manifest": "manifest"}
+              "--register": "register", "--prev-inventory": "prev_inventory", "--manifest": "manifest",
+              "--exemptions": "exemptions"}
     while i < len(argv):
         arg = argv[i]
         if arg in single and i + 1 < len(argv):
@@ -2351,8 +2852,8 @@ def _parse_args(argv):
             i += 1
         else:
             print("usage: check_clauses.py [--root DIR] [--rules-dir DIR] [--inventory FILE] "
-                  "[--register FILE] [--prev-inventory FILE] [--genesis] [--with-manifest | --manifest FILE] "
-                  "| --self-test", file=sys.stderr)
+                  "[--register FILE] [--exemptions FILE] [--prev-inventory FILE] [--genesis] "
+                  "[--with-manifest | --manifest FILE] | --self-test", file=sys.stderr)
             return None
     return opts
 
@@ -2373,7 +2874,9 @@ def main():
         manifest = Path(opts["manifest"])
     elif opts["with_manifest"]:
         manifest = root / ".aiqt" / "manifest.toml"
-    return run(root, rules_dir, inventory, register, prev, opts["genesis"], manifest)
+    exemptions = Path(opts["exemptions"]) if opts["exemptions"] else root / EXEMPTIONS_REL
+    return run(root, rules_dir, inventory, register, prev, opts["genesis"], manifest, exemptions,
+               exemptions_required=bool(opts["exemptions"]))
 
 
 if __name__ == "__main__":
