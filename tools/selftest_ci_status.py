@@ -19,9 +19,13 @@ malformed expectation manifest (a suite container that is not an array of
 tables included), a ci-status.sh whose jq program cannot be extracted, a duplicate check id, and a
 diagnostic or result that cannot be printed or flushed. The execution set is reconciled against the
 manifest only when no check recorded a harness error, because an unevaluated check would also be
-reported missing. Bad arguments, a Python older than 3.14, a
-missing tomllib, and a refused arming of the execution-report finalizer are refused before any check
-runs, so they always exit 2.
+reported missing. Bad arguments, a Python older than 3.14 that can start this file, a missing
+tomllib, and a refused arming of the execution-report finalizer are refused before any check runs, so
+they exit 2. These exits hold while the tool's output (its diagnostic on stderr, and what it prints on
+stdout) can be written and flushed. A failing output stream can change the exit status and can lose
+output; a separate fix in progress addresses this. An older interpreter that cannot start this file
+fails with Python's own error first, and that exit is Python's: 1 for a compile failure, which reads as
+an assertion failure, or 2 for an interpreter predating -I when run with it.
 
 Reporting can never escape or change the rule (under --execution-report, a refusal of the report
 finalizer, described below, ends the run with 2 after reporting). An uncaught exception is recorded
@@ -732,11 +736,12 @@ def _run_checks():
         malformed_run_seen.append((rc, "malformed workflow run record" in output))
         check("ci/single-source-malformed-run-fail-closed", malformed_run_seen, [(2, True)] * 2)
 
-        # Round 2 MAJOR: completeness counts unique run IDs, not rows. A run ID listed twice by one source
-        # means offset pagination shifted between page reads and some other run went unseen: a scan page
-        # [ok, ok] with total_count 2 must not be green, two copies of another commit's run must not read
-        # as "no run", a duplicate on full pages that the age bound ended must not pass, and neither may
-        # a duplicate within the filtered source. Each is re-read once in one-shot mode, then exit 2.
+        # Round 2 MAJOR: a run ID listed twice by one source, in any shape other than the page shift merged
+        # by the checks below, means offset pagination shifted between page reads in a way that may hide
+        # another run: a scan page [ok, ok] with total_count 2 must not be green, two copies of another
+        # commit's run must not read as "no run", a duplicate on full pages that the age bound ended must
+        # not pass, and neither may a duplicate within the filtered source. Each is re-read once in
+        # one-shot mode, then exit 2.
         old_tail = other_commits[1:] + [dict(old_commits[0])]
         busy = [workflow_run(8000 + index, "completed", "success", "Busy run {}".format(index),
                              "e" * 40) for index in range(150)]
@@ -748,19 +753,112 @@ def _run_checks():
                 ([{"filtered": [page([success_a])],
                    "scan": [page(old_tail, 300), page(old_commits, 300)]}], "unfiltered"),
                 ([{"filtered": [page([success_a, success_a], 1)], "scan": [page([success_a])]}],
-                 "head_sha-filtered"),
-                # Round 3: a run created between the two page reads, on the first read and on the
-                # re-read alike, repeats runs[99] on page 2. Disclosed availability cost: exit 2.
-                ([{"filtered": [page([success_a])],
-                   "scan": [page(busy[:100], 150), page(busy[99:], 151)]}], "unfiltered")):
+                 "head_sha-filtered")):
             rc, output, calls = fixture.invoke(polls)
             duplicates.append(
                 (rc, calls, "duplicate run id within the {} listing".format(source) in output,
                  "no workflow run registered" in output))
-        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 5)
+        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 4)
 
-        # A scan that reached the end of the listing reconciles unique run IDs against total_count even
-        # when every page's own count is in range.
+        # TOOL-CI-STATUS-DUP-RUN-ID (A): runs created between two page reads push the previous page's
+        # trailing rows onto the next page. Repeated rows that are the next page's leading rows, identical
+        # in every field, and no more than the rise in total_count are merged, not an API error, so a read
+        # that merged them reports what it saw: this commit's failed run repeated across a short last page
+        # fails on the FIRST read, reported once; this commit's not-terminal run beside a repeat on full
+        # pages ended by the age bound is not green on the first read; and an all-success merged read is
+        # re-read once, each of this commit's two repeated runs reported once per read, and a clean re-read
+        # passes.
+        recent = [workflow_run(8200 + index, "completed", "success", "Recent run {}".format(index),
+                               "e" * 40) for index in range(200)]
+        failed_row = "Repository quality checks: completed / failure"
+        shifted_note = "shifted between page reads, so this all-success read is incomplete"
+        shifted_read = {"filtered": [page([])],
+                        "scan": [page(busy[:98] + [success_a, success_b], 150),
+                                 page([success_a, success_b] + busy[98:148], 152)]}
+        clean_read = {"filtered": [page([])],
+                      "scan": [page(busy[:98] + [success_a, success_b], 150), page(busy[98:148], 150)]}
+        merged = []
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a, failed_b])],
+            "scan": [page(busy[:99] + [failed_b], 150), page([failed_b] + busy[99:149], 151)]}])
+        merged.append((rc, calls, output.count(failed_row), "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([{
+            "filtered": [page([success_a, pending_b])],
+            "scan": [page(recent[:100], 400), page(recent[99:199], 401), page(old_commits, 401)]}])
+        merged.append((rc, calls, fixture.scan_pages, "not terminal" in output,
+                       "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([shifted_read, clean_read])
+        merged.append((rc, calls, output.count("Web generator health: completed / success"),
+                       output.count("Repository quality checks: completed / success"),
+                       shifted_note + "; re-reading once" in output, "duplicate run id" in output))
+        check("ci/scan-identical-shift-repeat-merged", merged,
+              [(1, 1, 1, False), (1, 1, [1, 2, 3], True, False), (0, 2, 2, 2, True, False)])
+
+        # PR #486 QA round 1 MEDIUM-1: a run moving down across a page boundary offsets one moving up, so
+        # the repeat stays within the rise while the run that moved up is skipped. Page 1 holds runs
+        # 1001-1100 (total_count 320); before page 2 is read one run is created at the head, this commit's
+        # failed run 1151 moves above the boundary, and run 1021 moves below the scanned range, so page 2
+        # (total_count 321) starts with a repeat of run 1100 and run 1151 is on no page read; page 3 is
+        # older than the bound, and the filtered source drops the failed run. The parent commit of this
+        # fix exits 0 here. A merged read is never a pass: one-shot mode re-reads it once and a second
+        # merged all-success read is exit 2; a re-read that sees run 1151 fails; under --wait a merged
+        # read never settles, and one between clean reads restarts the settle count.
+        first_rows = [workflow_run(1001 + index, "completed", "success", "Listing run {}".format(index),
+                                   "e" * 40) for index in range(100)]
+        later_rows = [workflow_run(run_id, "completed", "success", "Listing run {}".format(run_id),
+                                   "e" * 40) for run_id in range(1101, 1202) if run_id != 1151]
+        moved_failure = workflow_run(1151, "completed", "failure", "Moved quality run", head_sha)
+        offsetting_read = {"filtered": [page([success_a])],
+                           "scan": [page(first_rows, 320), page([first_rows[99]] + later_rows[:99], 321),
+                                    page(old_commits, 321)]}
+        settled_read = {"filtered": [page([success_a])],
+                        "scan": [page([moved_failure] + first_rows[:20] + first_rows[21:], 321),
+                                 page(later_rows[:100], 321), page(old_commits, 321)]}
+        never_passes = []
+        rc, output, calls = fixture.invoke([offsetting_read])
+        never_passes.append((rc, calls, "ERROR: the unfiltered listing " + shifted_note in output,
+                             "duplicate run id" in output))
+        rc, output, calls = fixture.invoke([offsetting_read, settled_read])
+        never_passes.append((rc, calls, "Moved quality run: completed / failure" in output))
+        rc, output, calls = fixture.invoke([shifted_read], wait=True, timeout="90")
+        never_passes.append((rc, calls, "TIMEOUT after 90s; the unfiltered listing " + shifted_note in output))
+        rc, output, calls = fixture.invoke([clean_read] * 4 + [shifted_read] + [clean_read] * 5, wait=True)
+        never_passes.append((rc, calls))
+        check("ci/scan-shift-never-passes", never_passes,
+              [(2, 2, True, False), (1, 2, True), (1, 7, True), (0, 10)])
+
+        # (B): a repeated row that differs from the row it repeats stays an API error, re-read once in
+        # one-shot mode, then exit 2: another commit's run whose status, conclusion, or URL changed, and
+        # this commit's run whose creation time changed (no other check compares creation times).
+        conflicting = []
+        for earlier, later in (
+                (busy[99], dict(busy[99], status="in_progress", conclusion=None)),
+                (busy[99], dict(busy[99], conclusion="failure")),
+                (busy[99], dict(busy[99], html_url="https://example.invalid/runs/other")),
+                (success_b, dict(success_b, created_at=iso(COMMIT_TIME + 601)))):
+            rc, output, calls = fixture.invoke([{
+                "filtered": [page([success_a])],
+                "scan": [page(busy[:99] + [earlier], 150), page([later] + busy[100:], 151)]}])
+            conflicting.append((rc, calls, "duplicate run id within the unfiltered listing" in output))
+        check("ci/scan-conflicting-shift-repeat-fail-closed", conflicting, [(2, 2, True)] * 4)
+
+        # (C): a repeat that the rise in total_count does not cover stays an API error, on a short last
+        # page whose row count matches total_count and on full pages ended by the age bound; so does a
+        # repeat of a row that is not the earlier page's trailing row, and repeated rows in another order
+        # than the earlier page's trailing rows.
+        unexplained = []
+        for scan in ([page(busy[:100], 151), page(busy[99:], 151)],
+                     [page(recent[:100], 400), page(recent[99:199], 400), page(old_commits, 400)],
+                     [page(busy[:100], 150), page([busy[98]] + busy[100:], 151)],
+                     [page(busy[:100], 150), page([busy[99], busy[98]] + busy[100:], 152)]):
+            rc, output, calls = fixture.invoke([{"filtered": [page([success_a])], "scan": scan}])
+            unexplained.append(
+                (rc, calls, "duplicate run id within the unfiltered listing" in output))
+        check("ci/scan-unexplained-shift-repeat-fail-closed", unexplained, [(2, 2, True)] * 4)
+
+        # A scan that reached the end of the listing reconciles the rows it read (a merged repeat counts as
+        # the run created at the head that pushed it down) against total_count even when every page's own
+        # count is in range.
         rc, output, _calls = fixture.invoke([{
             "filtered": [page([success_a])], "scan": [page([success_a], 2)]}])
         check("ci/scan-end-unique-count-fail-closed",

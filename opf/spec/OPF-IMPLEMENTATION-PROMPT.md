@@ -39,29 +39,29 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`6850500e694d7e16c8259467e3518c09b6dcb744` of `jposluns/guardrails`. Read them from the pinned URLs,
+`121f57b37221e2e334fbdb852fad15fa4790c0c0` of `jposluns/guardrails`. Read them from the pinned URLs,
 not from a branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `245cb883fb4c3b948b8c7fdb300b6f4bd5c551174776642bc82f29ea5672e885` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `63f14967a15c1f165cef348c06619ddc3b128b44cc61fd5a144fdcf7ebc4be96` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `69f62d00fa86a2d19576717df0356ddcbd1c56367586199250b28d370f90b16a` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/121f57b37221e2e334fbdb852fad15fa4790c0c0/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -86,9 +86,11 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
-  fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
-  and completion), which a fresh start does not perform, so there are no import prompts to run.
+  `version = "0.3.0"`) lists one member, `flow/SKILL.md`, an operating-loop skill for an assistant
+  that is not an import prompt and that this prompt does not use. The pack has two roles in the
+  specification, and this fresh start needs neither. Its prompts drive post-adoption import
+  (section 14.1, One approval and completion), which a fresh start does not perform, so there are
+  no import prompts to run.
   Separately, section 14.1 says every `opf.adoption.plan/v2` plan MUST bind "the version and digest
   of the prompt pack". This prompt reads section 14 as not requiring an adoption plan for a scaffold
   with nothing to disposition (open point 14); if the maintainer rules otherwise, the plan binds the
@@ -153,8 +155,9 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   generation, implements no section 9.2 upgrade and no legacy-state grading, and refuses an older
   store or listed legacy state through an admission check. This prompt builds an upgrade-capable
   implementation: step 6 grades legacy state and step 8 implements the upgrade. Section 16.1 says
-  that an implementation that declares no class "MUST be treated as upgrade-capable, and every
-  upgrade requirement binds it". Declare, in the documentation of each release and in every
+  that an implementation whose declaration lacks only its class "MUST be treated as
+  upgrade-capable, and every upgrade requirement binds it". Declare, in the documentation of each
+  release and in every
   conformance report you emit, your release identity, the class `upgrade-capable`, and the
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
   (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
@@ -388,7 +391,7 @@ conformance claim (checklist item 19) until the maintainer rules.
     the upgrade from 1.0.0, composed or staged, could not reach the validator VALID that section 9.2
     requires without staging its files, which section 9.2 forbids. Ask the maintainer to rule on
     this reading and on the open point 21 message together. A `HEAD` manifest that the second
-    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "an untracked or
+    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "An untracked or
     ignored `.working/` tree" without separating managed files from others, so this reading counts
     every file under `.working/`; the narrower alternative, counting only machine-store sources and
     declared views, is the maintainer's to choose instead. Rotation (step 12) gets no exception: the
@@ -694,7 +697,7 @@ conformance claim (checklist item 19) until the maintainer rules.
       reference of a legacy clean record: its field, its form, or how the validator confirms that it
       records the omission.
     - The base field names of a 1.0.0 manifest. The section 9 example marks `layout` as "(was
-      `layout_profile`)", and OPF-QUICKSTART.md lists that rename beside the retirement of
+      layout_profile)", and OPF-QUICKSTART.md lists that rename beside the retirement of
       `devprocess`, but the section 9.2 delta from 1.0.0 carries "every other base field over
       unchanged" and renames no field. The pinned sources do not settle whether a 1.0.0
       `[devprocess]` table carries `layout_profile` or `layout`, so the 1.0.0 fixtures cannot be
@@ -727,13 +730,13 @@ conformance claim (checklist item 19) until the maintainer rules.
     `done`", and does not say whether that also satisfies the receipt obligation. This prompt's
     reading: it does not, so the upgrade keeps refusing on that item; ask the maintainer to rule.
 27. **Manifest registration of the imported leaves.** Section 4.2 says the imported files are
-    "registered managed leaves beside the clean-series files, using the same enabled-type roster"
-    and that "Their manifest, emitter, upgrade and containment registrations MUST agree", and the
-    section 9.2 delta includes "registration". Neither the section 9 example nor any other section
-    shows a manifest key for that registration. This prompt's reading: the manifest registration is
-    the enabled type's `[types.<name>]` row itself, so neither step 3 nor the upgrade writes a
-    further key for it. If the maintainer rules that a key is needed, add it to the step 3 manifest,
-    to init, and to the step 8 allowed delta.
+    "registered managed leaves beside the clean-series files, using the same enabled-type roster
+    except `legacy_fragment`" and that "Their manifest, emitter, upgrade and containment
+    registrations MUST agree", and the section 9.2 delta includes "registration". Neither the
+    section 9 example nor any other section shows a manifest key for that registration. This
+    prompt's reading: the manifest registration is the enabled type's `[types.<name>]` row itself,
+    so neither step 3 nor the upgrade writes a further key for it. If the maintainer rules that a
+    key is needed, add it to the step 3 manifest, to init, and to the step 8 allowed delta.
 28. **Which withdrawals leave the post-upgrade validator below VALID, and their remedies.** Section
     9.2 says the upgrade MUST refuse "Where a withdrawn authority would leave the post-upgrade
     doctor below VALID", and names one case, the receipt-stripped `done` item, and one general
@@ -1036,29 +1039,30 @@ Build the primitives every later step relies on.
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
 - The class declaration check. Read the declaration file of "Choices to make before you start"
-  from the running release and check it. Section 16.1 states three rules for the declaration: "An
+  from the running release and check it. Section 16.1 states these rules for the declaration: "An
   implementation MUST declare, in the documentation of each release and in every conformance
   report it emits, its release identity, its class, and its supported `spec_version`, homes
-  generation, and worklog storage generation. An implementation that declares no class MUST be
-  treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
+  generation, and worklog storage generation. An implementation whose declaration lacks only its
+  class MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
+  malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
+  store operation. A declaration that is absent, or that omits its release identity, its
+  `spec_version`, its homes generation, or its worklog storage generation, is malformed rather than
+  one that declares no class: it MUST yield cannot-evaluate and MUST NOT authorize any store
   operation." The specification defines no format for the declaration and does not define the
-  three failing cases, so the cases below other than no class and an absent file are this prompt's
-  reading, yours to confirm with the maintainer. Every command of yours that reads, grades or writes
-  a store, `opf init` and the step 13 and step 14 checks included, runs this check before it
-  resolves, reads or writes any store, and on cannot-evaluate it stops with exit 2 and performs no
-  store operation.
+  three failing cases beyond an absent declaration and one that omits a required field, so the
+  cases below other than no class, an absent file and a file that lacks the release identity, the
+  `spec_version` or a generation are this prompt's reading, yours to confirm with the maintainer.
+  Every command of yours that reads, grades or writes a store, `opf init` and the step 13 and step
+  14 checks included, runs this check before it resolves, reads or writes any store, and on
+  cannot-evaluate it stops with exit 2 and performs no store operation.
   The check gives each declaration one of these outcomes:
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed, as a later revision of section 16.1 states: "A declaration that is absent, or that
-    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
-    generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate
-    and MUST NOT authorize any store operation"; section 16.1 at the pinned commit does not yet name
-    the absent case.
-    Cannot-evaluate.
+    malformed, as section 16.1 states: "A declaration that is absent, or that omits its release
+    identity, its `spec_version`, its homes generation, or its worklog storage generation, is
+    malformed rather than one that declares no class". Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
@@ -1071,9 +1075,8 @@ Build the primitives every later step relies on.
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
-    absent file, because that file declares nothing at all and so lacks the release identity,
-    `spec_version` and generations that the first rule also requires, which makes it malformed under
-    the third rule rather than a declaration that omits only its class.
+    absent file: section 16.1 limits it to a declaration that lacks only its class, and rules an
+    absent declaration malformed.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 
@@ -1185,8 +1188,8 @@ record).
   clean namespace (for example `BI`) and a quoted key per imported namespace (for example
   `"imported:BI"`). A genuinely first adoption MAY start at zero; counters are never reset, IDs are
   never reused, and rotation, index rewrites and relocation never touch the file (section 8.2).
-  Section 9.2 shows imported counter rows added at zero during the 1.3.0 upgrade; write them at
-  zero at initialization so each series has its own value.
+  Section 4.2 says "A 1.3.0 `opf init` MUST write at zero the imported counter row of each type
+  that has an imported leaf", so write them at zero at initialization.
 - **version.toml.** `schema = 1`, then append-only, immutable `[[release]]` rows (`version`, the
   SemVer version string, unique in the ledger; `date`; `worklog_span`; `coverage_digest`; and the
   optional `imported` flag, which a fresh store never sets) and `[[summary]]` rows (`covers`,
@@ -1421,11 +1424,13 @@ containment.
 - Counter monotonicity is two checks, each run per series and per namespace (section 8.2). The
   bounds check: every ID lies within its counter (section 5.7 says doctor "checks store-wide ID
   uniqueness and that every ID lies within its counter"), and `counters.toml` holds a row for every
-  clean and imported namespace of every enabled type, the imported rows only where the store is
-  graded at 1.3.0 (open point 21); a missing row is a finding naming its series and namespace, even
-  when that namespace holds no ID. That presence check is this prompt's reading of section 8.2,
-  which says `counters.toml` "MUST hold independent monotonic high-water values per series and
-  namespace", and it needs no prior snapshot. The monotonicity check: section 8.2 says
+  clean namespace of every enabled type and, only where the store is graded at 1.3.0 (open point
+  21), for every imported namespace of every enabled type except `legacy_fragment`, which section
+  4.2 says "has no imported leaf and no imported counter row"; a missing row is a finding naming its
+  series and namespace, even when that namespace holds no ID, and so is an `"imported:LF"` row.
+  That presence check is this prompt's reading of section 8.2, which says `counters.toml` "MUST
+  hold independent monotonic high-water values per series and namespace", and it needs no prior
+  snapshot. The monotonicity check: section 8.2 says
   `counters.toml` "MUST hold independent monotonic high-water values per series and namespace" and
   "Counters MUST NOT be reset", which no single snapshot can show, since a lowered counter can still
   lie above every ID. So the validator also compares each counter with its value in the prior
@@ -1447,8 +1452,10 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Treat a missing imported leaf as a finding: section 4.2 requires init
-  to create every one (this is a reading of that rule, not a check the specification names).
+  supersede immutable history. Treat a missing imported leaf of an enabled type other than
+  `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too: section 4.2
+  requires init and the upgrade to create the imported leaves "for every enabled type except
+  `legacy_fragment`" (this is a reading of that rule, not a check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -1683,8 +1690,9 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   creates each missing empty index, as section 9.2 states in full. The 1.1.0 to 1.2.0 delta is "the
   `spec_version` bump alone", and "the upgrade MUST NOT create provenance for an existing store".
   The 1.2.0 to 1.3.0 delta is "the version bump, registration and create-only initialization of
-  missing imported managed leaves for enabled types, and addition of missing imported counter rows
-  at zero only where no imported ancestry exists" (registration is open point 27). Preserve
+  missing imported managed leaves for enabled types other than `legacy_fragment`, and addition of
+  missing imported counter rows at zero only where no imported ancestry exists, never an
+  `"imported:LF"` row" (registration is open point 27). Preserve
   existing records, evidence, clean counters and imported high-water values; refuse on "a
   populated collision, missing ancestral counter or unprovable prestate". Never create historical
   records, adoption approval or provenance (no `init.toml` for an upgraded store), never change
@@ -1865,6 +1873,11 @@ Acceptance checks, over synthetic fixtures the test builds:
   and the validator reports valid, its tracked-store check accepting those leaves under open point
   20. After the test commits the change, the validator still reports valid.
 - A 1.2.0 fixture with synthetic clean records keeps every record byte and every clean counter.
+- A 1.2.0 fixture whose manifest declares the `legacy_fragment` type, with no LF record, upgrades to
+  1.3.0 with the imported leaves and imported counter rows of its other enabled types only: no
+  `legacy_fragment.imported.index.toml` and no `"imported:LF"` row is created (sections 4.2 and
+  9.2), and the validator reports valid. A store at 1.3.0 that holds either one, or that lacks the
+  imported leaf or imported counter row of another enabled type, gets a finding from step 6.
 - Each 1.0.0 origin-family fixture and the 1.1.0 fixture upgrade to 1.3.0 with exactly the
   composed allowed delta: the 1.0.0 fixtures carry `[opf]` and `standard = "opf"` afterwards, the
   retired `decision_support` key is gone, a governance-enabled fixture keeps its
@@ -2957,8 +2970,8 @@ maintainer's ruling on an open point, report the ruling with it.
     cannot-evaluate (exit 2) before any store operation, as section 16.1 requires: "An unreadable,
     malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
     store operation". With the declaration that lacks only its class key, they proceed as
-    upgrade-capable, as section 16.1 requires: "An implementation that declares no class MUST be
-    treated as upgrade-capable, and every upgrade requirement binds it".
+    upgrade-capable, as section 16.1 requires: "An implementation whose declaration lacks only its
+    class MUST be treated as upgrade-capable, and every upgrade requirement binds it".
 
 ## Out of scope for this prompt
 
