@@ -78,25 +78,29 @@ subprocess.Popen, io.open) is refused in any context, and a bare module name out
 access is refused as an alias the walk cannot follow; _FROM_IMPORT_ALLOW lists the only permitted
 from-imports; every other import (an unlisted module, an asname, a dotted form, every star
 import, importlib, __import__) is refused; eval, exec, compile, globals, vars, locals, input,
-help and breakpoint are refused by name anywhere; __dict__, __builtins__, modules and fdopen are
+help and breakpoint are refused by name anywhere; __dict__, __builtins__, modules, fdopen, the
+accessor method spellings __setattr__ and __delattr__, and the exception mutator add_note are
 refused as attribute names on any base; getattr, setattr and delattr are refused with a
 non-literal or refused-literal name (a refused attribute name, a channel attribute, a protected
 name, or a function-anatomy literal: __code__, __defaults__, __kwdefaults__, __globals__) and
 may not be aliased, and a setattr or delattr whose target is a gate, a gate table or a
 protected name is refused whatever its name argument; open, io.FileIO and os.fdopen are
-refused on an int-constant descriptor number, positional or passed as the file= or fd=
-keyword; any binding of a name the emitter's int clamp or a
+refused on a constant descriptor of any int subtype (True and False included), positional or
+passed as the file= or fd= keyword, an opener= keyword on one is refused, and so is a
+descriptor-duplicating call (os.dup2, or fcntl.fcntl with F_DUPFD) on a constant descriptor;
+any binding of a name the emitter's int clamp or a
 gate depends on (type, int, str, isinstance, frozenset) is refused in every binding form; an
 attribute or subscript store rooted at a gate or a gate table is refused, and so is an
-attribute store or del whose attribute name is a protected, gate-dependency or
-function-anatomy name, on any base; a decorated def of a
+attribute store or del whose attribute name is a protected, gate-dependency,
+function-anatomy name or an exception's args, on any base; a decorated def of a
 gate is refused (the gate decorator allowlist is empty on purpose); every _emit call passes
 closed text and a constant err= (code= may be any expression: the emitter exits through an int
 clamp, so the interpreter never prints an exit value of this module); exception constructors and
 assert messages stay checked wherever they appear, since the interpreter prints an uncaught
 exception's text; each refused form carries a flip that fails when its rule is removed, with
 an independent flip per refused-attribute entry, per gate-table row, per enumerated module's
-bare reference and per accessor, descriptor, store and import condition (train 2 round 34), and
+bare reference and per accessor, descriptor, store and import condition (train 2 rounds 34 and
+35), and
 _check_closed_sites requires _PROTECTED_PROBES, an independent spelling-out of every protected
 name, to equal _PROTECTED_NAMES and probes _patched with each, so a dropped table row fails even
 where another rule overlaps it; the deliberate introspection sites of the test machinery itself
@@ -133,7 +137,9 @@ another module. (3) An enumerated attribute is allowed, not proven harmless: sub
 enumerated because this gate launches children, and a launch that does not capture its streams
 writes to the inherited ones (_launch_recorder and _check_launches pin the launch keywords of
 the launches this module makes); io.FileIO is enumerated for the descriptor probe, whose
-descriptor is a non-constant expression the int-constant rule cannot see; sys._getframe, and
+descriptor is a non-constant expression the int-constant rule cannot see; os.dup2 and
+fcntl.fcntl with F_DUPFD are enumerated for that same probe, which duplicates a non-constant
+captured descriptor the constant-descriptor rule cannot see; sys._getframe, and
 Path with write_text and open, are enumerated introspection and file surfaces. (4) THE
 NAMESPACE AND INTROSPECTION ROUTES ARE OPEN, NOT CLOSED, and a static pin over Python source
 cannot close them. A value that has left a module (a subscript item, a call result, a caught
@@ -152,11 +158,15 @@ hostile stub could still mutate what no rule protects (a table reached through a
 an attribute whose spelling no rule refuses); _patched, the one deliberate mutator, refuses
 every protected name, _CLOSED_VOCABULARIES is a read-only mapping proxy (pinned at run time
 by _check_closed_sites), and the static store and accessor rules refuse the spelled forms
-alone (a store rooted at a gate or a gate table, an attribute store of a protected or
-function-anatomy name on any base, a setattr or delattr on a gate, gate-table or protected
-target or with a function-anatomy literal); a mutation through any route residual (4) names
-stays open.
-The walk does not see a raise of a bare name (re-raising formats nothing) or a BUILT exception
+alone (a store rooted at a gate or a gate table, an attribute store of a protected,
+function-anatomy or exception-args name on any base, a setattr or delattr builtin on a gate,
+gate-table or protected target or with a function-anatomy literal, and the accessor method
+spellings __setattr__ and __delattr__ refused as attribute doors on any base); a mutation
+through any route residual (4) names stays open.
+The walk does not see a raise of a bare name (re-raising an unmodified caught exception formats
+only text a checked site already built; add_note on it and a store or del of its args, which
+would add text the interpreter prints, are refused by the _REFUSED_ATTRS and store rules above)
+or a BUILT exception
 whose class name is neither a builtin exception's nor this module's; and where a diagnostic
 reports only a count (the attribution inventory's unpinned sites and unrecorded indirections),
 the offending keys are deliberately not printed. The canonical Python floor guard that opens this
@@ -353,11 +363,16 @@ _REFUSED_BUILTIN_NAMES = ("eval", "exec", "compile", "globals", "vars", "locals"
                           "help", "breakpoint")
 
 # Attribute names refused on ANY base expression, however it was built: each is a namespace or
-# descriptor door (sys.modules, a __dict__, a __builtins__, os.fdopen) that the module
-# enumeration alone cannot close once a value has left a module. These rows refuse SPELLED
-# doors alone: the frame and function namespace attributes and the other introspection routes
-# are the module docstring's residual (4), stated open on purpose.
-_REFUSED_ATTRS = ("__dict__", "__builtins__", "modules", "fdopen")
+# descriptor door (sys.modules, a __dict__, a __builtins__, os.fdopen), the method spelling of
+# an attribute accessor (__setattr__, __delattr__: setattr and delattr reach the same slot
+# through a load-and-call, object.__setattr__ included, that the accessor rules matching the
+# builtin names do not see), or an exception mutator whose text the interpreter prints
+# (add_note), none of which this file spells. The module enumeration alone cannot close these
+# once a value has left a module. These rows refuse SPELLED doors alone: the frame and function
+# namespace attributes and the other introspection routes are the module docstring's residual
+# (4), stated open on purpose.
+_REFUSED_ATTRS = ("__dict__", "__builtins__", "modules", "fdopen", "__setattr__",
+                  "__delattr__", "add_note")
 
 # The attribute accessors: a call with a non-literal name argument, with no name argument, or
 # with a literal name that is itself refused (a _REFUSED_ATTRS name, a channel attribute, a
@@ -377,10 +392,15 @@ _ATTR_ACCESSOR_NAMES = ("getattr", "setattr", "delattr")
 # __globals__ as a plain attribute remains the module docstring's residual (4).
 _REFUSED_ACCESSOR_LITERALS = ("__code__", "__defaults__", "__kwdefaults__", "__globals__")
 
-# A call to open, io.FileIO or os.fdopen whose first argument is an int constant is a handle on
-# a numbered descriptor (1 and 2 are this process's streams): refused. A descriptor built as a
-# non-constant expression (the descriptor probe in _check_env_canaries dups one with fcntl) is
-# a stated residual of this rule, held by that probe's own launch checks.
+# A call to open, io.FileIO or os.fdopen whose descriptor argument is a constant of any int
+# subtype (bool is an int subclass, so True and False are descriptors 1 and 0), positional or
+# passed as the file= or fd= keyword, is a handle on a numbered descriptor (1 and 2 are this
+# process's streams): refused, and so is an opener= keyword on one, whose callable may return a
+# constant descriptor the argument scan cannot see (this file passes no opener). A
+# descriptor-duplicating call (os.dup2, or fcntl.fcntl with F_DUPFD) whose first argument is a
+# constant int is refused the same way; the file's own dup2 and F_DUPFD duplicate a NON-constant
+# captured descriptor, the stated residual of this rule (held by the probe's launch checks), as
+# is a descriptor built as a non-constant expression for open.
 _DESCRIPTOR_OPEN_NAMES = ("open", "FileIO", "fdopen")
 
 # Builtin names the emitter's int clamp and the gates' membership checks depend on: any binding
@@ -388,9 +408,10 @@ _DESCRIPTOR_OPEN_NAMES = ("open", "FileIO", "fdopen")
 # declaration, a parameter, an import alias, a def), is refused by closure/closed-sites, an
 # attribute store of one on any base is refused by the protected-store rule (round 33's
 # len.__self__.int = str reproduction stored int on the builtins module reached as a value),
-# and _patched refuses rebinding one at run time, so a SPELLED rebinding of int cannot turn
-# the emitter's clamp into a string exit; a rebinding through a namespace no rule spells (a
-# frame's f_builtins) is the module docstring's residual (4).
+# the method spelling len.__self__.__setattr__('int', str) is refused because __setattr__ is a
+# _REFUSED_ATTRS door, and _patched refuses rebinding one at run time, so a SPELLED rebinding of
+# int cannot turn the emitter's clamp into a string exit; a rebinding through a namespace no rule
+# spells (a frame's f_builtins) is the module docstring's residual (4).
 _GATE_DEPENDENCY_NAMES = ("int", "str", "type", "isinstance", "frozenset")
 
 # The tables the gates read at run time: a subscript or attribute store rooted at a gate name
@@ -2729,7 +2750,8 @@ def _closed_output_violations(tree):
     streams, the dunder streams, sys.exit, os.write, os._exit) is refused wherever it appears;
     an attribute chain rooted in an imported module name whose dotted path is not enumerated in
     _MODULE_ATTRS (nor a prefix of an entry) is refused, however deep the chain; an attribute
-    named in _REFUSED_ATTRS (__dict__, __builtins__, modules, fdopen) is refused on any base;
+    named in _REFUSED_ATTRS (__dict__, __builtins__, modules, fdopen, __setattr__, __delattr__,
+    add_note) is refused on any base;
     any reference to a _DYNAMIC_IMPORT_NAMES or _REFUSED_BUILTIN_NAMES name (importlib,
     __import__, eval, exec, compile, globals, vars, locals, input, help, breakpoint) is refused;
     a getattr, setattr or delattr call with a non-literal name, with no name argument, or with a
@@ -2737,8 +2759,10 @@ def _closed_output_violations(tree):
     protected name, or a channel attribute) is refused, a setattr or delattr whose target is a
     gate, a gate table or a protected name is refused whatever its name argument, and so is an
     accessor loaded outside a
-    call's callee position; a call to open, io.FileIO or os.fdopen whose descriptor is an
-    int constant, positional or passed as the file= or fd= keyword, is refused; only a plain
+    call's callee position; a call to open, io.FileIO or os.fdopen whose descriptor is a
+    constant of any int subtype (True and False included), positional or passed as the file= or
+    fd= keyword, is refused, as is an opener= keyword on one and a descriptor-duplicating call
+    (os.dup2, or fcntl.fcntl with F_DUPFD) on a constant descriptor; only a plain
     `import M` of a module enumerated
     in _MODULE_ATTRS is permitted (no asname, no dotted form, no star import), and only the
     exact (module, name) pairs in _FROM_IMPORT_ALLOW may be from-imported, each bound under its
@@ -2749,7 +2773,7 @@ def _closed_output_violations(tree):
     global or nonlocal declaration) is refused, except the gates' and the emitter's own
     module-level defs; an attribute or subscript store rooted at a gate name or a
     _GATE_TABLE_NAMES name is refused, and so is an attribute store or del whose attribute
-    name is a _PROTECTED_NAMES or _REFUSED_ACCESSOR_LITERALS name, on any
+    name is a _PROTECTED_NAMES or _REFUSED_ACCESSOR_LITERALS name or an exception's args, on any
     base; a load of _emit outside a call's callee position is
     refused; and every _emit call must pass closed text (_closed_argument) as its at most one
     positional or text= argument, a True or False constant as err=, and no other keyword and no
@@ -2862,7 +2886,7 @@ def _closed_output_violations(tree):
                                       "an attribute accessor with a non-literal or refused name"))
                     if (child.func.id in ("setattr", "delattr") and child.args
                             and isinstance(child.args[0], ast.Name)
-                            and (child.args[0].id in _GATE_NAMES + _GATE_TABLE_NAMES
+                            and (child.args[0].id in _GATE_TABLE_NAMES
                                  or child.args[0].id in _PROTECTED_NAMES)):
                         found.append((qualname, child.func.id, child.lineno,
                                       "a setattr or delattr on a gate, a gate table or a "
@@ -2872,10 +2896,20 @@ def _closed_output_violations(tree):
                     if opener.split(".")[-1] in _DESCRIPTOR_OPEN_NAMES:
                         handles = list(child.args[:1]) + [kw.value for kw in child.keywords
                                                           if kw.arg in ("file", "fd")]
-                        if any(isinstance(handle, ast.Constant) and type(handle.value) is int
+                        if any(isinstance(handle, ast.Constant) and isinstance(handle.value, int)
                                for handle in handles):
                             found.append((qualname, opener, child.lineno,
                                           "an open of a numbered descriptor"))
+                        if any(kw.arg == "opener" for kw in child.keywords):
+                            found.append((qualname, opener, child.lineno,
+                                          "an opener keyword on a stream open"))
+                    tail = opener.split(".")[-1]
+                    if (tail == "dup2" or (tail == "fcntl" and any(
+                            isinstance(flag, ast.Attribute) and flag.attr == "F_DUPFD"
+                            for flag in child.args))) and child.args and isinstance(
+                            child.args[0], ast.Constant) and isinstance(child.args[0].value, int):
+                        found.append((qualname, opener, child.lineno,
+                                      "a descriptor-duplicating call on a numbered descriptor"))
                 if (isinstance(child, (ast.Attribute, ast.Subscript))
                         and isinstance(child.ctx, (ast.Store, ast.Del))):
                     root = child
@@ -2886,9 +2920,11 @@ def _closed_output_violations(tree):
                                       "an attribute or subscript store on a gate or a gate table"))
                 if (isinstance(child, ast.Attribute) and isinstance(child.ctx, (ast.Store, ast.Del))
                         and (child.attr in _PROTECTED_NAMES
-                             or child.attr in _REFUSED_ACCESSOR_LITERALS)):
+                             or child.attr in _REFUSED_ACCESSOR_LITERALS
+                             or child.attr == "args")):
                     found.append((qualname, child.attr, child.lineno,
-                                  "an attribute store of a protected or function-anatomy name"))
+                                  "an attribute store of a protected, function-anatomy or "
+                                  "exception name"))
                 if isinstance(child, ast.Name) and child.id in _DYNAMIC_IMPORT_NAMES:
                     found.append((qualname, child.id, child.lineno, "a dynamic import"))
                 if isinstance(child, ast.Import):
@@ -3155,6 +3191,16 @@ _CLOSED_FLIPS = (
     ("subprocess-reference", "handler = subprocess\n"),
     ("tempfile-reference", "handler = tempfile\n"),
     ("types-reference", "handler = types\n"),
+    ("open-bool-descriptor", "open(True, 'w', closefd=False).write(value)\n"),
+    ("open-bool-descriptor-file-keyword", "open(file=True, mode='w', closefd=False).write(value)\n"),
+    ("open-opener-keyword", "open('/x', 'w', opener=probe).write(value)\n"),
+    ("fileio-opener-keyword", "import io\nio.FileIO('/x', 'w', opener=probe)\n"),
+    ("dup2-descriptor", "import os\nos.dup2(2, handle.fileno())\n"),
+    ("fcntl-dupfd-descriptor", "import fcntl\nfcntl.fcntl(2, fcntl.F_DUPFD, 3)\n"),
+    ("setattr-method", "target.__setattr__('label', value)\n"),
+    ("delattr-method", "target.__delattr__('label')\n"),
+    ("add-note-method", "caught.add_note(value)\n"),
+    ("exception-args-store", "caught.args = (value,)\n"),
 )
 
 # One snippet per refused rebinding or shadowing form of a registered text name: each must make
@@ -3351,7 +3397,8 @@ def _check_closed_sites(_root):
     _FLOOR_GUARD_CONTROLS module; the walk must flag every _CLOSED_FLIPS snippet and pass
     _CLOSED_CONTROL; a site failing a rule is refuted naming its qualname, token and line; a
     registry entry covers EXACTLY its recorded count of matching references (_exception_ledger,
-    both of whose directions a fixture pins here), so a stale entry, a duplicate, one with no
+    whose over-count and under-count directions, zero matches included, a fixture pins here, as
+    does the entry-shape check), so a stale entry, a duplicate, one with no
     reason or no positive count, or a new reference beside a recorded site is
     refuted. At run time it also pins the emitter and the patch guard (and that
     _CLOSED_VOCABULARIES is a read-only mapping proxy): _emit must write a probe
@@ -3414,13 +3461,24 @@ def _check_closed_sites(_root):
                     _EMITTER_SOURCE.replace("):", '):\n    """a docstring"""', 1)):
         if not _emitter_matches(ast.parse(control).body[0]):
             raise AssertionError("closure/closed-sites: the emitter shape pin refused its own control")
-    recorded = set()
-    for qualname, name, count, reason in _CLOSED_SITE_EXCEPTIONS:
-        if (qualname, name) in recorded or not reason.strip() or type(count) is not int or count < 1:
-            raise AssertionError("closure/closed-sites: a duplicate exception entry, one with no "
-                                 "reason, or one with no positive site count: {} {}".format(
-                                     qualname, name))
-        recorded.add((qualname, name))
+    def entry_fault(entries):
+        seen = set()
+        for qualname, name, count, reason in entries:
+            if (qualname, name) in seen or not reason.strip() or type(count) is not int or count < 1:
+                return (qualname, name)
+            seen.add((qualname, name))
+        return None
+    bad = entry_fault(_CLOSED_SITE_EXCEPTIONS)
+    if bad is not None:
+        raise AssertionError("closure/closed-sites: a duplicate exception entry, one with no "
+                             "reason, or one with no positive site count: {} {}".format(
+                                 bad[0], bad[1]))
+    if entry_fault((("probe", "vars", 0, "fixture"),)) is None:
+        raise AssertionError("closure/closed-sites: the exception-entry check accepted a count-0 "
+                             "entry, so no positive count would no longer be refused as stale")
+    if entry_fault((("probe", "vars", 1, "fixture"),)) is not None:
+        raise AssertionError("closure/closed-sites: the exception-entry check refused its own "
+                             "control (one well-formed entry with a positive count)")
     violations, exempted = _unexempted_violations(tree)
     if exempted != 2:
         raise AssertionError("closure/closed-sites: the floor-guard exemption removed {} violation(s), "
@@ -3446,6 +3504,15 @@ def _check_closed_sites(_root):
     if extra or over:
         raise AssertionError("closure/closed-sites: the exception ledger refused its own control "
                              "(two references, a recorded count of two)")
+    extra, under = _exception_ledger((), (("probe", "vars", 1, "fixture"),))
+    if extra or not under:
+        raise AssertionError("closure/closed-sites: the exception ledger accepted a recorded entry "
+                             "with no matching reference (a zero-match stale entry)")
+    one_reference = _closed_output_violations(ast.parse("def probe():\n    first = vars(target)\n"))
+    extra, under = _exception_ledger(one_reference, (("probe", "vars", 2, "fixture"),))
+    if extra or not under:
+        raise AssertionError("closure/closed-sites: the exception ledger accepted fewer matching "
+                             "references than a recorded entry's count (an under-count)")
     if not isinstance(_CLOSED_VOCABULARIES, types.MappingProxyType):
         raise AssertionError("closure/closed-sites: _CLOSED_VOCABULARIES is not wrapped in a "
                              "read-only mapping proxy at run time")
