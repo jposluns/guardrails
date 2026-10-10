@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "26ec128e83acfa433ffa924f6f15a1bd8ff9241e9acab59bb31d5adc29af325a"
+tree-sha256 = "e9c3bb3d867eb2412e1672339bc62a0ae1f64c97ee9c1f23f3b729aebe81afdb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2381,8 +2381,8 @@ sha256 = "42db2862ae33cce674febff7be58c91263cd2932b69d641157c46f08a6eac398"
 
 [[sources]]
 path = "TODO.md"
-bytes = 21204
-sha256 = "95c368358d2df8005260c10f82e4ac52be3f93a2737789309bb63c59a62fd231"
+bytes = 21034
+sha256 = "4fdb82c0cd46b35786f7da8f36fe3d0ecb310c56d12f8924d9c54e39b592dc28"
 
 [[sources]]
 path = "VERSION"
