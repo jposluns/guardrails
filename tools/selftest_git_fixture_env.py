@@ -55,11 +55,16 @@ a failed report write, or an unreadable, malformed, or suite-missing expectation
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import ast
 import hashlib
@@ -73,10 +78,15 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
-    sys.stderr.write(
-        "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
-        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: selftest_git_fixture_env.py cannot import tomllib, part of the Python standard library; "
+            "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
@@ -2063,6 +2073,18 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_release_delta.py", "_git", ("git",),
      "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
      " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git_raw", ("git",),
+     "production gate read funnel with replace refs and grafts disabled"
+     " (--no-replace-objects plus GIT_GRAFT_FILE pinned to os.devnull; diff-tree and"
+     " merge-base reads for the post-release revision binding, QA round-2); read-only by"
+     " design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_stage1_git", ("git",),
+     "stage-1 re-execution read funnel (QA round 5, D-397-REEXEC-FROM-COMMITTED): rev-parse and"
+     " cat-file --batch reads only, with --no-replace-objects and -c core.commitGraph=false -c"
+     " core.fsmonitor=false in option position plus an INLINE GIT_* scrub (GIT_NO_REPLACE_OBJECTS=1,"
+     " GIT_GRAFT_FILE pinned to os.devnull); the env is built inline rather than through"
+     " _substitution_free_env because stage 1 runs before that function is defined and may import"
+     " nothing from the checkout; read-only by design, never a maintenance-triggering subcommand"),
     ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
      "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
      " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"

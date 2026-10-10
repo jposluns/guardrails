@@ -12,16 +12,23 @@ tools/_adapter_compose.py, the engine shared with gen_agents.py; both adapters a
 in one run, so a refused target means neither is written.
 --check drift-gates both files byte for byte; exit 2 on a malformed source or registry, a read/write
 failure, a symlinked target or parent directory, an absent rule corpus (nothing is deleted), or a write
-that would erase a hand edit.
+that would erase a hand edit in a composed-layout target. A legacy-layout target is refused only when it
+holds a pasted marker-like line; any other hand edit in it is lost on regeneration, though --check still
+reports it as drift.
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_adapters.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_adapters.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 from pathlib import Path
 

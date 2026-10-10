@@ -29,11 +29,16 @@ un-adopt row, a missing referenced preimage, anything unreadable) is exit 2 MALF
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: doctor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: doctor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 import hashlib
 import os
@@ -206,7 +211,12 @@ def assert_pin_and_manifest(root_fd, root):
 
 def assert_open_journal(root_fd, root):
     """FAIL on any non-terminal cutover transaction until recovered (the 9.3 gate line). An unreadable or
-    invalid-sequence journal is MALFORMED (fail-closed)."""
+    invalid-sequence journal is MALFORMED (fail-closed). The entries are listed through a FRESH
+    descriptor reopened as "." beneath the held journal descriptor, never through the held descriptor
+    itself (F-JOURNAL-HELD-FD-LISTING: a listing read through a descriptor held from an earlier open
+    can miss entries created since that open, so a transaction created after the journal was opened
+    would read as 'no open transaction'); each listed entry is then stat'ed and its frames read beneath
+    the SAME held descriptor (no path re-resolution)."""
     jr = _journal._lstat_contained(root_fd, pin.JOURNAL_REL)
     if jr is None:
         return Result("open-journal", NA, "no cutover journal installed")
@@ -224,7 +234,7 @@ def assert_open_journal(root_fd, root):
         _journal._close_fd_yielding(pfd)
         return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
     try:
-        for entry in sorted(os.listdir(jfd)):
+        for entry in sorted(_journal._listdir_fresh(jfd, "cutover journal")):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
             if stat.S_ISLNK(est.st_mode):
                 return Result("open-journal", MALFORMED,
@@ -547,6 +557,63 @@ def self_test():
         (broken / pin.HISTORY_REL).write_text(pin._render_history([r0, r1]), encoding="utf-8")
         rc = run(str(broken))
         check("a broken chain FAILs (exit 1)", rc == 1)
+
+        # F-JOURNAL-HELD-FD-LISTING: a transaction created AFTER the journal descriptor was opened is
+        # still reported, because the gate lists the journal through a FRESH descriptor reopened
+        # beneath the held one (a held descriptor's listing can miss entries created since its open).
+        # The os.open spy creates the open (INTENT-only) transaction right after assert_open_journal
+        # opens the journal fd, inside the gate's own open-to-list window. FILESYSTEM-DEPENDENT
+        # integration evidence: this native leg discriminates only where a held descriptor's listing is
+        # stale (btrfs, not tmpfs); the seam leg after it discriminates on any filesystem.
+        late = tmp / "late"
+        (late / pin.JOURNAL_REL).mkdir(parents=True)
+        late_rfd = os.open(str(late), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        hf_real_open = os.open
+        hf_state = {"fired": False}
+        hf_jname = pin.JOURNAL_REL.rsplit("/", 1)[-1]
+
+        def hf_spy(path, flags, *a, **k):
+            fd = hf_real_open(path, flags, *a, **k)
+            if not hf_state["fired"] and path == hf_jname and k.get("dir_fd") is not None:
+                hf_state["fired"] = True
+                os.mkdir("late-txn", dir_fd=fd)
+                _journal.publish(fd, late / pin.JOURNAL_REL / "late-txn", _journal.F_INTENT,
+                                 {"txn": "A", "header": {}, "ops": []})
+            return fd
+
+        os.open = hf_spy
+        try:
+            hf_res = assert_open_journal(late_rfd, str(late))
+        finally:
+            os.open = hf_real_open
+            os.close(late_rfd)
+        check("a transaction created after the journal open is still reported (fresh-listing reopen)",
+              hf_state["fired"] and hf_res.status == FAIL and "late-txn" in hf_res.detail)
+        # The same late transaction under _journal._StStaleListing: the journal fd is held from the
+        # gate's own open and the transaction created right after it; the seam serves the stale view
+        # through the held fd and any dup of it, and the current view only through a "." descriptor
+        # opened relative to it, so on ANY filesystem the gate must list through a fresh descriptor.
+        seam_late = tmp / "late-seam"
+        (seam_late / pin.JOURNAL_REL).mkdir(parents=True)
+        seam_rfd = os.open(str(seam_late), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        seam = _journal._StStaleListing()
+
+        def seam_txn(fd):
+            os.mkdir("late-txn", dir_fd=fd)
+            _journal.publish(fd, seam_late / pin.JOURNAL_REL / "late-txn", _journal.F_INTENT,
+                             {"txn": "A", "header": {}, "ops": []})
+
+        seam.hold_on_open(lambda path, kwargs: path == hf_jname and kwargs.get("dir_fd") is not None,
+                          seam_txn)
+        try:
+            with seam:
+                seam_res = assert_open_journal(seam_rfd, str(seam_late))
+        finally:
+            os.close(seam_rfd)
+        check("under the stale-listing seam, a transaction created after the journal open is reported "
+              "through a fresh listing descriptor",
+              seam.views and "stale" not in seam.views and seam_res.status == FAIL
+              and "late-txn" in seam_res.detail)
 
         # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))

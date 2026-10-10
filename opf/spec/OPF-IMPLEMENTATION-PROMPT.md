@@ -39,29 +39,31 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`6850500e694d7e16c8259467e3518c09b6dcb744` of `jposluns/guardrails`. Read them from the pinned URLs,
-not from a branch, so the text cannot change under you. After downloading each file, compute its
+`028ea6d309eea90d31b51ea57a4e34988972f210` of `jposluns/guardrails`. These pins name the
+specification this prompt quotes: every quotation of OPF-SPEC.md in this prompt is taken from that
+file at that commit, whose SHA-256 the table gives. Read them from the pinned URLs, not from a
+branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `245cb883fb4c3b948b8c7fdb300b6f4bd5c551174776642bc82f29ea5672e885` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `3afc5ffb2eec42c674f575305d6727728ce17023909785557d82165d9a5d6c80` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
 | `opf/enforcement/ci/github-actions.yml` | The reference CI workflow template (read; do not copy) | `f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5` |
-| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `69f62d00fa86a2d19576717df0356ddcbd1c56367586199250b28d370f90b16a` |
+| `opf/prompt-pack/pack.toml` | The prompt-pack manifest | `119cb377c6f1ed90aa237b44e14e6f5786d48d28d84bd0fba2ab0e9d9539b4c3` |
 
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/028ea6d309eea90d31b51ea57a4e34988972f210/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -86,9 +88,15 @@ Facts about these sources that shape the work:
   contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
   the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
-  `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
-  fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
-  and completion), which a fresh start does not perform, so there are no import prompts to run.
+  `version = "0.4.1"`) lists three members: `adopt/SKILL.md`, an adoption procedure that drives the
+  reference tooling's `opf adopt` verb; `adopt/clean-start.md`, its companion for a project with no
+  prior records, whose interim route runs the reference tooling's `opf init`; and `flow/SKILL.md`,
+  an operating-loop skill for an assistant. None of them is an import prompt, and this prompt uses
+  none of them: you build and run your own implementation, never the reference tooling (see "What
+  you must not do"). The pack has two roles in the
+  specification, and this fresh start needs neither. Its prompts drive post-adoption import
+  (section 14.1, One approval and completion), which a fresh start does not perform, so there are
+  no import prompts to run.
   Separately, section 14.1 says every `opf.adoption.plan/v2` plan MUST bind "the version and digest
   of the prompt pack". This prompt reads section 14 as not requiring an adoption plan for a scaffold
   with nothing to disposition (open point 14); if the maintainer rules otherwise, the plan binds the
@@ -153,16 +161,22 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   generation, implements no section 9.2 upgrade and no legacy-state grading, and refuses an older
   store or listed legacy state through an admission check. This prompt builds an upgrade-capable
   implementation: step 6 grades legacy state and step 8 implements the upgrade. Section 16.1 says
-  that an implementation that declares no class "MUST be treated as upgrade-capable, and every
-  upgrade requirement binds it". Declare, in the documentation of each release and in every
+  that an implementation whose declaration lacks only its class "MUST be treated as
+  upgrade-capable, and every upgrade requirement binds it". Declare, in the documentation of each
+  release and in every
   conformance report you emit, your release identity, the class `upgrade-capable`, and the
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
   (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
-  "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it. This
-  prompt's choice is to keep the declaration in one file shipped inside each release of your
-  implementation, outside every store, and to produce the declaration in the release documentation
-  and in every report from that file. Section 16.1 also says "An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation";
+  "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it.
+  Section 16.1 requires each release to ship the declaration as one file, the declaration file, and
+  to carry in the implementation, apart from that file, the SHA-256 digest of its bytes as shipped
+  (the shipped-file digest), with the documentation of each release stating where. This prompt's
+  choice is to keep that file inside each release of your implementation, outside every store, to
+  have your build embed in the program the shipped-file digest and the declaration as the release
+  ships it, and to produce the declaration in the release documentation and in every report from
+  that embedded copy, never from the installed copy. Section 16.1 also says "An
+  unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT
+  authorize any store operation";
   step 1 builds that check, and every command that reads, grades or writes a store runs it first.
   A fresh start of your project's store does not make your implementation fresh-only. If the
   maintainer prefers the fresh-only class, this prompt does not cover it: its admission check,
@@ -388,7 +402,7 @@ conformance claim (checklist item 19) until the maintainer rules.
     the upgrade from 1.0.0, composed or staged, could not reach the validator VALID that section 9.2
     requires without staging its files, which section 9.2 forbids. Ask the maintainer to rule on
     this reading and on the open point 21 message together. A `HEAD` manifest that the second
-    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "an untracked or
+    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "An untracked or
     ignored `.working/` tree" without separating managed files from others, so this reading counts
     every file under `.working/`; the narrower alternative, counting only machine-store sources and
     declared views, is the maintainer's to choose instead. Rotation (step 12) gets no exception: the
@@ -694,7 +708,7 @@ conformance claim (checklist item 19) until the maintainer rules.
       reference of a legacy clean record: its field, its form, or how the validator confirms that it
       records the omission.
     - The base field names of a 1.0.0 manifest. The section 9 example marks `layout` as "(was
-      `layout_profile`)", and OPF-QUICKSTART.md lists that rename beside the retirement of
+      layout_profile)", and OPF-QUICKSTART.md lists that rename beside the retirement of
       `devprocess`, but the section 9.2 delta from 1.0.0 carries "every other base field over
       unchanged" and renames no field. The pinned sources do not settle whether a 1.0.0
       `[devprocess]` table carries `layout_profile` or `layout`, so the 1.0.0 fixtures cannot be
@@ -727,13 +741,13 @@ conformance claim (checklist item 19) until the maintainer rules.
     `done`", and does not say whether that also satisfies the receipt obligation. This prompt's
     reading: it does not, so the upgrade keeps refusing on that item; ask the maintainer to rule.
 27. **Manifest registration of the imported leaves.** Section 4.2 says the imported files are
-    "registered managed leaves beside the clean-series files, using the same enabled-type roster"
-    and that "Their manifest, emitter, upgrade and containment registrations MUST agree", and the
-    section 9.2 delta includes "registration". Neither the section 9 example nor any other section
-    shows a manifest key for that registration. This prompt's reading: the manifest registration is
-    the enabled type's `[types.<name>]` row itself, so neither step 3 nor the upgrade writes a
-    further key for it. If the maintainer rules that a key is needed, add it to the step 3 manifest,
-    to init, and to the step 8 allowed delta.
+    "registered managed leaves beside the clean-series files, using the same enabled-type roster
+    except `legacy_fragment`" and that "Their manifest, emitter, upgrade and containment
+    registrations MUST agree", and the section 9.2 delta includes "registration". Neither the
+    section 9 example nor any other section shows a manifest key for that registration. This
+    prompt's reading: the manifest registration is the enabled type's `[types.<name>]` row itself,
+    so neither step 3 nor the upgrade writes a further key for it. If the maintainer rules that a
+    key is needed, add it to the step 3 manifest, to init, and to the step 8 allowed delta.
 28. **Which withdrawals leave the post-upgrade validator below VALID, and their remedies.** Section
     9.2 says the upgrade MUST refuse "Where a withdrawn authority would leave the post-upgrade
     doctor below VALID", and names one case, the receipt-stripped `done` item, and one general
@@ -1036,29 +1050,44 @@ Build the primitives every later step relies on.
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
 - The class declaration check. Read the declaration file of "Choices to make before you start"
-  from the running release and check it. Section 16.1 states three rules for the declaration: "An
-  implementation MUST declare, in the documentation of each release and in every conformance
-  report it emits, its release identity, its class, and its supported `spec_version`, homes
-  generation, and worklog storage generation. An implementation that declares no class MUST be
-  treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
-  operation." The specification defines no format for the declaration and does not define the
-  three failing cases, so the cases below other than no class and an absent file are this prompt's
-  reading, yours to confirm with the maintainer. Every command of yours that reads, grades or writes
-  a store, `opf init` and the step 13 and step 14 checks included, runs this check before it
-  resolves, reads or writes any store, and on cannot-evaluate it stops with exit 2 and performs no
-  store operation.
+  from the copy installed with the running release (the installed copy) and check it. Section 16.1
+  states these rules for the declaration: "An implementation MUST declare, in the documentation of
+  each release and in every report its emitter writes, its release identity, its class, and its
+  supported `spec_version`, homes generation, and worklog storage generation." The emitter there is
+  the step of your implementation that writes its conformance reports, which section 16.1 defines as
+  "never a store-file emitter such as the canonical new-document emitter", so it is not
+  the canonical TOML emitter above; this step builds it below. It also says "A
+  runtime check MUST compare the installed copy's bytes with the shipped-file digest before it
+  reads any field, and an installed copy that is absent or unreadable, or whose bytes differ from
+  that digest, MUST yield cannot-evaluate and MUST NOT authorize any store operation." Later in the
+  same section it says: "An implementation whose declaration lacks only its class MUST be treated
+  as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.
+  A declaration that is absent, or that omits its release identity, its `spec_version`, its homes
+  generation, or its worklog storage generation, is malformed rather than one that declares no
+  class: it MUST yield cannot-evaluate and MUST NOT authorize any store operation." The
+  specification defines no format for the declaration and does not define the three failing cases
+  beyond an absent declaration and one that omits a required field; apart from those cases, its
+  digest rule yields cannot-evaluate for an installed copy that is absent or unreadable, or whose
+  bytes differ from the shipped-file digest. So the cases below other than a digest mismatch, no
+  class, an absent file and a file that lacks the release identity, the `spec_version` or a
+  generation are this prompt's reading, yours to confirm with the maintainer, except that an
+  unreadable file yields cannot-evaluate as that rule requires; only the definition of the
+  unreadable case is this prompt's reading.
+  Every command of yours that reads, grades or writes a store, `opf init` and the step 13 and step
+  14 checks included, runs this check before it resolves, reads or writes any store, and on
+  cannot-evaluate it stops with exit 2 and performs no store operation.
   The check gives each declaration one of these outcomes:
+  - Digest mismatch: the installed copy's bytes differ from the shipped-file digest. The check
+    compares them before it reads any field, so a file with this outcome gets no other.
+    Cannot-evaluate.
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed, as a later revision of section 16.1 states: "A declaration that is absent, or that
-    omits its release identity, its `spec_version`, its homes generation, or its worklog storage
-    generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate
-    and MUST NOT authorize any store operation"; section 16.1 at the pinned commit does not yet name
-    the absent case.
-    Cannot-evaluate.
+    malformed, as section 16.1 states: "A declaration that is absent, or that omits its release
+    identity, its `spec_version`, its homes generation, or its worklog storage generation, is
+    malformed rather than one that declares no class". Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
@@ -1071,11 +1100,79 @@ Build the primitives every later step relies on.
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
-    absent file, because that file declares nothing at all and so lacks the release identity,
-    `spec_version` and generations that the first rule also requires, which makes it malformed under
-    the third rule rather than a declaration that omits only its class.
+    absent file: section 16.1 limits it to a declaration that lacks only its class, and rules an
+    absent declaration malformed. Because the digest comparison comes first, this case arises only
+    where the release ships a file with no class key; removing that key from an installed copy is
+    a digest mismatch.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
+- The report emitter. Build the step that writes every conformance report of your implementation,
+  for a run of any command or for a documented run of the class declaration check and the emitter
+  alone. Section 16.1 says "Every report the emitter of a release writes MUST carry the four parts
+  compared in every report, exactly these: the restatement of the declaration, the shipped-file
+  digest the implementation carries, the installed-copy digest, and the runtime result", and "A
+  report deviates from the expected report where any of the four compared parts is omitted, written
+  in another form, or holds another value". The emitter writes each part as follows.
+  - Restatement: from the declaration your build embeds, never from the installed copy, because
+    the expected report fixes it as "the declaration of that file as the release ships it". It gives
+    every field of that file with the same value and no other field.
+  - Shipped-file digest: the digest your build embeds.
+  - Installed-copy digest: section 16.1 says "The installed-copy digest is the SHA-256 digest of the
+    installed copy's bytes that the runtime check read, or the token `not-read` where that check
+    read none because the installed copy is absent or unreadable, and a report MUST NOT carry
+    `not-read` with any runtime result other than `cannot_evaluate`." So on a digest mismatch the
+    emitter writes the digest of the bytes the check read, not the shipped-file digest.
+  - Digest form: section 16.1 says "Each digest in a report MUST be written as 64 lowercase
+    hexadecimal digits". This prompt's reading is that a report digest carries no `sha256:` prefix,
+    unlike the text form above.
+  - Runtime result: section 16.1 says the runtime result is written as "`cannot_evaluate` where that
+    run's runtime check yielded cannot-evaluate or another rule of this section made that run yield
+    cannot-evaluate, the admission check over the store that run resolved included, and otherwise
+    `pass` where it authorized store operations and `fail` where it did not", and "under this
+    section `pass` and `fail` read observably, over performed store operations, so a documented run
+    that resolves no store, and one whose only writes are the exempt writes above, each authorized
+    none and, where no rule yields cannot-evaluate, write `fail`". A run authorized store operations
+    "exactly where it performed one, a write within a store that run resolved or to that store's
+    lease", and the exempt writes are the lease claim, its release, the `session_lease` records of
+    both, and the lease reconciliation and recovery writes. So the emitter takes the token from the
+    run's record of the store writes it performed, never from the declaration check's outcome
+    alone, the command's exit status or the validator's verdict: a passing declaration check
+    followed by no store write gives `fail`, and a refusal under a rule outside section 16.1 is not
+    `cannot_evaluate` there.
+  - Scope, exclusions and cannot-evaluate results: these are not among the four parts, but section
+    16 says "Every report names its scope, its exclusions, and its cannot-evaluate results", and "A
+    report speaks in `conformant_for_declared_scope`, `nonconformant`, `indeterminate`, or
+    `migration_incomplete`, each qualified by whether it concerns the OPFiles **base** or a named
+    **profile**." So every report the emitter writes, for a run of any command or for a documented
+    run, names the scope that run evaluated, its exclusions and every cannot-evaluate result of that
+    run, and gives its base result, and any profile result it states, in those tokens, each
+    qualified as base or as a named profile. Those tokens apply to those results alone. The runtime
+    result stays a gate_run token, as the runtime result bullet above builds it, because section
+    16.1 says "the runtime result MUST be written as one of the tokens of the three-valued gate_run
+    verdict field (section 8.5)". This prompt's reading of section 16, "Conformance is reported
+    against the base and, separately, against each declared profile a tool evaluated", is that every
+    report states its base result, since the condition "a tool evaluated" qualifies the profiles
+    alone. It names an exclusion only as checklist item 19 allows, and for a declared profile your
+    implementation did not evaluate, as section 16 says, "the report names that profile as
+    unevaluated rather than implying whole-store coverage".
+  - Base result of a run that resolves no store: this applies to the report of every run that
+    resolves no store, each documented run and each run that stops before it resolves a store
+    included. This prompt's choice is that such a report states the base result `indeterminate`,
+    qualified as base, names as its scope that the run resolved no store, and states no profile
+    result, since that run read no manifest that declares a profile. Section 16 gives the basis for
+    excluding the other three tokens: it says "a conformance claim is a completeness claim over a
+    declared set", and a run that resolves no store evaluated no store, so
+    `conformant_for_declared_scope` there claims a completeness that run never checked,
+    `nonconformant` a finding it never made, and `migration_incomplete` migration work of a store it
+    never read. This prompt's reading is that `indeterminate` is the token section 16.1 itself uses
+    where a report gives a base result for a store it did not grade: the refusal-report rule, which
+    binds the fresh-only class, says "For a store its admission check refuses, a report MUST give
+    the base result as `indeterminate`", and its fresh-only paragraph says "Missing evidence makes
+    the claim `indeterminate`, never a pass". The base result of such a report is not one of the
+    four compared parts, so no reference run compares it; step 1's acceptance check below tests it,
+    and the step 15 inspection covers it.
+  This prompt's choice is that the emitter checks its own output before it writes it, and writes no
+  report that carries `not-read` beside `pass` or `fail` or a digest in any other form.
 
 Acceptance checks:
 
@@ -1087,8 +1184,36 @@ Acceptance checks:
   unreadable, not parseable, missing each field other than the class in turn, carrying an extra
   key, naming an unknown class, naming another release's identity with every other field equal to
   the shipped declaration, declaring `fresh-only`, declaring `spec_version = "1.2.0"`, and
-  declaring homes generation 2. The shipped declaration with its class key removed passes with the
-  class `upgrade-capable` (section 16.1). The shipped declaration passes.
+  declaring homes generation 2. Each of them except the absent and unreadable ones is tested with a
+  shipped-file digest of its own bytes, so the field checks, not the digest comparison, decide it.
+  The check also yields cannot-evaluate for the shipped declaration with one byte changed in a way
+  that keeps it parseable and every field value unchanged, such as one whitespace byte your
+  declaration format permits replaced by another (a space by a tab in TOML), tested with the
+  shipped-file digest of the unchanged file. The same changed file, tested with a shipped-file
+  digest of its own bytes, passes, so the digest comparison alone decides that rejection. The
+  shipped declaration with its class key removed, tested with a shipped-file digest of its own
+  bytes, passes with the class `upgrade-capable` (section 16.1). The shipped declaration passes.
+- The report emitter, over documented runs of the check and the emitter that resolve no store:
+  with the shipped declaration installed, the report restates the shipped declaration, carries the
+  shipped-file digest and the installed-copy digest, each equal to the SHA-256 of the shipped
+  file's bytes and written as 64 lowercase hexadecimal digits, and carries the runtime result
+  `fail`. With the installed copy absent, and with it unreadable, the report carries the
+  installed-copy digest `not-read` and the runtime result `cannot_evaluate`, and still restates the
+  shipped declaration and carries the shipped-file digest. With the one-byte-changed copy above
+  installed, the report carries the installed-copy digest of the changed bytes, which differs from
+  the shipped-file digest, and `cannot_evaluate`; with the copy naming another release's identity
+  installed, it carries the digest of that copy's bytes as its installed-copy digest and
+  `cannot_evaluate`, and still restates the shipped declaration. Given `not-read` beside `pass` or
+  `fail`, or a digest in uppercase, in the `sha256:` form or of 63 digits, the emitter writes no
+  report. Each report above names its scope, its exclusions and its cannot-evaluate results,
+  states the base result `indeterminate`, qualified as base, with a scope that says the run
+  resolved no store, and states no profile result, while its runtime result stays the gate_run
+  token given above. A report above that states no base result, that states the base result
+  `conformant_for_declared_scope`, `nonconformant` or `migration_incomplete`, or that states any
+  profile result fails this check. With the installed copy absent, the cannot-evaluate result of
+  that run is among those it names. A run of these checks made outside your attempts is no
+  reference run: it directs the step 15 inspection (checklist item 22) and is no evidence under the
+  two rules of section 16.1 (step 15).
 
 ### Step 2: store resolution
 
@@ -1185,8 +1310,8 @@ record).
   clean namespace (for example `BI`) and a quoted key per imported namespace (for example
   `"imported:BI"`). A genuinely first adoption MAY start at zero; counters are never reset, IDs are
   never reused, and rotation, index rewrites and relocation never touch the file (section 8.2).
-  Section 9.2 shows imported counter rows added at zero during the 1.3.0 upgrade; write them at
-  zero at initialization so each series has its own value.
+  Section 4.2 says "A 1.3.0 `opf init` MUST write at zero the imported counter row of each type
+  that has an imported leaf", so write them at zero at initialization.
 - **version.toml.** `schema = 1`, then append-only, immutable `[[release]]` rows (`version`, the
   SemVer version string, unique in the ledger; `date`; `worklog_span`; `coverage_digest`; and the
   optional `imported` flag, which a fresh store never sets) and `[[summary]]` rows (`covers`,
@@ -1421,11 +1546,13 @@ containment.
 - Counter monotonicity is two checks, each run per series and per namespace (section 8.2). The
   bounds check: every ID lies within its counter (section 5.7 says doctor "checks store-wide ID
   uniqueness and that every ID lies within its counter"), and `counters.toml` holds a row for every
-  clean and imported namespace of every enabled type, the imported rows only where the store is
-  graded at 1.3.0 (open point 21); a missing row is a finding naming its series and namespace, even
-  when that namespace holds no ID. That presence check is this prompt's reading of section 8.2,
-  which says `counters.toml` "MUST hold independent monotonic high-water values per series and
-  namespace", and it needs no prior snapshot. The monotonicity check: section 8.2 says
+  clean namespace of every enabled type and, only where the store is graded at 1.3.0 (open point
+  21), for every imported namespace of every enabled type except `legacy_fragment`, which section
+  4.2 says "has no imported leaf and no imported counter row"; a missing row is a finding naming its
+  series and namespace, even when that namespace holds no ID, and so is an `"imported:LF"` row.
+  That presence check is this prompt's reading of section 8.2, which says `counters.toml` "MUST
+  hold independent monotonic high-water values per series and namespace", and it needs no prior
+  snapshot. The monotonicity check: section 8.2 says
   `counters.toml` "MUST hold independent monotonic high-water values per series and namespace" and
   "Counters MUST NOT be reset", which no single snapshot can show, since a lowered counter can still
   lie above every ID. So the validator also compares each counter with its value in the prior
@@ -1447,8 +1574,10 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Treat a missing imported leaf as a finding: section 4.2 requires init
-  to create every one (this is a reading of that rule, not a check the specification names).
+  supersede immutable history. Treat a missing imported leaf of an enabled type other than
+  `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too: section 4.2
+  requires init and the upgrade to create the imported leaves "for every enabled type except
+  `legacy_fragment`" (this is a reading of that rule, not a check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -1463,7 +1592,7 @@ containment.
 - On homes 1, path containment recognizes as OPF control area the imported managed leaves,
   `.working/archive/adoption/<run-id>/`, `.working/archive/moved/` and
   `.working/imported/<kind>/<run-id>/` (section 4.2, "Activated 1.3.0 tooling MUST register on
-  homes 1 ..."). C-EVIDENCE-ENUM does not run or read anything on homes 1 (section 4.2).
+  homes 1" ...). C-EVIDENCE-ENUM does not run or read anything on homes 1 (section 4.2).
 - The validator reads the record archive under the discovered machine store (section 12): ID
   uniqueness, the chain rule and archive integrity cover active and archived records together.
   With no archive tree nothing has rotated; an archive that is present and unreadable or malformed
@@ -1683,8 +1812,9 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   creates each missing empty index, as section 9.2 states in full. The 1.1.0 to 1.2.0 delta is "the
   `spec_version` bump alone", and "the upgrade MUST NOT create provenance for an existing store".
   The 1.2.0 to 1.3.0 delta is "the version bump, registration and create-only initialization of
-  missing imported managed leaves for enabled types, and addition of missing imported counter rows
-  at zero only where no imported ancestry exists" (registration is open point 27). Preserve
+  missing imported managed leaves for enabled types other than `legacy_fragment`, and addition of
+  missing imported counter rows at zero only where no imported ancestry exists, never an
+  `"imported:LF"` row" (registration is open point 27). Preserve
   existing records, evidence, clean counters and imported high-water values; refuse on "a
   populated collision, missing ancestral counter or unprovable prestate". Never create historical
   records, adoption approval or provenance (no `init.toml` for an upgraded store), never change
@@ -1865,6 +1995,11 @@ Acceptance checks, over synthetic fixtures the test builds:
   and the validator reports valid, its tracked-store check accepting those leaves under open point
   20. After the test commits the change, the validator still reports valid.
 - A 1.2.0 fixture with synthetic clean records keeps every record byte and every clean counter.
+- A 1.2.0 fixture whose manifest declares the `legacy_fragment` type, with no LF record, upgrades to
+  1.3.0 with the imported leaves and imported counter rows of its other enabled types only: no
+  `legacy_fragment.imported.index.toml` and no `"imported:LF"` row is created (sections 4.2 and
+  9.2), and the validator reports valid. A store at 1.3.0 that holds either one, or that lacks the
+  imported leaf or imported counter row of another enabled type, gets a finding from step 6.
 - Each 1.0.0 origin-family fixture and the 1.1.0 fixture upgrade to 1.3.0 with exactly the
   composed allowed delta: the 1.0.0 fixtures carry `[opf]` and `standard = "opf"` afterwards, the
   retired `decision_support` key is gone, a governance-enabled fixture keeps its
@@ -2333,6 +2468,17 @@ Acceptance checks:
   runs.
 - A file with a comment is refused and left untouched; a held lease refuses; no ID is ever reported
   for a rolled-back transaction.
+- Have the step 1 report emitter write a report for each of these runs, and check its runtime
+  result against the store writes the run performed (section 16.1): an `opf record` run that exits
+  0 after writing a record gives `pass`; an `opf doctor` run over the same store, which writes
+  nothing, gives `fail` though it reports valid; an `opf record` run that you make refuse with exit
+  2 after it takes the lease, for a reason outside section 16.1, and that writes nothing but the
+  lease claim, its release and their `session_lease` records, gives `fail`; and an `opf record` run
+  with the step 1 declaration naming another release's identity installed, which stops with exit 2
+  before it resolves the store, gives `cannot_evaluate`, states the base result `indeterminate` that
+  step 1 fixes for a run that resolves no store, and leaves the store unchanged. These checks are no
+  reference runs, since every documented run resolves no store (step 15): they direct the step 15
+  inspection of the runtime result over performed store operations (checklist item 22).
 
 ### Step 11: releases and the changelog
 
@@ -2860,7 +3006,200 @@ not do:
 Whether a scaffold needs an adoption receipt is open point 14: report your ratified reading, and do
 not invent a receipt format.
 
-Then write the conformance report described in the checklist below.
+Then write the conformance report described in the checklist below. It includes the report your
+step 1 report emitter writes for a documented run that the conformance report names, one of the
+reference runs below, with the four parts of checklist item 20; which run it carries is this
+prompt's choice.
+
+Before you claim conformance of a release, make attempts and reference runs of it; this is the
+acceptance step for checklist item 21. Section 16.1 defines them: "An attempt is the documented
+installation of a release, made by one checker in an unaltered execution environment, from the
+bytes the release ships and, for each installed file the release does not ship, from the source its
+documentation directs, followed by two successive documented runs of the runtime check and the
+emitter over that installation." and "A reference run of a release is a run of an attempt whose
+installed copy holds that file's bytes as the release ships them and is readable when the run
+starts." The same paragraph of section 16.1 defines an unaltered execution environment and an
+altered installation, and says "An attempt whose installation or execution environment anything
+else altered is not an attempt and establishes nothing."
+
+Before your first attempt, write into the documentation of each release what an attempt rests on.
+Section 16.1 defines an attempt by "the documented installation of a release" and "two successive
+documented runs of the runtime check and the emitter over that installation", and says "An execution
+environment is unaltered where it is a stock install of a platform and version within what the
+documentation of the release names or, where that documentation names none, of the platform the
+checker uses, as that platform's own installer leaves it, changed only as that documentation directs
+and in this closed operational list, and in nothing else: the account name, administrative privilege
+only where that documentation directs it, the working and temporary locations, and the clock." Write
+each of these:
+
+- The installation procedure: every step, in order, from the bytes the release ships and, for each
+  installed file the release does not ship, from the source the documentation directs, as the
+  attempt definition above has it; where it puts the installed copy of the declaration file; and
+  every change to the stock install it directs.
+- The documented run: the command that runs the runtime check and the emitter over that
+  installation, as the step 1 report emitter checks run them, and where the report it writes
+  appears. This prompt's choice is that the documented run resolves no store, which section 16.1
+  permits and does not require: "a documented run of the runtime check and the emitter need not
+  resolve a store". That choice leaves these unexercised by every reference run: no reference run
+  performs a store operation or writes `pass`, none runs a store-coupled cannot-evaluate rule or an
+  admission check, and none states a base result for a store it evaluated; its base result is the
+  `indeterminate` that step 1 fixes for a run that resolves no store. What the commands that
+  resolve a store do there is checked by the inspection below, which the step 10 report checks
+  direct. This prompt's choice is also that the two documented runs of an attempt are that one
+  command run twice in succession.
+- The platforms and versions: section 16.1 says "Every default of that stock install that the
+  documentation does not exclude, by directing that it be changed or by naming a platform that lacks
+  it, is part of an unaltered execution environment, so meeting it is the release's, whichever
+  platform and version within that naming a checker uses." This prompt's choice is to name only
+  platforms and versions on which you make attempts.
+- The declaration file's bytes: the availability rule below fails "an installer that rewrites that
+  file's bytes, by converting its line endings or otherwise". This prompt's choice is that your
+  source repository's `.gitattributes` gives the declaration file's path the attributes
+  `-text -filter -ident -working-tree-encoding -export-subst`. Those explicit values take precedence
+  over a `core.attributesFile`, but `.git/info/attributes`, and a `.gitattributes` file in a deeper
+  directory, take precedence over them, so they keep a Git checkout, commit or `git archive` from
+  converting that file's line endings or otherwise rewriting it only where neither of those sets an
+  attribute for that path. They are therefore not the protection this prompt relies on. That
+  protection is the next two choices: your build computes the embedded shipped-file digest from the
+  exact bytes it packages as that file, and the last step of the documented installation compares
+  the SHA-256 digest of the installed copy's bytes with the shipped-file digest and fails the
+  installation where they differ. That comparison detects a rewrite and does not excuse one: an
+  installation that stops there is "an installation step an attempt cannot complete", a failure of
+  the same rule. Neither the runtime check nor the emitter opens the installed copy for writing,
+  because the same rule fails "a first run whose writes leave the second run with an installed copy
+  that no longer holds the shipped bytes".
+
+Check every attempt and every reference run against the two rules of section 16.1: "A release MUST
+be available: every attempt MUST complete the documented installation and yield two reference runs,
+so an installer that rewrites that file's bytes, by converting its line endings or otherwise, an
+installed copy a documented run cannot read, an installation step an attempt cannot complete, and a
+first run whose writes leave the second run with an installed copy that no longer holds the shipped
+bytes are each a failure of this rule." and "A reference run of a release MUST NOT emit a report
+that deviates from the expected report, and its runtime check MUST NOT authorize any store
+operation where the expected runtime result is `cannot_evaluate` or where its admission check, the
+pre-scan included, refused the store that run resolved." Compare each reference run's report with
+the expected report section 16.1 fixes, whose parts the step 1 report emitter writes, and its
+runtime result with the store writes that run performed.
+
+Section 16.1 also says "Only a checker's own attempts and reference runs are evidence under the two
+rules above: a report of any other run or installation, altered or not, MUST NOT be presented as
+establishing or countering conformance of any release". This prompt's reading is that you, making
+your own attempts, are the checker those rules name. So a run of the step 1 or step 10 report
+checks is evidence under those rules only where it is a run of one of your attempts, and a run over
+a changed, absent or unreadable installed copy is never a reference run, by the definition above.
+A run of one of your attempts that is no reference run, such as a second run whose installed copy
+the first run's writes changed, is still evidence under the availability rule, which fails "a first
+run whose writes leave the second run with an installed copy that no longer holds the shipped
+bytes".
+
+Section 16.1 goes on: "whether a release conforms to this section is judged only from the bytes the
+release ships, the implementation and the installer included, inspected, from the documentation of
+the release, and from the checker's own attempts and reference runs". Section 17 names two
+properties that no run shows: "Whether a release's runtime check compares the installed copy's bytes
+with the digest the implementation carries at all, and whether that digest sits at the place the
+documentation states, are established only by an inspection of the implementation, never by a
+reference run: every reference run's installed copy holds the shipped bytes, over which a runtime
+check that skips that comparison and one that makes it can yield the same report." So, before you
+claim conformance of a release, inspect the implementation that release ships for those two
+properties; this is the acceptance step for checklist item 22. This prompt's reading is that you
+inspect the bytes the release ships, not your working tree, and this prompt's choice is that you
+record the release identity, each file and place you inspected and what you found there: that the
+runtime check compares the installed copy's bytes with the digest the implementation carries before
+it reads any field, as section 16.1 requires, that every command that reads, grades or writes a
+store runs that check first, as "Choices to make before you start" has it, and that the digest sits
+at the place the release documentation states.
+
+Section 16.1 also says "Every requirement of this section that those rules do not compare is a
+requirement on the bytes the release ships, on the documentation of the release, or on a checker's
+own conduct and reporting", and of a requirement on the conduct of the implementation's commands
+outside what the parts above read, "a breach of it is judged by that inspection alone, never by this
+procedure". Every reference run's installed copy holds the shipped bytes and is readable, and every
+documented run resolves no store (the documented run above), so no reference run compares the
+checklist item 20 requirements below for an installed copy other than the shipped bytes or for a
+run that resolves a store. This prompt's reading is that each of them is judged by that
+inspection, so the same inspection covers them, and the record states, for each, each file and
+place you inspected and what you found there:
+
+- The outcome table of the step 1 class declaration check: that an installed copy that is absent,
+  unreadable, malformed or contradictory, one naming another release's identity included, yields
+  cannot-evaluate, and that every command that reads, grades or writes a store then stops with exit
+  2 before any store operation, as section 16.1 requires: "An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation";
+  and that a copy that lacks only its class key proceeds as upgrade-capable. The step 1 class
+  declaration checks and the command checks of item 20 direct this inspection.
+- Reading the installed copy alone: section 16.1 says "A runtime check MUST read the declaration
+  from the copy of that file installed with the implementation (the installed copy) alone, never
+  from the documentation of the release or from any report" and "each check MUST NOT take a class
+  or any other field from the documentation of the release or from any report"; the inspection
+  also covers that no profile, manifest field or command-line request declares or changes the class
+  (section 9.1). The step 1 class declaration checks direct this inspection.
+- The emitter's installed-copy digest outside the shipped bytes: `not-read` exactly where the check
+  read no bytes because the installed copy is absent or unreadable, the digest of the bytes the
+  check read on a digest mismatch, and no report written with `not-read` beside `pass` or `fail`,
+  since section 16.1 says "a report MUST NOT carry `not-read` with any runtime result other than
+  `cannot_evaluate`". The step 1 report emitter checks direct this inspection.
+- The runtime result of a run that resolves a store: the emitter takes `pass` or `fail` from the
+  run's record of the store writes it performed, as step 1 builds it. The step 10 report checks
+  direct this inspection.
+- The report content that section 16.1 does not compare, since it says "no other content of a
+  report is compared": that every report the emitter writes names its scope, its exclusions and its
+  cannot-evaluate results and states its base result as step 1 describes, `indeterminate` for a run
+  that resolves no store included. The step 1 report emitter checks direct this inspection.
+
+A run that is no reference run and belongs to none of your attempts, a run of the step 1 or step 10
+report checks made outside your attempts and the Appendix E scratch-copy probe included, is a
+supporting observation only: section 16.1 says "A run that is no reference run and belongs to none
+of the checker's attempts" is "an observation of the implementation's behaviour, never an
+inspection of the bytes the release ships or a reading of the documentation of the release", and
+"it can only direct the checker to what an inspection of the bytes the release ships then finds". A
+run of one of your attempts is evidence under the two rules of section 16.1, as above, and is no
+inspection either. This prompt's choice is that an observation the inspection does not explain is
+a defect you resolve before a claim.
+
+Section 16.1 also says "The two rules above are the one path from attempts and reference runs to a
+verdict: a breach of any requirement of this section that an attempt or a reference run shows in
+what those rules compare, the four compared parts of a report, `not-read` beside another runtime
+result, a run's cannot-evaluate and the store operations it performs, a restatement a report states,
+and the store and base-result parts below included, MUST be judged solely as a failure of the
+availability rule or of the reference-run rule, shown and established only as those rules provide,
+never as nonconformance on one showing". So a breach that one of your attempts or reference runs
+shows there, a deviating report part or a store operation the reference-run rule forbids included,
+is reported only as a shown failure of one of those two rules, as below, never as nonconformance of
+the release on that one showing; it still fails checklist item 21, so you do not claim conformance.
+
+Report every failure those runs show as section 16.1 requires: "A failure of either rule is shown
+for a checker where one of its own attempts or reference runs shows it, and established for that
+checker where a second of its own attempts or reference runs, made on the same platform and
+version, shows a failure of the same rule and, under the reference-run rule, in the same part, the
+four compared parts of the report and the store and base-result parts below each one part; attempts
+and reference runs that show no failure, however many there are, never counter a shown or
+established failure." It also says "An availability failure is shown by a failed attempt and
+established by a second failed attempt of the same checker on the same platform and version; it
+has no part, so the same-part condition does not apply to it." and "A checker that reports on a
+shown failure MUST report it as established or, where its own evidence has shown it and not
+reproduced it, as unresolved, MUST name the platform, the version, and its own attempts and
+reference runs behind that state, and MUST NOT report an unresolved failure, or the absence of a
+shown one, as conformance of the release." Of an attempt whose eligibility the checker cannot
+determine, it says "a failure that only such attempts show MUST be reported as unresolved, never as
+established", and of a run for which the checker cannot determine whether it observed every write,
+"a result-part or store-part failure that only those two comparisons of such runs could show MUST be
+reported as unresolved, never as established".
+
+Section 16.1 then says "A release for which a checker's own evidence establishes a failure of
+either rule does not conform to this section, and that checker MUST NOT make a conformance claim for
+it; a conformance claim under this section MUST name the attempts and reference runs it rests on."
+So the conformance claim you write names each attempt and each reference run it rests on; naming
+the platform and version of each is this prompt's choice. A shown failure, established or
+unresolved, fails checklist item 21, so you do not claim conformance.
+
+Section 16.1 ends that paragraph: "Each such failure is a release nonconformance, never a runtime
+state of the declaration: it MUST NOT be treated as making the declaration malformed or
+contradictory, and it does not change what a runtime check of an installed copy yields." So no code
+of your implementation reacts to a release failure: the runtime check and the emitter read no record
+of your attempts, reference runs, inspections or conformance reports, and a failure you find changes
+neither the declaration file, the shipped-file digest nor what the step 1 check yields for an
+installed copy. This prompt's choice is that you remedy such a failure with a new release, which you
+then inspect, install and run as above.
 
 ## Final conformance checklist
 
@@ -2946,19 +3285,81 @@ maintainer's ruling on an open point, report the ruling with it.
     requirement, while one that a base requirement depends on, as open point 25 does, blocks the
     claim rather than narrowing it. Until the maintainer rules on open point 32, this item is not
     passed.
-20. The documentation of each release and every conformance report declare the release identity, the
+20. The documentation of each release and every conformance report your report emitter writes
+    declare the release identity, the
     class `upgrade-capable`, and the supported `spec_version` (`1.3.0`), homes generation (1) and
     worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
     command-line request declares or changes the class (section 9.1); the class claim says that it
     is self-asserted (section 17); the declared release identity is that of the running release.
+    Each release carries the shipped-file digest apart from the declaration file, and its
+    documentation states where (section 16.1). The documentation of each release restates the
+    declaration file as the release ships it, as section 16.1 requires: "The documentation of each
+    release MUST restate that file's declaration without differing from it". Section 16.1 also says
+    "Every report the emitter of a release writes MUST carry the four parts compared in every
+    report, exactly these: the restatement of the declaration, the shipped-file digest the
+    implementation carries, the installed-copy digest, and the runtime result", and every report of
+    yours carries them in the forms that section fixes, as the step 1 report emitter builds them:
+    the restatement of the declaration as the release ships it, each digest as 64 lowercase
+    hexadecimal digits, the installed-copy digest `not-read` only beside `cannot_evaluate`, and the
+    runtime result read over the store operations the run performed, and every report names its
+    scope, its exclusions and its cannot-evaluate results as step 1 describes (section 16).
     With each declaration that the step 1 checks yield cannot-evaluate for, another release's
     identity included, every command that reads, grades or writes a store, `opf init`,
     `opf upgrade`, `opf record` and the step 13 and step 14 checks included, stops with
     cannot-evaluate (exit 2) before any store operation, as section 16.1 requires: "An unreadable,
     malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
-    store operation". With the declaration that lacks only its class key, they proceed as
-    upgrade-capable, as section 16.1 requires: "An implementation that declares no class MUST be
-    treated as upgrade-capable, and every upgrade requirement binds it".
+    store operation". With the declaration that lacks only its class key, and a shipped-file digest
+    of its own bytes, they proceed as upgrade-capable, as section 16.1 requires: "An implementation
+    whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade
+    requirement binds it".
+    The report checks of steps 1 and 10 and the checks of this item passed. They are tests that
+    direct the inspection of item 22, and a run of them made outside your attempts is not evidence
+    of conformance: section 16.1 says "A run that is no reference run and belongs to none of the
+    checker's attempts" can "only direct the checker to what an inspection of the bytes the release
+    ships then finds". The run evidence for a claim is the reference runs of item 21. The evidence
+    for each requirement of this item that no reference run compares, which step 15 lists (the
+    outcome table of the class declaration check, reading the installed copy alone, the `not-read`
+    rule and the installed-copy digest outside the shipped bytes, the runtime result of a run that
+    resolves a store, and the report content section 16.1 does not compare), is the step 15
+    inspection record of item 22.
+21. Each release was installed and run as step 15 describes, from the installation procedure,
+    documented run, and platforms and versions that step 15 has you write into its documentation,
+    and its conformance claim names the attempts and reference runs it rests on, as section 16.1
+    requires: "a conformance claim under this section MUST name the attempts and reference runs it
+    rests on". The claim rests only on attempts whose eligibility you determined, for the
+    installation as well as the execution environment: section 16.1 says "The installation or the
+    execution environment is altered where any byte, file, or setting of either differs from what
+    the stock install's defaults, the changes the closed operational list above permits, the
+    documented steps, the release's own code, and code those steps install from a source the
+    documentation of the release directs left it", and "an attempt whose eligibility under this
+    rule the checker cannot determine establishes nothing for that checker: a failure that only such
+    attempts show MUST be reported as unresolved, never as established". The conformance report that
+    step 15 has you write records, for each attempt the claim names, its platform, its version,
+    every change made to that stock install, and that you determined both its execution environment
+    and its installation unaltered, and names apart each attempt whose eligibility you could not
+    determine; a claim that names such an attempt fails this item. In each attempt the installed
+    copy of the declaration file held the shipped bytes when the installation completed, as the
+    install-time comparison of step 15 checks. Every attempt completed the documented installation
+    and yielded two reference runs, no reference run emitted a report that deviates from the
+    expected report or authorized a store operation the reference-run rule forbids, and no attempt
+    or reference run showed a failure of either rule. A shown failure fails this item and is
+    reported as established or unresolved, naming the platform, the version, and the attempts and
+    reference runs behind that state.
+22. Before the conformance claim, the implementation each release ships was inspected as step 15
+    describes for the two properties section 17 names: "Whether a release's runtime check compares
+    the installed copy's bytes with the digest the implementation carries at all, and whether that
+    digest sits at the place the documentation states, are established only by an inspection of the
+    implementation, never by a reference run". It was also inspected for each item 20 requirement
+    that step 15 lists as one no reference run compares: the outcome table of the class declaration
+    check, reading the installed copy alone, the `not-read` rule and the installed-copy digest
+    outside the shipped bytes, the runtime result of a run that resolves a store, and the report
+    content section 16.1 does not compare. The evidence is the step 15 inspection record, this
+    prompt's choice: the release identity, each file and place inspected and what was found there,
+    for each property and each of those requirements, and the step 1, step 10 or item 20 check that
+    directed it. A run that is no reference run and belongs to none of your attempts, a test run of
+    step 1 or step 10 and the Appendix E scratch-copy probe included, is a supporting observation
+    only and does not pass this item; a run of one of your attempts is evidence under item 21, not
+    an inspection, and does not pass it either.
 
 ## Out of scope for this prompt
 

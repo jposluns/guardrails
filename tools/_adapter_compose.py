@@ -34,13 +34,13 @@ O_NOFOLLOW and dir_fd), and the target itself is opened beneath the final descri
 O_NONBLOCK, for the read and for the write-permission probe alike, and that descriptor is fstat-checked
 to be a regular file. A symlink or non-regular file met while the path is opened, including one swapped
 in after an earlier check, is exit 2 in both modes. A write goes to a new temporary file created
-exclusively beside the target through the same descriptor (keeping an existing target's permission
-mode) and os.replace renames it over the target through that descriptor, so the target holds either its
-old bytes or its new bytes. Whatever is swapped in at the target name after the write probe is not
-refused but replaced by that rename: a symlink there is itself replaced, never followed, so nothing
+exclusively beside the target through the same descriptor (keeping an existing target's ordinary
+permission bits) and os.replace renames it over the target through that descriptor, so the target holds
+either its old bytes or its new bytes. Whatever is swapped in at the target name after the write probe is
+not refused but replaced by that rename: a symlink there is itself replaced, never followed, so nothing
 outside the tree is written (a directory there makes the rename fail, exit 2). Each directory is opened
-O_RDONLY, which needs read permission as well as search permission, so a directory between the root and
-a target that this user can search but not read is exit 2 in both modes (the per-component lstat walk
+O_RDONLY, which needs read permission as well as search permission, so a directory between the root and a
+target that this user can search but not read is exit 2 in both modes (the per-component lstat walk
 before descriptors needed search permission only). A platform without dir_fd support is exit 2 in both
 modes: there is no path-based fallback.
 
@@ -65,16 +65,21 @@ control there too). A descriptor pins a directory, not its place in the tree: a 
 root and a target that is renamed out of the tree after the walk opened it still receives the write, at
 its new place (the repository root's own ancestry race, one level down; whoever can rename it could
 write into it directly). The targets of one run are renamed one at a time, not as a set. A successful
-write keeps only the target's permission mode: owner, group, ACLs and extended attributes are not
-preserved (the renamed file takes the writer's defaults). An existing target this user cannot write (no
-write permission) is refused (exit 2), as the plain overwrite before descriptors was. A write that fails
-after its temporary file (a dot-prefixed name ending in .tmp) exists is exit 2 and names that file in
-the refusal; a run interrupted or killed after the creation and before the rename completes leaves it
-too. In each case the target keeps its old bytes and the temporary file is left beside it (an exception
-other than OSError raised inside the try around the write and the rename carries its name as a note):
-the engine never deletes a file by name, because another process can replace that name between the
-creation and an unlink, and an identity check before the unlink races the same way, so the leftover is
-for a reviewer to remove by hand. A colliding name at creation is retried, bounded, with a fresh random
+write keeps only the target's ordinary permission bits (mode & 0o777): its set-user-ID, set-group-ID and
+sticky bits are dropped (a write by an unprivileged process drops the set-ID bits anyway), and owner,
+group, ACLs and extended attributes are not preserved (the renamed file takes the writer's defaults). An
+existing target this user cannot write (no write permission) is refused (exit 2), as the plain overwrite
+before descriptors was. A write that fails after its temporary file (a dot-prefixed name ending in .tmp)
+exists and before the rename completes is exit 2 and names that file in the refusal; a run interrupted or
+killed after the creation and before the rename completes leaves it too. In each case the target keeps
+its old bytes and the temporary file is left beside it (an exception other than OSError raised inside the
+try around the write and the rename carries its name as a note): the engine never deletes a file by name,
+because another process can replace that name between the creation and an unlink, and an identity check
+before the unlink races the same way, so the leftover is for a reviewer to remove by hand. Once the
+rename has completed, a failure to close the target's directory descriptor (the one step after it) is
+still exit 2, with that close error's own text, although the target already holds its new bytes and no
+temporary file remains: the old-bytes and left-file statements above cover only a failure before the
+rename completes. A colliding name at creation is retried, bounded, with a fresh random
 token, and the colliding file is kept. A process that replaces the temporary name before the rename has
 its own bytes renamed over the target; it could equally write the target directly, so this grants
 nothing (diff review is the control). Descriptors are closed exactly once on every ordinary success and
@@ -104,20 +109,29 @@ from pathlib import Path
 try:
     import tomllib
 except ModuleNotFoundError:
+    import os
     if tuple(sys.version_info[:2]) < (3, 14):
         # Reached only through an importer that carries no floor guard yet (every guarded
         # entrypoint refuses an older Python that can start it first; one that cannot start
         # it fails with Python's own error before reaching here): the version is the
-        # problem, so name it.
-        sys.stderr.write(
-            "error: the adapter composer requires Python 3.14 or newer; this is Python %d.%d.%d "
-            "(%s). Nothing was run (cannot evaluate).\n"
-            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        # problem, so say so. The message is a literal, as the fallback grammar in
+        # tools/check_python_floor.py requires (it admits no call), so it names no version.
+        try:
+            sys.stderr.write(
+                "error: the adapter composer requires Python 3.14 or newer, and this interpreter is "
+                "older. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
     else:  # every Python 3.14 ships tomllib, so this installation is incomplete
-        sys.stderr.write(
-            "error: the adapter composer cannot import tomllib, part of the Python standard "
-            "library; this installation is incomplete. Nothing was run (cannot evaluate).\n")
-    raise SystemExit(2)
+        try:
+            sys.stderr.write(
+                "error: the adapter composer cannot import tomllib, part of the Python standard "
+                "library; this installation is incomplete. Nothing was run (cannot evaluate).\n")
+            sys.stderr.flush()
+        except BaseException:
+            pass
+    os._exit(2)
 
 from _standards import dir_present  # noqa: E402
 
@@ -630,8 +644,11 @@ def _read_target(root, rel):
     """The current bytes of target rel under root, or None when it (or a directory above it) is absent.
     The final component is opened beneath the directory descriptor from _target_dir_fd with O_NOFOLLOW
     (a symlink swapped in after the stat is refused, never followed) and O_NONBLOCK (a FIFO swapped in
-    cannot block the open), and the open descriptor is fstat-checked to still be a regular file; an
-    open refused because the name holds a symlink, socket or device is the engine's refusal naming rel.
+    cannot block the open), and the open descriptor is fstat-checked to still be a regular file before
+    any file object is made on it (an O_RDONLY open admits a directory, which a file object would refuse
+    with raw errno text naming the descriptor number; the fstat refuses it in the engine's wording naming
+    rel); an open refused because the name holds a symlink, socket or device is the engine's refusal
+    naming rel.
     The file object is made with closefd=False, so the finally's close is the one close of fd on every
     ordinary path."""
     directory, name, st = _target_dir_fd(root, rel, make_dirs=False)
@@ -648,9 +665,11 @@ def _read_target(root, rel):
                 raise refusal from None
             raise
         try:
+            mode = os.fstat(fd).st_mode
+            if not stat.S_ISREG(mode):
+                raise ComposeError("target {} is not a regular file{}".format(
+                    rel, " (a directory)" if stat.S_ISDIR(mode) else ""))
             with os.fdopen(fd, "rb", closefd=False) as fh:
-                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                    raise ComposeError("target {} is not a regular file".format(rel))
                 return fh.read()
         finally:
             _close_fd_yielding(fd)
@@ -675,10 +694,13 @@ def _write_target(root, rel, data):
     rel, as a non-regular file found by the fstat is); data
     goes to a new temporary file (O_CREAT|O_EXCL|O_NOFOLLOW beneath the descriptor; a colliding name is
     retried with a fresh random token up to _TMP_TRIES times) which takes the existing target's
-    permission mode via fchmod, and os.replace renames it over the target through the same descriptor.
-    Nothing is ever deleted: a pre-existing file at a colliding name is never touched, and on a failure
-    after the temporary file exists that file is left in place and named in the ComposeError, since the
-    name may no longer be this call's file. Any other exception raised inside the try around the write
+    ordinary permission bits (mode & 0o777; set-ID and sticky bits are dropped) via fchmod, and
+    os.replace renames it over the target through the same descriptor. Nothing is ever deleted: a
+    pre-existing file at a colliding name is never touched, and on a failure after the temporary file
+    exists and before the rename completes that file is left in place and named in the ComposeError,
+    since the name may no longer be this call's file. A failed close of the directory descriptor after
+    a completed rename propagates its OSError (exit 2) with the target already rewritten (see
+    DISCLOSED RESIDUALS). Any other exception raised inside the try around the write
     and the rename carries the name as a note; one that lands after the creation but outside that try (an
     interrupt before the try is entered, or while the ComposeError is built) leaves the file unnamed (see
     DISCLOSED RESIDUALS). The temporary file object is made with closefd=False, so the finally's close is
@@ -718,7 +740,7 @@ def _write_target(root, rel, data):
             try:
                 with os.fdopen(tfd, "wb", closefd=False) as fh:
                     if st is not None:
-                        os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+                        os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode) & 0o777)
                     fh.write(data)
                     fh.flush()
                     os.fsync(fh.fileno())

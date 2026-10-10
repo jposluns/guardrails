@@ -11,18 +11,28 @@ Verdict mapping:
   gate roster absent / unreadable  -> UNVERIFIABLE (missing evidence never reads as PASS)
 
 Exit codes (normal mode): 0 PASS, 1 FAIL, 2 UNVERIFIABLE/config-error. `--digest` is the ADVISORY,
-report-only mode the runner calls: it prints the compact surface digest plus this audit's line and always
-exits 0 (advisory, never gating). stdlib only. `--self-test` proves PASS on a present roster and
-UNVERIFIABLE on an absent one (removing the missing-evidence guard fails it).
+report-only mode the runner calls: it prints the compact surface digest plus this audit's line and exits 0
+whatever the audit finds (advisory, never gating). In every mode a bad argument or a config error exits 2
+before the mode runs, and so does the floor guard on a Python older than 3.14 that can start this file.
+These exits hold while the tool's output (its diagnostic on stderr, and what it prints on stdout) can be
+written and flushed. A failing output stream can change the exit status and can lose output; a separate
+fix in progress addresses this. An older interpreter that cannot start this file fails with Python's own
+error and status first. stdlib only. `--self-test` proves PASS on a present roster and UNVERIFIABLE on an
+absent one (removing the missing-evidence guard fails it).
 """
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: audit_reference.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: audit_reference.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 from pathlib import Path
 

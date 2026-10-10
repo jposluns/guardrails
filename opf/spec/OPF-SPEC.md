@@ -134,7 +134,7 @@ describes the 1.3.0 target on legacy homes. The homes-2 requirements in sections
       counters.toml                # per-namespace ID high-water marks (section 8.2)
       version.toml                 # version and release ledger (section 6.1)
       worklog.toml                 # durable operational record (section 6.2)
-      <type>.imported.index.toml    # separate imported records of each enabled type (section 8.3)
+      <type>.imported.index.toml    # imported records per enabled type except LF (section 8.3)
       worklog.imported.toml         # imported worklog, on its own ID number line
       lease.toml                   # single-writer lease, present only while held (section 5.7)
       init.toml                    # bootstrap provenance of a coupled init (section 9.2), if present
@@ -171,11 +171,20 @@ per-record layout (section 9) additionally places one file per record under
 `.working/toml/<type>/`, with each `<type>.index.toml` acting as the registry.
 
 The imported files are registered managed leaves beside the clean-series files, using the same
-enabled-type roster; `worklog` uses `worklog.imported.toml` instead of an imported index.
-Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0 `opf init`
-and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and
-empty; in a store that declares `spec_version` 1.3.0 or later, enabling a further type or module
-later MUST create its imported leaf in the same act as its clean index. They are machine
+enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.toml` instead of an
+imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0
+`opf init` and the section 9.2 upgrade MUST create the imported leaves for every enabled type
+except `legacy_fragment`, create-only and empty; in a store that declares `spec_version` 1.3.0 or
+later, enabling a further type or module other than `legacy_fragment` later MUST create its imported
+leaf in the same act as its clean index.
+`legacy_fragment` has no imported leaf and no imported counter row, since the imported series
+refuses the `LF` namespace (section 8.2). A 1.3.0 `opf init` MUST write at zero the imported
+counter row of each type that has an imported leaf (section 8.2). In a store that declares
+`spec_version` 1.3.0 or later, enabling a further type or module other than `legacy_fragment`
+MUST also add its imported counter row in the same act as its clean index, at zero only where no
+imported ancestry exists, as in the section 9.2 upgrade. Both counter-row duties follow from the
+section 8.2 rule that requires the imported counter rows once the store declares `spec_version`
+1.3.0 or later. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
 imported-series release MUST keep these files inline in either store layout and MUST NOT provide
 views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
@@ -810,7 +819,8 @@ Notes on the roster:
   text (section 8.3), not LF quarantine. LF MUST NOT be scaffolded. A fresh-only implementation
   (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the
   `legacy_fragment` type or holds an LF record.
-- Imported history uses the same enabled types in a separate series, not additional record types.
+- Imported history uses the same enabled types except `legacy_fragment` (section 8.2) in a separate
+  series, not additional record types.
   Reserved namespaces remain reserved. Imported states describe history and confer no current
   authority (section 8.6).
 - `done` is a durable completion receipt linked one-to-one to a backlog item reaching ratified
@@ -835,12 +845,19 @@ Clean record IDs have the form `<NS>-<n>`; imported IDs have the form `imported:
 for example `imported:BI-7`. The complete lexical grammar is
 `^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`, and the namespace MUST additionally name the
 record's enabled type in section 8.1. Namespaces map one-to-one to types within each series.
-`counters.toml` MUST hold independent monotonic high-water values per series and namespace:
-`BI` for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items.
+The imported series MUST refuse the `LF` namespace, since new imports do not use LF quarantine
+(section 8.1).
+`counters.toml` MUST hold independent monotonic high-water values per series and namespace, `BI`
+for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items, with
+the imported series' rows required once the store declares `spec_version` 1.3.0 or later, one for
+each enabled type except `legacy_fragment`, since the imported series refuses `LF` and so has no
+`"imported:LF"` row.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
-line. Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series
-independently; allocation MUST increment its counter under the store's lock as one atomic claim, so
-no gap between choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
+line. The doctor MUST require the imported counter rows once the store declares `spec_version`
+1.3.0 or later, whether a 1.3.0 `opf init` or the section 9.2 upgrade created them. Uniqueness,
+counter high-water, contiguity and no-deletion checks MUST evaluate each series independently;
+allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between
+choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
 MUST NOT be reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
@@ -886,10 +903,16 @@ fields. Standalone imported `done` receipts are legal history. Historical `creat
 `updated_at`, `date` and `decided_at` are optional; when present they MUST be valid RFC 3339 UTC
 and no later than the writer's import clock instant. Import time MUST NOT stand in for event time.
 
-Other historical type fields MUST NOT be absent without an explicit missingness row. Supplied
-fields MUST retain their declared value types and vocabularies; unknown keys still fail. Missing
-historical timestamps and type fields MUST be accounted for in `unrecorded = [{field, reason}]`,
-with one row per absent field, no duplicate fields and no row claiming a supplied field absent.
+An imported record MUST give a missingness row in `unrecorded = [{field, reason}]` to each field of
+its type's schema that it omits, including optional type fields and each historical timestamp
+above that its type's schema carries. The only exempt fields are `proposed_from`, `summary`,
+`links`, `refs` and registered `x-<vendor>` tables, which the envelope table above marks optional,
+each where the type's own schema does not require it; an imported record never carries
+`proposed_from`, since its status never takes `/proposed`. An imported worklog row's `summary` is
+therefore never exempt, since the worklog schema requires it (section 6.2). `unrecorded` MUST hold
+exactly one row for each omitted field that is not exempt, and no row that repeats a field or
+claims a supplied field absent. Supplied
+fields MUST retain their declared value types and vocabularies; unknown keys still fail.
 `field` MUST name a field in that type's schema. A missingness row whose `field` names an omitted
 exempt envelope field, one of the optional envelope fields `proposed_from`, `summary`, `links`,
 `refs` and registered `x-<vendor>` tables where the type's own schema does not require it, MUST be
@@ -906,9 +929,12 @@ from the writer's clock). Optional `span` is an informational byte range in the 
 Optional `import.history` retains verbatim source-precision values that cannot be losslessly
 normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated. Optional
 `import.unparsed` holds verbatim source text that cannot be mapped. The assistant MUST retain such
-text rather than drop it. The writer performs no byte-tiling or leftover accounting: byte-level
-coverage and semantic fidelity are not machine-proven. Preserved originals remain the restoration
-authority.
+text rather than drop it. When present, `import.span` MUST be an array of two integers,
+`import.history` an array of tables, and `import.unparsed` an array of strings. Each
+`import.history` table MUST hold exactly two keys, `field` (a field named in the type's schema)
+and `value` (its verbatim source value as a string). The writer performs
+no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not
+machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
@@ -1513,8 +1539,9 @@ fabricated). Declared views are then regenerated, so a stale committed view can 
 store takes the 1.0.0 delta above directly to 1.2.0.
 
 For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and
-create-only initialization of missing imported managed leaves for enabled types, and addition
-of missing imported counter rows at zero only where no imported ancestry exists.
+create-only initialization of missing imported managed leaves for enabled types other than
+`legacy_fragment`, and addition of missing imported counter rows at zero only where no imported
+ancestry exists, never an `"imported:LF"` row.
 Where imported ancestry exists in a namespace, the imported counter row added for it MUST hold the
 highest imported ID number in that namespace, the largest `<n>` of its `imported:<NS>-<n>` IDs.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
@@ -2098,14 +2125,186 @@ base 1.3.0 remains a target contract (section 9.2). A fresh-only implementation 
 one base `spec_version`, one homes generation, and one worklog storage generation, initializes
 stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.
 
-An implementation MUST declare, in the documentation of each release and in every conformance report
-it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
-worklog storage generation. An implementation that declares no class MUST be treated as
-upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or contradictory
-declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A declaration
-that is absent, or that omits its release identity, its `spec_version`, its homes generation, or its
-worklog storage generation, is malformed rather than one that declares no class: it MUST yield
-cannot-evaluate and MUST NOT authorize any store operation.
+An implementation MUST declare, in the documentation of each release and in every report its emitter
+writes, its release identity, its class, and its supported `spec_version`, homes generation, and
+worklog storage generation. Each release MUST ship that declaration as one file, the declaration
+file. A runtime check is the step of the implementation that, in a run, reads the declaration and
+gates that run's store operations, the emitter is the step of the implementation that writes the
+conformance reports section 16 describes, never a store-file emitter such as the canonical
+new-document emitter, and a documented run of the runtime check and the emitter need not resolve a
+store. Whether a run authorized store operations is an observable of that run: it authorized them
+exactly where it performed one, a write within a store that run resolved or to that store's lease,
+as the checker observes the run's writes, and an authorization no performed operation shows is not
+compared. A write this section or section 5.7 itself requires is not a store operation under this
+section, for the runtime-result comparison and the store part below alike: the claim of the
+single-writer lease a command takes, its release, the `session_lease` record of that claim and of
+that release, and the lease reconciliation and recovery writes sections 5.7, 8.8, 14.1, and 14.2
+require, so a run that stops as cannot-evaluate and writes nothing but what section 5.7 requires to
+end its own claim performed no store operation. A runtime check MUST read the declaration from the
+copy of that file installed with the implementation (the installed copy) alone, never from the
+documentation of the release or from any report. Each release MUST also carry, in the implementation
+and apart from that file, the SHA-256 digest of that file's bytes as the release ships them (the
+shipped-file digest), and the documentation of each release MUST state where the implementation
+carries it. A release that carries no such digest, or whose documentation states no such place, does
+not conform to this section, and a conformance claim MUST NOT be made for it. A runtime check MUST
+compare the installed copy's bytes with the shipped-file digest before it reads any field, and an
+installed copy that is absent or unreadable, or whose bytes differ from that digest, MUST yield
+cannot-evaluate and MUST NOT authorize any store operation. That comparison detects an edit of the
+installed copy alone; section 17 discloses that residual and the others these rules leave.
+
+Every report the emitter of a release writes MUST carry the four parts compared in every report,
+exactly these: the restatement of the declaration, the shipped-file digest the implementation
+carries, the installed-copy digest, and the runtime result. The installed-copy digest is the SHA-256
+digest of the installed copy's bytes that the runtime check read, or the token `not-read` where that
+check read none because the installed copy is absent or unreadable, and a report MUST NOT carry
+`not-read` with any runtime result other than `cannot_evaluate`. Each digest in a report MUST be
+written as 64 lowercase hexadecimal digits, and the runtime result MUST be written as one of the
+tokens of the three-valued gate_run verdict field (section 8.5): `cannot_evaluate` where that run's
+runtime check yielded cannot-evaluate or another rule of this section made that run yield
+cannot-evaluate, the admission check over the store that run resolved included, and otherwise `pass`
+where it authorized store operations and `fail` where it did not. Section 8.5 fixes those tokens,
+not their meaning here: under this section `pass` and `fail` read observably, over performed store
+operations, so a documented run that resolves no store, and one whose only writes are the exempt
+writes above, each authorized none and, where no rule yields cannot-evaluate, write `fail`. A
+restatement differs from that file's declaration where it gives a different value for any field the
+file carries, omits such a field, or states a field the file does not carry. The documentation of
+each release MUST restate that file's declaration without differing from it. The expected report of
+a release is fixed by the bytes the release ships alone, apart from the runtime result, the one part
+also coupled to the run it concerns: its restatement is the declaration of that file as the release
+ships it, each of its digests equals the SHA-256 digest of that file's bytes as the release ships
+them, and its runtime result is `cannot_evaluate` exactly where a rule of this section makes those
+bytes, or the store that run resolved as the checker observes it, yield cannot-evaluate, and
+otherwise `pass` or `fail`, between which this section, as it now stands, sets no rule. A report
+deviates from the expected report where any of the four compared parts is omitted, written in
+another form, or holds another value; no other content of a report is compared, the base result of a
+report a reference run emits over a store its admission check refuses (the base-result part below)
+apart. The runtime-result part also deviates where its token disagrees with whether that run
+authorized store operations, the performed operations the checker observes; this comparison reads
+the run's writes, the store-coupled cannot-evaluate rule above reads the store that run resolved,
+and together they make the runtime result the only part of the expected report not fixed by the
+shipped bytes alone. A `pass` token beside no performed store operation, a `fail` token beside one,
+and a `cannot_evaluate` token beside one each disagree that way, whatever the expected result, since
+a run that yields cannot-evaluate authorizes no store operation. The behaviour-coupled comparisons
+are exactly two, the token comparison above and the store part below, and they read only the writes
+the checker observed: a run for which the checker cannot determine whether it observed every write
+gives it no evidence under either comparison, so a result-part or store-part failure that only those
+two comparisons of such runs could show MUST be reported as unresolved, never as established, a
+residual section 17 discloses; the rest of the expected-report comparison, the store-coupled
+cannot-evaluate expected result included, reads such a run's report as any other, over the store
+that run resolved as the checker observes it.
+
+An execution environment is unaltered where it is a stock install of a platform and version within
+what the documentation of the release names or, where that documentation names none, of the platform
+the checker uses, as that platform's own installer leaves it, changed only as that documentation
+directs and in this closed operational list, and in nothing else: the account name, administrative
+privilege only where that documentation directs it, the working and temporary locations, and the
+clock. Every default of that stock install that the documentation does not exclude, by directing
+that it be changed or by naming a platform that lacks it, is part of an unaltered execution
+environment, so meeting it is the release's, whichever platform and version within that naming a
+checker uses. An attempt is the documented installation of a release, made by one checker in an
+unaltered execution environment, from the bytes the release ships and, for each installed file the
+release does not ship, from the source its documentation directs, followed by two successive
+documented runs of the runtime check and the emitter over that installation. A reference run of a
+release is a run of an attempt whose installed copy holds that file's bytes as the release ships
+them and is readable when the run starts. The installation or the execution environment is altered
+where any byte, file, or setting of either differs from what the stock install's defaults, the
+changes the closed operational list above permits, the documented steps, the release's own code, and
+code those steps install from a source the documentation of the release directs left it; the working
+and temporary locations the checker chose are the checker's own, and what sits there alters neither,
+the installation apart: the installed files, the installed copy included, and the files a documented
+step or the release's own code wrote belong to the installation wherever they sit, those locations
+included, so an edit of any of them alters the installation there as anywhere. An attempt whose
+installation or execution environment anything else altered is not an attempt and establishes
+nothing. A verdict under this section is decided from the checker's own observations, given its
+detection of alterations (section 17), and an attempt whose eligibility under this rule the checker
+cannot determine establishes nothing for that checker: a failure that only such attempts show MUST
+be reported as unresolved, never as established.
+
+A release MUST be available: every attempt MUST complete the documented installation and yield two
+reference runs, so an installer that rewrites that file's bytes, by converting its line endings or
+otherwise, an installed copy a documented run cannot read, an installation step an attempt cannot
+complete, and a first run whose writes leave the second run with an installed copy that no longer
+holds the shipped bytes are each a failure of this rule. A reference run of a release MUST NOT emit
+a report that deviates from the expected report, and its runtime check MUST NOT authorize any store
+operation where the expected runtime result is `cannot_evaluate` or where its admission check, the
+pre-scan included, refused the store that run resolved.
+
+Only a checker's own attempts and reference runs are evidence under the two rules above: a report of
+any other run or installation, altered or not, MUST NOT be presented as establishing or countering
+conformance of any release, and whether a release conforms to this section is judged only from the
+bytes the release ships, the implementation and the installer included, inspected, from the
+documentation of the release, and from the checker's own attempts and reference runs. A failure of
+either rule is shown for a checker where one of its own attempts or reference runs shows it, and
+established for that checker where a second of its own attempts or reference runs, made on the same
+platform and version, shows a failure of the same rule and, under the reference-run rule, in the
+same part, the four compared parts of the report and the store and base-result parts below each one
+part; attempts and reference runs that show no failure, however many there are, never counter a
+shown or established failure. The two rules above are the one path from attempts and reference runs
+to a verdict: a breach of any requirement of this section that an attempt or a reference run shows
+in what those rules compare, the four compared parts of a report, `not-read` beside another runtime
+result, a run's cannot-evaluate and the store operations it performs, a restatement a report states,
+and the store and base-result parts below included, MUST be judged solely as a failure of the
+availability rule or of the reference-run rule, shown and established only as those rules provide,
+never as nonconformance on one showing; only what a checker inspects in the bytes the release ships
+or reads in the documentation of the release decides a verdict under this section without that
+procedure. Every requirement of this section that those rules do not compare is a requirement on the
+bytes the release ships, on the documentation of the release, or on a checker's own conduct and
+reporting: in particular, a requirement on the conduct of the implementation's commands outside what
+the parts above read, the fresh-only admission, lease, recovery, and sync conduct below included, is
+a property of the bytes the release ships, and a breach of it is judged by that inspection alone,
+never by this procedure. A run that is no reference run and belongs to none of the checker's
+attempts, a run of another command over a store the checker made and the Appendix E scratch-copy
+probe over an edited installed copy included, is an observation of the implementation's behaviour,
+never an inspection of the bytes the release ships or a reading of the documentation of the release:
+however often it is repeated, it is no evidence under the two rules above, it shows and establishes
+nothing there, and it decides no verdict under this section, on one showing or many, since only
+those two rules, that inspection, and that reading decide; it can only direct the checker to what an
+inspection of the bytes the release ships then finds, and section 17 discloses what every inspection
+and such an observation rest on. An availability failure is shown by a failed attempt and
+established by a second failed attempt of the same checker on the same platform and version; it has
+no part, so the same-part condition does not apply to it. Under the reference-run rule the same-part
+condition applies to every failure, a store operation performed where the expected runtime result is
+`cannot_evaluate` or where that run's admission check, the pre-scan included, refused the store that
+run resolved included: that operation is a failure in a part of its own, the store part, shown and
+reproduced only by a run that performs such an operation, never by a deviating report. A report a
+reference run emits over a store its admission check refuses is compared in one more part of its
+own, the base-result part: it deviates there where that report breaches the refusal-report rule
+below, by a base result other than `indeterminate` or by not naming what that rule has it name, and
+such a breach in such a report is judged only there, under the reference-run rule and the same-part
+condition, never as a direct verdict. The showing and the reproducing evidence MAY be any two of the
+checker's own reference runs on the same platform and version, the two runs of one attempt included.
+A checker that reports on a shown failure MUST report it as established or, where its own evidence
+has shown it and not reproduced it, as unresolved, MUST name the platform, the version, and its own
+attempts and reference runs behind that state, and MUST NOT report an unresolved failure, or the
+absence of a shown one, as conformance of the release. A release for which a checker's own evidence
+establishes a failure of either rule does not conform to this section, and that checker MUST NOT
+make a conformance claim for it; a conformance claim under this section MUST name the attempts and
+reference runs it rests on. Each such failure is a release nonconformance, never a runtime state of
+the declaration: it MUST NOT be treated as making the declaration malformed or contradictory, and it
+does not change what a runtime check of an installed copy yields.
+
+An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and
+every upgrade requirement binds it. An unreadable, malformed, or contradictory declaration MUST
+yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or
+that omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
+MUST NOT authorize any store operation. A declaration that carries its release identity, its
+`spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
+declares no class: it MUST NOT be treated as malformed for that omission, and the implementation
+that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
+contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
+classless declaration govern the file alone: a runtime check MUST apply them to the installed copy
+as it stands, a check of the documentation or of the reports MUST apply them to that file as the
+release ships it, and each check MUST NOT take a class or any other field from the documentation of
+the release or from any report. Where that documentation states a class that the file omits, the
+release does not conform to this section and a conformance claim MUST NOT be made for it, because
+the documentation's restatement states a field the file does not carry; where a report a reference
+run of that release emits states such a class, that report's restatement differs from the file's
+declaration the same way, a deviation of the restatement part judged under the reference-run rule
+like any other, never a direct verdict. The file declares no class only where it omits its class and
+no other field: a file that is absent, or that also omits its release identity, its `spec_version`,
+its homes generation, or its worklog storage generation, is malformed and MUST yield
+cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
@@ -2302,29 +2501,30 @@ store only after full doctor VALID. Admission MUST NOT substitute for any other 
 
 For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
 naming the class, the supported version and generations, and the finding; it MUST NOT give
-`conformant_for_declared_scope`, nor `nonconformant` on that refusal alone. A claim of the
-fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a
-fixture that every store-resolving command refuses with that finding, asserting each seeded
-legacy-state item by its path, with both trees byte-identical; for the section 9.2 ceiling, whose
-finding carries no token in this specification, the fixture asserts an INVALID finding that names
-the declared and supported versions and the tooling-upgrade remedy. The importer-authored
-clean-series item's fixtures MUST include five separate fixtures that each seed exactly one
-importer-authored clean record, one an entry in the active `worklog.toml` ledger, one an entry in an
-archived worklog ledger, one an active typed record in its `<type>.index.toml`, one an active typed
-record in a per-record file under a `<type>/` directory (section 9), and one an archived typed
-record, and the `import_status` item's fixtures MUST include one whose `.working/imported/adoption/`
-holds no file, refused with that item's finding, and one whose
-`.working/imported/adoption/<run-id>/` holds a file at no adoption receipt path of the
-implementation's own writer and no candidate adoption receipt, which every store-resolving command
-MUST report as cannot-evaluate, never as `unsupported-legacy-state` and never as admission, with
-both trees byte-identical. The recovery bound's fixtures MUST include, for each kind of recovery
-journal the implementation's own writers keep, the section 8.8 journal and the section 14.2 apply
-journal included: one whose candidate is torn under such a journal within the bound, which a command
-that performs that recovery recovers and then admits, the section 14.2 one interrupted after apply
-removed an occupying `manifest.toml`; one whose journal names a path-defined legacy-state item as an
-operand and one whose journal does not parse in its writer's format, each of which every
-store-resolving command MUST report as cannot-evaluate, never as admission, with both trees
-byte-identical; and one at the supported version that holds such a journal, whose operands all
+`conformant_for_declared_scope`, nor `nonconformant` on that refusal alone. That sentence is the
+refusal-report rule the base-result part above compares, so in a report a reference run emits, a
+breach of it deviates there, never as a direct verdict. A claim of the fresh-only class MUST cite
+refusal evidence: for each finding above and each legacy-state item, a fixture that every
+store-resolving command refuses with that finding, asserting each seeded legacy-state item by its
+path, with both trees byte-identical; for the section 9.2 ceiling, whose finding carries no token in
+this specification, the fixture asserts an INVALID finding that names the declared and supported
+versions and the tooling-upgrade remedy. The importer-authored clean-series item's fixtures MUST
+include five separate fixtures that each seed exactly one importer-authored clean record, one an
+entry in the active `worklog.toml` ledger, one an entry in an archived worklog ledger, one an active
+typed record in its `<type>.index.toml`, one an active typed record in a per-record file under a
+`<type>/` directory (section 9), and one an archived typed record, and the `import_status` item's
+fixtures MUST include one whose `.working/imported/adoption/` holds no file, refused with that
+item's finding, and one whose `.working/imported/adoption/<run-id>/` holds a file at no adoption
+receipt path of the implementation's own writer and no candidate adoption receipt, which every
+store-resolving command MUST report as cannot-evaluate, never as `unsupported-legacy-state` and
+never as admission, with both trees byte-identical. The recovery bound's fixtures MUST include, for
+each kind of recovery journal the implementation's own writers keep, the section 8.8 journal and the
+section 14.2 apply journal included: one whose candidate is torn under such a journal within the
+bound, which a command that performs that recovery recovers and then admits, the section 14.2 one
+interrupted after apply removed an occupying `manifest.toml`; one whose journal names a path-defined
+legacy-state item as an operand and one whose journal does not parse in its writer's format, each of
+which every store-resolving command MUST report as cannot-evaluate, never as admission, with both
+trees byte-identical; and one at the supported version that holds such a journal, whose operands all
 parse, and a listed legacy-state item that is no operand of it, which every store-resolving command
 MUST refuse with that item's finding, with both trees byte-identical. The section 14.2 apply
 journal's fixtures MUST also include a first adoption interrupted after its apply journal was
@@ -2441,58 +2641,128 @@ The gates in this standard are strong where they are strong and say so where the
   `.working/`, which only the `import_status` item reaches. Admission parses only the section 16.1
   candidates and a recovery journal of the implementation's own writer (sections 8.8, 14.1, and
   14.2), and never reads beneath a path registered under `[unmanaged]` that section 14.2 permits, so
-  a listed item kept outside those candidates, such as a legacy-format inventory kept under such a
-  path or anywhere but the root of a staging or evidence run folder, goes undetected; an
-  `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave
-  a path unsearched. Admission recognizes only the adoption receipts of the implementation's own
-  section 14 adoption writer, so where another implementation's writer placed a store's adoption
-  receipt under `.working/imported/adoption/` at another path or in another format, and that area
-  holds no adoption receipt of the implementation's own writer, the check cannot establish whether
-  that store holds an adoption receipt, and a `partial` or `complete` `import_status` there is
-  cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format
-  adoption set that status. An adoption receipt kept outside `.working/imported/adoption/`, which
-  section 14.2 does not permit, decides nothing, so where that area holds no file, its store's
-  `partial` or `complete` `import_status` is refused as `unsupported-legacy-state`. A refusal at its
-  pre-scan leaves a store unchanged, and no refusal offers preservation, repair, or continuity; an
-  adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included,
-  needs an upgrade-capable implementation for that store. The lease and recovery steps of sections
-  5.7, 8.8, 14.1, and 14.2 run after a read-only pre-scan and before the admission check that
-  follows them (section 16.1). The pre-scan refuses, before any write, a store whose manifest
-  declares a version or generation that the check refuses or that shows a listed legacy-state item,
-  the live bytes of an operand of an interrupted transaction included, and defers only the
-  cannot-evaluate classification of an unreadable, malformed, contradictory, or absent operand of
-  such a transaction within the recovery bound, so a store that only the later check refuses or
-  cannot evaluate, as where such an operand stays contradictory after recovery or the recovery's own
-  result meets a refusal, or where something that does not take the lease changed the store between
-  the pre-scan and the recovery, may carry the effects of a completed recovery of the
-  implementation's own interrupted transaction, within the section 16.1 recovery bound, and of the
-  section 5.7 reconciliation of a dead run's leftover lease. A command that writes and takes its
-  lease after admission rechecks admission once that lease is taken and observable and before any
-  other write; a stop there writes nothing but what section 5.7 requires to end the command's own
-  claim: it releases a `lease.toml` that carries its own claim and leaves untouched one that carries
-  another holder's claim. That stop restores nothing else, so a change that another process made and
-  the recheck detected stays in the tree; where the store has a sync target, that target's history
-  can keep the lease's claim and release, and where the concurrent-operation module is enabled the
-  `session_lease` record of that claim and its release remain. Within the section 16.1 recovery
-  bound, a fresh-only implementation trusts its own writer's recovery journal, as section 8.8, 14.1,
-  or 14.2 recovery does, to complete or roll back an interrupted transaction before admission runs;
-  a command that performs no such recovery, a read-only command included, reports a store with a
-  torn candidate as cannot-evaluate until a recovering command recovers it, and a clone without the
-  journal (section 4.2) stays cannot-evaluate. Only the transactions section 16.1 lists are
-  recovered that way: a candidate torn by any other write, such as a section 12 rotation or a
-  non-green outcome event appended to an adoption receipt, is classed like any other candidate even
-  where the implementation journals that write, so one left unparseable stays cannot-evaluate for
-  every command of a fresh-only implementation, its own writers included, until it is repaired by
-  hand, and one left parseable is not recognized as torn. A section 14.1 restore after a committed
-  apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's
-  store manifest apart from a foreign source at a candidate path binds only that first adoption, so
-  a restore that copies archived bytes to a candidate path, such as an importer-authored
+  a listed item defined by file content and kept outside those candidates, such as a legacy-format
+  inventory kept under such a path or anywhere but the root of a staging or evidence run folder,
+  goes undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input,
+  never a reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
+  implementation's own section 14 adoption writer, so where another implementation's writer placed a
+  store's adoption receipt under `.working/imported/adoption/` at another path or in another format,
+  and that area holds no adoption receipt of the implementation's own writer, the check cannot
+  establish whether that store holds an adoption receipt, and a `partial` or `complete`
+  `import_status` there is cannot-evaluate: never refused as legacy, but not admitted either, even
+  where a current-format adoption set that status. An adoption receipt kept outside
+  `.working/imported/adoption/`, which section 14.2 does not permit, decides nothing, so where that
+  area holds no file, a store at the supported version whose `import_status` is `partial` or
+  `complete` is refused as `unsupported-legacy-state`. A refusal at its pre-scan leaves a store
+  unchanged, and no refusal offers preservation, repair, or continuity; an adopter whose store holds
+  legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
+  implementation for that store. The lease and recovery steps of sections 5.7, 8.8, 14.1, and 14.2
+  run after a read-only pre-scan and before the admission check that follows them (section 16.1).
+  The pre-scan refuses, before any write, a store whose manifest declares a version or generation
+  that the check refuses or that shows a listed legacy-state item, the live bytes of an operand of
+  an interrupted transaction included, and defers only the cannot-evaluate classification of an
+  unreadable, malformed, contradictory, or absent operand of such a transaction within the recovery
+  bound, together with a discovery outcome that such an operand alone decides, so a store that only
+  the later check refuses or cannot evaluate, as where such an operand stays contradictory after
+  recovery or the recovery's own result meets a refusal, or where something that does not take the
+  lease changed the store between the pre-scan and the recovery, may carry the effects of a
+  completed recovery of the implementation's own interrupted transaction, within the section 16.1
+  recovery bound, and of the section 5.7 reconciliation of a dead run's leftover lease. A command
+  that writes and takes its lease after admission confirms, once that lease is taken and observable
+  and before any other write, that the `lease.toml` carries its own claim and that every directory
+  listing, existence-probe result, and candidate the admission check read is unchanged apart from
+  exactly the bytes its own claim of the lease wrote; a stop at that recheck writes nothing but what
+  section 5.7 requires to end the command's own claim: it releases a `lease.toml` that carries its
+  own claim and leaves untouched one that does not. That stop restores nothing else, so a change
+  that another process made and the recheck detected stays in the tree; where the store has a sync
+  target, that target's history can keep the lease's claim and release, and where the
+  concurrent-operation module is enabled the `session_lease` record of that claim and its release
+  remain. Within the section 16.1 recovery bound, a fresh-only implementation trusts its own
+  writer's recovery journal, as section 8.8, 14.1, or 14.2 recovery does, to complete or roll back
+  an interrupted transaction before the admission check that follows recovery runs; a command that
+  performs no such recovery, a read-only command included, reports a store with a candidate that an
+  interruption left unreadable, malformed, or contradictory as cannot-evaluate until a recovering
+  command recovers it, and a clone without the journal (section 4.2) stays cannot-evaluate. Only the
+  transactions section 16.1 lists are recovered that way: a candidate torn by any other write, such
+  as a section 12 rotation or a non-green outcome event appended to an adoption receipt, is classed
+  like any other candidate even where the implementation journals that write, so one left
+  unparseable stays cannot-evaluate for every command of a fresh-only implementation, its own
+  writers included, until something outside that implementation, such as a hand edit, repairs it,
+  and one left parseable is not recognized as torn. A section 14.1 restore after a committed apply
+  is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's store
+  manifest apart from a foreign source at a candidate path binds only that first adoption, so a
+  restore that copies archived bytes to a candidate path, such as an importer-authored
   `worklog.toml` restored over the live one, leaves a store that every command of a fresh-only
-  implementation, its own writers included, then refuses as `unsupported-legacy-state` where those
-  bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable,
-  malformed, or contradictory. A change made after the recheck by
-  anything that does not take the lease, such as a hand edit or a branch switch, is outside
-  admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+  implementation, its own writers included, then refuses where those bytes show a listed item, as
+  `unsupported-legacy-state` where the store stays at the supported version, or reports as
+  cannot-evaluate where it classes them unreadable, malformed, or contradictory. A change made after
+  the recheck by anything that does not take the lease, such as a hand edit or a branch switch, is
+  outside admission. Until validation tooling ships, a class claim is self-asserted (section 16).
+- The section 16.1 runtime check compares the installed copy of a release's declaration file with
+  the shipped-file digest the implementation carries, so it detects an edit of that copy alone,
+  which yields cannot-evaluate; it does not detect a co-edit that changes both the installed copy
+  and the digest the implementation carries to match it, or one that changes the installed copy
+  together with the implementation's comparison code so that the comparison no longer refuses that
+  copy, and an anchor outside the installation, such as a signature over that file that the
+  implementation verifies, is the stronger option only against an edit that does not also change the
+  implementation's verification key or its anchor check; section 16.1 does not require one. Whether
+  a release's runtime check compares the installed copy's bytes with the digest the implementation
+  carries at all, and whether that digest sits at the place the documentation states, are
+  established only by an inspection of the implementation, never by a reference run: every reference
+  run's installed copy holds the shipped bytes, over which a runtime check that skips that
+  comparison and one that makes it can yield the same report. Section 16.1 verdicts are
+  observer-local: each rests on a checker's own knowledge of its stock baseline and of what it
+  changed, so an alteration the checker did not detect, such as an organization-wide package-manager
+  configuration file taken for part of the stock install, can mislead that checker. Another checker
+  contests a claim only with its own evidence: under the section 16.1 availability and reference-run
+  rules, with its own attempts and reference runs alone, and otherwise with what it finds by
+  inspecting the bytes the release ships or by reading the documentation of the release, such as
+  that the release carries no shipped-file digest or that its documentation states no place for it.
+  Honest checkers can reach different verdicts on stock installs of different platforms or versions,
+  each within what the documentation of the release names or, where that documentation names none,
+  the platform the checker in question uses, since section 16.1 makes every default of each such
+  install that the documentation does not exclude, by directing that it be changed or by naming a
+  platform that lacks it, the release's to meet. They can also reach different verdicts on one
+  platform and version, where the changes the section 16.1 closed operational list permits, such as
+  the account name or the clock, differ between their attempts, or where one checker's own attempts
+  and reference runs show a failure of one rule twice, under the reference-run rule in the same part
+  both times, and another checker's show it once or never. The same residual covers the section 16.1
+  rule that an attempt whose installation or execution environment differs from what the stock
+  install's defaults, the changes the closed operational list permits, the documented steps, the
+  release's own code, and code those steps install from a source the documentation of the release
+  directs left it is not an attempt and establishes nothing: only a checker that detects the
+  alteration can know to set that attempt aside, and section 16.1 has a checker that cannot
+  determine an attempt's eligibility report what only such attempts show as unresolved, never
+  established. It covers whether a checker observed every write of a run the same way: the
+  section 16.1 runtime-result token comparison and store part read the writes the checker observed,
+  so a write a checker missed could make an honest token read as disagreeing, or hide a disagreeing
+  token or a store-part failure that the run's writes show, and a checker that cannot determine
+  whether it observed every write of a run reports what only the behaviour-coupled comparisons of
+  such runs show as unresolved, never established. The working and temporary locations a checker
+  chose are its own, and what sits there alters nothing, the installation apart: the installed
+  files, the installed copy included, and the files a documented step or the release's own code
+  wrote stay part of the installation wherever they sit, so the Appendix E scratch-copy probe, which
+  edits an installed copy, alters the installation it probes. That probe, like every run outside the
+  checker's own attempts and reference runs, is an observation of the implementation's behaviour,
+  never an attempt, a reference run, or an inspection of the bytes the release ships: it establishes
+  nothing under the section 16.1 rules however often it is repeated, it decides no verdict of its
+  own, and it informs only the section 16.1 inspection of the implementation, which rests on the
+  same observer-local attribution. A requirement of section 16.1 on the conduct of the
+  implementation's commands that its two rules do not compare, the fresh-only admission, lease,
+  recovery, and sync conduct included, is judged only by that inspection, so a conduct breach a
+  checker cannot attribute to the bytes the release ships decides nothing for that checker, and one
+  it can attribute is decided by what that inspection finds in those bytes, never by the observed
+  run itself on any number of showings. A failure that a checker cannot show twice in its own
+  attempts and reference runs, on the same platform and version and, under the reference-run rule,
+  in the same part, stays unresolved, however many other checkers each show it once, and an
+  unresolved failure neither establishes nor counters any conformance or nonconformance of the
+  release. Where the documentation of a release directs that a file the release does not ship be
+  installed and does not pin its bytes, attempts made at different times can differ as the bytes the
+  directed source serves differ, a residual of the release's own documentation. Appendix E gives
+  informative guidance for checking release conformance: a record of attempts, redaction of secrets,
+  sharing and repetition, corroboration across checkers, a consistency probe over third-party
+  reports, scratch-copy probes of the byte comparison, and an optional content-addressed reference
+  environment.
 
 ## Appendix A: record envelope example
 
@@ -2588,5 +2858,53 @@ baseline record types, deterministic views with a drift gate, and the first impo
 tooling; then renamed types can no longer leave a stale generated view behind, and
 composed views now surface records awaiting ratification.
 ```
+
+## Appendix E: checking release conformance (informative)
+
+This appendix is informative: it recommends practice for checkers and releases working under
+section 16.1, it adds no requirement, and section 16.1 alone decides what a failure, a verdict, or a
+conformance claim is.
+
+- Keep a record of each attempt. A useful record holds the platform and version the documentation
+  names, if any, and the platform and version used; the account and whether it held administrative
+  privilege; the umask, locale, and character encoding; every environment variable set; the path and
+  SHA-256 digest of each interpreter, version-control, and package-manager configuration file a step
+  read; each package index or other source a step used; the documented steps followed and the
+  commands run; the interpreter and tool versions; the store a run read, with the SHA-256 digest of
+  each of its files; the list of installed files, with the SHA-256 digest of each; and each setting
+  or component the checker knows it changed relative to the stock install.
+- Redact secrets everywhere in a record: a credential, a token, a password, or a private key, in an
+  environment variable's value, in a source's address, or in a command argument, is written as its
+  name and a redaction marker, never as its value.
+- Share records so that another checker can repeat an attempt on its own stock install; keeping the
+  bytes each source served, and replaying them, makes a repetition closer. A shared record informs
+  another checker's work and never substitutes for that checker's own attempts and reference runs.
+- Corroborate across checkers: where two checkers each show the same failure once, on the same
+  platform and version, that agreement is a strong reason to keep attempting, though under
+  section 16.1 the failure stays unresolved for each checker until its own attempts or reference
+  runs show it twice, on the same platform and version and, under the reference-run rule, in the
+  same part.
+- A report of a third-party installation can be probed for consistency. Where its installed-copy
+  digest is 64 lowercase hexadecimal digits other than the SHA-256 digest of the shipped file's
+  bytes and its runtime result is other than `cannot_evaluate`, the report is inconsistent with a
+  run whose runtime check compared the installed copy's bytes with that digest before reading any
+  field and, on finding them different, yielded cannot-evaluate as section 16.1 requires, whose
+  emitter reported that run truthfully, and whose report no one altered after the emitter wrote it.
+  It does not show that no comparison ran: a co-edit that also changed the digest the implementation
+  carries (section 17), a comparison that is skipped, defective, or made without refusing a
+  mismatch, an emitter that misreports, and a report altered after it was written each explain it,
+  and the report does not tell which. It establishes nothing under section 16.1.
+- Probe the byte comparison on a scratch copy: install the release somewhere disposable, edit the
+  installed copy, and observe whether the runtime check yields cannot-evaluate and authorizes no
+  store operation. This observes the implementation's behaviour over bytes the release did not ship;
+  section 17 discloses that no reference run can show whether that comparison is made. An edited
+  installed copy is an altered installation under section 16.1 wherever it sits, a disposable
+  location included, so a probe run is no attempt and no reference run and, however often it is
+  repeated, establishes nothing under the section 16.1 availability and reference-run rules. It is
+  an observation, never an inspection of the bytes the release ships, and it decides no verdict: it
+  can only direct the checker to what an inspection of those bytes then finds.
+- A content-addressed reference environment, such as a container image named by digest, makes a
+  checker's stock baseline reproducible and repetitions cheaper; section 16.1 does not require one,
+  and a release's documentation can name one as the platform it documents.
 
 ---

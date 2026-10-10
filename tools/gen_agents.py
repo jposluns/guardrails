@@ -8,7 +8,9 @@ to a section heading. The layout (legacy, or composed with reviewed blocks aroun
 block registry .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator
 shares with gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or
 registry, a symlinked target, an absent rule corpus (nothing is deleted), or a write that would erase a
-hand edit.
+hand edit in a composed-layout target. A legacy-layout target is refused only when it holds a pasted
+marker-like line; any other hand edit in it is lost on regeneration, though --check still reports it as
+drift.
 
   gen_agents.py              regenerate AGENTS.md
   gen_agents.py --check      exit 1 if AGENTS.md differs from a fresh composition; write nothing
@@ -17,11 +19,16 @@ hand edit.
 import sys
 
 if tuple(sys.version_info[:2]) < (3, 14):
-    sys.stderr.write(
-        "error: gen_agents.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
-        "Nothing was run (cannot evaluate).\n"
-        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    import os
+    try:
+        sys.stderr.write(
+            "error: gen_agents.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 from pathlib import Path
 
@@ -123,9 +130,11 @@ def main():
 #       and the sibling target are unchanged, and nothing is created through the link.
 #   T20 a legacy target already in sync is not judged: a rule body holding a marker-like line writes once
 #       and then rewrites as exit 0 (the guard runs only on a target whose bytes would change).
-#   T21 a write keeps the target's mode (umask pinned; the asserted mode holds execute bits no creation
-#       mode supplies, so a dropped fchmod cannot pass) and leaves no temporary file; a failed rename is
-#       exit 2 with the target unchanged and the temporary file left in place and named in the refusal.
+#   T21 a write keeps the target's ordinary permission bits and drops its set-user-ID and sticky bits
+#       (umask pinned; the kept bits hold execute bits no creation mode supplies, so a dropped fchmod
+#       cannot pass, and the whole S_IMODE is asserted, so a kept sticky bit, which no write clears, fails)
+#       and leaves no temporary file; a failed rename is exit 2 with the target unchanged and the
+#       temporary file left in place and named in the refusal.
 #   T22 a parent directory swapped for a symlink after the write-side walk: the write lands through the
 #       held descriptor in the original directory and nothing outside the tree changes.
 #   T23 the same swap after the read-side walk: the bytes read are the real target's, never the planted
@@ -147,16 +156,23 @@ def main():
 #   T32 a nested target swapped for a FIFO with no reader after the write-side walk: the probe's open
 #       fails at once with ENXIO, refused (exit 2) in the engine's wording naming the path from the root;
 #       a probe descriptor opened in blocking mode fails the vector, and a watchdog whose clock starts
-#       only once the FIFO exists supplies a reader, so a blocking open cannot hang the run.
+#       only once the probe's open is entered supplies a reader, so a blocking open cannot hang the run.
 #   T33 a foreign file put at the temporary name after its creation, then a failed rename: exit 2, the
 #       target unchanged, the foreign file kept and its name given in the refusal (nothing is unlinked).
-#   T34 descriptor accounting: the descriptors open after every other vector (T1-T33, then T35 and T36,
+#   T34 descriptor accounting: the descriptors open after every other vector (T1-T33, then T35 to T38,
 #       which run before it) are the ones open before them, so a close dropped on any ordinary success or
 #       error path fails (skipped where neither /proc/self/fd nor /dev/fd can be listed).
-#   T35 an exception other than OSError raised at the rename (a stand-in for an interrupt) propagates
-#       with a note naming the temporary file it left; the target unchanged and the file left there.
+#   T35 on a nested target, an exception other than OSError raised at the rename (a stand-in for an
+#       interrupt) propagates with a note naming the temporary file it left by its path from the root;
+#       the target unchanged and the file left there.
 #   T36 a nested target swapped for a directory after the write-side walk: the probe's open fails with
 #       EISDIR, refused (exit 2) in the engine's wording naming the path from the root; nothing replaced.
+#   T37 a nested target swapped for a directory after the read-side walk: the read leg's fstat, made
+#       before any file object, refuses it (exit 2 in both modes) in the engine's wording naming the path
+#       from the root; nothing replaced.
+#   T38 a nested target swapped for a UNIX socket after the read-side walk: the read leg's open fails
+#       with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the root
+#       (ENXIO is injected where this environment cannot bind the socket or refuses its open otherwise).
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -177,6 +193,7 @@ def self_test_main():
     import io
     import os
     import shutil
+    import socket
     import stat
     import tempfile
     import threading
@@ -599,13 +616,22 @@ def self_test_main():
         saved_umask = os.umask(0o022)
         try:
             root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-            os.chmod(root / AGENTS_REL, 0o751)
+            # Set-user-ID and sticky bits beyond the ordinary 0o751: the write drops both, and the sticky
+            # bit (which no write clears) makes a kept one visible even to an unprivileged runner.
+            try:
+                os.chmod(root / AGENTS_REL, 0o5751)
+            except OSError:  # a platform refusing the sticky bit on a regular file (EFTYPE)
+                os.chmod(root / AGENTS_REL, 0o4751)
+            if not stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode) & 0o7000:
+                failures.append("T21: the fixture could not set a mode bit beyond 0o777")
             (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
             expect("T21 rewrite", root, False, 0, unchanged=False)
             if read(root / AGENTS_REL) == legacy_golden:
                 failures.append("T21: the rewrite did not change AGENTS.md")
-            if os.stat(root / AGENTS_REL).st_mode & 0o777 != 0o751:
-                failures.append("T21: the rewrite did not keep the target's mode")
+            kept = stat.S_IMODE(os.stat(root / AGENTS_REL).st_mode)
+            if kept != 0o751:
+                failures.append("T21: the rewrite left mode {:o}, not the target's ordinary permission bits "
+                                "751".format(kept))
             if sorted(p.name for p in root.iterdir()) != [".aiqt", AGENTS_REL]:
                 failures.append("T21: the write left a stray file: {}".format(sorted(p.name for p in root.iterdir())))
             (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(_RULE, encoding="utf-8")
@@ -919,10 +945,13 @@ def self_test_main():
         #      path from the root. The judgement is not a timer: the engine's probe open on the FIFO is
         #      observed through a wrapper, and a probe descriptor in blocking mode fails the vector, since a
         #      blocking open of a FIFO with no reader waits for one. A watchdog keeps the run bounded: its
-        #      clock starts only once to_fifo has made the FIFO (or the run has ended), and on expiry it
-        #      opens a reader on the FIFO, which releases a blocking open. If a scheduling delay lets that
-        #      reader arrive before a healthy probe, the probe still opens the FIFO in non-blocking mode and
-        #      the fstat check refuses it (exit 2, the same wording), so the delay cannot fail the vector.
+        #      clock starts only when the wrapper is entered for the probe's open (or the run has ended),
+        #      and on expiry it opens a reader on the FIFO, which releases a blocking open. A stall anywhere
+        #      before the probe therefore starts no clock: the healthy probe meets a FIFO with no reader and
+        #      fails with ENXIO, so the ENXIO wording stays judged. Only a stall of the watchdog's five
+        #      seconds between the wrapper's signal and its own open, two adjacent statements, lets the
+        #      reader arrive first; the probe then still opens the FIFO in non-blocking mode and the fstat
+        #      check refuses it (exit 2, the same wording), so even that cannot fail a healthy engine.
         nested = ".github/copilot-instructions.md"
         nested_target = [(nested, ("# Copilot", "", "Stand-in header.", ""))]
         nested_name = nested.rsplit("/", 1)[1]
@@ -941,10 +970,9 @@ def self_test_main():
         def to_fifo():
             (root / nested).unlink()
             os.mkfifo(root / nested)
-            ready.set()
 
         def watchdog():
-            ready.wait()  # set once the FIFO exists, or by the finally below if the run ends first
+            ready.wait()  # set as the probe's open is entered, or by the finally below if the run ends first
             if not finished.wait(5):
                 rescuers.append(real_open(root / nested, os.O_RDONLY | os.O_NONBLOCK))
 
@@ -954,6 +982,7 @@ def self_test_main():
             if (path != nested_name or flags & os.O_CREAT
                     or flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) != os.O_WRONLY):
                 return real_open(path, flags, *a, **k)
+            ready.set()  # the watchdog's clock starts here, at probe entry, never before
             try:
                 fd = real_open(path, flags, *a, **k)
             except OSError as exc:
@@ -1023,8 +1052,11 @@ def self_test_main():
         # T35. An exception other than OSError raised inside the try around the write and the rename,
         #      here a BaseException standing in for an interrupt and raised at the rename, propagates with
         #      a note naming the temporary file it left; the target is unchanged and the file is left at
-        #      that name. Without the note nothing names the leftover.
-        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+        #      that name. Without the note nothing names the leftover. The target is nested, so the note
+        #      must give the path from the root: the bare temporary name differs from it here.
+        root = tree(ac.registry_text(), blocks=())
+        (root / ".github").mkdir()
+        (root / nested).write_bytes(b"old line\n")
 
         class Interrupted(BaseException):
             pass
@@ -1038,7 +1070,7 @@ def self_test_main():
         notes = None
         ac.os.replace = interrupt_rename
         try:
-            ac._write_target(root, AGENTS_REL, b"new line\n")
+            ac._write_target(root, nested, b"new line\n")
         except Interrupted as exc:
             notes = getattr(exc, "__notes__", [])
         except Exception as exc:  # a refusal before the rename; reported here and by the check below
@@ -1048,12 +1080,13 @@ def self_test_main():
         if len(interrupted) != 1 or notes is None:
             failures.append("T35: the injected interrupt did not reach the rename")
         else:
-            if not any(interrupted[0] in note for note in notes):
+            left_rel = ".github/" + interrupted[0]
+            if not any(left_rel in note for note in notes):
                 failures.append("T35: the interrupt carries no note naming the temporary file {}: {}".format(
-                    interrupted[0], notes))
-            if read(root / interrupted[0]) != b"new line\n":
+                    left_rel, notes))
+            if read(root / left_rel) != b"new line\n":
                 failures.append("T35: the temporary file was not left at the name the note gives")
-        if read(root / AGENTS_REL) != legacy_golden:
+        if read(root / nested) != b"old line\n":
             failures.append("T35: the interrupted write changed the target")
 
         # T36. A nested target swapped for a directory after the write-side walk: the probe's write-only
@@ -1081,7 +1114,111 @@ def self_test_main():
             failures.append("T36: the directory was replaced or a temporary file was left: {}".format(
                 nested_strays(root)))
 
-        # T34. Descriptor accounting over every other vector (T1-T33, T35, T36).
+        # T37 and T38 swap a nested target on the READ leg: the hook runs after the _target_dir_fd call
+        # that _read_target makes (make_dirs=False), so the walk has judged a regular file and only the
+        # read leg's open and fstat stand between the swap and the bytes read.
+        def read_leg_swap(swap):
+            fired = []
+
+            def walk(*a, **k):
+                result = real_walk(*a, **k)
+                if not k.get("make_dirs") and not fired:
+                    fired.append(True)
+                    swap()
+                return result
+            return walk, fired
+
+        # T37. A nested target swapped for a directory after the read-side walk: an O_RDONLY open admits a
+        #      directory, and the fstat on that descriptor, made before any file object, refuses it (exit 2
+        #      in both modes) in the engine's wording naming the path from the root; a file object made
+        #      first raises IsADirectoryError naming the descriptor number instead.
+        for check in (True, False):
+            root = tree(ac.registry_text(), blocks=())
+            (root / ".github").mkdir()
+            (root / nested).write_bytes(b"old line\n")
+
+            def to_dir_on_read():
+                (root / nested).unlink()
+                (root / nested).mkdir()
+
+            ac._target_dir_fd, fired = read_leg_swap(to_dir_on_read)
+            try:
+                out = expect("T37 nested target swapped for a directory after the read-side walk", root, check,
+                             2, targets=nested_target, unchanged=False)
+            finally:
+                ac._target_dir_fd = real_walk
+            if not fired:
+                failures.append("T37: the read-leg swap hook did not run")
+            if nested_refusal + " (a directory)" not in out:
+                failures.append("T37: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
+            if not (root / nested).is_dir() or nested_strays(root):
+                failures.append("T37: the directory was replaced or a temporary file was left: {}".format(
+                    nested_strays(root)))
+
+        # T38. A nested target swapped for a UNIX socket after the read-side walk: the read leg's open fails
+        #      with ENXIO, refused (exit 2 in both modes) in the engine's wording naming the path from the
+        #      root, never the raw errno text naming the bare file name. The read leg's open of the final
+        #      name is observed through a wrapper; where this environment cannot bind the socket, or answers
+        #      its open with another errno (a sandbox can refuse it with EPERM), the wrapper raises ENXIO in
+        #      its place, so the engine's mapping is judged either way.
+        for check in (True, False):
+            root = tree(ac.registry_text(), blocks=())
+            (root / ".github").mkdir()
+            (root / nested).write_bytes(b"old line\n")
+            sockets, bound, read_opens = [], [], []
+
+            def to_socket():
+                (root / nested).unlink()
+                try:
+                    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                except OSError:
+                    return
+                sockets.append(sk)
+                here = os.getcwd()
+                os.chdir(root / ".github")  # a relative bind stays under the AF_UNIX path length limit
+                try:
+                    sk.bind(nested_name)
+                    bound.append(True)
+                except OSError:
+                    pass
+                finally:
+                    os.chdir(here)
+
+            def read_open(path, flags, *a, **k):
+                if (path != nested_name or flags & os.O_DIRECTORY
+                        or flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) != os.O_RDONLY):
+                    return real_open(path, flags, *a, **k)
+                read_opens.append(path)
+                if not bound:
+                    raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path)
+                try:
+                    return real_open(path, flags, *a, **k)
+                except OSError as exc:
+                    if exc.errno != errno.ENXIO:
+                        raise OSError(errno.ENXIO, os.strerror(errno.ENXIO), path) from None
+                    raise
+
+            ac._target_dir_fd, fired = read_leg_swap(to_socket)
+            ac.os.open = read_open
+            try:
+                out = expect("T38 nested target swapped for a socket after the read-side walk", root, check, 2,
+                             targets=nested_target, unchanged=False)
+            finally:
+                ac.os.open = real_open
+                ac._target_dir_fd = real_walk
+                for sk in sockets:
+                    sk.close()
+            if not fired:
+                failures.append("T38: the read-leg swap hook did not run")
+            if len(read_opens) != 1:
+                failures.append("T38: expected one read-leg open of the final name, saw {}".format(read_opens))
+            if nested_refusal + " (a FIFO with no reader, a socket, or a device" not in out:
+                failures.append("T38: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
+            if (root / nested).is_file() or nested_strays(root):
+                failures.append("T38: the socket was replaced or a temporary file was left: {}".format(
+                    nested_strays(root)))
+
+        # T34. Descriptor accounting over every other vector (T1-T33, T35 to T38).
         fds_after = open_fds()
         if fds_before is not None and fds_after != fds_before:
             failures.append("T34: descriptors leaked across the matrix: {} open before, {} after".format(
@@ -1103,17 +1240,19 @@ def self_test_main():
           "field; CRLF is drift; either refused adapter blocks the other's write; no corpus is exit 2 and "
           "deletes nothing; an unreachable corpus deletes nothing; a marker-like rule body is exit 2 for a "
           "composed target; a symlinked target or parent, a dangling link and a directory target are exit 2 "
-          "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the mode "
-          "(under a pinned umask) and leaves no temporary file, and a failed rename names the one it "
+          "with nothing outside the tree touched; an in-sync legacy target rewrites; a write keeps the "
+          "ordinary permission bits, dropping set-ID and sticky bits (under a pinned umask), and leaves no "
+          "temporary file, and a failed rename names the one it "
           "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "
           "symlink or a FIFO swapped in at the target is refused, as is a symlink planted against mkdir; "
           "a colliding "
           "temporary name is retried and the colliding file kept; a read-only target is refused; a "
           "platform without dir_fd support is refused; a symlink or a FIFO (held open or not) swapped in "
           "at the target after the write-side walk is refused by the write probe without blocking, as is a "
-          "directory, each in the engine's wording naming the path from the root; a failed write leaves "
-          "its temporary file, never deleting a foreign file at that name, and an interrupt at the rename "
-          "carries a note naming it; and no descriptor is left open.")
+          "directory, each in the engine's wording naming the path from the root, and so is a directory or "
+          "a socket swapped in after the read-side walk; a failed write leaves its temporary file, never "
+          "deleting a foreign file at that name, and an interrupt at the rename carries a note naming it "
+          "by its path from the root; and no descriptor is left open.")
     return 0
 
 
