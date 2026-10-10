@@ -25,13 +25,14 @@ MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
 
-The default entry also guards the informative sections: a heading that says "(informative)" or
-whose body declares itself informative ("This appendix is informative", or section or
-subsection, as Appendix E does), and every descendant heading beneath it at any level, is red
-where its title or its body carries an uppercase requirement keyword (MUST, SHALL, REQUIRED,
-SHOULD, MAY, RECOMMENDED, OPTIONAL) outside the one exempt quotation form, a code span holding
-exactly the keyword preceded by "the keyword" or "the term"; a keyword in any other form there,
-a bare code span or a fenced block included, is a finding (the guard fails closed). A keyword is
+The default entry also guards the informative sections: a heading whose title or body holds
+"(informative)" or the declaration ("This appendix is informative", or section or subsection,
+as Appendix E does), or whose title sets the word off as a label (below), and every
+descendant heading beneath it at any level, is red where its title or its body carries an
+uppercase requirement keyword (MUST, SHALL, REQUIRED, SHOULD, MAY, RECOMMENDED, OPTIONAL)
+outside the one exempt quotation form, a code span holding exactly the keyword preceded by
+"the keyword" or "the term"; a keyword in any other form there, a bare code span or a fenced
+block included, is a finding (the guard fails closed). A keyword is
 read where no letter, digit or underscore adjoins it, or where an underscore run adjoins it with
 no letter or digit beyond the run, as CommonMark requires before an underscore can open or close
 emphasis: _MUST_ and __MUST__ are read, MUST_DO and x_MUST_y (rendered as written) are not, and
@@ -48,35 +49,54 @@ superscript, subscript or circled form read as a space, since a footnote mark en
 MU**ST**, [MU](/u)ST, [MU][r]ST, x](M**U**ST), [x][M**U**ST], &#77;UST, M&shy;UST, MU with a
 combining grapheme joiner before ST, MUST followed by a superscript 1, and fullwidth or
 mathematical MUST are read too; a removed character that renders visibly (MU!ST) over-fires.
-An informative marker is read the same way, in plain text alone: a heading title or body is
-informative where any of those forms holds "(informative)" (spaces allowed inside the
-parentheses) or the declaration, in any ASCII letter case and with any whitespace run, a
-line break included, read as one space; a URI autolink is read once more as its URI, the
-text CommonMark shows for it. A body is read as written and as the text of each of its
-paragraphs with the container markers of its lines removed (a block quote's ">" on every
-line, nested ones included); every paragraph is read, none is skipped, so a near-duplicate
-of a quoted declaration elsewhere in its section skips nothing. So Z (&#105;nformative),
-Z (Informative), Z (informa**tive**) and a declaration split across lines or across
-block-quoted lines mark their sections; reading more forms only marks more sections
-informative, so the guard scans more. The declaration is read wherever it stands in a
-sentence, so a sentence that denies it (Nothing in this section is informative.), one inside
-an HTML attribute or comment read as text, or one inside a fenced or indented code block
-(the body is also read as written) marks its section informative too, over-fires. The guard
-reads no inline HTML tag and no character reference it does not decode; it finds every text
-that could show a declaration from its letters, and holds that text to plain prose. A
-heading title anywhere, or any paragraph in any section, block-quoted or not, is a
-declaration candidate where the letters of "informative" can be assembled, in order, from
-the letter runs of its text (character references decoded, invisible characters dropped,
-compatibility forms folded, ASCII letters lowercased), each non-ASCII letter standing for
-any letter of the word: a run inside the word used whole, runs between the pieces skipped,
-and the first and last pieces a suffix and a prefix of their runs. Candidacy and the
-declaration reader share one case fold (_fold_case): ASCII letters lowercased and every
-other character kept, so it maps each character to one and never expands one. No non-ASCII
-letter is folded, since a Unicode fold can expand one out of the reader's view (str.casefold
-reads the dotted capital I, U+0130, as "i" and a combining dot, so a plain declaration
-spelled with it was neither read nor refused); a non-ASCII letter instead stands for any letter
-in candidacy and is refused inside a candidate (below), so no fold is needed to find or
-refuse it. A candidate is held to plain prose: every character of it must be an ASCII
+An informative marker is read the same way, in plain text alone, in any ASCII letter case
+and with any whitespace run, a line break included, read as one space; a URI autolink is
+read once more as its URI, the text CommonMark shows for it. A heading title and a body are
+each read for both marker forms: "(informative)" (spaces allowed inside the parentheses)
+and the declaration. So a title that states the declaration (## This section is
+informative, its setext form, ## Z: this section is informative) and a body that holds
+"(informative)" mark their sections. A title is also read for the word set off as a label:
+"informative" between two edges, an edge being the title's start or end or a character
+other than a letter, digit, underscore or whitespace, with only whitespace between the word
+and each edge (Z - Informative, Informative: Z, and "(informative)" as one case). The word
+among other words of a title (Informative references, Z (see the informative note)) marks
+nothing, and a body is not read for the label. A body is read as written and as the text of
+each of its paragraphs with the container markers of its lines removed (a block quote's ">"
+on every line, nested ones included); every paragraph is read, none is skipped, so a
+near-duplicate of a quoted declaration elsewhere in its section skips nothing. So Z
+(&#105;nformative), Z (Informative), Z (informa**tive**) and a declaration split across
+lines or across block-quoted lines mark their sections; reading more forms only marks more
+sections informative, so the guard scans more. Each marker is read wherever it stands, so a
+sentence that denies the declaration (Nothing in this section is informative.), a body that
+names another section's marker (see Appendix E (informative)), a marker inside an HTML
+attribute or comment read as text, or one inside a fenced or indented code block (the body
+is also read as written) marks its section informative too, over-fires. The guard reads no
+inline HTML tag and no character reference it does not decode; it finds every text that
+could show a marker from its letters, and holds that text to plain prose. A candidate's
+plain text is read for the markers above and nothing more, so a candidate that holds no
+marker marks nothing (a title Z (informed by the informative note) is a candidate and marks
+nothing). A heading title anywhere, or any paragraph in any section, block-quoted or not,
+is a declaration candidate where the letters of "informative" can be assembled, in order,
+from the letter runs of its normalized text: character references decoded, invisible
+characters dropped (as above, the Hangul fillers included), compatibility forms folded
+(NFKC) and ASCII letters lowercased, in that order, before any letter is compared. A letter
+run is a run of characters Python reads as letters or as numerics other than decimal
+digits, and each non-ASCII character left in a run after that normalization stands for any
+letter of the word (a non-ASCII letter, or a numeric that is no decimal digit, such as
+U+3007): a run inside the word used whole, runs between the pieces skipped, and the first
+and last pieces a suffix and a prefix of their runs. The wildcard sees only what
+normalization leaves: a compatibility form NFKC folds to ASCII letters is compared as those
+letters, the letters it shows (fullwidth A as "a"; the st ligature U+FB06 as "st", so
+"informa", U+FB06, "ive" spells "informastive" and is no candidate), and a dropped
+invisible character stands for no letter and splits no run, so eleven fullwidth A's, eleven
+Hangul fillers or eleven U+FB06 ligatures make no candidate. Candidacy and the declaration
+reader share one case fold (_fold_case): ASCII letters lowercased and every other character
+kept, so it maps each character to one and never expands one. No non-ASCII letter is
+folded, since a Unicode fold can expand one out of the reader's view (str.casefold reads
+the dotted capital I, U+0130, as "i" and a combining dot, so a plain declaration spelled
+with it was neither read nor refused); a non-ASCII letter instead stands for any letter in
+candidacy and is refused inside a candidate (below), so no fold is needed to find or refuse
+it. A candidate is held to plain prose: every character of it must be an ASCII
 letter, an ASCII digit, a space or the line feed joining a paragraph's lines, or one of
 . , ; : ' " ( ) - ? ! / (sentence punctuation, the marker's own parentheses, the hyphen of
 compound words, the slash of either/or phrasing; a bare "!" is plain, and the image form
@@ -96,10 +116,15 @@ so no markup form is left to enumerate: every inline construct that can hide, re
 reorder text (an HTML tag or comment, a link, an image, an autolink, a code span, emphasis
 or strikethrough, a backslash escape, a character reference) opens with a character outside
 the set (each of QA rounds 4 to 8 found one more form a per-form list missed; the allowlist
-refuses the class at the character). A construct that opens with an allowed character hides
-no text: a GFM extended autolink (www.example.org) shows its text as written, a list marker,
-setext underline or thematic break is block structure the block scan reads, and a two-space
-hard break is spaces and a line feed. A refused candidate is never silently skipped: each
+refuses the class at the character), with one exception the guard refuses by shape: a
+GitHub emoji shortcode (infor:m:ative shows an emoji for :m:) opens with an allowed colon,
+so a candidate also refuses each colon, one or more ASCII letters, digits or hyphens, and a
+colon, as an emoji shortcode (a "+" or "_" in a shortcode name is refused as a character
+already); a time or ratio of that shape (10:30:00) in a candidate is refused too, an
+over-fire. Every other construct that opens with an allowed character hides no text: a GFM
+extended autolink (www.example.org) shows its text as written, a list marker, setext
+underline or thematic break is block structure the block scan reads, and a two-space hard
+break is spaces and a line feed. A refused candidate is never silently skipped: each
 refused character is a finding. Its plain reading forms are still read over the text, so it
 can also mark its section informative, which only scans more; the refusal, not the reading,
 is what the gate relies on. Named over-fires of the refusal, each in a candidate alone:
@@ -112,13 +137,13 @@ accented letter in a name or loanword) is refused; ordinary words that never sho
 can assemble it from pieces (in / form / at / i / v / e), so a paragraph holding no
 declaration can be held to plain prose; and since each non-ASCII letter stands for any
 letter of the word, text in another script is a candidate wherever its letters can assemble
-the word (any run of eleven non-ASCII letters does), so a paragraph or heading title written
-in another script is refused, each of its distinct letters named. A candidate heading title
-is held to the same set by the same scan, each finding naming the title line holding the
-character, since a refused character could hide an "(informative)" marker. A heading title
-or paragraph that is no candidate is not refused for any character, however it renders: its
-letter runs hold no assembly of the word, so no removal or hiding of characters leaves the
-word shown; what a renderer adds beyond the source text is a residual, below.
+the word (any run of eleven non-ASCII letters left after normalization does), so a paragraph or
+heading title written in another script is refused, each of its distinct letters named. A
+candidate heading title is held to the same set by the same scan, each finding naming the title
+line holding the character, since a refused character could hide an "(informative)" marker. A
+heading title or paragraph that is no candidate is not refused for any character, however it
+renders: its letter runs hold no assembly of the word, so no removal or hiding of characters
+leaves the word shown; what a renderer adds beyond the source text is a residual, below.
 An informative section also fails closed, with a finding that names the form and asks for
 plain text or a move out of the section, on inline syntax it does not read: a "](" or "]["
 that opens no plain target (a destination with no space, parenthesis, quote, angle bracket
@@ -1211,12 +1236,24 @@ _INFORMATIVE_KEYWORD = re.compile(
 # or a body (_INFORMATIVE_MARK), each form folded by the one case fold candidacy shares
 # (_fold_case), so any ASCII letter case is read; any whitespace run (a line break
 # included) reads as one space (_says_informative); a body is also read as its paragraphs'
-# text with their container markers removed (_informative_sections). The body marker matches
-# anywhere in a sentence, so a sentence that denies it marks its section too, a disclosed
-# over-fire.
-_INFORMATIVE_TITLE = re.compile(r"\(\s*informative\s*\)")
-_INFORMATIVE_MARK = re.compile(
-    r"\bthis\s+(?:appendix|section|subsection)\s+is\s+informative\b")
+# text with their container markers removed (_informative_sections). A title and a body are
+# each read for both marker forms, the parenthesized marker (_INFORMATIVE_PARENTHESIZED) and
+# the declaration (_INFORMATIVE_DECLARATION), so neither form escapes by standing in the
+# other place (PR #481 QA round 10: a title "This section is informative" and a body
+# holding "(informative)" each marked nothing). A title is also read for the word set off as
+# a label (_INFORMATIVE_LABEL): "informative" between two edges, an edge being the title's
+# start or end or a character other than a letter, digit, underscore or whitespace, with only
+# whitespace between the word and each edge (Z - Informative, Informative: Z, and the
+# parenthesized marker as one case); the word among other words of a title (Informative
+# references) marks nothing, and a body is not read for the label, since prose sets the
+# word off by punctuation (a list, a clause) without marking anything. Each marker matches
+# wherever it stands, so a sentence that denies the declaration, or a body naming another
+# section's "(informative)", marks its section too, a disclosed over-fire.
+_INFORMATIVE_PARENTHESIZED = r"\(\s*informative\s*\)"
+_INFORMATIVE_DECLARATION = r"\bthis\s+(?:appendix|section|subsection)\s+is\s+informative\b"
+_INFORMATIVE_LABEL = r"(?:\A|[^\w\s])\s*informative\s*(?:[^\w\s]|\Z)"
+_INFORMATIVE_TITLE = re.compile(_INFORMATIVE_LABEL + "|" + _INFORMATIVE_DECLARATION)
+_INFORMATIVE_MARK = re.compile(_INFORMATIVE_PARENTHESIZED + "|" + _INFORMATIVE_DECLARATION)
 # The one exempt quotation form: a code span holding exactly one keyword, preceded by
 # "the keyword" or "the term" (sentence case allowed). Every other uppercase occurrence in an
 # informative section, inside any other code span or a fenced block included, is a finding.
@@ -1323,10 +1360,11 @@ def _informative_keywords(text):
 
 
 def _says_informative(text, mark):
-    # Whether text marks itself informative (mark is _INFORMATIVE_TITLE for a heading title,
-    # _INFORMATIVE_MARK for a body): in any plain reading form (_reading_forms), each form
-    # folded by the one case fold candidacy uses too (_fold_case). So a marker written in
-    # any ASCII letter case, with decoded character references, split by markup
+    # Whether text marks itself informative (mark is _INFORMATIVE_TITLE for a heading title:
+    # the label form, "(informative)" included, or the declaration; _INFORMATIVE_MARK for a
+    # body: "(informative)" or the declaration): in any plain reading form (_reading_forms),
+    # each form folded by the one case fold candidacy uses too (_fold_case). So a marker
+    # written in any ASCII letter case, with decoded character references, split by markup
     # the forms remove, by invisible characters or by a line break, in compatibility forms,
     # or shown by a URI autolink is read as the page shows it; reading more forms only
     # marks more sections informative, so the guard scans more. The plain forms are
@@ -1444,8 +1482,11 @@ def _declaration_candidate(text):
 # space and that the reading forms drop, so one could stand unseen for the space between
 # two words of the declaration. An allowlist, not a list of markup forms, decides it, so
 # no markup form is left to enumerate: every inline construct that can hide, replace or
-# reorder text opens with a character outside the set.
+# reorder text opens with a character outside the set, except a GitHub emoji shortcode
+# (:m: shows an emoji), which opens with an allowed colon and is refused by its shape
+# (_SHORTCODE); a time or ratio of that shape (10:30:00) is refused too, an over-fire.
 _PLAIN_PROSE_MARKS = " \n.,;:'\"()-?!/"
+_SHORTCODE = re.compile(r":[A-Za-z0-9-]+:")
 
 
 def _plain_prose(ch):
@@ -1466,12 +1507,18 @@ def _unread_markup_at(text):
     # order, with nothing masked: no code span, autolink or link target shields a character
     # from the scan, so no pairing or matching divergence from a Markdown renderer can hide
     # one construct behind another, and paragraphs and heading titles (title_forms) are
-    # held to the same set by this one scan.
+    # held to the same set by this one scan. Each distinct emoji shortcode (_SHORTCODE),
+    # the one replacing construct built from allowed characters, is named the same way.
     first = {}
     for at, ch in enumerate(text):
         if ch not in first and not _plain_prose(ch):
             first[ch] = at
-    return sorted((at, _char_label(ch) + " " + _shown(text, at)) for ch, at in first.items())
+    shortcodes = {}
+    for match in _SHORTCODE.finditer(text):
+        shortcodes.setdefault(match.group(), match.start())
+    return sorted([(at, _char_label(ch) + " " + _shown(text, at)) for ch, at in first.items()]
+                  + [(at, "an emoji shortcode " + _shown(text, at))
+                     for at in shortcodes.values()])
 
 
 # Block structure as CommonMark reads it, for the informative guard alone. Lines end at LF,
@@ -1743,10 +1790,12 @@ def _heading_bounds(text):
 
 
 def _informative_sections(text):
-    # A heading is informative where it says "(informative)" or its own body (to the next
-    # heading at any level) declares itself informative (_INFORMATIVE_MARK), the body read as
-    # written and as the text of each of its paragraphs with their container markers removed
-    # (_heading_bounds), so a quote marker cannot hide its declaration; every own paragraph
+    # A heading is informative where its title holds a title marker (_INFORMATIVE_TITLE: the
+    # word set off as a label, "(informative)" included, or the declaration) or its own body
+    # (to the next heading at any level) holds a body marker (_INFORMATIVE_MARK:
+    # "(informative)" or the declaration), the body read as written and as the text of each
+    # of its paragraphs with their container markers removed (_heading_bounds), so a quote
+    # marker cannot hide a marker; every own paragraph
     # is read, none is skipped, each after the normalization the keyword scan uses
     # (_says_informative), and informative status is inherited by every descendant heading at
     # any deeper level, until the next heading at the same or a shallower level. Returns
@@ -1798,14 +1847,20 @@ def informative_findings(text):
     findings.extend("spec informative guard: heading at line {} carries {}, which the guard does"
                     " not read and which could hide an \"(informative)\" marker; write the title"
                     " plainly".format(n, form) for n, form in titles)
-    # Every declaration candidate is read plainly or refused: a paragraph (block-quoted or
-    # not, in any section) whose letters hold the letters of "informative" as runs in order
-    # (_declaration_candidate) is scanned with nothing masked, and each character in it
-    # outside the plain-prose allowlist (_unread_markup_at) is a finding naming the section
-    # and the character, whatever the section's classification, so no markup form, named or
-    # not, can hide a declaration by making it unreadable; a paragraph that is no candidate
-    # holds no assembly of the word and is not scanned; heading titles are held to the same
-    # set through the title findings above (title_forms shares the scan).
+    # Every declaration candidate is held to plain prose or refused: a paragraph
+    # (block-quoted or not, in any section) whose letters hold the letters of "informative"
+    # as runs in order (_declaration_candidate) is scanned with nothing masked, and each
+    # character in it outside the plain-prose allowlist, and each emoji shortcode
+    # (_unread_markup_at), is a finding naming the section and the form, whatever the
+    # section's classification, so no markup form, named or not, can hide a marker by making
+    # it unreadable; a paragraph that is no candidate holds no assembly of the word and is
+    # not scanned; heading titles are held to the same set through the title findings above
+    # (title_forms shares the scan). Holding a candidate to plain prose reads no marker: what
+    # marks a section is read separately (_informative_sections), a title for the label
+    # form ("(informative)" included) or the declaration (_INFORMATIVE_TITLE), a body and
+    # each of its paragraphs for "(informative)" or the declaration (_INFORMATIVE_MARK), so
+    # a plain candidate that holds no marker (Z (informed by the informative note)) marks
+    # nothing.
     for start, texts, first in paragraphs:
         joined = "\n".join(texts)
         if not _declaration_candidate(joined):
@@ -4192,7 +4247,10 @@ def _self_test_vectors():
     # block quote bounds nothing but is kept where it says "(informative)", and a raw HTML
     # block is a finding. Each red vector plants an informative heading the guard must see or
     # keeps an informative scope open; each green vector is the matching form that is no
-    # heading, a fence that masks, or a boundary that ends the scope.
+    # heading, a fence that masks, or a boundary that ends the scope. A green whose text is
+    # no heading holds the title-only label "Z - informative", which a body does not read
+    # (a body reads "(informative)", PR #481 QA round 10), so it turns red only where the
+    # guard reads that text as a heading.
     normative = text + "\n## Normative\n\n"
     informative = text + "\n## Z (informative)\n\n"
     plant = "\n\nA checker MUST share records.\n"
@@ -4233,8 +4291,8 @@ def _self_test_vectors():
         check("spec-informative-commonmark-red-" + name, lambda m=planted: any(
             "carries requirement keyword MUST" in f for f in informative_findings(m)))
     for name, planted in (
-            ("heading-indent-4", normative + "    ## Z (informative)" + plant),
-            ("heading-tab-indent", normative + "\t## Z (informative)" + plant),
+            ("heading-indent-4", normative + "    ## Z - informative" + plant),
+            ("heading-tab-indent", normative + "\t## Z - informative" + plant),
             ("boundary-indent-3", informative + "   ## Coda" + stays),
             ("boundary-tab-separator", informative + "##\tCoda" + stays),
             ("boundary-setext", informative + "Coda\n----" + stays),
@@ -4246,18 +4304,18 @@ def _self_test_vectors():
             ("boundary-quote-closes-list", informative + "- note\n> quote\n  ## Coda" + stays),
             ("boundary-paragraph-after-list", informative + "- note\n\nplain\n  ## Coda" + stays),
             ("boundary-setext-after-list-break", informative + "- note\n***\nCoda\n===" + stays),
-            ("thematic-after-blank", normative + "Z (informative)\n\n---" + plant),
-            ("paragraph-ends-at-fence", normative + "Z (informative)\n```\n```\n---" + plant),
-            ("paragraph-ends-at-heading", normative + "Z (informative)\n## Normative\n---" + plant),
-            ("paragraph-ends-at-thematic", normative + "Z (informative)\n***\n---" + plant),
-            ("paragraph-ends-at-list", normative + "Z (informative)\n- item\n---" + plant),
+            ("thematic-after-blank", normative + "Z - informative\n\n---" + plant),
+            ("paragraph-ends-at-fence", normative + "Z - informative\n```\n```\n---" + plant),
+            ("paragraph-ends-at-heading", normative + "Z - informative\n## Normative\n---" + plant),
+            ("paragraph-ends-at-thematic", normative + "Z - informative\n***\n---" + plant),
+            ("paragraph-ends-at-list", normative + "Z - informative\n- item\n---" + plant),
             ("setext-then-underline-text", normative + "Z (informative)\n---\n===\n\n## Coda"
              + stays),
             ("fence-indent-3", normative
-             + "   ```\n## Z (informative)\nA checker MUST obey.\n   ```\n"),
+             + "   ```\n## Z - informative\nA checker MUST obey.\n   ```\n"),
             ("fence-tilde-backtick-info", normative
-             + "~~~ a`b\n## Z (informative)\nA checker MUST obey.\n~~~\n"),
-            ("fence-unclosed", normative + "```\n## Z (informative)\nA checker MUST obey.\n"),
+             + "~~~ a`b\n## Z - informative\nA checker MUST obey.\n~~~\n"),
+            ("fence-unclosed", normative + "```\n## Z - informative\nA checker MUST obey.\n"),
             ("close-indent-3", informative + "```text\n## x\n   ```\n\n## Coda" + stays),
             ("close-trailing-space", informative + "```text\n## x\n``` \t\n\n## Coda" + stays),
             ("close-longer-run", informative + "```text\n## x\n`````\n\n## Coda" + stays),
@@ -4286,7 +4344,9 @@ def _self_test_vectors():
     # line at 4 or more columns, a block quote continued at 4 or more columns, or a paragraph
     # opening like a reference definition is a finding, since renderers read them
     # differently. Each red vector is green without its fix, or (the two ends-with vectors)
-    # where a container's fence outlives it; each green vector is the benign form.
+    # where a container's fence outlives it; each green vector is the benign form, its
+    # unread heading text holding the title-only label "Z - informative" (a body reads
+    # "(informative)").
     for name, planted in (
             ("setext-ordered-two-continues", normative + "Z (informative)\n2. item\n---" + plant),
             ("setext-ordered-paren-continues", normative + "Z (informative)\n3) item\n===" + plant),
@@ -4311,17 +4371,17 @@ def _self_test_vectors():
             "carries requirement keyword MUST" in f for f in informative_findings(m)))
     for name, planted in (
             ("quote-fence-masks", normative
-             + "> ```\n> ## Z (informative)\n> A checker MUST obey.\n> ```\n"),
+             + "> ```\n> ## Z - informative\n> A checker MUST obey.\n> ```\n"),
             ("list-fence-masks", normative
-             + "- ```\n  ## Z (informative)\n  A checker MUST obey.\n  ```\n"),
+             + "- ```\n  ## Z - informative\n  A checker MUST obey.\n  ```\n"),
             ("ordered-fence-masks-column-4", normative
-             + "1.  ~~~\n    ## Z (informative)\n    A checker MUST obey.\n    ~~~\n"),
-            ("ordered-one-interrupts", normative + "Z (informative)\n1. item\n---" + plant),
+             + "1.  ~~~\n    ## Z - informative\n    A checker MUST obey.\n    ~~~\n"),
+            ("ordered-one-interrupts", normative + "Z - informative\n1. item\n---" + plant),
             ("fence-in-item-then-boundary", informative
              + "-   item\n    ```\n    ## x\n    ```\n## Coda" + stays),
             ("five-columns-after-marker", informative + "-     ~~~\n  ```\n## Coda\n```" + stays),
             ("blank-item-closes-on-blank", informative + "-\n\n  ## Coda" + stays),
-            ("lazy-underline-is-thematic", normative + "> Z (informative)\n---" + plant),
+            ("lazy-underline-is-thematic", normative + "> Z - informative\n---" + plant),
             ("quote-fence-closed-then-boundary", informative + "> ```\nplain\n## Coda" + stays),
             ("list-fence-closed-then-boundary", informative + "- ```\nplain\n## Coda" + stays),
     ):
@@ -4823,6 +4883,78 @@ def _self_test_vectors():
               w=_char_label(ch): any(f.startswith("spec informative guard: heading at line ")
                                      and "could hide" in f and ("carries " + w) in f
                                      for f in informative_findings(m)))
+    # Round-11 vectors (PR #481 QA round 10): a heading title and a body are each read for
+    # both marker forms, "(informative)" and the declaration, and a title also for the word
+    # set off as a label. Each red vector is plain ASCII and gave zero findings on the
+    # round-10 parent and the two revisions before it: a title stating the declaration
+    # (ATX, after a label, at a deeper level, setext), a title holding the word as a label,
+    # and a body holding "(informative)" were candidates of plain prose, so nothing refused
+    # them, and no marker the parent read held them. Each finding names the section the
+    # marker makes informative.
+    for name, planted, section in (
+            ("title-declaration", normative + "## This section is informative" + plant,
+             "This section is informative"),
+            ("title-declaration-after-label",
+             normative + "## Z: this section is informative" + plant,
+             "Z: this section is informative"),
+            ("title-declaration-level-3", notes + "### This section is informative" + plant,
+             "This section is informative"),
+            ("title-declaration-setext", normative + "This section is informative\n---" + plant,
+             "This section is informative"),
+            ("title-label-dash", normative + "## Z - Informative" + plant, "Z - Informative"),
+            ("title-label-leading", normative + "## Informative: Z notes" + plant,
+             "Informative: Z notes"),
+            ("body-parenthesized", notes + "(informative)" + plant, "Z notes"),
+            ("body-parenthesized-in-sentence",
+             notes + "These notes (informative) give background." + plant, "Z notes"),
+            ("body-parenthesized-quoted", notes + "> (Informative)" + plant, "Z notes")):
+        check("spec-informative-both-forms-red-" + name, lambda m=planted, s=section: (
+            "spec informative section {} carries requirement keyword MUST".format(s)
+            in informative_findings(m)))
+    # A title is read for the label form, a body is not, and the word among other words of
+    # a title marks nothing: each green is a plain candidate that holds no marker its place
+    # reads (the commonmark and container greens that once held "Z (informative)" in a body
+    # now hold the title-only label "Z - informative" for the same reason).
+    for name, planted in (
+            ("body-label", notes + "Z - informative" + stays),
+            ("body-label-leading", notes + "Informative: background only." + stays),
+            ("title-word-in-note", normative + "## Z (informed by the informative note)"
+             + stays)):
+        check("spec-informative-both-forms-green-" + name,
+              lambda m=planted: not informative_findings(m))
+    # Emoji shortcodes (PR #481 QA round 10): GitHub shows infor:m:ative with an emoji for
+    # :m:, so a candidate of allowed characters alone could show a different word; each
+    # red gave zero findings on the round-10 parent, and each now names the shortcode. A
+    # shortcode in a paragraph that is no candidate is not scanned.
+    for name, planted in (
+            ("paragraph-m", notes + "This section is infor:m:ative." + plant),
+            ("paragraph-o", notes + "This section is inf:o:rmative." + plant)):
+        check("spec-informative-shortcode-red-" + name, lambda m=planted: any(
+            "section Z notes" in f and could_hide in f and "carries an emoji shortcode ':" in f
+            for f in informative_findings(m)))
+    check("spec-informative-shortcode-title-red", lambda: any(
+        f.startswith("spec informative guard: heading at line ") and "could hide" in f
+        and "carries an emoji shortcode ':m:ative)'" in f
+        for f in informative_findings(normative + "## Z (infor:m:ative)" + plant)))
+    check("spec-informative-shortcode-green-not-candidate",
+          lambda: not informative_findings(notes + "Mark it :m: or :o: as needed." + stays))
+    # The reader shares the ASCII case fold (_fold_case) with candidacy, and each vector
+    # here fails where the reader alone uses a Unicode fold (str.casefold), in each
+    # direction. A Unicode fold reads U+0345 as a Greek iota, a letter, so the title
+    # "Z", U+0345, "informative" no longer sets the word off as a label and the section is
+    # no longer marked; and it expands U+0130 to "i" and a combining dot, which ends a word,
+    # so "This" after U+0130 would read as a declaration the ASCII fold does not read.
+    # Each text is a candidate and its non-ASCII character is refused either way.
+    check("spec-informative-reader-fold-red-combining-edge", lambda m=normative
+          + "## Z \u0345informative" + plant: (
+              "spec informative section Z \u0345informative carries requirement keyword MUST"
+              in informative_findings(m) and any(
+                  ("carries " + _char_label("\u0345")) in f for f in informative_findings(m))))
+    check("spec-informative-reader-fold-no-expansion", lambda m=notes
+          + "\u0130This section is informative." + plant: (
+              [f for f in informative_findings(m) if "requirement keyword" in f] == []
+              and any(("carries " + _char_label("\u0130")) in f
+                      for f in informative_findings(m))))
     # A paragraph or heading title holding non-ASCII letters is no candidate, and is not
     # refused for them, where its letters assemble no "informative" with each non-ASCII
     # letter counted as any letter.
