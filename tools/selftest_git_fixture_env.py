@@ -2455,12 +2455,25 @@ _GROUP_MEMBER_FIXTURE = "\n".join((
 # timeliness report discounts, so a harness-held release rarely reaches the completion budget;
 # when anything does reach it, that too is cannot-evaluate, never definite. The sweep wrapper
 # appends to "branch_swept" when its caller is _config_results itself, and the report's
-# "evidence" extra carries, read AFTER main() ended, whether member a's positive control ran,
-# whether member a raised, whether the failed-member branch called the kill sweep, and that
-# the wrapper's caller check discriminates (a sweep called here, outside _config_results, is
-# not counted): state the finished run left, so a branch that never sweeps or a pool that
-# never runs member a is a definite finding with no deadline involved, kept compared under
-# any recorded timeout (the "evidence" entry of the _STATE_EVIDENCE allowlist);
+# "evidence" extra carries, read AFTER main() ended, whether the failed-member branch called
+# the kill sweep and that the wrapper's caller check discriminates (a sweep called here,
+# outside _config_results, is not counted). Both appends run synchronously inside the sweep
+# call, with no bound between the call and the append, and every bound of this scenario
+# raises INTO the failed-member handler (the injected ValueError, a HandshakeTimeout and the
+# positive control's own TimeoutExpired all surface where the pool's results are consumed),
+# so a bound can only enter the branch, never skip it: a False flag is a code fact, which is
+# why "evidence" sits on the _STATE_EVIDENCE allowlist, kept compared under any recorded
+# timeout. Whether member a's positive control ran and whether member a raised is the
+# "member_a" extra, OFF the allowlist: the positive control's 60 s subprocess bound sits
+# between member a's worker entering run and those flags, so a merely slow git leaves both
+# False with the code healthy (round 17), and no earlier flag is bound-free either (an
+# entered-run marker would rest on the pool consuming results in order, a property of the
+# code under test, and would still leave a window between the worker's dequeue and the
+# marker). member_a is definite in a run with no recorded timeout; under any recorded
+# timeout it stands down, and a pool that never ran member a is then fail closed, never a
+# pass: the main thread blocks on member a's pending result until the parent's 300 s bound
+# ends the child (cannot evaluate, no report), or member b's 120 s wait records the
+# "member a observed" bound, which stands the run down;
 # "failed-signal", the same with the lock wrapper armed for the failed-member branch;
 # "failed-handshake", the same with member b never reporting running, so member a's handshake
 # (1 s here) expires and member a raises HandshakeTimeout, never the injected failure. Every
@@ -2964,7 +2977,12 @@ _CLOSE_PROBE_CHILD = "\n".join((
     "real_signal(signal.SIGTERM, left[1])",
     "registered = len(suite._MEMBERS['groups'])",
     "if scenario.startswith('failed'):",
-    "    extra['evidence'] = [a_arrived.is_set(), a_raises.is_set(), bool(branch_swept)]",
+    "    # member a's arrival and raise sit BEHIND the positive control's 60 s subprocess",
+    "    # bound: a merely slow git leaves both False with the code healthy, so they are",
+    "    # the member_a extra, off the _STATE_EVIDENCE allowlist, definite only in a run",
+    "    # with no recorded timeout. evidence keeps only the branch facts no bound shapes.",
+    "    extra['member_a'] = [a_arrived.is_set(), a_raises.is_set()]",
+    "    extra['evidence'] = [bool(branch_swept)]",
     "    witnessed = len(branch_swept)",
     "    sweep()",
     "    extra['evidence'].append(len(branch_swept) == witnessed)",
@@ -3329,22 +3347,41 @@ def _handshake_expired(scenario, extra):
 # recorded process states, the timeliness, the printed lines and every other extras key) can
 # be shaped by WHEN something ran, so under any recorded timeout it stands down (_stood_down),
 # cannot-evaluate, never definite, with no per-site choice a new timeout site could forget.
-# Each entry's justification:
-# - "restored": whether main() left the handlers restored, read by getsignal and a real
-#   SIGINT raised AFTER the report's join loop; main() restores on every path, so once every
-#   thread was joined only a defect in the restore itself, never a slow thread, makes it
-#   false.
-# - "lock_free": a zero-timeout acquire of the registry lock AFTER the join loop; a joined
-#   holder has released (or leaked) the lock for good, so this is the lock's final state.
-# - "evidence": whether member a's positive control ran, whether member a raised, whether
-#   the failed-member branch itself called the kill sweep, and that the sweep wrapper's
-#   caller check discriminates; the pool _config_results runs the members on is shut down
-#   with wait=True before it returns, and the flags are read after main() ended and after
-#   the join loop, so each reflects whether the code ran that step, never when.
+# Each entry's justification traces its producer to its read with no bound, timeout or
+# scheduling delay between the fact and the read, and names the vector pinning it:
+# - "restored": whether main() left the handlers restored. Producer: main()'s restore path
+#   either ran or did not by the time main() ended; read by getsignal and a real SIGINT
+#   raised AFTER the report's join loop, a direct read of final handler state with no wait
+#   in it. A thread a bounded join left alive, the one remaining way timing could still
+#   change the handlers, replaces the whole observation (the alive-kind record-map vector),
+#   so only a defect in the restore itself, never a slow thread, makes this false (the
+#   restoration and stray-defect record-map vectors keep that defect definite).
+# - "lock_free": the registry lock's final state. Producer: the last joined holder's
+#   release (or leak); read by a zero-timeout acquire AFTER the join loop, so the read
+#   itself carries no bound, and a joined holder has released or leaked for good. A holder
+#   still alive is "lock holder finished", whole replacement (the alive-kind record-map
+#   vector); the expiry-pin record-map vectors pin the stand-down of the timing-shaped
+#   pin fields beside it.
+# - "evidence": whether the failed-member branch itself called the kill sweep, and that
+#   the sweep wrapper's caller check discriminates. Producer: the wrapper appends to
+#   branch_swept synchronously inside the sweep call (the frame walk is pure computation),
+#   so the append IS the fact and no bound sits between the fact and the post-main read;
+#   every bound of the failed scenarios raises INTO the handler that calls the sweep, so a
+#   bound can only make the branch run, never skip it, and the second flag comes from a
+#   direct post-main call. The slow-positive-control record-map vectors pin the mapping:
+#   the 60 s positive-control bound firing leaves both flags at their want (the run is
+#   cannot-evaluate, never a definite mismatch) while a false flag beside the same record
+#   stays definite. Member a's own arrival and raise came OFF this entry (round 17): that
+#   60 s bound sits between member a's worker entering run and those flags, so a merely
+#   slow git leaves them False with the code healthy; they are the "member_a" extra,
+#   definite only in a run with no recorded timeout.
 # A handshake kind naming a thread its bounded join left ALIVE (the report's join loop,
 # hold_lock's release and loop's sender join all record "<name> finished" exactly then) can
 # still poison any field, the allowlist included (a live holder owns the lock; a live
 # monitor can raise), so it replaces the whole observation (_scenario_timeout_record).
+# The record-map pins this tuple's exact membership VERBATIM and the stand-down of every
+# extras key the child writes, so adding any key (late, direct, member_a or a new one) or
+# removing one fails a vector.
 _STATE_EVIDENCE = ("evidence", "lock_free", "restored")
 
 
@@ -3380,8 +3417,10 @@ def _scenario_timeout_record(scenario, observation, extra, recorded=None):
     _stood_down_wants, so a restoration defect, a held lock or a false evidence flag beside
     the timeout is STILL A DEFINITE FINDING while every field timing could shape is neutral.
     No field stays definite through a per-timeout decision: a new timeout site gets the
-    stand-down for free, and widening the allowlist fails the "record-map" vectors, which
-    pin each mapping and the allowlist's exact keys."""
+    stand-down for free, and widening or narrowing the allowlist fails the "record-map"
+    vectors, which pin each mapping, the _STATE_EVIDENCE tuple's exact membership verbatim
+    and the stand-down of every extras key the child writes (member_a, late, direct and the
+    rest), so admitting any existing child field fails a vector too."""
     sink = CANNOT_EVALUATE if recorded is None else recorded
     messages = []
     missing = extra.pop("missing", None)
@@ -3504,8 +3543,11 @@ def _sweep_call_sites(config=None):
     wait=True in its finalbody), AND with no worker wait inside the handler itself before
     the call: shutdown(...) waits unless it carries a literal wait=False, so any shutdown
     call positioned before the sweep call in the handler without that literal refuses the
-    form. The except handler's body then runs the kill sweep before any wait for the
-    workers, so the sweep precedes that wait STRUCTURALLY, a source-order fact with no
+    form (the "sweep-oracle" bare and positional probes pin this rule: a bare shutdown()
+    and a positional shutdown(True, ...) each refuse, so a detector counting only a
+    literal wait=True fails them). The except handler's body then runs the kill sweep
+    before any wait for the workers, so the sweep precedes that wait STRUCTURALLY, a
+    source-order fact with no
     deadline involved. EVERY other reference (a call outside such a handler, the call moved
     after the wait into the finally block, a call after a handler-body wait, a bare name, an
     attribute or a string constant spelling of the name) comes back "unrecognized", never
@@ -3518,7 +3560,7 @@ def _sweep_call_sites(config=None):
     discrimination on compiled probes. The same syntactic limits as _close_lock_sites apply:
     a sweep called through another name bound to it, or a worker wait spelled through
     anything but a shutdown call (a join, a future's result), is outside this oracle (the
-    sweep wrapper's runtime caller witness, the fourth "evidence" flag, and member b's
+    sweep wrapper's runtime caller witness, the second "evidence" flag, and member b's
     staged bounds cover the ordering dynamically, fail closed)."""
     config = _config_results if config is None else config
     first = config.__code__.co_firstlineno
@@ -3558,7 +3600,9 @@ def _sweep_call_sites(config=None):
         # ordering exactly as the finally wait would. shutdown(...) waits unless it carries
         # a literal wait=False, so any shutdown call in the handler without that literal,
         # positioned before the sweep call, refuses the form (fail closed: the site comes
-        # back "unrecognized" and the one-site pin fails definitively).
+        # back "unrecognized" and the one-site pin fails definitively). The "bare" and
+        # "positional" sweep-oracle probes pin the literal rule: a detector counting only
+        # a literal wait=True accepts both and fails their vectors.
         for inner in ast.walk(handler):
             if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
                     and inner.func.attr == "shutdown"
@@ -3693,16 +3737,21 @@ def _member_close_controls(fixture):
     cannot-evaluate timeout (_scenario_timeout_record), failing the run closed, never passing
     it and never reading as a definite finding; the definite evidence is non-timing state the
     finished run left, read after main() ended: the outcome, the registry and recorded process
-    state, the refusal records, the late-launch records and the "evidence" flags (member a's
-    positive control ran, member a raised, the failed-member branch itself called the kill
-    sweep, witnessed by the sweep wrapper from its caller, never by a deadline, and that
-    caller check discriminates: a sweep the harness calls after main() is not counted), so a
-    branch that never sweeps or a pool that never runs member a stays definite while a merely
-    slow run is cannot-evaluate; the same check pins the sweep's ordering statically
+    state, the refusal records, the late-launch records, the "member_a" flags (member a's
+    positive control ran and raised; the positive control's 60 s bound shapes them, so they
+    are definite only in a run with no recorded timeout, and a pool that never ran member a
+    is cannot-evaluate under any timeout, fail closed, never a pass) and the "evidence"
+    flags (the failed-member branch itself called the kill sweep, witnessed by the sweep
+    wrapper from its caller, never by a deadline, and that caller check discriminates: a
+    sweep the harness calls after main() is not counted), so a branch that never sweeps
+    stays definite while a merely slow run is cannot-evaluate; the same check pins the
+    sweep's ordering statically
     ("sweep-site", _sweep_call_sites): exactly one kill-sweep call inside the failed-member
     except handler, with no worker wait in the handler before it, before the finally block
     that waits for the workers, a source-order fact with no deadline involved, so the sweep
-    moved after the worker wait, or a waiting shutdown placed before it in the handler, is
+    moved after the worker wait, or a waiting shutdown placed before it in the handler
+    (only a literal wait=False is exempt: a bare shutdown() and a positional
+    shutdown(True, ...) count as waits, pinned by the bare and positional probes), is
     definite, and the oracle's own discrimination is pinned ("sweep-oracle"); EVERY recorded
     timeout in any scenario (an expired harness handshake, _handshake_expired, whose own
     mapping is pinned there too; a reached code-owned bound in the "missing" extras; an owed
@@ -3714,8 +3763,9 @@ def _member_close_controls(fixture):
     (_stood_down), so a restoration defect, a held lock or a false evidence flag beside any
     timeout stays definite while timing alone never is (the "record-map" entry pins the
     reached-bound, unsent, budget, combined-failure, per-kind, outlive, expiry-pin,
-    stray-bound and late-signal mappings and the allowlist's exact keys, and "down-map" the
-    oracle-down stand-down);
+    stray-bound, late-signal and slow-positive-control mappings, the _STATE_EVIDENCE
+    tuple's exact membership verbatim and the stand-down of every extras key the child
+    writes, and "down-map" the oracle-down stand-down);
     config/member-close-unresolved-verdict, "unresolved":
     main() returns 2 with
     the CANNOT EVALUATE line and no PASS line, the group still registered, then released once the
@@ -3900,16 +3950,16 @@ def _member_close_controls(fixture):
                        "lock hold expired (cannot evaluate)")
     restoration_extra = dict(handshake=["lock hold expired"], restored=[False, True, False],
                              lock_free=True, lines=[False, True], refused=1,
-                             caught="injected failed member a",
-                             evidence=[True, True, True, True])
+                             caught="injected failed member a", member_a=[True, True],
+                             evidence=[True, True])
     restoration_recorded = []
     restoration_down = _scenario_timeout_record(
         "failed-refused",
         ("failed-refused", "returned 2", 0, [], 0, True, restoration_extra),
         restoration_extra, restoration_recorded)
     flag_extra = dict(handshake=["lock hold expired"], restored=[True, True, True],
-                      lock_free=True, lines=[False, True], refused=1,
-                      evidence=[True, True, False, True])
+                      lock_free=True, lines=[False, True], refused=1, member_a=[True, True],
+                      evidence=[False, True])
     flag_recorded = []
     flag_down = _scenario_timeout_record(
         "failed-refused", ("failed-refused", "returned 2", 0, [], 0, True, flag_extra),
@@ -3968,11 +4018,44 @@ def _member_close_controls(fixture):
                    "stray member finished")
 
     def kind_down(kind, restored):
+        # Every extras key the child can write rides along, so the per-kind vectors pin
+        # BEHAVIOURALLY that everything off the _STATE_EVIDENCE tuple (member_a, late,
+        # direct and the rest) is dropped: admitting any of them to the allowlist fails
+        # the exact-keys vector over these probes.
         kind_extra = dict(handshake=[kind], restored=restored, lock_free=True,
-                          lines=[False, True], refused=1, evidence=[True, True, True, True])
+                          lines=[False, True], refused=1, evidence=[True, True],
+                          member_a=[True, True], late=[["b", "closing"]], caught="injected",
+                          direct=[None, True, []], loop=[[], True],
+                          held=[True, True, [True]], run=["0", 0], released=[[], 0],
+                          protected=[True], monitor_pin=[], expiry_pin=[1, True],
+                          bound_pin=[], control=["closing", [], True], closes=[[]], site=2,
+                          rc=0, after=True)
         return _scenario_timeout_record(
             "failed-refused", ("failed-refused", "returned 2", 0, [], 0, True, kind_extra),
             kind_extra, [])
+    # The slow positive control (round 17): member a's git call reaching its 60 s
+    # subprocess bound leaves member_a [False, False] while member b's 120 s wait records
+    # the "member a observed" bound and the empty send list reaches the completion budget;
+    # the TimeoutExpired raised INTO the failed-member handler, which swept, so the
+    # allowlisted evidence matches its want, member_a stands down on both sides and the
+    # verdict is cannot-evaluate, never a definite mismatch (the producer-to-verdict
+    # vector below), while a false evidence flag beside the same record stays definite
+    # (the flag_down vector above).
+    slow_bound = ("TIMEOUT: member-close child (failed): code-owned bound reached: "
+                  "member a observed (cannot evaluate)")
+    slow_budget = ("TIMEOUT: member-close child (failed): completion budget reached "
+                   "(cannot evaluate)")
+    slow_extra = dict(missing=["member a observed"], restored=[True, True, True],
+                      lock_free=True, lines=[False, True], late=[],
+                      member_a=[False, False], evidence=[True, True])
+    slow_recorded = []
+    slow_down = _scenario_timeout_record(
+        "failed", ("failed", "TimeoutExpired: positive control", 0, [], 0, False,
+                   slow_extra), slow_extra, slow_recorded)
+    slow_want = ("failed", "ValueError: injected failed member a", 0, [], 0, True,
+                 dict(restored=[True, True, True], lock_free=True, lines=[False, False],
+                      late=[["b", "the suite is closing: no new member starts"]],
+                      member_a=[True, True], evidence=[True, True]))
     got["record-map"] = ("record-map", [
         # A reached code-owned bound ("missing") is a recorded timeout like any other: the
         # probe observation (not a report tuple, so nothing to stand down) becomes the
@@ -4031,9 +4114,9 @@ def _member_close_controls(fixture):
         # restoration defect or a false evidence flag beside the expiry is still definite.
         restoration_down == ("failed-refused",) + (partial_message,) * 5 + (
             dict(restored=[False, True, False], lock_free=True,
-                 evidence=[True, True, True, True], stood_down=partial_message),)
+                 evidence=[True, True], stood_down=partial_message),)
         and restoration_recorded == [partial_message],
-        flag_down[6].get("evidence") == [True, True, False, True]
+        flag_down[6].get("evidence") == [False, True]
         and flag_recorded == [partial_message],
         # The wants-side mirrors for the unsent and the holder-expiry stand-down.
         _stood_down_wants(
@@ -4042,11 +4125,11 @@ def _member_close_controls(fixture):
               dict(restored=[True, True, True], lock_free=True, lines=[False, False])),
              ("failed-refused", "returned 2", 0, [], 0, True,
               dict(restored=[True, True, True], lock_free=True, lines=[False, True],
-                   refused=1, evidence=[True, True, True, True]))])
+                   refused=1, evidence=[True, True]))])
         == [("pooled",) + (unsent_message,) * 5 + (
                 dict(kept_state, stood_down=unsent_message),),
             ("failed-refused",) + (partial_message,) * 5 + (
-                dict(kept_state, evidence=[True, True, True, True],
+                dict(kept_state, evidence=[True, True],
                      stood_down=partial_message),)],
         # The stray-member registration bound of "close": the states, their count and every
         # extras key off the allowlist stand down, the mirror makes the timing-only
@@ -4073,7 +4156,19 @@ def _member_close_controls(fixture):
             for kind in joined_kinds),
         all(sorted(kind_down(kind, [True, True, True])[6])
             == ["evidence", "lock_free", "restored", "stood_down"] for kind in joined_kinds),
-        all(_is_timeout(kind_down(kind, [False, True, False])) for kind in alive_kinds)])
+        all(_is_timeout(kind_down(kind, [False, True, False])) for kind in alive_kinds),
+        # The allowlist's exact membership, pinned VERBATIM: adding ANY key (an existing
+        # child field such as "late", "direct" or "member_a" included) or removing one
+        # fails here, beside the behavioural per-kind vector above.
+        _STATE_EVIDENCE == ("evidence", "lock_free", "restored"),
+        # The slow positive control: both bounds recorded, member_a dropped, the
+        # allowlisted evidence kept at its want.
+        slow_down == ("failed",) + (slow_budget,) * 5 + (
+            dict(kept_state, evidence=[True, True], stood_down=slow_budget),)
+        and slow_recorded == [slow_bound, slow_budget],
+        # Producer-to-verdict: the mirrored want equals the stood-down observation, so a
+        # merely slow positive control is cannot-evaluate, never a definite mismatch.
+        _stood_down_wants([slow_down], [slow_want]) == [slow_down]])
     # One with-form acquisition per refused-site scenario: a fourth acquisition, a direct acquire
     # call or a form the oracle refuses fails the "close-sites" pin definitively; an oracle that
     # cannot read _close_members at all is recorded as cannot-evaluate, never fail-open, and
@@ -4142,7 +4237,10 @@ def _member_close_controls(fixture):
     # cannot-evaluate, never fail-open. Its own mutants: a probe def NAMED _config_results
     # with the call so placed yields its one "except-before-wait" site, the call moved after
     # the wait into the finally block is "unrecognized", a waiting shutdown placed in the
-    # handler BEFORE the call is "unrecognized" too, a handler whose finally never waits is
+    # handler BEFORE the call is "unrecognized" too, whether it spells wait=True, a bare
+    # shutdown() or a positional shutdown(True, ...) (only a literal wait=False is exempt,
+    # so a detector counting only a literal wait=True fails the bare and positional
+    # probes), a handler whose finally never waits is
     # "unrecognized" (so a neutralised finally-wait detector is loud), and the same body
     # under another name at the SAME recorded line raises LookupError. compile() alone
     # builds the probe functions; no fixture code is executed.
@@ -4158,12 +4256,21 @@ def _member_close_controls(fixture):
     nowait = ("    try:\n        pass\n    except BaseException:\n"
               "        _signal_member_groups()\n        raise\n"
               "    finally:\n        pool.shutdown(wait=False)\n")
+    bare = ("    try:\n        pass\n    except BaseException:\n"
+            "        pool.shutdown()\n        _signal_member_groups()\n        raise\n"
+            "    finally:\n        pool.shutdown(wait=True)\n")
+    positional = ("    try:\n        pass\n    except BaseException:\n"
+                  "        pool.shutdown(True, cancel_futures=True)\n"
+                  "        _signal_member_groups()\n        raise\n"
+                  "    finally:\n        pool.shutdown(wait=True)\n")
     sweep_oracle = []
     for label, name, body in (("ordered", "_config_results", ordered),
                               ("moved", "_config_results", moved),
                               ("renamed", "unrelated", ordered),
                               ("waitfirst", "_config_results", waitfirst),
-                              ("nowait", "_config_results", nowait)):
+                              ("nowait", "_config_results", nowait),
+                              ("bare", "_config_results", bare),
+                              ("positional", "_config_results", positional)):
         source = "def {}():\n".format(name) + body
         path = fixture / "sweep-oracle-{}.py".format(label)
         path.write_text(source, encoding="utf-8")
@@ -4219,18 +4326,21 @@ def _member_close_controls(fixture):
                        held=[True, True, [True]])]),
             ("config/member-failed-no-late-launch", [
                 expect("failed", "ValueError: injected failed member a", 0, [], 0,
-                       late=[["b", closing]], evidence=[True, True, True, True]),
+                       late=[["b", closing]], member_a=[True, True],
+                       evidence=[True, True]),
                 expect("failed-signal", "KeyboardInterrupt", 0, [], 0,
-                       late=[["b", closing]], evidence=[True, True, True, True]),
+                       late=[["b", closing]], member_a=[True, True],
+                       evidence=[True, True]),
                 expect("failed-handshake", "HandshakeTimeout: member b running not within 1 s",
                        0, [], 0, late=[["b", closing]], handshake=["member b running"],
-                       evidence=[True, True, True, True]),
+                       member_a=[True, True], evidence=[True, True]),
                 ("handshake-map", [True, True, True, True]),
-                ("record-map", [True] * 23),
+                ("record-map", [True] * 26),
                 ("sweep-site", ["except-before-wait"]),
                 ("sweep-oracle", [[(4, "except-before-wait")], [(5, "unrecognized")],
                                   "LookupError", [(5, "unrecognized")],
-                                  [(4, "unrecognized")]])]),
+                                  [(4, "unrecognized")], [(5, "unrecognized")],
+                                  [(5, "unrecognized")]])]),
             ("config/member-close-unresolved-verdict", [
                 expect("unresolved", "returned 2", 1, [], 0, (False, True),
                        released=[[], 0]),
@@ -4246,7 +4356,7 @@ def _member_close_controls(fixture):
                        site=site_wants[1]),
                 expect("failed-refused", "returned 2", 0, [], 0, (False, True),
                        late=[["b", closing]], caught="injected failed member a", refused=1,
-                       evidence=[True, True, True, True]),
+                       member_a=[True, True], evidence=[True, True]),
                 ("close-sites", ["with"] * len(refused_site_scenarios)),
                 ("close-oracle",
                  [[(1, "with"), (3, "with"), (5, "with")], "LookupError",
