@@ -144,13 +144,19 @@ def main():
 #       refuses (exit 2), the link and the outside file are unchanged and no temporary file is made.
 #   T31 the target swapped for a FIFO with a reader held open after the write-side walk: the fstat check
 #       on the probe descriptor refuses (exit 2) and the FIFO is not replaced.
-#   T32 the target swapped for a FIFO with no reader after the write-side walk: the non-blocking probe
-#       refuses (exit 2) at once; a watchdog that unblocks a blocking open marks the vector failed.
+#   T32 a nested target swapped for a FIFO with no reader after the write-side walk: the probe's open
+#       fails at once with ENXIO, refused (exit 2) in the engine's wording naming the path from the root;
+#       a probe descriptor opened in blocking mode fails the vector, and a watchdog whose clock starts
+#       only once the FIFO exists supplies a reader, so a blocking open cannot hang the run.
 #   T33 a foreign file put at the temporary name after its creation, then a failed rename: exit 2, the
 #       target unchanged, the foreign file kept and its name given in the refusal (nothing is unlinked).
-#   T34 descriptor accounting: the descriptors open after T1-T33 are the ones open before them, so a
-#       close dropped on any ordinary success or error path fails (skipped where neither /proc/self/fd
-#       nor /dev/fd can be listed).
+#   T34 descriptor accounting: the descriptors open after every other vector (T1-T33, then T35 and T36,
+#       which run before it) are the ones open before them, so a close dropped on any ordinary success or
+#       error path fails (skipped where neither /proc/self/fd nor /dev/fd can be listed).
+#   T35 an exception other than OSError raised at the rename (a stand-in for an interrupt) propagates
+#       with a note naming the temporary file it left; the target unchanged and the file left there.
+#   T36 a nested target swapped for a directory after the write-side walk: the probe's open fails with
+#       EISDIR, refused (exit 2) in the engine's wording naming the path from the root; nothing replaced.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -166,6 +172,7 @@ _BLOCK_Z = ("OPF-Z", "AGENTS.md", "after-rules", 1, "opf/blocks/z.md", _Z_INNER 
 
 
 def self_test_main():
+    import errno
     import hashlib
     import io
     import os
@@ -907,40 +914,84 @@ def self_test_main():
         if not stat.S_ISFIFO(os.lstat(root / AGENTS_REL).st_mode) or strays(root):
             failures.append("T31: the FIFO was replaced or a temporary file was left: {}".format(strays(root)))
 
-        # T32. A FIFO with no reader swapped in after the write-side walk: the O_NONBLOCK probe fails at
-        #      once (ENXIO, exit 2). Without O_NONBLOCK the open blocks until a reader arrives; a watchdog
-        #      supplies one after a few seconds, so the run ends either way and the block is reported.
-        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
-        (root / ".aiqt" / "core" / "rules" / "r1.md").write_text(new_rule, encoding="utf-8")
-        finished, blocked, rescuers = threading.Event(), [], []
+        # T32. A nested target swapped for a FIFO with no reader after the write-side walk: the probe's
+        #      O_NONBLOCK open fails at once (ENXIO), refused (exit 2) in the engine's wording naming the
+        #      path from the root. The judgement is not a timer: the engine's probe open on the FIFO is
+        #      observed through a wrapper, and a probe descriptor in blocking mode fails the vector, since a
+        #      blocking open of a FIFO with no reader waits for one. A watchdog keeps the run bounded: its
+        #      clock starts only once to_fifo has made the FIFO (or the run has ended), and on expiry it
+        #      opens a reader on the FIFO, which releases a blocking open. If a scheduling delay lets that
+        #      reader arrive before a healthy probe, the probe still opens the FIFO in non-blocking mode and
+        #      the fstat check refuses it (exit 2, the same wording), so the delay cannot fail the vector.
+        nested = ".github/copilot-instructions.md"
+        nested_target = [(nested, ("# Copilot", "", "Stand-in header.", ""))]
+        nested_name = nested.rsplit("/", 1)[1]
+        nested_refusal = "target {} is not a regular file".format(nested)
+
+        def nested_strays(root):
+            return sorted(p.name for p in (root / ".github").iterdir() if p.name != nested_name)
+
+        root = tree(ac.registry_text(), blocks=())
+        (root / ".github").mkdir()
+        (root / nested).write_bytes(b"old line\n")
+        ready, finished = threading.Event(), threading.Event()
+        rescuers, probes = [], []
+        real_open = ac.os.open
 
         def to_fifo():
-            (root / AGENTS_REL).unlink()
-            os.mkfifo(root / AGENTS_REL)
+            (root / nested).unlink()
+            os.mkfifo(root / nested)
+            ready.set()
 
         def watchdog():
+            ready.wait()  # set once the FIFO exists, or by the finally below if the run ends first
             if not finished.wait(5):
-                blocked.append(True)
-                rescuers.append(os.open(root / AGENTS_REL, os.O_RDONLY | os.O_NONBLOCK))
+                rescuers.append(real_open(root / nested, os.O_RDONLY | os.O_NONBLOCK))
+
+        def probe_open(path, flags, *a, **k):
+            # Only the write probe opens the final name write-only without O_CREAT (the temporary file is
+            # created, the read leg opens read-only); every other open passes straight through.
+            if (path != nested_name or flags & os.O_CREAT
+                    or flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) != os.O_WRONLY):
+                return real_open(path, flags, *a, **k)
+            try:
+                fd = real_open(path, flags, *a, **k)
+            except OSError as exc:
+                probes.append(("raised", exc.errno))
+                raise
+            probes.append(("opened", os.get_blocking(fd)))
+            return fd
 
         ac._target_dir_fd, fired = write_leg_swap(to_fifo)
+        ac.os.open = probe_open
         dog = threading.Thread(target=watchdog, daemon=True)
         dog.start()
         try:
-            expect("T32 target swapped for a FIFO with no reader after the write-side walk", root, False, 2,
-                   unchanged=False)
+            out = expect("T32 nested target swapped for a FIFO with no reader after the write-side walk", root,
+                         False, 2, targets=nested_target, unchanged=False)
         finally:
+            ac.os.open = real_open
             finished.set()
+            ready.set()
             dog.join()
             ac._target_dir_fd = real_walk
             for rescue_fd in rescuers:
                 os.close(rescue_fd)
         if not fired:
             failures.append("T32: the write-leg swap hook did not run")
-        if blocked:
-            failures.append("T32: the write probe blocked on a FIFO with no reader")
-        if not stat.S_ISFIFO(os.lstat(root / AGENTS_REL).st_mode) or strays(root):
-            failures.append("T32: the FIFO was replaced or a temporary file was left: {}".format(strays(root)))
+        if len(probes) != 1:
+            failures.append("T32: expected one write-probe open of the FIFO, saw {}".format(probes))
+        elif probes[0] == ("opened", True):
+            failures.append("T32: the write probe opened the FIFO in blocking mode, so with no reader it "
+                            "waits for one ({})".format("the watchdog supplied a reader" if rescuers
+                                                        else "a reader was present"))
+        elif probes[0][0] == "raised" and probes[0][1] != errno.ENXIO:
+            failures.append("T32: the write probe failed with errno {}, not ENXIO".format(probes[0][1]))
+        if nested_refusal not in out:
+            failures.append("T32: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
+        if not stat.S_ISFIFO(os.lstat(root / nested).st_mode) or nested_strays(root):
+            failures.append("T32: the FIFO was replaced or a temporary file was left: {}".format(
+                nested_strays(root)))
 
         # T33. Another process replaces the temporary file after its creation, then the rename fails:
         #      exit 2, the target unchanged, and the foreign file at that name kept (a cleanup by name
@@ -969,7 +1020,68 @@ def self_test_main():
             if foreign[0] not in out:
                 failures.append("T33: the refusal does not name the file it left: {}".format(out.strip()))
 
-        # T34. Descriptor accounting over T1-T33.
+        # T35. An exception other than OSError raised inside the try around the write and the rename,
+        #      here a BaseException standing in for an interrupt and raised at the rename, propagates with
+        #      a note naming the temporary file it left; the target is unchanged and the file is left at
+        #      that name. Without the note nothing names the leftover.
+        root = tree(ac.registry_text(), blocks=(), agents=legacy_golden)
+
+        class Interrupted(BaseException):
+            pass
+
+        interrupted = []
+
+        def interrupt_rename(src, _dst, **_k):
+            interrupted.append(src)
+            raise Interrupted()
+
+        notes = None
+        ac.os.replace = interrupt_rename
+        try:
+            ac._write_target(root, AGENTS_REL, b"new line\n")
+        except Interrupted as exc:
+            notes = getattr(exc, "__notes__", [])
+        except Exception as exc:  # a refusal before the rename; reported here and by the check below
+            failures.append("T35: the write raised {}: {}".format(type(exc).__name__, exc))
+        finally:
+            ac.os.replace = real_replace
+        if len(interrupted) != 1 or notes is None:
+            failures.append("T35: the injected interrupt did not reach the rename")
+        else:
+            if not any(interrupted[0] in note for note in notes):
+                failures.append("T35: the interrupt carries no note naming the temporary file {}: {}".format(
+                    interrupted[0], notes))
+            if read(root / interrupted[0]) != b"new line\n":
+                failures.append("T35: the temporary file was not left at the name the note gives")
+        if read(root / AGENTS_REL) != legacy_golden:
+            failures.append("T35: the interrupted write changed the target")
+
+        # T36. A nested target swapped for a directory after the write-side walk: the probe's write-only
+        #      open fails with EISDIR, refused (exit 2) in the engine's wording naming the path from the
+        #      root, and the directory is not replaced.
+        root = tree(ac.registry_text(), blocks=())
+        (root / ".github").mkdir()
+        (root / nested).write_bytes(b"old line\n")
+
+        def to_dir():
+            (root / nested).unlink()
+            (root / nested).mkdir()
+
+        ac._target_dir_fd, fired = write_leg_swap(to_dir)
+        try:
+            out = expect("T36 nested target swapped for a directory after the write-side walk", root, False, 2,
+                         targets=nested_target, unchanged=False)
+        finally:
+            ac._target_dir_fd = real_walk
+        if not fired:
+            failures.append("T36: the write-leg swap hook did not run")
+        if nested_refusal not in out:
+            failures.append("T36: the refusal is not the engine's, naming {}: {}".format(nested, out.strip()))
+        if not (root / nested).is_dir() or nested_strays(root):
+            failures.append("T36: the directory was replaced or a temporary file was left: {}".format(
+                nested_strays(root)))
+
+        # T34. Descriptor accounting over every other vector (T1-T33, T35, T36).
         fds_after = open_fds()
         if fds_before is not None and fds_after != fds_before:
             failures.append("T34: descriptors leaked across the matrix: {} open before, {} after".format(
@@ -998,9 +1110,10 @@ def self_test_main():
           "a colliding "
           "temporary name is retried and the colliding file kept; a read-only target is refused; a "
           "platform without dir_fd support is refused; a symlink or a FIFO (held open or not) swapped in "
-          "at the target after the write-side walk is refused by the write probe without blocking; a "
-          "failed write leaves its temporary file, never deleting a foreign file at that name; and no "
-          "descriptor is left open.")
+          "at the target after the write-side walk is refused by the write probe without blocking, as is a "
+          "directory, each in the engine's wording naming the path from the root; a failed write leaves "
+          "its temporary file, never deleting a foreign file at that name, and an interrupt at the rename "
+          "carries a note naming it; and no descriptor is left open.")
     return 0
 
 

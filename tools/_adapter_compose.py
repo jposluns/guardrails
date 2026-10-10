@@ -69,20 +69,27 @@ write keeps only the target's permission mode: owner, group, ACLs and extended a
 preserved (the renamed file takes the writer's defaults). An existing target this user cannot write (no
 write permission) is refused (exit 2), as the plain overwrite before descriptors was. A write that fails
 after its temporary file (a dot-prefixed name ending in .tmp) exists is exit 2 and names that file in
-the refusal; a run interrupted or killed at that point leaves it too. Either way the target is intact
-and the temporary file is left beside it: the engine never deletes a file by name, because another
-process can replace that name between the creation and an unlink, and an identity check before the
-unlink races the same way, so the leftover is for a reviewer to remove by hand. A colliding name at
-creation is retried, bounded, with a fresh random token, and the colliding file is kept. A process that
-replaces the temporary name before the rename has its own bytes renamed over the target; it could
-equally write the target directly, so this grants nothing (diff review is the control). Descriptors are
-closed exactly once on every ordinary success and error path. A KeyboardInterrupt (or another
-asynchronous exception) that lands between an open and the try that owns its descriptor can leave that
-descriptor open; an interrupted run is a process about to exit, whose descriptors the kernel closes, so
-these windows are not guarded. A legacy target still loses a hand edit on regeneration
-unless it holds a marker-like line; --check still catches the edit in CI. A change to a generator's
-header is refused for a composed target that already carries the old header; delete and regenerate after
-reviewing it.
+the refusal; a run interrupted or killed after the creation and before the rename completes leaves it
+too. In each case the target keeps its old bytes and the temporary file is left beside it (an exception
+other than OSError raised inside the try around the write and the rename carries its name as a note):
+the engine never deletes a file by name, because another process can replace that name between the
+creation and an unlink, and an identity check before the unlink races the same way, so the leftover is
+for a reviewer to remove by hand. A colliding name at creation is retried, bounded, with a fresh random
+token, and the colliding file is kept. A process that replaces the temporary name before the rename has
+its own bytes renamed over the target; it could equally write the target directly, so this grants
+nothing (diff review is the control). Descriptors are closed exactly once on every ordinary success and
+error path. A KeyboardInterrupt (or another asynchronous exception) that lands between an open and its
+single close can leave that descriptor open in three windows: after the open returns and before the try
+that owns the descriptor (for the directory descriptor _target_dir_fd returns, until its caller's try);
+at the walk's hand-off from a parent directory descriptor to its child (from the child's open until the
+parent's close runs); and inside a finally block or a close helper before its os.close runs. One that
+lands after the temporary file is created but outside the try that adds the note (before that try is
+entered, or while the OSError refusal is being built) leaves the temporary file beside the target with
+nothing naming it. An interrupted run is a process about to exit, whose descriptors the kernel closes,
+so these windows are not guarded. A legacy target still loses a hand edit on regeneration unless it
+holds a marker-like line; --check still catches the edit in CI. A change to a generator's header is
+refused for a composed target that already carries the old header; delete and regenerate after reviewing
+it.
 """
 import errno
 import hashlib
@@ -532,6 +539,22 @@ def _symlink_refusal(rel, upto):
                         "symlink".format(rel, upto))
 
 
+def _target_open_refusal(exc, rel):
+    """The engine's refusal, naming rel from the root, for an open of the final component that failed
+    because the name no longer holds a regular file: a symlink (ELOOP, or EMLINK on some BSDs, from
+    O_NOFOLLOW), a FIFO with no reader, a socket or a device with nothing behind it (ENXIO, from the
+    write probe's O_NONBLOCK or from opening a socket), or a directory (EISDIR, from the write probe's
+    O_WRONLY). None for any other errno, which the caller re-raises unchanged."""
+    if exc.errno in (errno.ELOOP, errno.EMLINK):
+        return _symlink_refusal(rel, rel)
+    if exc.errno == errno.ENXIO:
+        return ComposeError("target {} is not a regular file (a FIFO with no reader, a socket, or a device "
+                            "with nothing behind it)".format(rel))
+    if exc.errno == errno.EISDIR:
+        return ComposeError("target {} is not a regular file (a directory)".format(rel))
+    return None
+
+
 def _open_dir_component(dir_fd, part, rel, upto):
     """One directory component opened beneath dir_fd with O_DIRECTORY|O_NOFOLLOW: a symlink here is
     refused (ELOOP, or ENOTDIR when O_DIRECTORY judges the link first), and so is a non-directory; a
@@ -564,7 +587,9 @@ def _target_dir_fd(root, rel, make_dirs):
     absent; a symlink or non-regular file at the final name is a ComposeError. Returns (None, name,
     None) when a directory above the target is absent and make_dirs is false. The caller closes the
     returned descriptor; on every other ordinary path this function closes it itself, exactly once (an
-    interrupt between an open and the next statement is out of scope: see DISCLOSED RESIDUALS)."""
+    interrupt before the try that owns a descriptor, between this return and the caller's try, at the
+    hand-off from a parent descriptor to its child, or inside a close before os.close runs is out of
+    scope: see DISCLOSED RESIDUALS)."""
     _require_dir_fd()
     _check_rel(rel, "target")
     parts = rel.split("/")
@@ -605,9 +630,10 @@ def _read_target(root, rel):
     """The current bytes of target rel under root, or None when it (or a directory above it) is absent.
     The final component is opened beneath the directory descriptor from _target_dir_fd with O_NOFOLLOW
     (a symlink swapped in after the stat is refused, never followed) and O_NONBLOCK (a FIFO swapped in
-    cannot block the open), and the open descriptor is fstat-checked to still be a regular file. The
-    file object is made with closefd=False, so the finally's close is the one close of fd on every
-    path."""
+    cannot block the open), and the open descriptor is fstat-checked to still be a regular file; an
+    open refused because the name holds a symlink, socket or device is the engine's refusal naming rel.
+    The file object is made with closefd=False, so the finally's close is the one close of fd on every
+    ordinary path."""
     directory, name, st = _target_dir_fd(root, rel, make_dirs=False)
     if directory is None:
         return None
@@ -617,8 +643,9 @@ def _read_target(root, rel):
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.EMLINK):
-                raise _symlink_refusal(rel, rel) from None
+            refusal = _target_open_refusal(exc, rel)
+            if refusal is not None:
+                raise refusal from None
             raise
         try:
             with os.fdopen(fd, "rb", closefd=False) as fh:
@@ -643,15 +670,19 @@ def _write_target(root, rel, data):
     beneath the held descriptor), an existing target is probed for write permission beneath it (a
     read-only target refuses with the PermissionError a plain overwrite raised) with O_NOFOLLOW (a
     symlink swapped in since the walk is refused, never followed) and O_NONBLOCK (a FIFO swapped in
-    cannot block the open), and the probe descriptor is fstat-checked to still be a regular file; data
+    cannot block the open), and the probe descriptor is fstat-checked to still be a regular file (a
+    symlink, a FIFO with no reader or a directory refused at the open is the engine's refusal naming
+    rel, as a non-regular file found by the fstat is); data
     goes to a new temporary file (O_CREAT|O_EXCL|O_NOFOLLOW beneath the descriptor; a colliding name is
     retried with a fresh random token up to _TMP_TRIES times) which takes the existing target's
     permission mode via fchmod, and os.replace renames it over the target through the same descriptor.
     Nothing is ever deleted: a pre-existing file at a colliding name is never touched, and on a failure
-    after the temporary file exists that file is left in place and named in the ComposeError (any other
-    exception carries the name as a note), since the name may no longer be this call's file. The
-    temporary file object is made with closefd=False, so the finally's close is the one close of tfd on
-    every path."""
+    after the temporary file exists that file is left in place and named in the ComposeError, since the
+    name may no longer be this call's file. Any other exception raised inside the try around the write
+    and the rename carries the name as a note; one that lands after the creation but outside that try (an
+    interrupt before the try is entered, or while the ComposeError is built) leaves the file unnamed (see
+    DISCLOSED RESIDUALS). The temporary file object is made with closefd=False, so the finally's close is
+    the one close of tfd on every ordinary path."""
     directory, name, st = _target_dir_fd(root, rel, make_dirs=True)
     try:
         if st is not None:
@@ -660,8 +691,9 @@ def _write_target(root, rel, data):
             try:
                 probe = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.EMLINK):
-                    raise _symlink_refusal(rel, rel) from None
+                refusal = _target_open_refusal(exc, rel)
+                if refusal is not None:
+                    raise refusal from None
                 raise
             try:
                 if not stat.S_ISREG(os.fstat(probe).st_mode):
