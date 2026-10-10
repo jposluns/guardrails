@@ -88,10 +88,15 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `manifest.toml` or `counters.toml`, in the restored tree or in the first-parent history
    at or before the named commit; a store found either way is expected to hold both files,
    and a subdirectory holding only other files or only deeper directories is neither
-   expected nor named; a structural file whose newest first-parent change at or before the
-   named commit renamed it to another first-level `.working` store path is counted at its
-   new path only (so a machine subdirectory renamed whole with `git mv` is not reported as
-   a PARTIAL restore). When the `.working` tree a command restores lacks such an expected
+   expected nor named; a structural file counts at its rename destination instead of its
+   old path only when the rename is exact (similarity 100), no older first-parent record
+   touched the destination, and the renaming commit's tree holds no structural file under
+   the source subdirectory, so a machine subdirectory renamed whole with `git mv` is not
+   reported as a PARTIAL restore, while any other pairing git's similarity-based rename
+   detection reports (for example a store deleted beside a similar store created in the
+   same commit) reads as a deletion of its source, which stays expected, fail-safe: the
+   doubtful case is disclosed as missing, never silently absorbed. When the `.working`
+   tree a command restores lacks such an expected
    structural file, the refusal says the restore is PARTIAL and names each missing path,
    in words that state only that observed lack. A command is printed only when the
    repository path and every restored path consist solely of the bare-command alphabet

@@ -14194,28 +14194,41 @@ def _init_inert(value):
 
 
 def _init_echo(line, err=False):
-    """THE one output route for opf init (QA round 7, requirement B; QA round 8: the
-    denylist is replaced by a PERMITTED-CALL allowlist): every line _cmd_init or any
-    opf.py function it reaches prints goes through this emitter. The init suite's
-    route gate (check_opf_init._init_route_violations) computes the set of opf.py
-    functions reachable from _cmd_init and, in every one of them except this emitter,
-    requires EVERY call target to resolve to a name in an explicit allowed set (the
-    reachable definitions, their own nested defs, and a reviewed roster of builtins,
-    module functions and spelled method chains); an unresolved or computed call
-    target is a violation, as is any reference to print, builtins, stdout, stderr,
-    write, writelines, warnings or logging, any rebinding of this emitter or of the
-    renderers, and any _InitRestoreLine or _InitPriorStoreRefusal construction whose
-    template is not a string literal. A spelled output route (subprocess.run,
-    os.system, os.write, os.writev, open, Path(...).write_text, sys.exit,
-    SystemExit, input, traceback, pprint, sys.displayhook, an alias to an
-    out-of-graph helper) is therefore refused because its target is not allowed.
-    RESIDUAL (D-STATIC-PIN-RESIDUAL, introspection only): a static name check cannot
-    see what an ALLOWED call does at runtime with hostile VALUES, a binding
-    manufactured through introspection that never spells a call target (no such
-    spelling passes the allowlist, but another module's code is out of scope), or
-    output produced inside the sibling _opf_* modules the init path calls into; the
-    suite's runtime paste test over every init exit path is the primary guard for
-    what the printed lines themselves can do."""
+    """THE one output route for opf init (QA round 7, requirement B; QA round 9: the
+    permitted-CALL allowlist is replaced by a permitted-REFERENCE allowlist): every
+    line _cmd_init or any opf.py function it reaches prints goes through this
+    emitter. The init suite's route gate (check_opf_init._init_route_violations)
+    computes the set of opf.py functions reachable from _cmd_init and, in every one
+    of them except this emitter, requires EVERY name and attribute-chain REFERENCE
+    (a callee, an argument, a callback keyword such as key= or default=, a default,
+    anything spelled at all) to resolve to a name the function itself binds, to a
+    reachable module-level definition, or to an entry in a reviewed roster SCOPED
+    to the one function the real source uses it in; an unresolvable (computed)
+    reference is a violation, as is any reference to print, builtins, stdout,
+    stderr, write, writelines, warnings or logging, any import of or assignment to
+    a name that shadows a rostered external base (builtins and the five pinned
+    module imports) at module level or inside a reachable function, any rebinding
+    of this emitter or of the renderers, str.__new__ spelled anywhere outside
+    _InitRestoreLine itself, any raise in _cmd_init outside the one handled try
+    unless it raises _InitPriorStoreRefusal (whose constructor renders, so even an
+    escaping traceback shows rendered values), and any _InitRestoreLine or
+    _InitPriorStoreRefusal construction whose template (the remedy template
+    included) is not a string literal or a name bound only to string literals. A
+    spelled output route (subprocess.run, os.system, os.write, os.writev, open,
+    Path(...).write_text, sys.exit, SystemExit, input, traceback, pprint,
+    sys.displayhook, an alias to an out-of-graph helper, an import alias such as
+    from os import writev as ascii, or a spelled callback such as
+    sorted(..., key=os.system)) is therefore refused because the reference is not
+    allowed where it appears. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated exactly): a
+    static reference check cannot see what an ALLOWED reference does at runtime
+    with hostile VALUES (an allowed method spelling invoked on a rebound object),
+    code in ANOTHER MODULE (the sibling _opf_* modules the init path calls into,
+    whose own output and introspection this gate never parses), or INTROSPECTION
+    reached through allowed spellings at runtime; no introspection spelling
+    (getattr, globals, vars, __import__) is itself in any roster, but a hostile
+    sibling module is out of this gate's scope. The suite's runtime paste test over
+    every init exit path is the primary guard for what the printed lines themselves
+    can do."""
     stream = sys.stderr if err else sys.stdout
     stream.write(str(line) + "\n")
 
@@ -14244,25 +14257,41 @@ def _init_inert_json(value):
 class _InitRestoreLine(str):
     """One physical line of a prior-store refusal's restore and detail block: a str
     whose CONSTRUCTOR renders (QA round 7, requirement B). The template is a string
-    literal (the route gate refuses any construction whose template is not), and every
-    value is rendered through _init_inert before it is formatted in, so a line of this
-    type never carries a raw interpolated value; a value already proven bare renders
-    unchanged. _cmd_init's refusal handler prints restore lines of exactly this type
-    and re-renders any other entry through this constructor, so a raw string smuggled
-    into restore_lines after construction is escaped, never printed raw."""
+    literal, or a name every binding of which is a string literal (the route gate
+    refuses any other construction), and EVERY value is rendered through _init_inert
+    before it is formatted in, with no exception and no pass-through of any kind (QA
+    round 9, requirement B: the round-8 constructor passed a value of the exact
+    _InitRestoreLine type through unrendered, and str.__new__ could mint such a value
+    around a raw string); a value already proven bare renders unchanged, so rendering
+    it again is the identity, and every bare-word restore command stays
+    byte-identical. A line this constructor produced carries a private slot marker
+    set only here, AFTER its values were rendered: the marker is the proof of
+    rendering the refusal constructor and the refusal handler accept, and an
+    instance minted around this constructor (str.__new__) lacks the slot and is
+    re-rendered wherever it arrives."""
 
-    __slots__ = ()
+    __slots__ = ("_opf_line_rendered",)
 
     def __new__(cls, template, *values):
-        # A value that is itself an _InitRestoreLine was already produced by this
-        # constructor from a gate-pinned string-literal template with every
-        # interpolated value rendered, so it passes through unchanged: this is how
-        # fixed remedy PROSE (built here from literals) stays readable while every
-        # data value renders through the fixed narrow alphabet (QA round 8,
-        # requirement A). Anything else, str subclasses included, is rendered.
-        return str.__new__(cls, template.format(
-            *[value if type(value) is _InitRestoreLine else _init_inert(str(value))
-              for value in values]))
+        line = str.__new__(cls, template.format(
+            *[_init_inert(str(value)) for value in values]))
+        line._opf_line_rendered = True
+        return line
+
+
+def _init_line_rendered(line):
+    """True only for a line the _InitRestoreLine constructor produced, proven by the
+    private slot that constructor sets after rendering every value: never a type
+    check (QA round 9, requirement B: a str.__new__-minted instance of the exact
+    type carried a raw value through the round-8 type-based pass-through). A minted
+    instance has no slot value, and anything else fails the type test, so the
+    caller re-renders both."""
+    if type(line) is not _InitRestoreLine:
+        return False
+    try:
+        return line._opf_line_rendered is True
+    except AttributeError:
+        return False
 
 
 class _InitPriorStoreRefusal(RuntimeError):
@@ -14274,21 +14303,31 @@ class _InitPriorStoreRefusal(RuntimeError):
     missing-store-path detail lines naming each structural store file the restorable
     .working tree lacks). The exit code is the
     same 2 either way; only the reporting wording distinguishes the two verdicts.
-    The CONSTRUCTOR renders (QA round 7, requirement B): the message is template.format
-    over values each rendered through _init_inert (the template is a string literal,
-    pinned by the route gate), and every restore_lines entry that is not already an
-    _InitRestoreLine is re-rendered through that type's constructor, so a raw value
-    bound into either channel is escaped at construction, never printed raw."""
+    The CONSTRUCTOR renders (QA rounds 7 and 9, requirement B): the message is
+    template.format over values EACH rendered through _init_inert, with no
+    pass-through of any kind (the template and the remedy template are string
+    literals or literal-only-bound names, pinned by the route gate); the remedy
+    prose is formatted here from its own pinned template over its own rendered
+    values, gains the fixed PARTIAL clause when partial is true, and fills the
+    template's {remedy} field, so no composed prose is ever passed back through the
+    renderer as a value; and every restore_lines entry that does not carry the
+    _InitRestoreLine constructor's rendering proof (_init_line_rendered, a private
+    slot a minted instance of the exact type lacks; QA round 9, requirement B) is
+    re-rendered through that constructor, so a raw value bound into any channel is
+    escaped at construction, never printed raw."""
 
-    def __init__(self, template, values, restore_lines):
-        # Values of the exact _InitRestoreLine type pass through unrendered for the
-        # same reason as in that type's constructor: they are literal-template
-        # products whose interpolated values were already rendered.
+    def __init__(self, template, values, restore_lines,
+                 remedy_template="", remedy_values=(), partial=False):
+        remedy = remedy_template.format(
+            *[_init_inert(str(value)) for value in remedy_values])
+        if partial:
+            remedy = remedy + (
+                ", and the restore is PARTIAL (the missing-store-path lines below "
+                "name structural store files the restored .working tree lacks)")
         super().__init__(template.format(
-            *[value if type(value) is _InitRestoreLine else _init_inert(str(value))
-              for value in values]))
+            *[_init_inert(str(value)) for value in values], remedy=remedy))
         self.restore_lines = [
-            line if type(line) is _InitRestoreLine else _InitRestoreLine("{}", line)
+            line if _init_line_rendered(line) else _InitRestoreLine("{}", line)
             for line in restore_lines]
 
 
@@ -14461,12 +14500,26 @@ def _init_no_prior_store(git, repo, root):
         under the shared hardened runner and its output bound, whose overflow refuses
         like every other unreadable answer), so a machine subdirectory deleted WHOLE in
         an earlier commit is still disclosed. The walk reads --name-status with rename
-        detection, newest first: a structural file whose NEWEST first-parent change at
-        or before <commit> renamed it to another first-level structural store path is
-        counted at its destination only (QA round 8 MINOR 4: a machine subdirectory
-        renamed whole with git mv survives complete at its new name and must not read
-        as a PARTIAL restore), while a rename whose destination the pathspecs exclude
-        is reported by git as a deletion of its source and stays disclosed. Each store found either way is expected
+        detection, newest first, and its records are parsed from git's NUL-delimited
+        token stream positionally, by record arity, so a byte a committed filename may
+        legally hold (QA round 9 codex MEDIUM: the 0x01 header sentinel) never splits
+        a record: a header is read only at a record boundary, where every path token
+        was already consumed. A structural file whose NEWEST first-parent change at or
+        before <commit> renamed it counts at its destination INSTEAD OF its old path
+        only when the rename is exact (similarity 100, so no byte changed in the
+        move), no older first-parent record touched the destination path, and the
+        renaming commit's own tree holds no structural file under the source
+        subdirectory (one ls-tree probe per rename record, read like every other
+        answer here); so a machine subdirectory renamed whole with git mv survives
+        complete at its new name and does not read as a PARTIAL restore (QA round 8
+        MINOR 4), while ANY other pairing git's similarity-based rename detection
+        reports, for example a store deleted while a similar store was created in the
+        same commit (QA round 9 MEDIUM 2: that store's loss went unreported), reads
+        as a deletion of its source, which stays expected, FAIL-SAFE: the doubtful
+        case is disclosed as missing, never silently absorbed. A rename whose
+        destination the pathspecs exclude is reported by git as a deletion of its
+        source and stays disclosed, and a copy record never releases its source
+        (the source was not changed by a copy). Each store found either way is expected
         to hold BOTH structural files; each expected file the tree lacks is returned.
         A subdirectory holding only other files, or only deeper directories, is neither
         expected nor named (QA round 7 MAJOR 2: an adopter-kept .working/notes/plan.md
@@ -14511,67 +14564,120 @@ def _init_no_prior_store(git, repo, root):
                 return parts
             return None
 
-        # Commits arrive NEWEST FIRST along the first-parent line, so the first
-        # record seen for a path is that path's newest change at or before <commit>
-        # and decides it (QA round 8 MINOR 4): a structural file whose newest change
-        # RENAMED it to another structural store path (git mv of a machine
-        # subdirectory) lives on at its destination, which this walk counts, so the
-        # old subdirectory is NOT expected and a complete renamed store no longer
-        # reads as a PARTIAL restore. A rename whose destination falls outside the
-        # glob pathspecs is reported by git as a plain deletion of the source
-        # (pathspec filtering precedes rename pairing), so a store moved OUT of
-        # .working still reads as deleted and stays disclosed; a copy leaves its
-        # source in place. Any other or unparseable record shape refuses.
-        decided = set()
-        for chunk in touched.out.split(b"\x01"):
-            if not chunk:
+        # PARSE: git's -z output is one NUL-delimited token stream; a committed
+        # path may hold ANY byte but NUL and the separator slash, the 0x01 header
+        # sentinel included (QA round 9 codex MEDIUM: splitting the whole stream on
+        # 0x01 split such a path in half and refused a previously supported
+        # disclosure), so the stream is split on NUL alone and read POSITIONALLY: a
+        # header (the 0x01-led token the %x01%H format prints) is accepted only at
+        # a record boundary, where the arity of every prior record has already
+        # consumed its path tokens, and a path token is consumed by arity, never
+        # inspected as a header or status. git prints one newline between a
+        # header's NUL and the commit's first record, so the token at a boundary
+        # may carry one leading newline (and carries ONLY the next header after it
+        # when a listed commit has no records). Any other or unparseable token
+        # shape refuses.
+        tokens = touched.out.split(b"\0")
+        if tokens and tokens[-1] == b"":
+            tokens.pop()
+        if len(tokens) == 1 and tokens[0] == b"":
+            tokens = []
+        commits = []   # (commit id, records, touched paths), newest first
+        index = 0
+        while index < len(tokens):
+            boundary = tokens[index]
+            if boundary[:1] == b"\n":
+                boundary = boundary[1:]
+            if boundary[:1] == b"\x01":
+                commits.append((oid(boundary[1:]), [], set()))
+                index += 1
                 continue
-            header, sep, body = chunk.partition(b"\x00\n")
-            if sep != b"\x00\n":
+            if not commits:
                 raise RuntimeError(
-                    "git history preflight: unparseable --name-status commit header "
-                    "{}; refusing".format(ascii(chunk[:80])))
-            oid(header)
-            records = body.split(b"\0")
-            if records and records[-1] == b"":
-                records.pop()
-            index = 0
-            while index < len(records):
-                status = records[index]
-                if status[:1] in (b"R", b"C"):
-                    if index + 2 > len(records) - 1:
-                        raise RuntimeError(
-                            "git history preflight: truncated rename record {}; "
-                            "refusing".format(ascii(status)))
-                    old_path = records[index + 1]
-                    new_path = records[index + 2]
+                    "git history preflight: --name-status output does not begin "
+                    "with a commit header ({}); refusing".format(ascii(boundary)))
+            records = commits[-1][1]
+            paths = commits[-1][2]
+            status = boundary
+            if status[:1] in (b"R", b"C"):
+                if index + 2 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated rename record {}; "
+                        "refusing".format(ascii(status)))
+                records.append((status, tokens[index + 1], tokens[index + 2]))
+                paths.add(tokens[index + 1])
+                paths.add(tokens[index + 2])
+                index += 3
+            elif status in (b"A", b"M", b"D", b"T"):
+                if index + 1 > len(tokens) - 1:
+                    raise RuntimeError(
+                        "git history preflight: truncated --name-status record "
+                        "{}; refusing".format(ascii(status)))
+                records.append((status, None, tokens[index + 1]))
+                paths.add(tokens[index + 1])
+                index += 2
+            else:
+                raise RuntimeError(
+                    "git history preflight: unexpected --name-status status {}; "
+                    "refusing".format(ascii(status)))
+
+        def source_left(commit_id, subdir):
+            # True when the renaming commit's OWN tree still holds a structural
+            # file under the rename's source subdirectory: the move was partial,
+            # so the source stays a store, fail-safe. Read like every other answer
+            # here; --literal-pathspecs keeps a metacharacter-named subdirectory a
+            # path.
+            probe2 = read(["--literal-pathspecs", "ls-tree", "-z", commit_id, "--",
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[0]),
+                           working_rel + "/" + os.fsdecode(subdir) + "/"
+                           + os.fsdecode(required[1])])
+            return len(probe2.out.split(b"\0")) > 1
+
+        # RESOLVE, newest first: the first record seen for a path is that path's
+        # newest change at or before <commit> and decides it. A rename record
+        # releases its SOURCE, counting the file at its destination only (QA
+        # round 8 MINOR 4: git mv of a machine subdirectory must not read as
+        # PARTIAL), ONLY when the rename is exact (R100: the destination's bytes
+        # are the source's, so nothing was reset in the move), its destination is
+        # itself a structural store path that NO OLDER first-parent record
+        # touched, and the renaming commit's tree holds no structural file under
+        # the source subdirectory (source_left); otherwise the source reads as
+        # DELETED and its subdirectory stays expected, FAIL-SAFE (QA round 9
+        # MEDIUM 2: git pairs by content similarity, so a store deleted beside a
+        # similar store created in the same commit read as a rename and the
+        # deleted store's loss went unreported). A rename whose destination falls
+        # outside the glob pathspecs is reported by git as a plain deletion of the
+        # source (pathspec filtering precedes rename pairing), so a store moved
+        # OUT of .working still reads as deleted and stays disclosed; a copy
+        # record counts its destination and never decides or releases its source
+        # (a copy does not change the source).
+        decided = set()
+        for position, commit_entry in enumerate(commits):
+            for status, old_path, new_path in commit_entry[1]:
+                if old_path is not None:
                     new_parts = structural(new_path)
                     old_parts = structural(old_path)
                     if new_parts is not None and new_path not in decided:
                         decided.add(new_path)
                         stores.add(new_parts[0])
-                    if old_parts is not None and old_path not in decided:
-                        decided.add(old_path)
-                        if status[:1] == b"R" and new_parts is None:
-                            # fail-safe: a rename whose destination is not itself a
-                            # structural store path reads as a deletion of its source
-                            stores.add(old_parts[0])
-                    index += 3
-                elif status in (b"A", b"M", b"D", b"T"):
-                    if index + 1 > len(records) - 1:
-                        raise RuntimeError(
-                            "git history preflight: truncated --name-status record "
-                            "{}; refusing".format(ascii(status)))
-                    entry = records[index + 1]
-                    parts = structural(entry)
-                    if parts is not None and entry not in decided:
-                        decided.add(entry)
-                        stores.add(parts[0])
-                    index += 2
+                    if status[:1] == b"C" or old_parts is None:
+                        continue
+                    if old_path in decided:
+                        continue
+                    decided.add(old_path)
+                    touched_older = any(
+                        new_path in older[2]
+                        for older in commits[position + 1:])
+                    if not (status == b"R100" and new_parts is not None
+                            and not touched_older
+                            and not source_left(commit_entry[0], old_parts[0])):
+                        stores.add(old_parts[0])
                 else:
-                    raise RuntimeError(
-                        "git history preflight: unexpected --name-status status {}; "
-                        "refusing".format(ascii(status)))
+                    parts = structural(new_path)
+                    if parts is not None and new_path not in decided:
+                        decided.add(new_path)
+                        stores.add(parts[0])
         expected = {store + b"/" + want for store in stores for want in required}
         missing = {working_rel + "/" + os.fsdecode(rel)
                    for rel in expected - names}
@@ -14732,19 +14838,28 @@ def _init_no_prior_store(git, repo, root):
     # command could keep a substitution live under the shell's quote reading or split
     # across physical lines, so the refusal instead names the repository, the commits
     # and the paths on rendered detail lines.
-    def bare_words(words):
+    def checkout_line(commit_id, paths):
         # Every word here is PROVEN bare by the gate below, so each renders
-        # unchanged; the separating space comes from the string-literal template
-        # (the renderer's fixed alphabet escapes a space inside a VALUE), and a
+        # unchanged through the constructor; the separating spaces come from one
+        # string-literal template per path arity (the renderer's fixed alphabet
+        # escapes a space inside a VALUE, and no composed line is ever passed back
+        # through the renderer as a value, QA round 9, requirement B), and a
         # smuggled non-bare word would render visibly rather than run.
-        joined = _InitRestoreLine("{}", words[0])
-        for word in words[1:]:
-            joined = _InitRestoreLine("{} {}", joined, word)
-        return joined
+        if len(paths) == 1:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {}", str(repo), commit_id, paths[0])
+        if len(paths) == 2:
+            return _InitRestoreLine(
+                "  git -C {} --no-replace-objects --literal-pathspecs checkout "
+                "{} -- {} {}", str(repo), commit_id, paths[0], paths[1])
+        raise RuntimeError(
+            "git history preflight: unexpected restore path count {}; "
+            "refusing".format(len(paths)))
 
     if all(_init_bare(value) for value in [str(repo)] + held + extra_paths):
         if extra_commit:
-            remedy = _InitRestoreLine(
+            remedy_template = (
                 "restore the store paths the restore commands below name, from the "
                 "commits they name (this history deleted the store across more than "
                 "one commit, so one command cannot restore every store path)")
@@ -14753,31 +14868,27 @@ def _init_no_prior_store(git, repo, root):
                 "paths its commit holds, and the additional command below restores the "
                 "other named store path as git checks it out from its own commit):")]
         else:
-            remedy = _InitRestoreLine(
+            remedy_template = (
                 "restore the store paths the restore command below names, from that "
                 "commit")
             restore_lines = [_InitRestoreLine(
                 "opf init: restore command (shell-ready; it restores the named store "
                 "paths as git checks them out from that commit):")]
-        restore_lines.append(_InitRestoreLine(
-            "  git -C {} --no-replace-objects --literal-pathspecs checkout {} -- {}",
-            str(repo), ancestor, bare_words(held)))
+        remedy_values = ()
+        restore_lines.append(checkout_line(ancestor, held))
         if extra_commit:
             restore_lines += [
                 _InitRestoreLine(
                     "opf init: additional restore command (shell-ready; it restores "
                     "the remaining store path from the newest first-parent tree that "
                     "holds it):"),
-                _InitRestoreLine(
-                    "  git -C {} --no-replace-objects --literal-pathspecs checkout "
-                    "{} -- {}",
-                    str(repo), extra_commit, bare_words(extra_paths))]
+                checkout_line(extra_commit, extra_paths)]
     else:
-        remedy = _InitRestoreLine(
+        remedy_template = (
             "restore the store paths the lines below name, from the {} named below "
             "(no command is printed: a value in it would hold a character outside "
-            "the bare-command alphabet)",
-            "commits" if extra_commit else "commit")
+            "the bare-command alphabet)")
+        remedy_values = ("commits" if extra_commit else "commit",)
         restore_lines = (
             [_InitRestoreLine(
                 "opf init: restore command withheld: a value in it holds a character "
@@ -14799,9 +14910,6 @@ def _init_no_prior_store(git, repo, root):
                 + [_InitRestoreLine("opf init:   additional restore path: {}", path)
                    for path in extra_paths])
     if gaps:
-        remedy = _InitRestoreLine(
-            "{}, and the restore is PARTIAL (the missing-store-path lines below "
-            "name structural store files the restored .working tree lacks)", remedy)
         restore_lines += (
             [_InitRestoreLine(
                 "opf init: the restore is PARTIAL: the .working tree the command or "
@@ -14812,9 +14920,15 @@ def _init_no_prior_store(git, repo, root):
                 "first-parent history at or before the named commit; a store found "
                 "either way is expected to hold both files, and a subdirectory "
                 "holding only other files or only deeper directories is neither "
-                "expected nor named; a structural file whose newest first-parent "
-                "change at or before the named commit renamed it to another "
-                "first-level .working store path is counted at its new path only); "
+                "expected nor named; a structural file counts at its rename "
+                "destination instead of its old path only when the rename is exact "
+                "(similarity 100), no older first-parent record touched the "
+                "destination, and the renaming commit's tree holds no structural "
+                "file under the source subdirectory, so a machine subdirectory "
+                "renamed whole with git mv is complete at its new path, while any "
+                "other pairing git's rename detection reports, for example a store "
+                "deleted beside a similar store created in the same commit, reads "
+                "as a deletion of its source, which stays expected, fail-safe); "
                 "supply each missing path by your own means, or re-adopt with opf "
                 "adopt:")]
             + [_InitRestoreLine("opf init:   missing store path: {}", path)
@@ -14823,16 +14937,17 @@ def _init_no_prior_store(git, repo, root):
         "a prior store exists in this repository's git history: commit {} on HEAD's "
         "first-parent line holds {} or a store manifest {} (spec 4.3, 4.5), and spec "
         "8.2 forbids restarting its counters at zero (record ids would be reissued). "
-        "Remedy: {}, or re-adopt the ancestry with opf adopt. Plain opf init refuses "
-        "whenever this scan of HEAD's first-parent line finds a prior store, and a "
-        "store that never reached a tree on HEAD's first-parent line (for example one "
-        "created and deleted on a side branch, merged or not) is not detected "
-        "(adoption across such side lines is opf adopt's authority); the scan checks "
-        "the root's current path only (a store committed under another directory, for "
-        "example before a rename, is not detected)",
+        "Remedy: {remedy}, or re-adopt the ancestry with opf adopt. Plain opf init "
+        "refuses whenever this scan of HEAD's first-parent line finds a prior store, "
+        "and a store that never reached a tree on HEAD's first-parent line (for "
+        "example one created and deleted on a side branch, merged or not) is not "
+        "detected (adoption across such side lines is opf adopt's authority); the "
+        "scan checks the root's current path only (a store committed under another "
+        "directory, for example before a rename, is not detected)",
         (ancestor, pointer_rel,
-         working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME, remedy),
-        restore_lines)
+         working_rel + "/<subdir>/" + _opf_store.MANIFEST_NAME),
+        restore_lines, remedy_template=remedy_template,
+        remedy_values=remedy_values, partial=len(gaps) > 0)
 
 
 def _init_same_root(root, root_fd):
@@ -15112,15 +15227,18 @@ def _cmd_init(rest):
         # never started. Its message is printed unwrapped because the refusal
         # CONSTRUCTOR rendered every message value through _init_inert (never ascii(),
         # which leaves a raw dollar sign and backquote inside the quoted literal it
-        # yields, QA round 5 MAJOR). The handler accepts restore lines of exactly the
-        # _InitRestoreLine type, whose constructor rendered every interpolated value;
-        # any other entry (a raw string smuggled onto the caught exception after
-        # construction) is re-rendered through that constructor here, never printed
-        # raw. The suite's runtime paste test holds both properties at runtime.
+        # yields, QA round 5 MAJOR). The handler accepts only restore lines that
+        # carry the _InitRestoreLine constructor's rendering proof
+        # (_init_line_rendered, a private slot set after every value was rendered;
+        # never a type check, QA round 9, requirement B: str.__new__ minted an
+        # exact-type instance around a raw value); any other entry (a raw string or
+        # minted instance smuggled onto the caught exception after construction) is
+        # re-rendered through that constructor here, never printed raw. The suite's
+        # runtime paste test holds both properties at runtime.
         _init_echo("opf init: REFUSED at {} during {}: {}; exit 2".format(
             _init_inert(str(root)), _init_inert(stage), exc), err=True)
         for line in exc.restore_lines:
-            _init_echo(line if type(line) is _InitRestoreLine
+            _init_echo(line if _init_line_rendered(line)
                        else _InitRestoreLine("{}", line), err=True)
         _init_echo("opf init: preflight refused; no publication attempted.", err=True)
         return EXIT_MALFORMED

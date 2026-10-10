@@ -120,116 +120,226 @@ _ROUTE_PINNED = ("_init_echo", "_init_inert", "_init_inert_json",
 _ROUTE_BANNED = frozenset(["print", "builtins", "stdout", "stderr",
                            "write", "writelines", "warnings", "logging"])
 
-# The PERMITTED-CALL allowlist (QA round 8, requirement B: the round-7 banned-name
-# check was a denylist, and spelled routes it did not name -- subprocess.run,
-# os.system, os.writev, open on /dev/stdout, Path(...).write_text, sys.exit,
-# SystemExit, input, traceback.print_exc, pprint.pprint, shutil.copyfileobj,
-# sys.displayhook, json.dump, a module-level alias to an out-of-graph helper --
-# all passed it). Every call target in every function reachable from _cmd_init must
-# resolve (_route_call_spelling) to a module-level reachable definition, to a def
-# nested inside the function under scan (whose own body is scanned the same way), or
-# to an entry in this reviewed roster of builtins, module functions and spelled
-# method chains the real init source uses. Anything else, including a target the
-# resolver cannot spell (a computed callee), is a violation. The spellings are
-# deliberately variable-name-specific (journal._open_parent, read().out.strip): a
-# rename in opf.py fails the gate until this roster is re-reviewed.
-_ROUTE_ALLOWED_CALLS = frozenset([
-    "Path",
-    "RuntimeError",
-    "_opf_emit.emit_checked",
-    "_opf_emit.emit_checked().encode",
-    "_opf_init.build_counters",
-    "_opf_init.build_index",
-    "_opf_init.build_manifest",
-    "_opf_init.build_version",
-    "_opf_init.build_worklog",
-    "_opf_observe._git_path",
-    "_opf_observe._run_git",
-    "_opf_observe._run_git_config_discovery",
-    "_opf_observe.indexed_ignore_availability",
-    "_opf_store._close_fd_exc_safe",
-    "_opf_store._journal._close_fd_propagating",
-    "_opf_store._journal._close_fd_quietly",
-    "_opf_store._open_dir_nofollow",
-    "_opf_store.resolve_store",
-    "_opf_write_guard._ignore_file_candidates",
-    "all",
-    "any",
-    "ascii",
-    "body.split",
-    "chunk.partition",
-    "decided.add",
-    "dict",
-    "documents.extend",
-    "entry.partition",
-    "entry.startswith",
-    "extra_paths.append",
-    "grafts_raw.decode",
-    "grafts_text.endswith",
-    "held.append",
-    "isinstance",
-    "journal._check_rel",
-    "journal._lstat_at",
-    "journal._lstat_contained",
-    "journal._open_parent",
-    "journal._read_at",
-    "journal._recreate_file",
-    "journal.require_containment",
-    "json.dumps",
-    "len",
-    "list",
-    "listing.out.split",
-    "meta.split",
-    "name.split",
-    "ord",
-    "os.fsdecode",
-    "os.fsdecode().splitlines",
-    "os.fsencode",
-    "os.fstat",
-    "os.fsync",
-    "os.lstat",
-    "os.mkdir",
-    "os.open",
-    "os.path.abspath",
-    "os.path.isabs",
-    "os.path.join",
-    "os.readlink",
-    "os.scandir",
-    "os.stat",
-    "parent.out.strip",
-    "path.startswith",
-    "payloads.items",
-    "pointer_path.as_posix",
-    "probe.out.split",
-    "raw.decode",
-    "raw.split",
-    "read().out.strip",
-    "records.pop",
-    "rel.split",
-    "restore_lines.append",
-    "root.relative_to",
-    "rows.append",
-    "rows.sort",
-    "set",
-    "sorted",
-    "stat.S_ISDIR",
-    "stat.S_ISLNK",
-    "stat.S_ISREG",
-    "stores.add",
-    "str",
-    "str-literal.format",
-    "str-literal.join",
-    "str.__new__",
-    "super",
-    "super().__init__",
-    "template.format",
-    "text.encode",
-    "touched.out.split",
-    "type",
-    "val.startswith",
-    "value.items",
-    "working_path.as_posix",
+# The PERMITTED-REFERENCE allowlist (QA round 9, requirement A: the round-8
+# permitted-CALL gate checked only call targets, so a spelled output function
+# passed whole as an ARGUMENT -- sorted(rest, key=os.system), key=input,
+# key=sys.displayhook, key=sys.exit, json.dumps(default=os.system),
+# rows.sort(key=os.system) -- and an ordinary import alias of a permitted name
+# -- from os import writev as ascii -- rebound an allowed spelling to a writer,
+# each reaching a descriptor with zero violations). Every Name and every
+# attribute-chain reference in every function reachable from _cmd_init must now
+# resolve (_route_call_spelling) to a name the function itself binds, to a
+# module-level reachable definition, or to an entry in this reviewed roster,
+# SCOPED to the one function the real init source uses it in: an allowed
+# spelling in one function is a violation in another, str.__new__ is permitted
+# in _InitRestoreLine alone, and a binding (an import alias included) of a
+# rostered external base anywhere on the graph or at module level, other than
+# the five pinned module imports, is a violation. The spellings are
+# deliberately variable-name-specific (journal._open_parent, touched.out.split):
+# a rename in opf.py fails the gate until this roster is re-reviewed.
+_ROUTE_ALLOWED_REFS = dict(
+    _InitPriorStoreRefusal=frozenset([
+        "RuntimeError", "remedy_template.format", "self.restore_lines", "str",
+        "super", "super().__init__", "template.format",
+    ]),
+    _InitRestoreLine=frozenset([
+        "line._opf_line_rendered", "str", "str.__new__", "template.format",
+    ]),
+    _cmd_init=frozenset([
+        "EXIT_MALFORMED", "EXIT_OK", "Exception", "Path", "RuntimeError",
+        "_opf_check.COUNTERS_NAME", "_opf_check.INDEX_SUFFIX",
+        "_opf_check.VERSION_NAME", "_opf_check.WORKLOG_NAME",
+        "_opf_emit.emit_checked", "_opf_emit.emit_checked().encode",
+        "_opf_init.INDEX_TYPES", "_opf_init.build_counters",
+        "_opf_init.build_index", "_opf_init.build_manifest",
+        "_opf_init.build_version", "_opf_init.build_worklog",
+        "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
+        "_opf_store.MANIFEST_NAME", "_opf_store.NOT_ADOPTED",
+        "_opf_store.POINTER_REL", "_opf_store.RESOLVED",
+        "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
+        "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
+        "_opf_store._open_dir_nofollow", "_opf_store.resolve_store", "all",
+        "any", "ascii", "dict", "documents.extend", "exc.restore_lines",
+        "journal._check_rel", "journal._lstat_at", "journal._lstat_contained",
+        "journal._open_parent", "journal.require_containment", "json.dumps",
+        "len", "list", "os.fsync", "os.mkdir", "os.path.abspath",
+        "path.startswith", "payloads.items", "res.detail", "res.status", "set",
+        "str", "str-literal.format", "str-literal.join", "text.encode", "type",
+        "type().__name__", "val.startswith",
+    ]),
+    _init_bare=frozenset([
+        "_INIT_BARE_SAFE", "all",
+    ]),
+    _init_create=frozenset([
+        "Exception", "RuntimeError", "_opf_store._close_fd_exc_safe",
+        "_opf_store._journal", "journal._open_parent",
+        "journal._recreate_file", "os.fsync", "str-literal.format",
+    ]),
+    _init_git=frozenset([
+        "RuntimeError", "_opf_observe._run_git", "result.completed",
+        "result.err", "result.out", "result.rc", "str", "str-literal.format",
+    ]),
+    _init_glob_escape=frozenset([
+        "str-literal.join",
+    ]),
+    _init_history_rels=frozenset([
+        "_opf_store.POINTER_REL", "_opf_store.WORKING_DIRNAME",
+        "pointer_path.as_posix", "working_path.as_posix",
+    ]),
+    _init_inert=frozenset([
+        "_INIT_INERT_SAFE", "ord", "str-literal.format", "str-literal.join",
+    ]),
+    _init_inert_json=frozenset([
+        "dict", "isinstance", "list", "str", "value.items",
+    ]),
+    _init_inventory=frozenset([
+        "Exception", "RuntimeError", "_INIT_MAX_DEPTH", "_INIT_MAX_ENTRIES",
+        "_INIT_MAX_NAME_BYTES", "_opf_store.WORKING_DIRNAME",
+        "_opf_store._close_fd_exc_safe", "_opf_store._journal", "ascii",
+        "entry.name", "journal._lstat_at", "len", "os.O_DIRECTORY",
+        "os.O_NOFOLLOW", "os.O_RDONLY", "os.fsencode", "os.open", "os.scandir",
+        "os.stat", "rows.append", "rows.sort", "st.st_mode", "stat.S_ISDIR",
+    ]),
+    _init_kind=frozenset([
+        "st.st_mode", "stat.S_ISDIR", "stat.S_ISLNK", "stat.S_ISREG",
+    ]),
+    _init_line_rendered=frozenset([
+        "AttributeError", "line._opf_line_rendered", "type",
+    ]),
+    _init_no_prior_store=frozenset([
+        "FileNotFoundError", "OSError", "RuntimeError", "UnicodeError",
+        "_opf_check.COUNTERS_NAME", "_opf_observe._run_git",
+        "_opf_store.MANIFEST_NAME", "all", "any", "ascii", "commits.append",
+        "decided.add", "entry.partition", "entry.startswith", "enumerate",
+        "extra_paths.append", "grafts_raw.decode", "grafts_st.st_size",
+        "grafts_text.endswith", "head.rc", "held.append", "len",
+        "listing.out.split", "meta.split", "name.split", "os.fsdecode",
+        "os.fsencode", "os.lstat", "os.path.isabs", "os.path.join",
+        "os.readlink", "parent.out.strip", "parent.rc", "paths.add",
+        "probe.out.split", "probe2.out.split", "raw.decode", "read().out",
+        "read().out.strip", "records.append", "rel.split",
+        "restore_lines.append", "result.completed", "result.err", "result.rc",
+        "root.relative_to", "set", "sorted", "stores.add", "str",
+        "str-literal.format", "str-literal.join", "tokens.pop",
+        "touched.out.split",
+    ]),
+    _init_observed=frozenset([
+        "Exception", "_opf_store._close_fd_exc_safe", "_opf_store._journal",
+        "ascii", "journal._lstat_contained", "journal._open_parent",
+        "journal._read_at", "len", "list", "opened.st_nlink", "rows.append",
+        "st.st_mode", "st.st_size", "stat.S_ISREG",
+    ]),
+    _init_repo=frozenset([
+        "Path", "RuntimeError", "_opf_observe._git_path",
+        "_opf_store._journal._close_fd_propagating",
+        "_opf_store._open_dir_nofollow", "len", "os.fsdecode",
+        "os.path.abspath", "os.path.isabs", "raw.split", "root.parents",
+    ]),
+    _init_same_root=frozenset([
+        "RuntimeError", "_opf_store._close_fd_exc_safe",
+        "_opf_store._open_dir_nofollow", "current.st_dev", "current.st_ino",
+        "opened.st_dev", "opened.st_ino", "os.fstat",
+    ]),
+    _init_unignored=frozenset([
+        "RuntimeError", "_opf_observe._run_git_config_discovery",
+        "_opf_observe.indexed_ignore_availability",
+        "_opf_write_guard._ignore_file_candidates", "os.fsdecode",
+        "os.fsdecode().splitlines", "result.completed", "result.err",
+        "result.out", "result.rc", "root.relative_to", "sorted", "str",
+        "str-literal.format",
+    ]),
+    _init_untracked=frozenset([
+        "RuntimeError", "os.fsdecode", "root.relative_to", "sorted", "str",
+        "str-literal.format",
+    ]),
+)
+
+# The bases that resolve OUTSIDE a reachable function: builtins and modules.
+# Any binding of one of these names, at module level or inside a reachable
+# function, is a violation unless it is that name's single pinned import form
+# below (QA round 9, codex MAJOR 1: from os import writev as ascii bound a
+# writer to a permitted spelling and passed the call gate).
+_ROUTE_EXTERNAL_BASES = frozenset([
+    "AttributeError", "Exception", "FileNotFoundError", "OSError", "Path",
+    "RuntimeError", "UnicodeError", "all", "any", "ascii", "dict", "enumerate",
+    "isinstance", "json", "len", "list", "ord", "os", "set", "sorted", "stat",
+    "str", "super", "type",
+    "_opf_check", "_opf_emit", "_opf_init", "_opf_observe", "_opf_store",
+    "_opf_write_guard",
 ])
+
+_ROUTE_EXTERNAL_IMPORTS = dict(
+    os=("import", "os"),
+    json=("import", "json"),
+    stat=("import", "stat"),
+    Path=("from", "pathlib", "Path"),
+    _opf_init=("import", "_opf_init"),
+)
+
+
+def _route_external_binding_ok(node, name):
+    """True only when node is exactly the pinned import form for the external
+    base name: a plain `import name` (no alias, the module under its own name)
+    or the pinned `from module import name` (no alias, absolute). Every other
+    binding of an external base, assignments and import aliases included, is a
+    violation wherever it appears on the scanned surface."""
+    pinned = _ROUTE_EXTERNAL_IMPORTS.get(name)
+    if pinned is None:
+        return False
+    if pinned[0] == "import":
+        if not isinstance(node, ast.Import):
+            return False
+        for alias in node.names:
+            if (alias.asname or alias.name.split(".")[0]) == name:
+                if alias.asname is not None or alias.name != name:
+                    return False
+        return True
+    if not isinstance(node, ast.ImportFrom) or node.level != 0:
+        return False
+    if node.module != pinned[1]:
+        return False
+    for alias in node.names:
+        if (alias.asname or alias.name.split(".")[0]) == name:
+            if alias.asname is not None or alias.name != pinned[2]:
+                return False
+    return True
+
+
+def _route_unit_params(sub):
+    """Parameter names a def or lambda binds (positional of both kinds,
+    keyword-only, *args and **kwargs)."""
+    spec = sub.args
+    names = [arg.arg for arg in
+             list(spec.posonlyargs) + list(spec.args) + list(spec.kwonlyargs)]
+    if spec.vararg is not None:
+        names.append(spec.vararg.arg)
+    if spec.kwarg is not None:
+        names.append(spec.kwarg.arg)
+    return names
+
+
+def _route_literal_bound(unit, name_id):
+    """True when, inside unit, name_id is bound at least once and ONLY by plain
+    assignments of a string literal to plain names, and is no parameter of unit
+    or of any nested def or lambda: such a name provably carries a string
+    literal wherever it is read, so it may serve as a rendering template (QA
+    round 9, requirement B: the remedy templates are branch-selected literals
+    bound to one name)."""
+    bindings = 0
+    for sub in ast.walk(unit):
+        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if name_id in _route_unit_params(sub):
+                return False
+        for bound in _route_binding_names(sub):
+            if bound == name_id:
+                bindings += 1
+                if not (isinstance(sub, ast.Assign)
+                        and all(isinstance(target, ast.Name)
+                                for target in sub.targets)
+                        and isinstance(sub.value, ast.Constant)
+                        and isinstance(sub.value.value, str)):
+                    return False
+    return bindings > 0
 
 
 def _route_call_spelling(func):
@@ -282,47 +392,69 @@ def _route_binding_names(node):
         names.extend(node.names)
     elif isinstance(node, ast.Delete):
         targets = list(node.targets)
-    for target in targets:
-        for sub in ast.walk(target):
-            if isinstance(sub, ast.Name):
-                names.append(sub.id)
+    stack = list(targets)
+    while stack:
+        sub = stack.pop()
+        if isinstance(sub, ast.Name):
+            names.append(sub.id)
+        elif isinstance(sub, (ast.Tuple, ast.List)):
+            stack.extend(sub.elts)
+        elif isinstance(sub, ast.Starred):
+            stack.append(sub.value)
+        # a Subscript or Attribute target binds no NAME: its base and index are
+        # reads, which the reference scan checks in their own right
     return names
 
 
 def _init_route_violations(source):
-    """PERMITTED-CALL output-route gate over opf.py (QA round 7, requirement B; QA
-    round 8, requirement B: the round-7 banned-name check was a DENYLIST, and spelled
-    routes it did not name all passed it). It computes the set of module-level opf.py
-    functions and classes REACHABLE from _cmd_init (every Name that resolves to a
-    module-level def, transitively; a duplicate module-level definition or a
-    module-level rebinding of a reachable def refuses as unresolvable) and, in every
-    reachable function except the one emitter _init_echo, requires EVERY call target
-    to resolve through _route_call_spelling to a reachable module-level definition, a
-    def nested in the function under scan, or an entry in the explicit
-    _ROUTE_ALLOWED_CALLS roster; an unresolvable (computed) call target and a call
-    target outside the allowed set are both violations. It additionally refuses BY
-    NAME any reference to print, builtins, stdout, stderr, write, writelines,
-    warnings or logging (as a bare name, an attribute, an import or a keyword
-    target: these catch non-call references too, such as sys.stdout passed as an
-    argument), any binding of a pinned route name (the emitter, the renderers and
-    the two rendering types) anywhere in the file, and any _InitRestoreLine or
-    _InitPriorStoreRefusal construction whose template argument is not a string
-    literal. Returns a list of violation descriptions; the suite requires it empty
-    on the real source and NON-empty on every seeded mutant, so each recognizer is
-    discriminated. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated, not waved away): a
-    static check sees spelled call targets, not values, dataflow or runtime
-    bindings. It cannot see WHAT an allowed call prints or does at runtime (an
-    allowed method name invoked on a hostile object, a permitted name rebound by a
-    test harness), introspection performed inside the sibling _opf_* modules the
-    init path calls into, or output those modules produce; spelled introspection
-    INSIDE opf.py (getattr, globals, vars, __import__) is refused because none of
-    those names is in the allowed set. The suite's RUNTIME paste test, which drives
-    hostile values through every init exit path and feeds every printed line alone
-    to real shells, is the primary guard for those; this gate keeps the reachable
-    call surface enumerable by a reviewer."""
+    """PERMITTED-REFERENCE output-route gate over opf.py (QA round 7, requirement B;
+    QA round 8: the denylist became a permitted-CALL allowlist; QA round 9,
+    requirement A: the call allowlist became this REFERENCE allowlist, because a
+    spelled output function passed whole as an argument -- sorted(rest,
+    key=os.system) -- and an import alias of a permitted name -- from os import
+    writev as ascii -- both reached a descriptor with zero violations). It computes
+    the set of module-level opf.py functions and classes REACHABLE from _cmd_init
+    (every Name that resolves to a module-level def, transitively; a duplicate
+    module-level definition or a module-level rebinding of a reachable def refuses
+    as unresolvable) and, in every reachable function except the one emitter
+    _init_echo, requires EVERY reference -- a call target, a bare Name read
+    anywhere (an argument, a callback keyword, a default, a subscript base), and
+    every maximal attribute chain in any context, store context included -- to
+    resolve through _route_call_spelling to a name the function itself binds, to a
+    reachable module-level definition, or to an entry in _ROUTE_ALLOWED_REFS,
+    SCOPED to this one function; an unresolvable (computed) reference and a
+    reference outside the function's allowed set are both violations. It
+    additionally refuses BY NAME any reference to print, builtins, stdout, stderr,
+    write, writelines, warnings or logging; any binding, at module level or inside
+    a reachable function, of a rostered EXTERNAL base (builtins and modules) other
+    than its single pinned import form (_ROUTE_EXTERNAL_IMPORTS), so an import
+    alias or assignment cannot shadow an allowed spelling; any binding of a pinned
+    route name (the emitter, the renderers and the two rendering types) anywhere in
+    the file; any binding of a reachable definition's name inside a reachable
+    function; any raise in _cmd_init lexically outside the body of the one try
+    whose handlers catch _InitPriorStoreRefusal, unless it raises
+    _InitPriorStoreRefusal itself (whose constructor renders its message, so even
+    an escaping traceback shows rendered values; QA round 9, claude MAJOR 1: a
+    raise before that try printed a raw argv value in the traceback); and any
+    _InitRestoreLine or _InitPriorStoreRefusal construction whose template, or
+    remedy_template keyword, is neither a string literal nor a name bound only to
+    string literals (_route_literal_bound). str.__new__ is rostered for
+    _InitRestoreLine alone, so minting an instance of that type anywhere else on
+    the graph is a violation. Returns a list of violation descriptions; the suite
+    requires it empty on the real source and NON-empty on every seeded mutant, so
+    each recognizer is discriminated. RESIDUAL (D-STATIC-PIN-RESIDUAL, stated
+    exactly): a static reference check sees spelled references, not values,
+    dataflow or runtime bindings. It cannot see what an ALLOWED spelling does at
+    runtime on a hostile or rebound OBJECT, code in ANOTHER MODULE (the sibling
+    _opf_* modules the init path calls into), or introspection REACHED at runtime
+    through allowed spellings; no introspection spelling (getattr, globals, vars,
+    __import__) is itself in any roster. The suite's RUNTIME paste test, which
+    drives hostile values through every init exit path and feeds every printed
+    line alone to real shells, is the primary guard for those; this gate keeps the
+    reachable reference surface enumerable by a reviewer."""
     tree = ast.parse(source)
     violations = []
-    top = {}
+    top = dict()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name in top:
@@ -340,7 +472,7 @@ def _init_route_violations(source):
         return ["output route gate: the emitter {} is not a module-level "
                 "function".format(_ROUTE_EMITTER)]
 
-    reachable = {"_cmd_init"}
+    reachable = set(["_cmd_init"])
     queue = ["_cmd_init"]
     while queue:
         for sub in ast.walk(top[queue.pop()]):
@@ -350,7 +482,9 @@ def _init_route_violations(source):
                 queue.append(sub.id)
 
     # A module-level statement that rebinds a reachable definition makes the name's
-    # runtime binding ambiguous: refuse as unresolvable rather than guessing.
+    # runtime binding ambiguous: refuse as unresolvable rather than guessing. A
+    # module-level binding of a rostered external base other than its pinned import
+    # form shadows an allowed spelling: refused (QA round 9, codex MAJOR 1).
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
@@ -359,6 +493,11 @@ def _init_route_violations(source):
                 violations.append(
                     "call graph unresolved: module-level statement at line {} rebinds "
                     "the reachable definition {}".format(node.lineno, name))
+            if (name in _ROUTE_EXTERNAL_BASES
+                    and not _route_external_binding_ok(node, name)):
+                violations.append(
+                    "module-level statement at line {} binds the external base {} "
+                    "outside its pinned import form".format(node.lineno, name))
 
     # A binding of a pinned route name ANYWHERE in the file (outside the pinned
     # definition itself) can redirect or disarm the route: refused by name.
@@ -372,13 +511,74 @@ def _init_route_violations(source):
                     "line {}: binding of the pinned route name {}".format(
                         getattr(node, "lineno", 0), name))
 
+    # The raise rule (QA round 9, claude MAJOR 1): inside _cmd_init, a raise that is
+    # not lexically inside the BODY of the one try whose handlers catch
+    # _InitPriorStoreRefusal escapes both rendering handlers and prints a Python
+    # traceback carrying raw values, so every such raise must construct
+    # _InitPriorStoreRefusal itself (its constructor renders at construction, so
+    # even an escaping traceback shows rendered values).
+    cmd_unit = top["_cmd_init"]
+    handled_tries = [sub for sub in ast.walk(cmd_unit)
+                     if isinstance(sub, ast.Try)
+                     and any(isinstance(handler.type, ast.Name)
+                             and handler.type.id == "_InitPriorStoreRefusal"
+                             for handler in sub.handlers)]
+    if len(handled_tries) != 1:
+        violations.append(
+            "_cmd_init: expected exactly one try handling _InitPriorStoreRefusal, "
+            "found {}".format(len(handled_tries)))
+    else:
+        inside_try = set()
+        for stmt in handled_tries[0].body:
+            for sub in ast.walk(stmt):
+                inside_try.add(id(sub))
+        for sub in ast.walk(cmd_unit):
+            if isinstance(sub, ast.Raise) and id(sub) not in inside_try:
+                permitted_raise = (
+                    isinstance(sub.exc, ast.Call)
+                    and isinstance(sub.exc.func, ast.Name)
+                    and sub.exc.func.id == "_InitPriorStoreRefusal")
+                if not permitted_raise:
+                    violations.append(
+                        "_cmd_init line {}: raise outside the handled try does not "
+                        "raise _InitPriorStoreRefusal".format(sub.lineno))
+
     for name in sorted(reachable):
         if name == _ROUTE_EMITTER:
             continue
-        local_defs = {sub.name for sub in ast.walk(top[name])
-                      if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                          ast.ClassDef))}
-        for sub in ast.walk(top[name]):
+        unit = top[name]
+        allowed = _ROUTE_ALLOWED_REFS.get(name, frozenset())
+        local_defs = set(sub.name for sub in ast.walk(unit)
+                         if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                             ast.ClassDef)))
+        local_bound = set(local_defs)
+        for sub in ast.walk(unit):
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                local_bound.update(_route_unit_params(sub))
+            if sub is unit:
+                continue
+            for bound in _route_binding_names(sub):
+                local_bound.add(bound)
+                if (bound in _ROUTE_EXTERNAL_BASES
+                        and not _route_external_binding_ok(sub, bound)):
+                    violations.append(
+                        "{} line {}: binding of the external base {} outside its "
+                        "pinned import form".format(
+                            name, getattr(sub, "lineno", 0), bound))
+                if bound in reachable:
+                    violations.append(
+                        "{} line {}: binding of the reachable definition name "
+                        "{}".format(name, getattr(sub, "lineno", 0), bound))
+        # A node on the SPINE of a longer chain (an attribute base, a call target)
+        # is checked as part of that chain, never alone: only MAXIMAL references
+        # are resolved against the roster.
+        interior = set()
+        for sub in ast.walk(unit):
+            if isinstance(sub, ast.Attribute):
+                interior.add(id(sub.value))
+            elif isinstance(sub, ast.Call):
+                interior.add(id(sub.func))
+        for sub in ast.walk(unit):
             if isinstance(sub, ast.Call):
                 spelled = _route_call_spelling(sub.func)
                 if spelled is None:
@@ -386,10 +586,29 @@ def _init_route_violations(source):
                         "{} line {}: computed call target (not a spellable name, "
                         "attribute chain or call chain)".format(name, sub.lineno))
                 elif not (spelled in top or spelled in local_defs
-                          or spelled in _ROUTE_ALLOWED_CALLS):
+                          or spelled in allowed):
                     violations.append(
-                        "{} line {}: call target {} is not in the permitted-call "
-                        "allowlist".format(name, sub.lineno, spelled))
+                        "{} line {}: call target {} is not in the "
+                        "permitted-reference roster for this function".format(
+                            name, sub.lineno, spelled))
+            if isinstance(sub, ast.Name) and id(sub) not in interior:
+                if (isinstance(sub.ctx, ast.Load)
+                        and not (sub.id in local_bound or sub.id in top
+                                 or sub.id in allowed)):
+                    violations.append(
+                        "{} line {}: reference to the name {} is not permitted "
+                        "in this function".format(name, sub.lineno, sub.id))
+            elif isinstance(sub, ast.Attribute) and id(sub) not in interior:
+                spelled = _route_call_spelling(sub)
+                if spelled is None:
+                    violations.append(
+                        "{} line {}: computed attribute reference (not a "
+                        "spellable chain)".format(name, sub.lineno))
+                elif not (spelled in allowed):
+                    violations.append(
+                        "{} line {}: reference to the attribute chain {} is not "
+                        "in the permitted-reference roster for this "
+                        "function".format(name, sub.lineno, spelled))
             if isinstance(sub, ast.Name) and sub.id in _ROUTE_BANNED:
                 violations.append("{} line {}: reference to the banned name "
                                   "{}".format(name, sub.lineno, sub.id))
@@ -411,11 +630,26 @@ def _init_route_violations(source):
                     name, sub.lineno, sub.arg))
             if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
                     and sub.func.id in _ROUTE_RENDERED):
-                if not (sub.args and isinstance(sub.args[0], ast.Constant)
-                        and isinstance(sub.args[0].value, str)):
+                templates = []
+                if sub.args:
+                    templates.append(sub.args[0])
+                else:
                     violations.append(
-                        "{} line {}: {} template is not a string literal".format(
+                        "{} line {}: {} construction without a template".format(
                             name, sub.lineno, sub.func.id))
+                for kw in sub.keywords:
+                    if kw.arg == "remedy_template":
+                        templates.append(kw.value)
+                for expr in templates:
+                    literal = (isinstance(expr, ast.Constant)
+                               and isinstance(expr.value, str))
+                    pinned_name = (isinstance(expr, ast.Name)
+                                   and _route_literal_bound(unit, expr.id))
+                    if not (literal or pinned_name):
+                        violations.append(
+                            "{} line {}: {} template is not a string literal or a "
+                            "literal-only-bound name".format(
+                                name, sub.lineno, sub.func.id))
     return violations
 
 
@@ -998,12 +1232,17 @@ def _suite_isolated(invoke):
                              "subdirectory "
                              "holding only other files or only deeper directories is "
                              "neither "
-                             "expected nor named; a structural file whose newest "
-                             "first-parent "
-                             "change at or before the named commit renamed it to "
-                             "another "
-                             "first-level .working store path is counted at its new "
-                             "path only); "
+                             "expected nor named; a structural file counts at its "
+                             "rename destination instead of its old path only when "
+                             "the rename is exact (similarity 100), no older "
+                             "first-parent record touched the destination, and the "
+                             "renaming commit's tree holds no structural file under "
+                             "the source subdirectory, so a machine subdirectory "
+                             "renamed whole with git mv is complete at its new path, "
+                             "while any other pairing git's rename detection "
+                             "reports, for example a store deleted beside a similar "
+                             "store created in the same commit, reads as a deletion "
+                             "of its source, which stays expected, fail-safe); "
                              "supply each missing path by your own means, or re-adopt "
                              "with opf "
                              "adopt:"]
@@ -2430,6 +2669,53 @@ def _suite_isolated(invoke):
                             return opf._cmd_init(["--root", str(root)])
                     return fd_capture(driven)
 
+                # QA round 9, requirement C (codex MEDIUM 3): the
+                # descriptor-level capture is PINNED, not merely present. A runner
+                # that writes to descriptor 1 and descriptor 2 with os.write and
+                # spawns a child process that inherits them must have ALL THREE
+                # outputs in the returned capture; a reversion to the sys-level
+                # redirect_stdout / redirect_stderr capture misses every one of
+                # them and fails here. Each in-process driver (call,
+                # drive_cmd_init, drive_module_init) returns fd_capture directly,
+                # pinned by the source count below, so this potency holds for
+                # every driver's capture path; drive_cmd_init and
+                # drive_module_init are additionally driven with raw-descriptor
+                # probes of their own below.
+                def fd_probe_runner():
+                    os.write(1, b"QA-FD1-MARKER\n")
+                    os.write(2, b"QA-FD2-MARKER\n")
+                    subprocess.run(["/bin/echo", "QA-FDCHILD-MARKER"])
+                    return 0
+
+                rc, output = fd_capture(fd_probe_runner)
+                check("capture potency: descriptor 1, descriptor 2 and an "
+                      "inherited child process all land in the capture",
+                      rc == 0 and "QA-FD1-MARKER" in output
+                      and "QA-FD2-MARKER" in output
+                      and "QA-FDCHILD-MARKER" in output)
+                this_source = (Path(__file__).resolve()
+                               .read_text(encoding="utf-8"))
+                capture_needle = "return fd_" + "capture("
+                check("capture: each of the three in-process drivers returns "
+                      "fd_capture directly",
+                      this_source.count(capture_needle) == 3)
+
+                def fd_probe_scan(git_arg, repo_arg, root_arg):
+                    os.write(1, b"QA-DRIVE-FD1\n")
+                    os.write(2, b"QA-DRIVE-FD2\n")
+                    subprocess.run(["/bin/echo", "QA-DRIVE-CHILD"])
+                    raise RuntimeError("qa capture probe")
+
+                cap_repo = make_git("capture-potency")
+                rc, output = drive_cmd_init(
+                    cap_repo, dict(_init_no_prior_store=fd_probe_scan))
+                check("capture potency through drive_cmd_init: raw descriptor "
+                      "and inherited child output are captured",
+                      rc == EXIT_ERROR and "QA-DRIVE-FD1" in output
+                      and "QA-DRIVE-FD2" in output
+                      and "QA-DRIVE-CHILD" in output
+                      and inert("qa capture probe") in output)
+
                 pp_repo = make_git("partial'$(touch PWNED)" + '"' + "`;#")
 
                 def fail_create(root_fd, relpath, data):
@@ -2592,6 +2878,21 @@ def _suite_isolated(invoke):
                      "    (str if rest else repr)(rest)"),
                     ("a spelled getattr route",
                      "    getattr(os, 'writev')(2, [b'x'])"),
+                    ("codex round-9: an import alias of a permitted name",
+                     "    from os import writev as ascii@N@"
+                     "    ascii(1, [b'QA-SPELLED-ROUTE'])"),
+                    ("claude round-9: sorted with an os.system callback",
+                     "    sorted(rest, key=os.system)"),
+                    ("claude round-9: sorted with an input callback",
+                     "    sorted(rest, key=input)"),
+                    ("claude round-9: sorted with a sys.displayhook callback",
+                     "    sorted(rest, key=sys.displayhook)"),
+                    ("claude round-9: sorted with a sys.exit callback",
+                     "    sorted(rest, key=sys.exit)"),
+                    ("claude round-9: json.dumps with an os.system default",
+                     "    json.dumps(list(rest), default=os.system)"),
+                    ("claude round-9: rows.sort with an os.system key",
+                     "    rows = list(rest)@N@    rows.sort(key=os.system)"),
                 ]
                 for mutant_label, insertion in spelled_routes:
                     mutated = gate_source.replace(
@@ -2628,6 +2929,60 @@ def _suite_isolated(invoke):
                       _init_route_violations(gate_source.replace(
                           "def _init_echo(line, err=False):",
                           "def _init_echo_gone(line, err=False):")) != [])
+                # QA round 9, requirement A: the remaining reproductions, each a
+                # zero-violation pass on the round-8 call gate. The module-level
+                # import alias rebinds a permitted spelling outside any function;
+                # the pre-try raise escapes both rendering handlers into a raw
+                # traceback; str.__new__ outside _InitRestoreLine mints an
+                # instance of the rendering type around an unrendered string; and
+                # a permitted spelling used in a function whose roster does not
+                # carry it fails the per-function scoping.
+                check("route gate flags the codex round-9 module-level import "
+                      "alias of a permitted name",
+                      _init_route_violations(
+                          gate_source + newline
+                          + "from os import writev as ascii" + newline) != [])
+                # The gate anchor sits after the parser loop and BEFORE the
+                # handled try, so an insertion there escapes both rendering
+                # handlers.
+                check("route gate flags a raise before the handled try (claude "
+                      "round-9: the traceback printed a raw argv value)",
+                      _init_route_violations(gate_source.replace(
+                          gate_anchor,
+                          gate_anchor + newline
+                          + "    raise RuntimeError(rest[0])")) != [])
+                check("route gate passes a pre-try raise of the rendering refusal "
+                      "type (its constructor renders, so an escaping traceback "
+                      "shows rendered values)",
+                      _init_route_violations(gate_source.replace(
+                          gate_anchor,
+                          gate_anchor + newline
+                          + "    raise _InitPriorStoreRefusal(" + chr(34) + "qa"
+                          + chr(34) + ", (), [])")) == [])
+                mint_anchor = "    raise _InitPriorStoreRefusal("
+                check("route gate: the mint anchor is present once",
+                      gate_source.count(mint_anchor) == 1)
+                check("route gate flags str.__new__ minting a restore line "
+                      "outside _InitRestoreLine (codex round-9 MAJOR 2)",
+                      _init_route_violations(gate_source.replace(
+                          mint_anchor,
+                          "    restore_lines.append(str.__new__("
+                          "_InitRestoreLine, str(repo)))" + newline
+                          + mint_anchor)) != [])
+                check("route gate flags str.__new__ bound to the remedy template "
+                      "(claude round-9 MAJOR 1)",
+                      _init_route_violations(gate_source.replace(
+                          mint_anchor,
+                          "    remedy_template = str.__new__("
+                          "_InitRestoreLine, str(repo))" + newline
+                          + mint_anchor)) != [])
+                check("route gate scopes a permitted spelling to its one "
+                      "function (rows.sort is rostered for _init_inventory, not "
+                      "_cmd_init)",
+                      _init_route_violations(gate_source.replace(
+                          gate_anchor,
+                          gate_anchor + newline + "    rows = []" + newline
+                          + "    rows.sort()")) != [])
 
                 # QA rounds 7 and 8 (requirements A and C): the RUNTIME paste
                 # test, the primary guard. THE EXIT-PATH BY VALUE-CLASS MATRIX:
@@ -2659,6 +3014,10 @@ def _suite_isolated(invoke):
                 #       (fault during publication)   | create-failure text
                 #   P11 post-publish-inventory       | every non-empty value, in the
                 #       report (fault after publish) | injected inventory entry path
+                #   P12 prior-store refusal, PRINTED | every non-empty value as a
+                #       restore hints + hostile      | historical machine-subdir
+                #       PARTIAL gap paths (the       | name, deleted whole before
+                #       repository name is bare)     | the store was dropped
                 #
                 # Value classes: both quote kinds, command substitution, backquote,
                 # ";", "#", LF, CRLF, U+202E, U+2028, U+0085, the empty value,
@@ -2940,6 +3299,57 @@ def _suite_isolated(invoke):
                                   for row in p11_rows)
                           and paste_clean(output, "p11-" + tag))
 
+                # Exit path P12 (QA round 9 MINOR, both reviewers): the PRINTED
+                # restore hints beside hostile PARTIAL gap paths. The repository
+                # name is bare, so the shell-ready restore command prints; the
+                # hostile value is a HISTORICAL machine-subdirectory name whose
+                # store was deleted whole in an earlier commit, so each gap line
+                # carries the rendered hostile value. The full output is compared
+                # byte-for-byte (so the excluded hint lines are exactly the
+                # intended commands and nothing else matches their prefixes), and
+                # every other line, the hostile gap lines included, runs alone
+                # through the paste probe's shells.
+                for tag, value in paste_dir_values:
+                    p12 = make_git("paste-p12-" + tag)
+                    p12_machine = p12 / working / machine_name
+                    p12_machine.mkdir(parents=True)
+                    (p12_machine / _opf_store.MANIFEST_NAME).write_bytes(
+                        b"x = 1\n")
+                    (p12_machine / _opf_check.COUNTERS_NAME).write_bytes(
+                        b"y = 1\n")
+                    p12_dir = p12 / working / value
+                    p12_dir.mkdir()
+                    (p12_dir / _opf_store.MANIFEST_NAME).write_bytes(b"z = 1\n")
+                    (p12 / _opf_store.POINTER_REL).write_bytes(
+                        b'[store]\ntarget = "dir:."\n')
+                    git_call(p12, ["--literal-pathspecs", "add", "-A"])
+                    git_call(p12, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "store with a hostile subdir"])
+                    git_call(p12, ["--literal-pathspecs", "rm", "-r", "-q", "--",
+                                   working + "/" + value])
+                    git_call(p12, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "drop the hostile subdir"])
+                    p12_commit = head_of(p12)
+                    git_call(p12, ["rm", "-r", "-q", "--",
+                                   working, _opf_store.POINTER_REL])
+                    git_call(p12, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "drop the store"])
+                    rc, output = run(p12)
+                    p12_gaps = sorted([
+                        working + "/" + value + "/" + _opf_check.COUNTERS_NAME,
+                        working + "/" + value + "/" + _opf_store.MANIFEST_NAME])
+                    check("paste " + tag + ": the printed restore hints beside "
+                          "hostile PARTIAL gap paths are byte-exact and "
+                          "paste-inert",
+                          rc == EXIT_ERROR and output == prior_store_output(
+                              p12, p12, p12_commit, [".opf.toml", ".working"],
+                              True, gaps=p12_gaps)
+                          and any(line.startswith("  git -C ")
+                                  for line in output.splitlines())
+                          and paste_probe(output, "p12-" + tag) == [])
+                check("paste P12: no payload file appeared beside the fixtures",
+                      not (base / "PASTE-PWNED").exists())
+
                 # PROBE POTENCY (QA round 8 BLOCKER 1): the interactive-bash leg,
                 # with its primed history line, catches a RAW history-expansion
                 # payload that the sh leg alone cannot (dash has no history
@@ -3042,17 +3452,19 @@ def _suite_isolated(invoke):
 
                 # Claude round-7 mutant 12, adapted to the constructor signature: a
                 # refusal raised from _init_same_root with the raw root as message
-                # value and restore line. The gate passes it (the template is a
-                # literal); the constructor renders both channels.
+                # value and restore line. The round-9 reference gate FLAGS it (str
+                # is not rostered for _init_same_root, so the per-function scoping
+                # catches even this harmless spelling); the constructor still
+                # renders both channels at runtime, held below.
                 sr_repo = make_git("route-same'$(touch PWNED-SR)`x")
                 sr_mutated = gate_source.replace(
                     deep_anchor,
                     "    raise _InitPriorStoreRefusal(" + chr(34) + chr(123)
                     + chr(125) + chr(34) + ", (str(root),), [str(root)])"
                     + newline + deep_anchor)
-                check("route gate passes the raw-refusal-from-_init_same_root mutant "
-                      "(its stated residual)",
-                      _init_route_violations(sr_mutated) == [])
+                check("route gate flags the raw-refusal-from-_init_same_root mutant "
+                      "(per-function scoping: str is not rostered there)",
+                      _init_route_violations(sr_mutated) != [])
                 sr_module = load_mutant("same-root-refusal", sr_mutated)
                 rc, output = drive_module_init(sr_module, ["--root", str(sr_repo)])
                 check("route runtime: a refusal raised from _init_same_root is "
@@ -3080,6 +3492,29 @@ def _suite_isolated(invoke):
                       "interpolation (the primary guard is potent)",
                       rc == EXIT_ERROR
                       and paste_probe(output, "route-raw-arg") != [])
+
+                # QA round 9, requirement C: the third driver's capture path,
+                # driven with raw-descriptor and child-process writes from a
+                # loaded mutant (the gate flags its spelled routes, and the
+                # capture still observes what they wrote at runtime).
+                fdm_source = gate_source.replace(
+                    gate_anchor,
+                    gate_anchor + newline
+                    + "    os.write(1, b'QA-MODULE-FD1 ')" + newline
+                    + "    os.write(2, b'QA-MODULE-FD2 ')" + newline
+                    + "    import subprocess as _qa_sub" + newline
+                    + "    _qa_sub.run(['/bin/echo', 'QA-MODULE-CHILD'])")
+                check("route gate flags the capture-probe mutant's spelled "
+                      "routes",
+                      _init_route_violations(fdm_source) != [])
+                fdm_module = load_mutant("fd-capture-probe", fdm_source)
+                fdm_repo = make_git("capture-module")
+                rc, output = drive_module_init(
+                    fdm_module, ["--root", str(fdm_repo)])
+                check("capture potency through drive_module_init: raw descriptor "
+                      "and inherited child output are captured",
+                      "QA-MODULE-FD1" in output and "QA-MODULE-FD2" in output
+                      and "QA-MODULE-CHILD" in output)
 
                 # QA round 7 MINOR 4: the key-rendering arm of _init_inert_json,
                 # driven with a hostile KEY (no CLI path binds one today, so this
@@ -3109,6 +3544,32 @@ def _suite_isolated(invoke):
                       and type(probe_exc.restore_lines[0]).__name__
                       == "_InitRestoreLine")
 
+                # QA round 9, requirement B (codex MAJOR 2, claude MAJOR 1): a
+                # FORGED instance of the exact _InitRestoreLine type, minted around
+                # a raw string with str.__new__, must never ride a pass-through.
+                # The constructor renders EVERY value (no type check), the refusal
+                # constructor and the handler accept only the constructor's private
+                # rendering proof, and a genuine constructed line passes those two
+                # unchanged (the acceptance is idempotent for real lines), so
+                # re-coercion never double-escapes real output.
+                forged_raw = "v; echo " + paste_marker + " #`$(touch QA-FORGED)"
+                forged = str.__new__(opf._InitRestoreLine, forged_raw)
+                check("a forged exact-type restore line is rendered when it is a "
+                      "constructor VALUE, never passed through",
+                      str(opf._InitRestoreLine("{}", forged)) == inert(forged_raw))
+                forged_exc = opf._InitPriorStoreRefusal(
+                    "qa forged", (), [str.__new__(opf._InitRestoreLine,
+                                                  forged_raw)])
+                check("a forged exact-type restore line is re-rendered by the "
+                      "refusal constructor",
+                      list(forged_exc.restore_lines) == [inert(forged_raw)])
+                genuine = opf._InitRestoreLine("qa {}", forged_raw)
+                genuine_exc = opf._InitPriorStoreRefusal("qa", (), [genuine])
+                check("a genuine constructed line passes the rendering-proof "
+                      "check unchanged (idempotent acceptance)",
+                      list(genuine_exc.restore_lines) == [genuine]
+                      and str(genuine) == "qa " + inert(forged_raw))
+
                 # The handler accepts only the line type: a raw string appended to
                 # the caught exception AFTER construction (past the constructor's
                 # coercion) is re-rendered by the handler, never printed raw.
@@ -3119,17 +3580,24 @@ def _suite_isolated(invoke):
                         "qa post-append refusal", (), [])
                     smuggled.restore_lines.append(
                         "$(touch PWNED-HANDLER); `touch PWNED-HANDLER`")
+                    smuggled.restore_lines.append(str.__new__(
+                        opf._InitRestoreLine,
+                        "$(touch PWNED-FORGED); `touch PWNED-FORGED`"))
                     raise smuggled
 
                 handler_repo = make_git("route-handler-coercion")
                 rc, output = drive_cmd_init(
                     handler_repo, dict(_init_no_prior_store=post_append_refusal))
                 check("the refusal handler re-renders a restore line smuggled in "
-                      "after construction",
+                      "after construction, a forged exact-type instance included "
+                      "(QA round 9, requirement B)",
                       rc == EXIT_ERROR and "REFUSED" in output
                       and "$(" not in output and "`" not in output
                       and inert("$(touch PWNED-HANDLER); `touch PWNED-HANDLER`")
                       in output
+                      and inert("$(touch PWNED-FORGED); `touch PWNED-FORGED`")
+                      in output
+                      and not (base / "PWNED-FORGED").exists()
                       and paste_probe(output, "handler-coercion") == [])
 
                 # QA round 7 MAJOR 2 (claude): an adopter-kept NON-STORE file in a
@@ -3254,20 +3722,26 @@ def _suite_isolated(invoke):
                                 "files, and a subdirectory holding only other files "
                                 "or only deeper directories is neither expected nor "
                                 "named")
-                store_rule_c = ("a structural file whose newest first-parent change "
-                                "at or before the named commit renamed it to another "
-                                "first-level .working store path is counted at its "
-                                "new path only")
+                store_rule_c = ("a structural file counts at its rename destination "
+                                "instead of its old path only when the rename is "
+                                "exact (similarity 100), no older first-parent "
+                                "record touched the destination, and the renaming "
+                                "commit's tree holds no structural file under the "
+                                "source subdirectory")
+                store_rule_d = ("reads as a deletion of its source, which stays "
+                                "expected, fail-safe")
                 quickstart_flat = " ".join(
                     quickstart.read_text(encoding="utf-8").replace("`", "").split())
                 check("ancestry: OPF-QUICKSTART.md states the store definition",
                       store_rule_a in quickstart_flat
                       and store_rule_b in quickstart_flat
-                      and store_rule_c in quickstart_flat)
+                      and store_rule_c in quickstart_flat
+                      and store_rule_d in quickstart_flat)
                 check("ancestry: the PARTIAL scope text states the store definition",
                       store_rule_a in " ".join(output.split())
                       and store_rule_b in " ".join(output.split())
-                      and store_rule_c in " ".join(output.split()))
+                      and store_rule_c in " ".join(output.split())
+                      and store_rule_d in " ".join(output.split()))
 
                 # QA round 8 MINOR 4 (claude; already in the round-7 parent): a
                 # machine subdirectory renamed WHOLE with git mv, the store then
@@ -3356,6 +3830,99 @@ def _suite_isolated(invoke):
                       rc == EXIT_ERROR and output == prior_store_output(
                           rno, rno, rno_named, [".opf.toml", ".working"], True,
                           gaps=rno_gaps))
+
+                # QA round 9 codex MEDIUM 4 (requirement D): a committed filename
+                # may legally hold the 0x01 byte the history walk's header
+                # sentinel uses. The walk parses git's NUL-delimited records
+                # positionally, so this name never splits a record, and the store
+                # it names (known from history: its directory was deleted whole in
+                # an earlier commit) is still disclosed as a PARTIAL restore.
+                # DISCRIMINATOR: the round-9 parent split the whole stream on
+                # 0x01 and refused this previously supported disclosure as
+                # cannot-evaluate.
+                x01 = make_git("ancestry-x01-filename")
+                x01_machine = x01 / working / machine_name
+                x01_machine.mkdir(parents=True)
+                (x01_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (x01_machine / _opf_check.COUNTERS_NAME).write_bytes(b"y = 1\n")
+                x01_name = "v" + chr(1) + "x"
+                x01_dir = x01 / working / x01_name
+                x01_dir.mkdir()
+                (x01_dir / _opf_store.MANIFEST_NAME).write_bytes(b"z = 1\n")
+                (x01 / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(x01, ["--literal-pathspecs", "add", "-A"])
+                git_call(x01, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "store with an x01-named subdir"])
+                git_call(x01, ["rm", "-r", "-q", "--", working + "/" + x01_name])
+                git_call(x01, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "drop the x01 subdir"])
+                x01_commit = head_of(x01)
+                git_call(x01, ["rm", "-r", "-q", "--",
+                               working, _opf_store.POINTER_REL])
+                git_call(x01, ["-c", "user.email=t@t", "-c", "user.name=t",
+                               "commit", "-m", "drop the store"])
+                rc, output = run(x01)
+                x01_gaps = sorted([
+                    working + "/" + x01_name + "/" + _opf_check.COUNTERS_NAME,
+                    working + "/" + x01_name + "/" + _opf_store.MANIFEST_NAME])
+                check("ancestry x01 filename: the 0x01-named store from history "
+                      "is still disclosed as PARTIAL, with the byte rendered",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          x01, x01, x01_commit, [".opf.toml", ".working"], True,
+                          gaps=x01_gaps)
+                      and inert(working + "/" + x01_name) in output)
+
+                # QA round 9 claude MEDIUM 2 (requirement E): one commit deletes a
+                # store and creates a SIMILAR store beside it; git's rename
+                # detection pairs the structural files by content similarity
+                # (counters here differ in one line of twenty-one, manifests are
+                # identical), yet the deleted store's counters are gone, exactly
+                # the spec 8.2 counter-restart risk the refusal exists to surface.
+                # The walk releases a rename source only on an exact (R100) pair
+                # whose destination no older record touched and whose commit
+                # leaves no structural file in the source subdirectory; the
+                # counters pair is inexact, so aa-machine stays expected and the
+                # refusal is PARTIAL, naming both of its structural files.
+                # DISCRIMINATOR: the round-9 parent read the pairing as a rename
+                # and reported the lost store nowhere (fails open); the genuine
+                # whole-store git mv stays non-PARTIAL in the renamed-machine
+                # fixture above.
+                f2 = make_git("ancestry-rename-similar")
+                f2_aa = f2 / working / "aa-machine"
+                f2_aa.mkdir(parents=True)
+                (f2_aa / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (f2_aa / _opf_check.COUNTERS_NAME).write_bytes(
+                    b"shared = 1\n" * 20 + b"bi = 7\n")
+                (f2 / _opf_store.POINTER_REL).write_bytes(
+                    b'[store]\ntarget = "dir:."\n')
+                git_call(f2, ["--literal-pathspecs", "add", "-A"])
+                git_call(f2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "store"])
+                git_call(f2, ["rm", "-r", "-q", "--", working + "/aa-machine"])
+                f2_bb = f2 / working / "bb-machine"
+                f2_bb.mkdir(parents=True)
+                (f2_bb / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                (f2_bb / _opf_check.COUNTERS_NAME).write_bytes(
+                    b"shared = 1\n" * 20 + b"bi = 0\n")
+                git_call(f2, ["--literal-pathspecs", "add", "-A"])
+                git_call(f2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "swap in a similar store"])
+                f2_named = head_of(f2)
+                git_call(f2, ["rm", "-r", "-q", "--",
+                              working, _opf_store.POINTER_REL])
+                git_call(f2, ["-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "-m", "drop the store"])
+                rc, output = run(f2)
+                f2_gaps = sorted([
+                    working + "/aa-machine/" + _opf_check.COUNTERS_NAME,
+                    working + "/aa-machine/" + _opf_store.MANIFEST_NAME])
+                check("ancestry rename-similar: a store deleted beside a similar "
+                      "created store stays expected and the refusal is PARTIAL, "
+                      "naming both of its structural files (fail-safe)",
+                      rc == EXIT_ERROR and output == prior_store_output(
+                          f2, f2, f2_named, [".opf.toml", ".working"], True,
+                          gaps=f2_gaps))
 
                 # QA round 8 (requirement A): the fixed narrow alphabet is pinned at
                 # runtime, in the renderer docstring and in OPF-QUICKSTART.md (the
