@@ -636,7 +636,7 @@ DYNAMIC_IMPORT_SITES = (
      "self-test loads a file of this tree by its path (spec_from_file_location, module_from_spec, exec_module): the "
      "close harness"),
     ("opf/tools/check_opf_record.py", "_self_test_isolated",
-     ("5982:11-5982:27: opf._bootstrap()",),
+     ("6072:11-6072:27: opf._bootstrap()",),
      "calls opf.py's own _bootstrap function (the opf module of this tree), not importlib._bootstrap"),
     ("opf/tools/check_opf_upgrade.py", "_suite_isolated",
      ("596:8-596:24: opf._bootstrap()",),
