@@ -4,6 +4,7 @@
 .aiqt/attribution.toml text eol=lf
 .aiqt/core/applicability.toml text eol=lf
 .aiqt/core/applies.toml text eol=lf
+.aiqt/core/clause-exemptions.toml text eol=lf
 .aiqt/core/clauses.toml text eol=lf
 .aiqt/core/conformance/behaviour-checklist.md text eol=lf
 .aiqt/core/dispositions.toml text eol=lf

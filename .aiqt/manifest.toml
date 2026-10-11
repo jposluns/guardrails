@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3caf9f3169395952f167bfea92dc76069608a3797b036ff4b961f22383acd0ec"
+tree-sha256 = "db67a6896937379db9d736b167d12a69203531f492ad3b6604bad48621e6c6a4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -30,9 +30,14 @@ bytes = 4626
 sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
+path = ".aiqt/core/clause-exemptions.toml"
+bytes = 26252
+sha256 = "f923f244a4bf83ca5fe0b33a46b34bfdeb58c84a9e8c48587f72ec6cee9876c9"
+
+[[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 299860
-sha256 = "9257e29d64ba44c08b7ad93b80d39eda1da5cf054bcb533d0bd00521de155ffd"
+bytes = 303222
+sha256 = "1702b9f66de193c05aa1f53416f7272da27b0a76c627c6982ee90d506249a9c4"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -61,8 +66,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 277932
-sha256 = "9d01a4da5f795f837ba8c72289a30d36b232050151196d1c4a62f0eba8b16cc1"
+bytes = 278364
+sha256 = "f962b118d3a818050d8f6079136bf7834094a2ded0f9906964021d286b230fe9"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -86,8 +91,8 @@ sha256 = "268659bc6b9040c3d27aa0e95bbc9a40f777e9403a0a69bae485b8d80d4bf3d9"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 37533
-sha256 = "6116fda333fdb7057cbe0935789f4a10b11893713b898f5cd90679abab09d384"
+bytes = 37980
+sha256 = "28f6908372fc942a6e13cba7b6a67a68385601b3ab38ab7dc7fe78087dbf6492"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
@@ -2251,8 +2256,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 42337
-sha256 = "097d4b5b59e942ed3554baa63077a22a22ff80e65d7c662624b71da8305e846a"
+bytes = 42383
+sha256 = "541b4dc2d0bdf716b91c3c0a40ea83fb1b21566a1f4ff60de477f6a8ce66d5f7"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3296,8 +3301,8 @@ sha256 = "0bea1bc6f0cc17886531edfdd39b3fa6fc4f9319f5b3a545c72c6bc98a8213f9"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 162808
-sha256 = "e7a1ac60ef340bdc56147ed5e0a0ee539d731ce21cba4b3dc2a7f1fef49eaed0"
+bytes = 226953
+sha256 = "e9aa7d3ef7a56682cebd52765318ee1d7b223bb4aaae3eac336b17140e8c7def"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
